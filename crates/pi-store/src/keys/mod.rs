@@ -10,7 +10,6 @@ mod text;
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Result, bail};
-use crossterm::event::{KeyCode, KeyModifiers};
 
 pub use text::{chord, parse};
 
@@ -785,53 +784,79 @@ const BINDINGS: &[Binding] = &[
     },
 ];
 
+/// A key a binding can name. `Other` is any key a surface reports that no
+/// name reaches: a press all the same, bound to nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Key {
+    Char(char),
+    F(u8),
+    Enter,
+    Tab,
+    BackTab,
+    Backspace,
+    Delete,
+    Insert,
+    Esc,
+    Up,
+    Down,
+    Left,
+    Right,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Other,
+}
+
+/// The modifiers a binding can name; any other a surface reports is dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Mods {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+}
+
+impl Mods {
+    pub const NONE: Self = Self {
+        ctrl: false,
+        alt: false,
+        shift: false,
+    };
+}
+
 /// A key press, normalized. Shift folds into the character (`shift+a` is `A`);
 /// ctrl/alt name the unshifted letter, where terminals disagree about the character.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Press {
-    pub code: KeyCode,
-    pub mods: KeyModifiers,
+    pub code: Key,
+    pub mods: Mods,
 }
 
 impl Press {
     /// A character with no `ctrl` or `alt` on it: text as much as a key.
     pub fn is_bare(&self) -> bool {
-        matches!(self.code, KeyCode::Char(_))
-            && !self
-                .mods
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        matches!(self.code, Key::Char(_)) && !self.mods.ctrl && !self.mods.alt
     }
 
-    pub fn of(code: KeyCode, mods: KeyModifiers) -> Self {
-        let mods = mods & (KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT);
+    pub fn of(code: Key, mods: Mods) -> Self {
         match code {
-            KeyCode::Char(c) if mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
-                Press {
-                    code: KeyCode::Char(c.to_ascii_lowercase()),
-                    mods,
-                }
-            }
-            KeyCode::Char(c) => Press {
-                code: KeyCode::Char(if mods.contains(KeyModifiers::SHIFT) {
+            Key::Char(c) if mods.ctrl || mods.alt => Press {
+                code: Key::Char(c.to_ascii_lowercase()),
+                mods,
+            },
+            Key::Char(c) => Press {
+                code: Key::Char(if mods.shift {
                     c.to_ascii_uppercase()
                 } else {
                     c
                 }),
-                mods: mods - KeyModifiers::SHIFT,
+                mods: Mods {
+                    shift: false,
+                    ..mods
+                },
             },
             _ => Press { code, mods },
         }
-    }
-}
-
-/// The character a press types, when it types one on its own: a letter with
-/// `ctrl` or `alt` on it is the menu's key rather than the surface's own, which
-/// is the same rule every screen with a letter vocabulary reads — browse, a
-/// command's output, a preview's search — so it is written down once, here.
-pub fn bare_letter(key: &crossterm::event::KeyEvent) -> Option<char> {
-    match key.code {
-        KeyCode::Char(c) if Press::of(key.code, key.modifiers).is_bare() => Some(c),
-        _ => None,
     }
 }
 
@@ -943,9 +968,12 @@ impl Keys {
         }
         // Terminals that don't report shift send `ctrl+shift+w` as `ctrl+w`;
         // falling back to the bare press keeps it working either way.
-        if press.mods.contains(KeyModifiers::SHIFT) {
+        if press.mods.shift {
             return find(Press {
-                mods: press.mods - KeyModifiers::SHIFT,
+                mods: Mods {
+                    shift: false,
+                    ..press.mods
+                },
                 ..press
             });
         }
@@ -1011,6 +1039,11 @@ mod tests {
     pub(super) fn press(s: &str) -> Press {
         parse(s).unwrap()
     }
+
+    const SHIFT: Mods = Mods {
+        shift: true,
+        ..Mods::NONE
+    };
 
     // A page reads its own keys and the app's,
     // never the editor's: one place has the keyboard.
@@ -1393,9 +1426,9 @@ mod tests {
         // Terminals disagree whether shift+a arrives as Char('A'), Char('A')
         // +SHIFT, or Char('a')+SHIFT; all three must converge to one press.
         let reports = [
-            Press::of(KeyCode::Char('A'), KeyModifiers::NONE),
-            Press::of(KeyCode::Char('A'), KeyModifiers::SHIFT),
-            Press::of(KeyCode::Char('a'), KeyModifiers::SHIFT),
+            Press::of(Key::Char('A'), Mods::NONE),
+            Press::of(Key::Char('A'), SHIFT),
+            Press::of(Key::Char('a'), SHIFT),
         ];
         assert!(reports.iter().all(|p| *p == reports[0]), "{reports:?}");
         // Ctrl+Shift rides beside Ctrl on the terminals that report it, so
@@ -1404,8 +1437,12 @@ mod tests {
         assert_eq!(
             press("ctrl+shift+t"),
             Press::of(
-                KeyCode::Char('T'),
-                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                Key::Char('T'),
+                Mods {
+                    ctrl: true,
+                    shift: true,
+                    ..Mods::NONE
+                }
             )
         );
         // Named keys keep it, so shift+enter stays expressible.
@@ -1417,10 +1454,7 @@ mod tests {
         // Shift folds into the character rather than being dropped, which is
         // what lets a modal keymap give `D` a meaning `d` does not have.
         assert_ne!(press("D"), press("d"));
-        assert_eq!(
-            press("D"),
-            Press::of(KeyCode::Char('D'), KeyModifiers::NONE)
-        );
+        assert_eq!(press("D"), Press::of(Key::Char('D'), Mods::NONE));
         // Ctrl and Alt still name the unshifted letter: there the terminals
         // disagree about the character, not about the modifier.
         assert_eq!(press("ctrl+D"), press("ctrl+d"));

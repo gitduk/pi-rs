@@ -4,11 +4,9 @@
 //! Second half of `mod.rs`: that says what the table is, this says how a key
 //! is spelled in it — the config file's side, and the `/keys` listing's.
 
-use anyhow::{Result, bail};
-use crossterm::event::{KeyCode, KeyModifiers};
-
-use super::{BINDINGS, Chord, Keys, Press};
+use super::{BINDINGS, Chord, Key, Keys, Mods, Press};
 use crate::listing::{Listing, Row};
+use anyhow::{Result, bail};
 
 impl Keys {
     /// What is bound right now: the id it is rebound by, the keys that reach
@@ -42,53 +40,55 @@ fn show_chord(c: Chord) -> String {
     }
 }
 
+// Every key spelled by name, its canonical spelling first. Reading and `show`
+// both go through here, so what `/keys` prints is what a config can type back.
+const NAMES: &[(Key, &[&str])] = &[
+    (Key::Enter, &["enter", "return"]),
+    (Key::Tab, &["tab"]),
+    (Key::BackTab, &["backtab"]),
+    (Key::Backspace, &["backspace"]),
+    (Key::Delete, &["delete", "del"]),
+    (Key::Insert, &["insert"]),
+    (Key::Esc, &["esc", "escape"]),
+    (Key::Char(' '), &["space"]),
+    (Key::Up, &["up"]),
+    (Key::Down, &["down"]),
+    (Key::Left, &["left"]),
+    (Key::Right, &["right"]),
+    (Key::Home, &["home"]),
+    (Key::End, &["end"]),
+    (Key::PageUp, &["pageup"]),
+    (Key::PageDown, &["pagedown"]),
+];
+
 // A press written the way a config would write it.
 fn show(p: Press) -> String {
     let mut out = String::new();
-    for (m, name) in [
-        (KeyModifiers::CONTROL, "ctrl+"),
-        (KeyModifiers::ALT, "alt+"),
-        (KeyModifiers::SHIFT, "shift+"),
+    for (on, name) in [
+        (p.mods.ctrl, "ctrl+"),
+        (p.mods.alt, "alt+"),
+        (p.mods.shift, "shift+"),
     ] {
-        if p.mods.contains(m) {
+        if on {
             out.push_str(name);
         }
     }
-    out.push_str(&match p.code {
-        KeyCode::Char(' ') => "space".into(),
-        KeyCode::Char(c) => c.to_string(),
-        KeyCode::F(n) => format!("f{n}"),
-        other => format!("{other:?}").to_lowercase(),
+    let name = NAMES.iter().find(|(k, _)| *k == p.code);
+    out.push_str(&match (name, p.code) {
+        (Some((_, names)), _) => names[0].to_string(),
+        (None, Key::Char(c)) => c.to_string(),
+        (None, Key::F(n)) => format!("f{n}"),
+        (None, _) => "unnamed".to_string(),
     });
     out
 }
 
-fn named(word: &str) -> Option<KeyCode> {
-    Some(match word {
-        "enter" | "return" => KeyCode::Enter,
-        "tab" => KeyCode::Tab,
-        "backtab" => KeyCode::BackTab,
-        "backspace" => KeyCode::Backspace,
-        "delete" | "del" => KeyCode::Delete,
-        "insert" => KeyCode::Insert,
-        "esc" | "escape" => KeyCode::Esc,
-        "space" => KeyCode::Char(' '),
-        "up" => KeyCode::Up,
-        "down" => KeyCode::Down,
-        "left" => KeyCode::Left,
-        "right" => KeyCode::Right,
-        "home" => KeyCode::Home,
-        "end" => KeyCode::End,
-        "pageup" => KeyCode::PageUp,
-        "pagedown" => KeyCode::PageDown,
-        other => {
-            let n: u8 = other.strip_prefix('f')?.parse().ok()?;
-            if !(1..=12).contains(&n) {
-                return None;
-            }
-            KeyCode::F(n)
-        }
-    })
+fn named(word: &str) -> Option<Key> {
+    if let Some((key, _)) = NAMES.iter().find(|(_, names)| names.contains(&word)) {
+        return Some(*key);
+    }
+    let n: u8 = word.strip_prefix('f')?.parse().ok()?;
+    (1..=12).contains(&n).then_some(Key::F(n))
 }
 
 /// One press, or two apart by a space: `ctrl+w`, `g g`, `ctrl+c ctrl+c`.
@@ -107,15 +107,15 @@ pub fn chord(spec: &str) -> Result<Chord> {
 /// Modifier names and key names are read case-insensitively; a bare
 /// character is not, because `D` and `d` are two presses.
 pub fn parse(spec: &str) -> Result<Press> {
-    let mut mods = KeyModifiers::NONE;
+    let mut mods = Mods::NONE;
     let mut rest = spec.trim();
     // Split on the first `+` only while something follows it, so `+` and
     // `ctrl++` name the key itself.
     while let Some((head, tail)) = rest.split_once('+').filter(|(_, t)| !t.is_empty()) {
         match head.to_ascii_lowercase().as_str() {
-            "ctrl" | "control" => mods |= KeyModifiers::CONTROL,
-            "alt" | "opt" | "option" | "meta" => mods |= KeyModifiers::ALT,
-            "shift" => mods |= KeyModifiers::SHIFT,
+            "ctrl" | "control" => mods.ctrl = true,
+            "alt" | "opt" | "option" | "meta" => mods.alt = true,
+            "shift" => mods.shift = true,
             _ => break,
         }
         rest = tail;
@@ -128,7 +128,7 @@ pub fn parse(spec: &str) -> Result<Press> {
         None => {
             let mut chars = rest.chars();
             match (chars.next(), chars.next()) {
-                (Some(c), None) => KeyCode::Char(c),
+                (Some(c), None) => Key::Char(c),
                 _ => {
                     bail!("`{spec}` is not a key; try ctrl+w, alt+left, f5, or a single character")
                 }
@@ -141,8 +141,7 @@ pub fn parse(spec: &str) -> Result<Press> {
 #[cfg(test)]
 mod tests {
     use super::super::tests::press;
-    use super::{Press, parse, show};
-    use crossterm::event::{KeyCode, KeyModifiers};
+    use super::{Key, Mods, NAMES, Press, parse, show};
     #[test]
     fn a_capital_survives_the_round_trip_through_the_listing() {
         // `/keys` prints presses with `show`, and what it prints has to be
@@ -152,12 +151,32 @@ mod tests {
         }
     }
     #[test]
+    fn every_named_key_reads_back_from_what_is_shown() {
+        let keys = NAMES.iter().map(|(k, _)| *k).chain((1..=12).map(Key::F));
+        for key in keys {
+            for (ctrl, alt, shift) in [
+                (false, false, false),
+                (true, false, true),
+                (false, true, false),
+            ] {
+                let p = Press::of(key, Mods { ctrl, alt, shift });
+                assert_eq!(press(&show(p)), p, "{p:?} shown as {}", show(p));
+            }
+        }
+        for (key, names) in NAMES {
+            for name in *names {
+                assert_eq!(press(name).code, *key, "{name}");
+            }
+        }
+    }
+    #[test]
     fn a_plus_is_a_key_like_any_other() {
-        assert_eq!(press("+").code, KeyCode::Char('+'));
-        assert_eq!(
-            press("ctrl++"),
-            Press::of(KeyCode::Char('+'), KeyModifiers::CONTROL)
-        );
+        assert_eq!(press("+").code, Key::Char('+'));
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        assert_eq!(press("ctrl++"), Press::of(Key::Char('+'), ctrl));
     }
     #[test]
     fn nonsense_is_refused_with_a_hint() {

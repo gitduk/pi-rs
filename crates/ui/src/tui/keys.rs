@@ -6,11 +6,13 @@ use super::ui::{Focus, LastPress};
 use super::view::View;
 use super::{Asked, Deed, Ui};
 use super::{DOUBLE_TAP, screen};
-use crossterm::event::{Event as TermEvent, KeyEventKind, MouseEventKind};
+use crossterm::event::{
+    Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use pi_core::core::lane::Lane;
 use pi_core::input::Builtin;
 use pi_core::input::{self, Intent};
-use pi_store::keys::{Action, Layers, Mode, Press, Surface};
+use pi_store::keys::{Action, Key, Layers, Mode, Mods, Press, Surface};
 use std::time::Instant;
 
 impl Ui {
@@ -56,7 +58,7 @@ impl Ui {
             return Asked::Own(Deed::Nothing);
         }
 
-        let press = Press::of(key.code, key.modifiers);
+        let press = press_of(&key);
         let now = Instant::now();
         let last = self.last_press.take();
         let prev = last
@@ -418,7 +420,7 @@ impl Ui {
             // Unbound and printable is the one thing no table has to say —
             // except in Normal, where it is the table saying no.
             None => {
-                if let Some(c) = pi_store::keys::bare_letter(&key)
+                if let Some(c) = bare_letter(&key)
                     && self.vim.is_none_or(|m| m == Mode::Insert)
                 {
                     self.editor.insert(c);
@@ -509,4 +511,56 @@ enum Stride {
     Page,
     // As far as there is.
     End,
+}
+
+/// The press a terminal key is, as the key table reads it. No catch-all: a key
+/// a new crossterm adds does not compile until it is given a name or `Other`.
+pub(super) fn press_of(key: &KeyEvent) -> Press {
+    let code = match key.code {
+        KeyCode::Char(c) => Key::Char(c),
+        KeyCode::F(n) => Key::F(n),
+        KeyCode::Enter => Key::Enter,
+        KeyCode::Tab => Key::Tab,
+        KeyCode::BackTab => Key::BackTab,
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::Insert => Key::Insert,
+        KeyCode::Esc => Key::Esc,
+        KeyCode::Up => Key::Up,
+        KeyCode::Down => Key::Down,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
+        KeyCode::Null
+        | KeyCode::CapsLock
+        | KeyCode::ScrollLock
+        | KeyCode::NumLock
+        | KeyCode::PrintScreen
+        | KeyCode::Pause
+        | KeyCode::Menu
+        | KeyCode::KeypadBegin
+        | KeyCode::Media(_)
+        | KeyCode::Modifier(_) => Key::Other,
+    };
+    let m = key.modifiers;
+    let mods = Mods {
+        ctrl: m.contains(KeyModifiers::CONTROL),
+        alt: m.contains(KeyModifiers::ALT),
+        shift: m.contains(KeyModifiers::SHIFT),
+    };
+    Press::of(code, mods)
+}
+
+/// The character a key types, when it types one on its own: a letter with
+/// `ctrl` or `alt` on it is the menu's key rather than the surface's own, which
+/// is the same rule every screen with a letter vocabulary reads — browse, a
+/// slash page, a preview's search — so it is written down once, here.
+pub(super) fn bare_letter(key: &KeyEvent) -> Option<char> {
+    match key.code {
+        KeyCode::Char(c) if press_of(key).is_bare() => Some(c),
+        _ => None,
+    }
 }

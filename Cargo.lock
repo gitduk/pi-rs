@@ -1931,7 +1931,6 @@ version = "2.3.5"
 dependencies = [
  "anyhow",
  "clap",
- "crossterm",
  "llm",
  "serde",
  "serde_json",

@@ -5,7 +5,7 @@
 //! read off the rows as drawn, so what is counted is what is marked.
 
 use crossterm::event::{KeyCode, KeyEvent};
-use pi_store::keys::{Action, Layers, Press, Surface};
+use pi_store::keys::{Action, Layers, Surface};
 use ratatui::style::Modifier;
 use ratatui::text::Line;
 
@@ -224,7 +224,7 @@ impl Ui {
     pub(super) fn search_key(&mut self, key: &KeyEvent) -> bool {
         // The line's own editing keys, as the user bound them, edit the query.
         let edit = self.keys.action(
-            Press::of(key.code, key.modifiers),
+            super::keys::press_of(key),
             Layers {
                 surface: Surface::Editor,
                 ..Layers::default()
@@ -264,7 +264,7 @@ impl Ui {
                 search.query.clear();
                 search.want = typed;
             }
-            _ => match pi_store::keys::bare_letter(key) {
+            _ => match super::keys::bare_letter(key) {
                 Some(c) => {
                     search.query.push(c);
                     search.want = typed;
