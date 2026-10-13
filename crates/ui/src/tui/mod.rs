@@ -96,6 +96,8 @@ pub(crate) enum Deed {
     Interrupt,
     // Esc caught a prompt on its way out: stop the run, then unsend it.
     Unsend,
+    // A job's row clicked: what it said that is not back yet, on a page.
+    Job(u64),
 }
 
 impl Deed {
@@ -430,6 +432,19 @@ impl Tui {
             Deed::Rewind => self.open_rewind(),
             Deed::To(id) => self.rewind_turn(id),
             Deed::External => self.edit_externally().await,
+            Deed::Job(id) => self.open_job(id),
+        }
+    }
+
+    fn open_job(&mut self, id: u64) {
+        let root = self.core.lane().root();
+        let waiting = self.drivers.jobs().waiting(root, id);
+        match (self.ui.jobs.iter().find(|j| j.id == id), waiting) {
+            (Some(job), Some(waiting)) => {
+                let page = call::job_page(job, &waiting, &self.ui.paint);
+                self.ui.preview(page);
+            }
+            _ => self.ui.flash(format!("#{id} is gone")),
         }
     }
 

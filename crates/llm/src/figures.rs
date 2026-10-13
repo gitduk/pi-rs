@@ -38,9 +38,10 @@ pub fn slash(input: u64, output: u64) -> String {
 /// seconds, and the minutes once there are any.
 pub fn elapsed(d: Duration) -> String {
     let s = d.as_secs();
-    if s < 60 {
-        format!("{s}s")
-    } else {
-        format!("{}m{:02}s", s / 60, s % 60)
+    match s {
+        0..60 => format!("{s}s"),
+        60..3_600 => format!("{}m{:02}s", s / 60, s % 60),
+        3_600..86_400 => format!("{}h{:02}m", s / 3_600, s % 3_600 / 60),
+        _ => format!("{}d{:02}h", s / 86_400, s % 86_400 / 3_600),
     }
 }

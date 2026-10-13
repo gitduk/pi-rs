@@ -46,6 +46,14 @@ impl Ui {
             .map_or(0, |b| b.width())
     }
 
+    // The job whose row of the bar is at screen row `row`.
+    pub(super) fn job_at(&self, row: u16) -> Option<u64> {
+        let bar = self.regions.bar;
+        let at = row.checked_sub(bar.y).filter(|r| *r < bar.height)? as usize;
+        let shown = &self.jobs[..self.jobs.len().min(super::call::JOBS_SHOWN)];
+        shown.get(at).map(|job| job.id)
+    }
+
     pub(super) fn target_at(&self, row: u16) -> Option<Target> {
         self.row_targets
             .get(row.checked_sub(self.regions.history.y)? as usize)

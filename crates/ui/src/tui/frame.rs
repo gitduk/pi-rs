@@ -30,7 +30,8 @@ impl Ui {
         let command = matches!(self.page(), Some(Page::Command(_)));
         let keep = self.keeps();
         let text = self.page_lines();
-        let mut bar = call::job_lines(&self.jobs, &self.paint, width);
+        let hovered_job = self.pointer.and_then(|(_, row)| self.job_at(row));
+        let mut bar = call::job_lines(&self.jobs, hovered_job, &self.paint, width);
         bar.extend(self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width));
         let caret_shown = matches!(self.focus, Focus::Editor) || self.search_typing();
         // A command's output sits on what was being typed; another reading

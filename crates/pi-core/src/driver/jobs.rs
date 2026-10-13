@@ -9,6 +9,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -44,6 +45,8 @@ struct Item {
     description: String,
     progress: String,
     started: Instant,
+    // The same moment on the wall clock, for a surface to say when.
+    started_at: SystemTime,
     running: bool,
     // What it said that is not yet delivered, oldest first. A job leaves the
     // table once it has stopped running and these are gone.
@@ -71,6 +74,7 @@ impl Item {
                  started; the user did not just type it."
             ),
             label: format!("{name} #{id} {first}"),
+            text: text.to_string(),
             spent,
         }
     }
@@ -100,6 +104,8 @@ pub struct Job {
     pub description: String,
     pub progress: String,
     pub started: Instant,
+    /// When it started, by the wall clock.
+    pub started_at: SystemTime,
     /// Done, its results waiting for the lane to be free.
     pub ended: bool,
 }
@@ -118,6 +124,8 @@ pub struct Due {
     pub note: String,
     /// What the screen names the turn by, since nobody typed it.
     pub label: String,
+    /// What the job said, as it said it.
+    pub text: String,
     /// What a background subagent spent getting here, owed to the session.
     pub spent: llm::stream::Usage,
 }
@@ -220,9 +228,26 @@ impl Table {
                 description: i.description.clone(),
                 progress: i.progress.clone(),
                 started: i.started,
+                started_at: i.started_at,
                 ended: !i.running,
             })
             .collect()
+    }
+
+    /// What job `id` of `root`'s said that is not back yet, oldest first;
+    /// None once it has left.
+    pub fn waiting(&self, root: &Path, id: u64) -> Option<Vec<String>> {
+        let inner = self.lock();
+        let item = inner.items.iter().find(|i| i.id == id && i.root == root)?;
+        Some(
+            item.waiting
+                .iter()
+                .map(|back| match back {
+                    Back::Result(due) => due.text.clone(),
+                    Back::Input { text, .. } => text.clone(),
+                })
+                .collect(),
+        )
     }
 
     /// The jobs for `root`, one line each.
@@ -302,6 +327,7 @@ impl Table {
             description,
             progress: String::new(),
             started: Instant::now(),
+            started_at: SystemTime::now(),
             running: true,
             waiting: VecDeque::new(),
             dropped: 0,
@@ -621,6 +647,11 @@ mod tests {
         job.result("page one".into(), Default::default());
         job.result("page two".into(), Default::default());
         job.end();
+        assert_eq!(
+            table.waiting(&root, job.id()).unwrap(),
+            ["page one", "page two"]
+        );
+        assert!(table.waiting(Path::new("/elsewhere"), job.id()).is_none());
         assert_eq!(table.jobs(&root)[0].progress, "1/2 pages");
         assert!(table.jobs(&root)[0].ended);
         let first = result_of(&table, &root).unwrap();

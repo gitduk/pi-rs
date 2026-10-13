@@ -1,11 +1,13 @@
 //! The rows a tool call occupies while it runs: the line it holds itself, and
 //! the group that draws it when there is one to fold into.
 
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use llm::message::ToolResult;
 use ratatui::text::Line;
+use unicode_width::UnicodeWidthStr;
 
+use super::browse::PageLine;
 use super::row::{self, PendingTool, Row};
 use super::scrollback::{Folds, Scrollback};
 use crate::render::{Paint, named};
@@ -115,30 +117,102 @@ pub(super) fn push_tool_row(
 }
 
 // More than this and the list would crowd out the history it sits under.
-const JOBS_SHOWN: usize = 4;
+pub(super) const JOBS_SHOWN: usize = 4;
 
-// One row per job: still out with its progress and clock, or done and
-// waiting for the lane to be free. The ticking clock is what says it lives.
-pub(super) fn job_lines(jobs: &[Job], paint: &Paint, width: usize) -> Vec<Line<'static>> {
+// What a job's row says, in two: what it is, then how long it has run,
+// which a narrow row keeps whole.
+fn job_text(job: &Job) -> (String, String) {
+    let head = match job.progress.as_str() {
+        "" => format!("#{} {}", job.id, job.description),
+        progress => format!(
+            "#{} {}{}{progress}",
+            job.id,
+            job.description,
+            icons::PART_SEP
+        ),
+    };
+    let state = if job.ended {
+        format!("{}done, back when idle", icons::PART_SEP)
+    } else {
+        row::out_for(None, Some(job.started.elapsed().as_secs()))
+    };
+    (head, state)
+}
+
+// The local time `at`, as HH:MM:SS, its date ahead when not today.
+fn clock(at: SystemTime) -> String {
+    let (Some(at), Some(now)) = (local(at), local(SystemTime::now())) else {
+        return "?".into();
+    };
+    let time = format!("{:02}:{:02}:{:02}", at.tm_hour, at.tm_min, at.tm_sec);
+    if (at.tm_year, at.tm_yday) == (now.tm_year, now.tm_yday) {
+        time
+    } else {
+        format!(
+            "{}-{:02}-{:02} {time}",
+            at.tm_year + 1900,
+            at.tm_mon + 1,
+            at.tm_mday
+        )
+    }
+}
+
+fn local(at: SystemTime) -> Option<libc::tm> {
+    let secs = at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs()) as libc::time_t;
+    // SAFETY: `localtime_r` writes only into `tm`, which lives past the call.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    (!unsafe { libc::localtime_r(&secs, &mut tm) }.is_null()).then_some(tm)
+}
+
+// One row per job, `hovered` bold: a click reads it on a page of its own.
+// The ticking clock is what says it lives.
+pub(super) fn job_lines(
+    jobs: &[Job],
+    hovered: Option<u64>,
+    paint: &Paint,
+    width: usize,
+) -> Vec<Line<'static>> {
     let room = width.saturating_sub(1);
-    let muted = |s: String| paint.span(&paint.theme.muted, s);
     let mut lines: Vec<Line<'static>> = jobs
         .iter()
         .take(JOBS_SHOWN)
         .map(|job| {
-            let state = if job.ended {
-                format!("{}done, back when idle", icons::PART_SEP)
-            } else {
-                let progress = Some(job.progress.as_str()).filter(|p| !p.is_empty());
-                row::out_for(progress, Some(job.started.elapsed().as_secs()))
-            };
-            let text = format!("#{} {}{state}", job.id, job.description);
-            Line::from(muted(pi_store::text::clip(&text, room)))
+            let (head, tail) = job_text(job);
+            let left = room.saturating_sub(UnicodeWidthStr::width(tail.as_str()));
+            let text = pi_store::text::clip(
+                &format!(
+                    "{}{tail}",
+                    pi_store::text::clip(&head, left.saturating_sub(1))
+                ),
+                room,
+            );
+            Line::from(paint.span_hovered(hovered == Some(job.id), &paint.theme.muted, text))
         })
         .collect();
     if jobs.len() > JOBS_SHOWN {
         let more = format!("+{} more · /jobs", jobs.len() - JOBS_SHOWN);
-        lines.push(Line::from(muted(more)));
+        lines.push(Line::from(paint.span(&paint.theme.muted, more)));
+    }
+    lines
+}
+
+// A job read whole: its row uncut, then what it said that is not back yet.
+pub(super) fn job_page(job: &Job, waiting: &[String], paint: &Paint) -> Vec<PageLine> {
+    let muted = |s: String| Line::from(paint.span(&paint.theme.muted, s));
+    // No clock here: the page is not redrawn, so it would stand still.
+    let (head, tail) = job_text(job);
+    let state = if job.ended { tail.as_str() } else { "" };
+    let since = format!("{}started {}", icons::PART_SEP, clock(job.started_at));
+    let mut lines = vec![(muted(head + &since + state), None)];
+    if waiting.is_empty() {
+        lines.push((Line::default(), None));
+        lines.push((muted("nothing back from it yet".into()), None));
+    }
+    for said in waiting {
+        lines.push((Line::default(), None));
+        lines.extend(said.lines().map(|l| (Line::from(l.to_string()), None)));
     }
     lines
 }
