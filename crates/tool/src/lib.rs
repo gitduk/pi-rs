@@ -251,6 +251,9 @@ pub struct Ctx {
 /// Takes a running call's latest word on its progress, replacing the last.
 pub type Progress = std::sync::Arc<dyn Fn(String) + Send + Sync>;
 
+/// Reads the latest of what a running job has printed, on demand.
+pub type Peek = std::sync::Arc<dyn Fn() -> String + Send + Sync>;
+
 /// Where a call that will outlive its turn is kept: a job of the checkout at
 /// `root`, which the host lists, stops through `stop`, and delivers from.
 /// What the host has to tell the job goes to `told`, when it listens.
@@ -277,6 +280,8 @@ pub trait JobHandle: Send + Sync {
     fn notice(&self, text: String);
     /// Stop whatever runs where the job was started, as the user's stop would.
     fn interrupt(&self);
+    /// Where the latest of what it prints can be read while it runs.
+    fn watch(&self, output: Peek);
     fn end(&self);
 }
 

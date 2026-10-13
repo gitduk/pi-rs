@@ -439,9 +439,10 @@ impl Tui {
     fn open_job(&mut self, id: u64) {
         let root = self.core.lane().root();
         let waiting = self.drivers.jobs().waiting(root, id);
+        let output = self.drivers.jobs().output(root, id).ok();
         match (self.ui.jobs.iter().find(|j| j.id == id), waiting) {
             (Some(job), Some(waiting)) => {
-                let page = call::job_page(job, &waiting, &self.ui.paint);
+                let page = call::job_page(job, &waiting, output.as_deref(), &self.ui.paint);
                 self.ui.preview(page);
             }
             _ => self.ui.flash(format!("#{id} is gone")),

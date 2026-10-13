@@ -104,8 +104,9 @@ pub(crate) const BUILTIN: &[Command] = &[
     ),
     Command::builtin(
         "/jobs",
-        "[stop [id…]]",
-        "what runs in the background here; stop ends them, bare every running one",
+        "[stop [id…] | output id]",
+        "what runs in the background here; stop ends them, bare every running one; \
+         output shows what one printed",
         |_, rest| Intent::Builtin(Builtin::Jobs(rest)),
     ),
     Command::builtin(
@@ -313,10 +314,10 @@ fn offer(choices: &[Choice], head: &str, typed: &str) -> Vec<Candidate> {
         .collect()
 }
 
-// The ids after `/jobs stop` not named yet, completing the one being typed.
+// The ids after `/jobs <verb>` not named yet, completing the one being typed.
 // Once one is named, a bare space offers nothing: submitting runs the line
 // as typed, not an offered id tacked on.
-fn stop_ids(jobs: &[Choice], args: &str) -> Vec<Candidate> {
+fn job_ids(verb: &str, jobs: &[Choice], args: &str) -> Vec<Candidate> {
     let mut named: Vec<&str> = args.split_whitespace().collect();
     let typing = if args.is_empty() || args.ends_with(char::is_whitespace) {
         ""
@@ -333,7 +334,7 @@ fn stop_ids(jobs: &[Choice], args: &str) -> Vec<Candidate> {
         .filter(|j| j.name.starts_with(typing) && !settled(&j.name))
         .map(|j| Candidate {
             show: format!("#{}", j.name),
-            line: format!("/jobs stop {head}{}", j.name),
+            line: format!("/jobs {verb} {head}{}", j.name),
             help: j.note.clone(),
             more: false,
             picked_only: false,
@@ -395,19 +396,32 @@ pub fn complete<'a>(
         "/model" => offer(models, "/model ", typed),
         "/edit" => offer(editable(), "/edit ", typed),
         "/jobs" if typed.starts_with("stop ") => {
-            stop_ids(jobs, typed["stop ".len()..].trim_start())
+            job_ids("stop", jobs, typed["stop ".len()..].trim_start())
+        }
+        "/jobs" if typed.starts_with("output ") => {
+            let arg = typed["output ".len()..].trim_start();
+            if arg.contains(char::is_whitespace) {
+                Vec::new()
+            } else {
+                job_ids("output", jobs, arg)
+            }
         }
         "/jobs" if typed.contains(char::is_whitespace) => Vec::new(),
         // Submitting a bare `/jobs ` still lists them, not stops them all.
-        "/jobs" if "stop".starts_with(typed) && typed != "stop" && !jobs.is_empty() => {
-            vec![Candidate {
-                show: "stop".into(),
-                line: "/jobs stop".into(),
-                help: "end them by id, or every running one".into(),
-                more: true,
-                picked_only: typed.is_empty(),
-            }]
-        }
+        "/jobs" => [
+            ("stop", "end them by id, or every running one"),
+            ("output", "what one has printed so far"),
+        ]
+        .into_iter()
+        .filter(|(verb, _)| verb.starts_with(typed) && *verb != typed)
+        .map(|(verb, help)| Candidate {
+            show: verb.into(),
+            line: format!("/jobs {verb}"),
+            help: help.into(),
+            more: true,
+            picked_only: typed.is_empty(),
+        })
+        .collect(),
         // `rm` marks what follows it for removal; a bare `rm` still means the
         // name of a worktree, so nothing is offered until the space says.
         "/worktree" if typed == "rm" => Vec::new(),

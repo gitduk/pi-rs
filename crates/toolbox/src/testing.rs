@@ -13,11 +13,13 @@ pub(crate) struct Sink {
     pub(crate) ended: Arc<Notify>,
     pub(crate) stop: Mutex<Option<CancellationToken>>,
     pub(crate) told: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Told>>>,
+    pub(crate) output: Arc<Mutex<Option<tool::Peek>>>,
 }
 
 struct Handle {
     said: Arc<Mutex<Vec<String>>>,
     ended: Arc<Notify>,
+    output: Arc<Mutex<Option<tool::Peek>>>,
 }
 
 impl tool::JobSink for Sink {
@@ -37,6 +39,7 @@ impl tool::JobSink for Sink {
         Arc::new(Handle {
             said: self.said.clone(),
             ended: self.ended.clone(),
+            output: self.output.clone(),
         })
     }
 }
@@ -62,6 +65,9 @@ impl JobHandle for Handle {
     }
     fn interrupt(&self) {
         self.said.lock().unwrap().push("interrupt".into());
+    }
+    fn watch(&self, output: tool::Peek) {
+        *self.output.lock().unwrap() = Some(output);
     }
     fn end(&self) {
         self.said.lock().unwrap().push("end".into());

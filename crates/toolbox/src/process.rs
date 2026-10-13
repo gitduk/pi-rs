@@ -1,10 +1,13 @@
 //! A child run under the workspace's clamps: its own process group, both pipes
 //! in bounded captures, and a timeout and cancellation that take the tree.
 
+use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt as _;
+use tokio::io::{AsyncRead, AsyncWriteExt as _, ReadBuf};
 use tokio::process::Command;
 use tool::output::{Capture, Captured};
 use tool::{Ctx, ToolError};
@@ -142,6 +145,70 @@ impl Drop for Group {
     }
 }
 
+// How much of what a job printed last `jobs` can show while it runs.
+const PEEK: usize = 8 * 1024;
+
+/// The last of what a job's streams printed, both in the order it arrived.
+#[derive(Clone, Default)]
+pub(crate) struct Tail(Arc<Mutex<(Vec<u8>, usize)>>);
+
+impl Tail {
+    fn push(&self, chunk: &[u8]) {
+        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        held.1 += chunk.len();
+        held.0.extend_from_slice(chunk);
+        let over = held.0.len().saturating_sub(PEEK);
+        held.0.drain(..over);
+    }
+
+    /// What it holds, cut to whole lines once earlier bytes have gone.
+    pub(crate) fn read(&self) -> String {
+        let held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let (kept, total) = (&held.0, held.1);
+        if total == 0 {
+            return "nothing printed yet".into();
+        }
+        if kept.len() == total {
+            return String::from_utf8_lossy(kept).into_owned();
+        }
+        let from = kept.iter().position(|b| *b == b'\n').map_or(0, |at| at + 1);
+        let shown = &kept[from..];
+        format!(
+            "… the first {} of {total} bytes not shown\n{}",
+            total - shown.len(),
+            String::from_utf8_lossy(shown)
+        )
+    }
+
+    /// `pipe`, with what is read from it also kept here.
+    pub(crate) fn tee<R>(&self, pipe: R) -> Tee<R> {
+        Tee {
+            pipe,
+            tail: self.clone(),
+        }
+    }
+}
+
+pub(crate) struct Tee<R> {
+    pipe: R,
+    tail: Tail,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for Tee<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let polled = Pin::new(&mut self.pipe).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = polled {
+            self.tail.push(&buf.filled()[before..]);
+        }
+        polled
+    }
+}
+
 /// Pull `pipe` into a bounded capture on a task of its own.
 pub(crate) fn drain<R>(mut pipe: R, ctx: &Ctx) -> tokio::task::JoinHandle<Captured>
 where
@@ -174,5 +241,28 @@ pub(crate) async fn drained(
             Some((captured(stdout).await, captured(stderr).await))
         }
         () = stop.cancelled() => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Past the window, the view starts on a whole line and counts what went.
+    #[test]
+    fn a_tail_past_its_window_starts_on_a_whole_line() {
+        let tail = Tail::default();
+        let line = "x".repeat(99) + "\n";
+        for _ in 0..100 {
+            tail.push(line.as_bytes());
+        }
+        let seen = tail.read();
+        let (note, rest) = seen.split_once('\n').unwrap();
+        assert!(rest.split_inclusive('\n').all(|l| l == line), "{seen}");
+        let shown = rest.len();
+        assert_eq!(
+            note,
+            format!("… the first {} of 10000 bytes not shown", 10000 - shown)
+        );
     }
 }

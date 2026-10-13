@@ -61,6 +61,8 @@ struct Item {
     notices: VecDeque<String>,
     // Asks it to wind down: a subagent as a stopped run is, a process by signal.
     stop: CancellationToken,
+    // Reads the latest of what it printed; None for one that keeps none.
+    output: Option<tool::Peek>,
 }
 
 impl Item {
@@ -250,6 +252,20 @@ impl Table {
         )
     }
 
+    /// The latest of what job `id` of `root`'s printed.
+    pub fn output(&self, root: &Path, id: u64) -> Result<String, String> {
+        let peek = {
+            let inner = self.lock();
+            let item = (inner.items.iter())
+                .find(|i| i.id == id && i.root == root)
+                .ok_or_else(|| format!("no job #{id} here"))?;
+            item.output.clone().ok_or_else(|| {
+                format!("#{id} keeps no output to show; what it says comes back as turns")
+            })?
+        };
+        Ok(peek())
+    }
+
     /// The jobs for `root`, one line each.
     pub fn listing(&self, root: &Path) -> Vec<String> {
         self.jobs(root)
@@ -366,6 +382,7 @@ impl Table {
             interrupt: false,
             notices: VecDeque::new(),
             stop,
+            output: None,
         });
         drop(inner);
         self.changed.notify_one();
@@ -475,6 +492,10 @@ impl tool::JobHandle for Handle {
         self.table.update(self.id, |i| i.interrupt = true);
     }
 
+    fn watch(&self, output: tool::Peek) {
+        self.table.update(self.id, |i| i.output = Some(output));
+    }
+
     fn end(&self) {
         tracing::info!(target: "pi::job", job = self.id, "ended");
         self.table.update(self.id, |i| i.running = false);
@@ -490,8 +511,8 @@ impl Tool for Jobs {
     fn description(&self) -> &str {
         "List what runs in the background for this checkout — subagents sent \
          off with `background`, tools that went on after their call returned — \
-         or `stop` some by id, or `stop_all`. A stopped job's results never \
-         come back."
+         show the latest a command printed with `output`, or `stop` some by id, \
+         or `stop_all`. A stopped job's results never come back."
     }
 
     fn tier(&self) -> Tier {
@@ -508,6 +529,10 @@ impl Tool for Jobs {
                     "description": "The ids of those to stop.",
                 },
                 "stop_all": { "type": "boolean", "description": "Stop every one still running." },
+                "output": {
+                    "type": "integer",
+                    "description": "The id of one whose latest output to show, as it runs.",
+                },
             },
         })
     }
@@ -534,6 +559,11 @@ impl Tool for Jobs {
             } else {
                 Err(ToolError::Invalid(said))
             };
+        }
+        if let Some(v) = args.get("output").filter(|v| !v.is_null()) {
+            return (self.table.output(root, id(v)?))
+                .map(ToolOutput::text)
+                .map_err(ToolError::Invalid);
         }
         let jobs = self.table.listing(root);
         Ok(ToolOutput::text(if jobs.is_empty() {

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::sync::Arc;
 use tokio::process::Command;
 
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput, output};
@@ -117,10 +118,12 @@ impl Tool for WithBackground {
         let mut schema = Bash.schema();
         schema["properties"]["background"] = json!({
             "type": "boolean",
-            "description": "Run it apart from this turn — an import, a build, a deploy you need \
-                not wait on: the call returns at once with a job id, and the exit status and \
-                output come back later as a turn of its own. No timeout applies; its output is \
-                still captured, so leave it unredirected.",
+            "description": "Run it apart from this turn — a build, a deploy, a dev server, a \
+                watcher: the call returns at once with a job id, and once it exits its status \
+                and output come back as a turn of its own. No timeout applies, and pi stops it \
+                when pi exits. `jobs` with `output` shows the latest of what it printed while it \
+                runs, so leave it unredirected; use this, not nohup or `&`, for anything meant \
+                to keep running.",
         });
         schema
     }
@@ -157,8 +160,11 @@ impl Tool for WithBackground {
         cmd.process_group(0);
         let mut child = crate::process::spawn(&mut cmd)?;
         let group = child.id();
-        let mut stdout = crate::process::drain(child.stdout.take().expect("stdout is piped"), ctx);
-        let mut stderr = crate::process::drain(child.stderr.take().expect("stderr is piped"), ctx);
+        let tail = crate::process::Tail::default();
+        let out_pipe = tail.tee(child.stdout.take().expect("stdout is piped"));
+        let err_pipe = tail.tee(child.stderr.take().expect("stderr is piped"));
+        let mut stdout = crate::process::drain(out_pipe, ctx);
+        let mut stderr = crate::process::drain(err_pipe, ctx);
 
         let preview = command.split('\n').next().unwrap_or_default().to_string();
         let stop = tokio_util::sync::CancellationToken::new();
@@ -169,6 +175,7 @@ impl Tool for WithBackground {
             None,
         );
         let id = job.id();
+        job.watch(Arc::new(move || tail.read()));
         let guard = group.map(crate::process::Group);
         let name = preview.clone();
         tokio::spawn(async move {
@@ -202,8 +209,8 @@ impl Tool for WithBackground {
         });
         Ok(ToolOutput::text(format!(
             "running in the background as job #{id}; its exit status and output come back as \
-             a turn of its own, so keep working or end this turn. `jobs` lists it, and `jobs` \
-             with `stop` stops it."
+             a turn of its own, so keep working or end this turn. `jobs` with `output` shows \
+             what it has printed so far, and `jobs` with `stop` stops it."
         ))
         .with_preview(format!("{preview} [background #{id}]")))
     }
@@ -321,6 +328,31 @@ mod background_tests {
             "{said:?}"
         );
         assert_eq!(said[2], "end");
+    }
+
+    // A server never exits: what it printed so far must be readable meanwhile.
+    #[tokio::test]
+    async fn a_running_command_shows_what_it_printed_so_far() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        let ctx = ctx(dir.path()).with_jobs(sink.clone());
+        WithBackground
+            .execute(
+                json!({"command": "echo listening on 8080; echo warn >&2; sleep 30", "background": true}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let peek = sink.output.lock().unwrap().clone().expect("watched");
+        for _ in 0..100 {
+            let seen = peek();
+            if seen.contains("listening on 8080") && seen.contains("warn") {
+                sink.stop.lock().unwrap().take().unwrap().cancel();
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("never showed: {}", peek());
     }
 
     #[tokio::test]

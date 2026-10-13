@@ -199,13 +199,23 @@ pub(super) fn job_lines(
 }
 
 // A job read whole: its row uncut, then what it said that is not back yet.
-pub(super) fn job_page(job: &Job, waiting: &[String], paint: &Paint) -> Vec<PageLine> {
+pub(super) fn job_page(
+    job: &Job,
+    waiting: &[String],
+    output: Option<&str>,
+    paint: &Paint,
+) -> Vec<PageLine> {
     let muted = |s: String| Line::from(paint.span(&paint.theme.muted, s));
     // No clock here: the page is not redrawn, so it would stand still.
     let (head, tail) = job_text(job);
     let state = if job.ended { tail.as_str() } else { "" };
     let since = format!("{}started {}", icons::PART_SEP, clock(job.started_at));
     let mut lines = vec![(muted(head + &since + state), None)];
+    if let Some(output) = output {
+        lines.push((Line::default(), None));
+        lines.push((muted("printed so far".into()), None));
+        lines.extend(output.lines().map(|l| (Line::from(l.to_string()), None)));
+    }
     if waiting.is_empty() {
         lines.push((Line::default(), None));
         lines.push((muted("nothing back from it yet".into()), None));
