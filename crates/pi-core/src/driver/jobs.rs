@@ -83,6 +83,22 @@ impl Item {
 }
 
 impl Item {
+    // What it has to show: what it printed, or what it sends back for one
+    // that keeps no output. Read outside the table's lock.
+    fn said(&self) -> tool::Peek {
+        if let Some(peek) = &self.output {
+            return peek.clone();
+        }
+        let texts: Vec<&str> = (self.waiting.iter())
+            .map(|back| match back {
+                Back::Result(due) => due.text.as_str(),
+                Back::Input { text, .. } => text.as_str(),
+            })
+            .collect();
+        let text = texts.join("\n");
+        Arc::new(move || text.clone())
+    }
+
     fn wait(&mut self, back: Back) {
         if self.waiting.len() >= MAX_WAITING {
             tracing::warn!(target: "pi::job", job = self.id, "over the waiting cap, dropped");
@@ -110,6 +126,9 @@ pub struct Job {
     pub started_at: SystemTime,
     /// Done, its results waiting for the lane to be free.
     pub ended: bool,
+    /// The last line of what it printed, or of what it sends back for one
+    /// that keeps no output; empty when nothing yet.
+    pub last: String,
 }
 
 /// What comes back from a job: a result, or a person speaking through it,
@@ -221,19 +240,38 @@ impl Table {
 
     /// The jobs for `root`, oldest first.
     pub fn jobs(&self, root: &Path) -> Vec<Job> {
-        self.lock()
-            .items
-            .iter()
+        let held: Vec<(Job, tool::Peek)> = (self.lock().items.iter())
             .filter(|i| i.root == root)
-            .map(|i| Job {
-                id: i.id,
-                description: i.description.clone(),
-                progress: i.progress.clone(),
-                started: i.started,
-                started_at: i.started_at,
-                ended: !i.running,
+            .map(|i| {
+                let job = Job {
+                    id: i.id,
+                    description: i.description.clone(),
+                    progress: i.progress.clone(),
+                    started: i.started,
+                    started_at: i.started_at,
+                    ended: !i.running,
+                    last: String::new(),
+                };
+                (job, i.said())
+            })
+            .collect();
+        (held.into_iter())
+            .map(|(job, said)| Job {
+                last: pi_store::text::last_line(&said()),
+                ..job
             })
             .collect()
+    }
+
+    /// What job `id` of `root`'s has to show under its row; None once it
+    /// has left.
+    pub fn body(&self, root: &Path, id: u64) -> Option<String> {
+        let said = {
+            let inner = self.lock();
+            let item = inner.items.iter().find(|i| i.id == id && i.root == root)?;
+            item.said()
+        };
+        Some(said())
     }
 
     /// What job `id` of `root`'s said that is not back yet, oldest first;
@@ -263,7 +301,11 @@ impl Table {
                 format!("#{id} keeps no output to show; what it says comes back as turns")
             })?
         };
-        Ok(peek())
+        let printed = peek();
+        Ok(match printed.is_empty() {
+            true => "nothing printed yet".into(),
+            false => printed,
+        })
     }
 
     /// The jobs for `root`, one line each.

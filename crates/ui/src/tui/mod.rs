@@ -432,20 +432,9 @@ impl Tui {
             Deed::Rewind => self.open_rewind(),
             Deed::To(id) => self.rewind_turn(id),
             Deed::External => self.edit_externally().await,
-            Deed::Job(id) => self.open_job(id),
-        }
-    }
-
-    fn open_job(&mut self, id: u64) {
-        let root = self.core.lane().root();
-        let waiting = self.drivers.jobs().waiting(root, id);
-        let output = self.drivers.jobs().output(root, id).ok();
-        match (self.ui.jobs.iter().find(|j| j.id == id), waiting) {
-            (Some(job), Some(waiting)) => {
-                let page = call::job_page(job, &waiting, output.as_deref(), &self.ui.paint);
-                self.ui.preview(page);
+            Deed::Job(id) => {
+                self.ui.job_open = (self.ui.job_open != Some(id)).then_some(id);
             }
-            _ => self.ui.flash(format!("#{id} is gone")),
         }
     }
 
@@ -582,7 +571,11 @@ impl Tui {
                     self.ui.say(view, line.to_string());
                 }
             }
-            self.ui.jobs = jobs.jobs(self.core.lane().root());
+            let root = self.core.lane().root();
+            self.ui.jobs = jobs.jobs(root);
+            let body = self.ui.job_open.and_then(|id| jobs.body(root, id));
+            self.ui.job_open = self.ui.job_open.filter(|_| body.is_some());
+            self.ui.job_body = body.unwrap_or_default();
             let view = front_view(&mut self.views, self.core.lane());
             self.ui.flush(self.core.lane(), view);
             if std::mem::take(&mut self.ui.redraw) {

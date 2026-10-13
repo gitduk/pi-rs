@@ -165,9 +165,6 @@ impl Tail {
     pub(crate) fn read(&self) -> String {
         let held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let (kept, total) = (&held.0, held.1);
-        if total == 0 {
-            return "nothing printed yet".into();
-        }
         if kept.len() == total {
             return String::from_utf8_lossy(kept).into_owned();
         }

@@ -129,6 +129,45 @@ pub fn clip(s: &str, max: usize) -> String {
     one
 }
 
+/// The last line of `s` with anything on it, as a terminal leaves it: what
+/// follows its last `\r`, escapes and other controls dropped.
+pub fn last_line(s: &str) -> String {
+    (s.lines().rev())
+        .flat_map(|line| line.rsplit('\r'))
+        .map(bare)
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// A printed line as a terminal leaves it: what follows its last `\r` that
+/// has anything, tabs as spaces, escapes and other controls dropped.
+pub fn screen_line(line: &str) -> String {
+    let shown = (line.rsplit('\r'))
+        .find(|part| !part.is_empty())
+        .unwrap_or_default();
+    bare(&shown.replace('\t', "    "))
+}
+
+fn bare(s: &str) -> String {
+    let mut esc: Option<Escape> = None;
+    (s.chars())
+        .filter(|&c| {
+            if let Some(open) = &mut esc {
+                if open.closed(c) {
+                    esc = None;
+                }
+                return false;
+            }
+            if c == '\x1b' {
+                esc = Some(Escape::new());
+                return false;
+            }
+            !c.is_control()
+        })
+        .collect()
+}
+
 /// Pad a string to a display width with trailing spaces, so a column of
 /// mixed-width (CJK) text lines up where `{:width$}` would only count chars.
 pub fn pad(s: &str, width: usize) -> String {

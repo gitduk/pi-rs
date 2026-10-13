@@ -119,6 +119,11 @@ pub(super) struct Ui {
     pub(super) live_tools_shown: bool,
     // The front checkout's subagents in the background, drawn over the bar.
     pub(super) jobs: Vec<pi_core::driver::jobs::Job>,
+    // The job a click opened under its row, and what it has to show there.
+    pub(super) job_open: Option<u64>,
+    pub(super) job_body: String,
+    // Whose own row each bar row the last frame drew is, from the top.
+    pub(super) job_rows: Vec<Option<u64>>,
 }
 
 /// Who has the keyboard.
@@ -231,6 +236,9 @@ impl Ui {
             flash: None,
             copied: None,
             jobs: Vec::new(),
+            job_open: None,
+            job_body: String::new(),
+            job_rows: Vec::new(),
             images: Vec::new(),
             layout: Default::default(),
             hovered_scrollback: None,
