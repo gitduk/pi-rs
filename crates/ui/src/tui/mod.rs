@@ -768,6 +768,12 @@ impl Tui {
                     match self.drivers.command(drive, lane.token(), lane.ctx()) {
                         Said::Nothing => {}
                         Said::Command(lines) => self.ui.open_slash(Listing::say(lines)),
+                        Said::Noted(lines, note) => {
+                            self.ui.open_slash(Listing::say(lines));
+                            let lane = self.core.lane_mut();
+                            let view = front_view(&mut self.views, lane);
+                            self.ui.file_note(lane, view, &note);
+                        }
                         Said::Transcript(line) => self
                             .ui
                             .say(front_view(&mut self.views, self.core.lane()), line),

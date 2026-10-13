@@ -102,11 +102,16 @@ struct Conversation {
     // What the run in flight has cost so far, seeded from `totals` when a run
     // arms; the status lines read this run alone, `/status` the session.
     tally: Tally,
-    // Rows filed for the screen while a run had the transcript out. They land
+    // Rows and notes filed while a run had the transcript out. They land
     // when it comes home, after everything the run committed.
-    held_screens: Vec<String>,
+    held: Vec<Held>,
     // Why the last save failed; cleared by the next one that lands.
     unsaved: Option<String>,
+}
+
+enum Held {
+    Screen(String),
+    Note(String),
 }
 
 impl Conversation {
@@ -125,7 +130,7 @@ impl Conversation {
             name,
             totals: Totals::default(),
             tally: Tally::default(),
-            held_screens: Vec::new(),
+            held: Vec::new(),
             unsaved: None,
         }
     }
@@ -547,8 +552,11 @@ impl Lane {
             self.talk.session.is_none(),
             "a lane holds one transcript: a second would drop the first"
         );
-        for text in self.talk.held_screens.drain(..) {
-            session.push_screen(&text);
+        for held in self.talk.held.drain(..) {
+            match held {
+                Held::Screen(text) => session.push_screen(text),
+                Held::Note(text) => session.push_note(text),
+            };
         }
         self.talk.session = Some(session);
     }
@@ -560,11 +568,17 @@ impl Lane {
         }
     }
 
-    /// A line the run filed rather than the model: a command's note, read back
-    /// with the rest of the transcript. Nothing to file when there is none.
-    pub fn push_note(&mut self, note: &str) {
-        if let Some(session) = self.talk.session.as_mut() {
-            session.push_note(note);
+    /// A line pi filed rather than the model: a command's note, read back
+    /// with the rest of the transcript; held when a run has the transcript.
+    ///
+    /// Returns the id as `push_screen` does; `None` for a held note.
+    pub fn push_note(&mut self, note: &str) -> Option<EntryId> {
+        match self.talk.session.as_mut() {
+            Some(session) => Some(session.push_note(note)),
+            None => {
+                self.talk.held.push(Held::Note(note.to_string()));
+                None
+            }
         }
     }
 
@@ -577,7 +591,7 @@ impl Lane {
         match self.talk.session.as_mut() {
             Some(session) => Some(session.push_screen(text)),
             None => {
-                self.talk.held_screens.push(text.to_string());
+                self.talk.held.push(Held::Screen(text.to_string()));
                 None
             }
         }
@@ -595,8 +609,8 @@ impl Lane {
         &self.talk.totals
     }
 
-    pub fn held_screens(&self) -> &[String] {
-        &self.talk.held_screens
+    pub fn held(&self) -> usize {
+        self.talk.held.len()
     }
 }
 

@@ -52,7 +52,9 @@ pub enum Builtin {
     // What to run over and over, or empty to stop the loop in force.
     Loop(String),
     // Bare, what runs in the background here; `stop <id>` ends one.
-    Jobs(String),
+    Job(String),
+    // Something the model is asked to start in the background.
+    Background(String),
     // Bare, the MCP servers and their tools; `restart [name]` reconnects.
     Mcp(String),
     // `/new` and the keys bound to it are one variant: a fresh session, old one
@@ -98,7 +100,7 @@ impl Intent {
                 | Builtin::Name(_)
                 | Builtin::Model(_)
                 | Builtin::Effort(_)
-                | Builtin::Jobs(_),
+                | Builtin::Job(_),
             ) => Fate::Now,
             // A restart drops only the servers' connections, never the run's.
             Intent::Builtin(Builtin::Mcp(_)) => Fate::Now,
@@ -126,6 +128,7 @@ impl Intent {
             Intent::Other { .. } | Intent::Prompt(_) => Fate::Queued,
             // Its first round is due at once, and a round wants the lane free.
             Intent::Builtin(Builtin::Loop(_)) => Fate::Queued,
+            Intent::Builtin(Builtin::Background(_)) => Fate::Queued,
             // A `!` files its result in the transcript, which the run has.
             Intent::Bash(_) => Fate::Queued,
             // Both reach for the transcript, and the run is holding it.
@@ -370,8 +373,8 @@ impl Step {
 pub enum Drive {
     /// `/loop` over a goal already known to start a turn; `None` stops it.
     Loop(Option<String>),
-    /// `/jobs`, with what followed the word.
-    Jobs(String),
+    /// `/job`, with what followed the word.
+    Job(String),
 }
 
 pub(crate) fn lines(text: impl Into<String>) -> Step {

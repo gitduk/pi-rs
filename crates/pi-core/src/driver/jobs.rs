@@ -1,4 +1,4 @@
-//! `jobs`: what runs apart from the turn that started it — a subagent sent
+//! `job`: what runs apart from the turn that started it — a subagent sent
 //! to the background, a script tool that detached — and what comes back from
 //! it to its checkout: each result a turn of its own, each input a line read
 //! as if typed, whose turn's answer goes back to the job.
@@ -334,7 +334,8 @@ impl Table {
             .any(|i| i.root == root && i.running)
     }
 
-    /// Stop `id` of `root`'s and forget it, waiting results and all.
+    /// Stop `id` of `root`'s and forget it, waiting results and all: what
+    /// it was.
     pub fn stop(&self, root: &Path, id: u64) -> Result<String, String> {
         let mut inner = self.lock();
         let at = inner
@@ -347,12 +348,12 @@ impl Table {
         drop(inner);
         tracing::info!(target: "pi::job", job = id, "stopped");
         self.changed.notify_one();
-        Ok(format!("stopped #{id}: {}", item.description))
+        Ok(item.description)
     }
 
     /// Stop each of `ids` of `root`'s, or every one still running there when
-    /// none are named: a line for each, and whether any of them was stopped.
-    pub fn stop_each(&self, root: &Path, ids: &[u64]) -> (Vec<String>, bool) {
+    /// none are named: a line for each, and those stopped, as `#id (what)`.
+    pub fn stop_each(&self, root: &Path, ids: &[u64]) -> (Vec<String>, Vec<String>) {
         // A finished one's results only wait for the lane: stopping it
         // would throw them away, not stop anything.
         let ids = if ids.is_empty() {
@@ -366,19 +367,21 @@ impl Table {
         if ids.is_empty() {
             return (
                 vec!["nothing running in the background to stop".into()],
-                false,
+                Vec::new(),
             );
         }
-        let mut any = false;
+        let mut stopped = Vec::new();
         let lines = ids
             .into_iter()
-            .map(|id| {
-                let said = self.stop(root, id);
-                any |= said.is_ok();
-                said.unwrap_or_else(|e| e)
+            .map(|id| match self.stop(root, id) {
+                Ok(what) => {
+                    stopped.push(format!("#{id} ({what})"));
+                    format!("stopped #{id}: {what}")
+                }
+                Err(why) => why,
             })
             .collect();
-        (lines, any)
+        (lines, stopped)
     }
 
     /// Stop and forget every job of checkouts at or under `root`: the
@@ -443,13 +446,13 @@ impl Table {
     }
 }
 
-/// The `jobs` tool, and where a call that outlives its turn is kept.
+/// The `job` tool, and where a call that outlives its turn is kept.
 pub struct Jobs {
     table: Arc<Table>,
 }
 
 impl Jobs {
-    pub const NAME: &'static str = "jobs";
+    pub const NAME: &'static str = "job";
 
     pub fn new(table: Arc<Table>) -> Self {
         Self { table }
@@ -594,9 +597,9 @@ impl Tool for Jobs {
         };
         let all = args.get("stop_all").and_then(Value::as_bool) == Some(true);
         if all || !ids.is_empty() {
-            let (lines, any) = self.table.stop_each(root, if all { &[] } else { &ids });
+            let (lines, stopped) = self.table.stop_each(root, if all { &[] } else { &ids });
             let said = lines.join("\n");
-            return if any {
+            return if !stopped.is_empty() {
                 Ok(ToolOutput::text(said))
             } else {
                 Err(ToolError::Invalid(said))

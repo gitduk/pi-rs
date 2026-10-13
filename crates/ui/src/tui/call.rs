@@ -167,7 +167,7 @@ pub(super) fn job_lines(
             let mut rows = super::screen::fit(&row, room);
             let own = rows.len();
             if from > 0 {
-                let more = format!("  … {from} lines before · /jobs output {}", job.id);
+                let more = format!("  … {from} lines before · /job output {}", job.id);
                 rows.push(Line::from(paint.span(&paint.theme.muted, more)));
             }
             rows.extend((said[from..].iter()).map(|l| {
@@ -198,7 +198,7 @@ pub(super) fn job_lines(
         lines.extend(rows);
     }
     if jobs.len() > JOBS_SHOWN {
-        let more = format!("+{} more · /jobs", jobs.len() - JOBS_SHOWN);
+        let more = format!("+{} more · /job", jobs.len() - JOBS_SHOWN);
         lines.push(Line::from(paint.span(&paint.theme.muted, more)));
     }
     (lines, ids)

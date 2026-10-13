@@ -103,7 +103,7 @@ refused, and resuming one from another directory moves it here.
 | `/worktree [name]`, `/worktree rm` | work in `<repo>.worktrees/<name>`             |
 | `/compact [focus]`                 | summarize everything but the working tail     |
 | `/loop <line>`                     | resubmit a line until a round edits no file   |
-| `/jobs`, `stop <id>`, `output <id>` | background jobs; stop one; what one printed |
+| `/job [text]`, `stop <id>`, `output <id>` | background jobs; have the model start one; stop one; what one printed |
 | `/mcp`, `/mcp restart [name]`      | MCP servers and their tools; reconnect        |
 | `/settings`                        | edit the project's config                     |
 | `/edit [file]`                     | edit `SYSTEM.md`, an `AGENTS.md`, or memory   |
@@ -128,13 +128,14 @@ refused, and resuming one from another directory moves it here.
   not start is listed as `<name>__unavailable`, with the reason; `/mcp`
   shows each server and its tools, and `/mcp restart` reconnects them. A call
   with no answer in 10 minutes is given up.
-- `jobs`, in the terminal: what runs in the background, the latest a
+- `job`, in the terminal: what runs in the background, the latest a
   command printed with `output`, or `stop` one. A
   `bash` or `subagent` call with `background`, or a script that detaches,
   leaves the turn free; each result comes back as a turn of its own once the
   checkout is in front and idle. Those still out are listed above the bar,
-  `/jobs output` shows what one printed, and `/jobs stop` stops one. Jobs
-  last while pi runs; past that, use cron.
+  `/job output` shows what one printed, and `/job stop` stops one — the
+  model is told before it next speaks. `/job <text>` asks the model to start
+  something in the background. Jobs last while pi runs; past that, use cron.
 - One tool per script in `~/.pi/tools/`: any file whose first line is a `#!`,
   its `description` and `[args]` written as TOML in a `# ---` comment block
   under that line; or a cargo script `*.rs`, described by its

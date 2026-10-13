@@ -103,11 +103,11 @@ pub(crate) const BUILTIN: &[Command] = &[
         |_, rest| Intent::Builtin(Builtin::Compact(rest)),
     ),
     Command::builtin(
-        "/jobs",
-        "[stop [id…] | output id]",
+        "/job",
+        "[stop [id…] | output id | text]",
         "what runs in the background here; stop ends them, bare every running one; \
-         output shows what one printed",
-        |_, rest| Intent::Builtin(Builtin::Jobs(rest)),
+         output shows what one printed; anything else has the model start it there",
+        |_, rest| job(rest),
     ),
     Command::builtin(
         "/loop",
@@ -314,7 +314,19 @@ fn offer(choices: &[Choice], head: &str, typed: &str) -> Vec<Candidate> {
         .collect()
 }
 
-// The ids after `/jobs <verb>` not named yet, completing the one being typed.
+// `/job` manages jobs when it is bare or a verb followed only by ids;
+// any other text is something to start in the background.
+fn job(rest: String) -> Intent {
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    let id = |w: &&str| w.trim_start_matches('#').parse::<u64>().is_ok();
+    match words.as_slice() {
+        [] => Intent::Builtin(Builtin::Job(rest)),
+        ["stop" | "output", ids @ ..] if ids.iter().all(id) => Intent::Builtin(Builtin::Job(rest)),
+        _ => Intent::Builtin(Builtin::Background(rest)),
+    }
+}
+
+// The ids after `/job <verb>` not named yet, completing the one being typed.
 // Once one is named, a bare space offers nothing: submitting runs the line
 // as typed, not an offered id tacked on.
 fn job_ids(verb: &str, jobs: &[Choice], args: &str) -> Vec<Candidate> {
@@ -334,7 +346,7 @@ fn job_ids(verb: &str, jobs: &[Choice], args: &str) -> Vec<Candidate> {
         .filter(|j| j.name.starts_with(typing) && !settled(&j.name))
         .map(|j| Candidate {
             show: format!("#{}", j.name),
-            line: format!("/jobs {verb} {head}{}", j.name),
+            line: format!("/job {verb} {head}{}", j.name),
             help: j.note.clone(),
             more: false,
             picked_only: false,
@@ -346,7 +358,7 @@ fn job_ids(verb: &str, jobs: &[Choice], args: &str) -> Vec<Candidate> {
 /// then that command's own argument once the word is settled.
 ///
 /// Only args with a known name set are completed (`/model`, `/resume`,
-/// `/worktree`, `/edit`, `/jobs`); a prompt or focus phrase is prose, not guessed.
+/// `/worktree`, `/edit`, `/job`); a prompt or focus phrase is prose, not guessed.
 ///
 /// Sessions, worktrees and files are asked for lazily: walking transcripts,
 /// running `git worktree list` or reading directories is paid only by the
@@ -395,10 +407,10 @@ pub fn complete<'a>(
         "/model" if typed.contains(char::is_whitespace) => Vec::new(),
         "/model" => offer(models, "/model ", typed),
         "/edit" => offer(editable(), "/edit ", typed),
-        "/jobs" if typed.starts_with("stop ") => {
+        "/job" if typed.starts_with("stop ") => {
             job_ids("stop", jobs, typed["stop ".len()..].trim_start())
         }
-        "/jobs" if typed.starts_with("output ") => {
+        "/job" if typed.starts_with("output ") => {
             let arg = typed["output ".len()..].trim_start();
             if arg.contains(char::is_whitespace) {
                 Vec::new()
@@ -406,9 +418,9 @@ pub fn complete<'a>(
                 job_ids("output", jobs, arg)
             }
         }
-        "/jobs" if typed.contains(char::is_whitespace) => Vec::new(),
-        // Submitting a bare `/jobs ` still lists them, not stops them all.
-        "/jobs" => [
+        "/job" if typed.contains(char::is_whitespace) => Vec::new(),
+        // Submitting a bare `/job ` still lists them, not stops them all.
+        "/job" => [
             ("stop", "end them by id, or every running one"),
             ("output", "what one has printed so far"),
         ]
@@ -416,10 +428,11 @@ pub fn complete<'a>(
         .filter(|(verb, _)| verb.starts_with(typed) && *verb != typed)
         .map(|(verb, help)| Candidate {
             show: verb.into(),
-            line: format!("/jobs {verb}"),
+            line: format!("/job {verb}"),
             help: help.into(),
             more: true,
-            picked_only: typed.is_empty(),
+            // A prefix of a verb may be the first word of something to start.
+            picked_only: true,
         })
         .collect(),
         // `rm` marks what follows it for removal; a bare `rm` still means the
@@ -501,5 +514,32 @@ pub(crate) fn ago(secs: u64) -> String {
         format!("{}h ago", ago / 3600)
     } else {
         format!("{}d ago", ago / 86400)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A verb with only ids after it manages jobs; any other text, even one
+    // starting with a verb, is something to start.
+    #[test]
+    fn job_manages_only_on_a_verb_and_ids() {
+        for line in ["", "stop", "stop 2 #3", "output 4", "output"] {
+            assert!(
+                matches!(job(line.into()), Intent::Builtin(Builtin::Job(_))),
+                "{line}"
+            );
+        }
+        for line in [
+            "python3 -m http.server 8080",
+            "stop the server",
+            "output logs",
+        ] {
+            assert!(
+                matches!(job(line.into()), Intent::Builtin(Builtin::Background(_))),
+                "{line}"
+            );
+        }
     }
 }

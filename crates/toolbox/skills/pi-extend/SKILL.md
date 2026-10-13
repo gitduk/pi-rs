@@ -117,7 +117,7 @@ For each turn an `input` opened, pi writes back on the same fd
 ```python
 #!/usr/bin/env python3
 # ---
-# description = "Watch a URL and report each time its content changes. Runs in the background until `jobs` stops it."
+# description = "Watch a URL and report each time its content changes. Runs in the background until `job` stops it."
 # [args]
 # url = "the page to watch"
 # ---
@@ -143,7 +143,7 @@ while True:
 
 - Detach first, before anything slow: until then the call holds the turn and
   the 300 s limit applies. After it, no limit: the job runs until it exits, a
-  `jobs` stop (SIGTERM, then SIGKILL), or pi exits, and takes its process
+  `job` stop (SIGTERM, then SIGKILL), or pi exits, and takes its process
   group along each time.
 - `result`, `input` and `interrupt` count only after `detach`.
 - Its stdout at exit is its last result; a non-zero exit adds stderr.

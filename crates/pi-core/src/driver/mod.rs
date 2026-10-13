@@ -39,6 +39,9 @@ pub enum Said {
     Nothing,
     // The answer to the command, for whoever typed it.
     Command(Vec<String>),
+    // The answer to the command, and a note the model reads before it next
+    // speaks: something it started was changed under it.
+    Noted(Vec<String>, String),
     // Something that happened to the lane, filed with its transcript.
     Transcript(String),
 }
@@ -72,7 +75,7 @@ struct Owed {
 }
 
 impl Drivers {
-    /// What `jobs` and every call that outlives its turn write into: the
+    /// What `job` and every call that outlives its turn write into: the
     /// lanes' tools and this driver share it.
     pub fn jobs(&self) -> Arc<jobs::Table> {
         self.jobs.clone()
@@ -120,7 +123,7 @@ impl Drivers {
                 Ok(()) => Said::Nothing,
                 Err(why) => Said::Command(vec![why]),
             },
-            Drive::Jobs(arg) => Said::Command(self.jobs_command(&arg, ctx)),
+            Drive::Job(arg) => self.job_command(&arg, ctx),
             Drive::Loop(None) => match self.loops.stop(lane) {
                 // A loop really ended: that belongs in the transcript.
                 Some(said) => Said::Transcript(said),
@@ -224,11 +227,11 @@ fn reply(mut said: String, ended: &Ended) -> String {
 }
 
 impl Drivers {
-    // `/jobs`: what runs in the background here, `stop [id…]` to end them,
+    // `/job`: what runs in the background here, `stop [id…]` to end them,
     // every one when none is named, or `output <id>` for what one printed.
-    fn jobs_command(&self, arg: &str, ctx: &Ctx) -> Vec<String> {
+    fn job_command(&self, arg: &str, ctx: &Ctx) -> Said {
         let root = ctx.workspace.root();
-        match arg.split_whitespace().collect::<Vec<_>>().as_slice() {
+        let lines = match arg.split_whitespace().collect::<Vec<_>>().as_slice() {
             [] => {
                 let jobs = self.jobs.listing(root);
                 if jobs.is_empty() {
@@ -243,8 +246,24 @@ impl Drivers {
                     .map(|id| id.trim_start_matches('#').parse().map_err(|_| id))
                     .collect();
                 match parsed {
-                    Ok(ids) => self.jobs.stop_each(root, &ids).0,
-                    Err(id) => vec![format!("`{id}` is not an id; /jobs lists them")],
+                    Ok(ids) => {
+                        let (lines, stopped) = self.jobs.stop_each(root, &ids);
+                        if stopped.is_empty() {
+                            return Said::Command(lines);
+                        }
+                        // A job it started ends without a word back: say so.
+                        let (job, it) = match stopped.len() {
+                            1 => ("job", "it"),
+                            _ => ("jobs", "them"),
+                        };
+                        let note = format!(
+                            "The user stopped background {job} {}; nothing more will come \
+                             back from {it}.",
+                            stopped.join(", ")
+                        );
+                        return Said::Noted(lines, note);
+                    }
+                    Err(id) => vec![format!("`{id}` is not an id; /job lists them")],
                 }
             }
             ["output", id] => match id.trim_start_matches('#').parse() {
@@ -253,14 +272,15 @@ impl Drivers {
                     .lines()
                     .map(str::to_string)
                     .collect(),
-                Err(_) => vec![format!("`{id}` is not an id; /jobs lists them")],
+                Err(_) => vec![format!("`{id}` is not an id; /job lists them")],
             },
             _ => vec![
-                "/jobs lists what runs in the background; /jobs stop [id…] ends them, or all; \
-                 /jobs output <id> shows what one printed"
+                "/job lists what runs in the background; /job stop [id…] ends them, or all; \
+                 /job output <id> shows what one printed; /job <text> starts it there"
                     .into(),
             ],
-        }
+        };
+        Said::Command(lines)
     }
 }
 
@@ -302,6 +322,34 @@ mod tests {
         );
         drivers.turn_ended(1, &Ended::Done, &ctx, None);
         assert!(rx.try_recv().is_err(), "told once");
+    }
+
+    // The model is told of a job the user stopped; one it could not stop
+    // leaves it nothing to be told.
+    #[tokio::test]
+    async fn a_job_the_user_stops_is_noted_for_the_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let ctx = Ctx::new(tool::Workspace::new(&root).unwrap());
+        let mut drivers = Drivers::default();
+        let job = jobs::Jobs::new(drivers.jobs()).start(
+            root.clone(),
+            "http.server 8080".into(),
+            Default::default(),
+            None,
+        );
+        let stop = format!("stop {}", job.id());
+        let Said::Noted(_, note) = drivers.command(Drive::Job(stop.clone()), 1, &ctx) else {
+            panic!("a stop is noted")
+        };
+        assert!(
+            note.contains(&format!("#{} (http.server 8080)", job.id())),
+            "{note}"
+        );
+        assert!(matches!(
+            drivers.command(Drive::Job(stop), 1, &ctx),
+            Said::Command(_)
+        ));
     }
 
     // A retried request streams its turn again: the job hears the retry's

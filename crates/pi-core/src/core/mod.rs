@@ -197,7 +197,7 @@ impl Core {
         }
     }
 
-    /// Offer `jobs` on every lane, writing into `table`, which the surface
+    /// Offer `job` on every lane, writing into `table`, which the surface
     /// serves: lanes armed before this are armed again.
     pub fn enable_jobs(&mut self, table: std::sync::Arc<crate::driver::jobs::Table>) {
         self.jobs = Some(table);
@@ -256,7 +256,7 @@ impl Core {
                 .iter()
                 .any(|lane| !jobs.jobs(lane.root()).is_empty())
         {
-            return Err("background jobs would be cut off — /jobs lists them".into());
+            return Err("background jobs would be cut off — /job lists them".into());
         }
         let lane = self.lane();
         // A session nothing was said in is never filed.
@@ -287,7 +287,14 @@ impl Core {
         match intent {
             Intent::Bash(command) => Step::Bash(command),
             Intent::Prompt(send) => Step::Prompt { send, typed: None },
-            Intent::Builtin(Builtin::Jobs(arg)) => Step::Drive(Drive::Jobs(arg)),
+            Intent::Builtin(Builtin::Job(arg)) => Step::Drive(Drive::Job(arg)),
+            Intent::Builtin(Builtin::Background(what)) => Step::Prompt {
+                send: format!(
+                    "Start this in the background, apart from this turn, then end the \
+                     turn without waiting on it:\n\n{what}"
+                ),
+                typed: Some(format!("/job {what}")),
+            },
             Intent::Builtin(Builtin::Loop(goal)) => match goal.trim() {
                 "" => Step::Drive(Drive::Loop(None)),
                 goal if self.starts_turn(goal) => Step::Drive(Drive::Loop(Some(goal.to_string()))),
