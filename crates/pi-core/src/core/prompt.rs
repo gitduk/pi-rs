@@ -7,6 +7,9 @@
 
 use std::path::PathBuf;
 
+/// The assistant's own prompt, when no file replaces it.
+pub const DEFAULT_SYSTEM: &str = include_str!("../../prompts/system.md");
+
 /// The facts a run's blocks are drawn from. Empty fields leave their block out.
 #[derive(Debug, Clone)]
 pub struct Standing {

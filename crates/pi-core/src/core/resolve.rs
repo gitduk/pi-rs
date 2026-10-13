@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use llm::request::Effort;
 
 use crate::args::Pinned;
+use crate::core::instructions;
 use crate::input::commands::{Command, commands};
-use agent::instructions;
 use pi_store::args::EffortArg;
 use pi_store::settings::Settings;
 use pi_store::{config, journal};
@@ -27,6 +27,9 @@ pub struct Resolved {
     /// instructions files. Kept apart because the subagent has its own prompt but the same
     /// tree, the same machine and the same tier.
     pub standing: std::sync::Arc<str>,
+    /// How long a subagent may run silent before it is read as wedged; `None`
+    /// leaves the subagent's own default.
+    pub subagent_deadline: Option<std::time::Duration>,
     /// How far this run may reach. The lane needs it to decide whether the
     /// subagent, offered after this set is cut, belongs in it.
     pub ceiling: tool::Tier,
@@ -88,7 +91,7 @@ impl PromptFiles {
         let system = match &system_file {
             Some(path) => std::fs::read_to_string(path)
                 .with_context(|| format!("cannot read system prompt {}", path.display()))?,
-            None => agent::DEFAULT_SYSTEM.to_string(),
+            None => crate::core::prompt::DEFAULT_SYSTEM.to_string(),
         };
         let (instructions, memory) = if pinned.no_context_files {
             (Vec::new(), Vec::new())
@@ -270,7 +273,7 @@ pub fn resolve(
         .collect();
     // Appended rather than sent as a message: standing instructions don't
     // change within a run, and the system prompt is what a provider caches.
-    let standing = agent::prompt::Standing {
+    let standing = crate::core::prompt::Standing {
         workspace: root.to_path_buf(),
         write_paths: workspace.write_roots().to_vec(),
         pi_home,
@@ -289,10 +292,10 @@ pub fn resolve(
             effort,
             approver: std::sync::Arc::new(agent::Ceiling(tier)),
             hooks: crate::core::hooks::of(&config.hooks),
-            subagent_deadline: config
-                .subagent_deadline
-                .map(|s| std::time::Duration::from_secs(s.max(1))),
         }),
+        subagent_deadline: config
+            .subagent_deadline
+            .map(|s| std::time::Duration::from_secs(s.max(1))),
         standing: standing.into(),
         ceiling: tier,
         keys: std::sync::Arc::new(config.key_map()?),

@@ -188,7 +188,7 @@ async fn once(
         "Memory now:\n{}\n\nSession in {}, {}:\n{history}",
         match memory.files(&project) {
             files if files.is_empty() => "(nothing yet)".into(),
-            files => agent::prompt::files(
+            files => crate::core::prompt::files(
                 &files
                     .into_iter()
                     .map(|f| (f.name, f.body))

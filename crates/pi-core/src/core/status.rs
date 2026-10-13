@@ -4,8 +4,8 @@
 //! The vocabulary is `pi_store::status` and the drawing is the surface's; this
 //! is where the values come from.
 
+use crate::core::instructions::short;
 use agent::Totals;
-use agent::instructions::short;
 use llm::figures;
 
 use super::Core;
@@ -97,7 +97,7 @@ impl Core {
 
         let tier = format!("{:?}", resolved.ceiling).to_lowercase();
         rows.push(Row::new(["tier", &tier]));
-        let mut workspace = agent::instructions::home()
+        let mut workspace = crate::core::instructions::home()
             .and_then(|h| Some(format!("~/{}", root.strip_prefix(h).ok()?.display())))
             .unwrap_or_else(|| root.display().to_string());
         if let Some(tree) = lane.worktree() {

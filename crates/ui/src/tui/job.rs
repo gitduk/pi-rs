@@ -323,7 +323,7 @@ impl Tui {
                 // The file edited first: what else the reload says follows it.
                 Ok(notes) => {
                     let root = self.core.lane().root();
-                    let name = agent::instructions::short(&path, root);
+                    let name = pi_core::core::instructions::short(&path, root);
                     let prompt = pi_core::core::resolve::editable(&self.core.pinned, root)
                         .iter()
                         .any(|f| f.path == path);

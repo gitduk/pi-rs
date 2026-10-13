@@ -708,7 +708,9 @@ pub(super) fn count(n: usize, thing: &str) -> String {
 
 // The home directory as `~`: the banner has no workspace to shorten against.
 fn tilde(path: &std::path::Path) -> String {
-    match agent::instructions::home().and_then(|h| Some(path.strip_prefix(h).ok()?.to_owned())) {
+    match pi_core::core::instructions::home()
+        .and_then(|h| Some(path.strip_prefix(h).ok()?.to_owned()))
+    {
         Some(rel) => format!("~/{}", rel.display()),
         None => path.display().to_string(),
     }

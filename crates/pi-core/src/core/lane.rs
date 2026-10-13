@@ -161,6 +161,9 @@ pub fn arm(
         &resolved.standing,
         retry,
     );
+    if let Some(deadline) = resolved.subagent_deadline {
+        subagent = subagent.with_deadline(deadline);
+    }
     // Its answer comes back as a job's does, so only with somewhere to keep it.
     if jobs.is_some() {
         subagent = subagent.with_background();
@@ -205,8 +208,8 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
             effort: llm::request::Effort::Off,
             approver: Arc::new(agent::Ceiling(tool::Tier::Exec)),
             hooks: Arc::new(agent::NoHooks),
-            subagent_deadline: None,
         }),
+        subagent_deadline: None,
         standing: standing.into(),
         ceiling: tool::Tier::Exec,
         keys: Arc::new(pi_store::keys::Keys::default()),

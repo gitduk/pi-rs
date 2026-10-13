@@ -10,10 +10,12 @@ pub mod bash;
 pub mod content;
 pub mod dial;
 pub mod hooks;
+pub mod instructions;
 pub mod lane;
 pub mod mcp;
 pub mod memory;
 pub mod meter;
+pub mod prompt;
 pub mod resolve;
 pub mod settings;
 pub mod status;
@@ -124,7 +126,7 @@ impl Core {
             .iter()
             .filter(|s| !was.contains(s))
             .chain(was.iter().filter(|s| !now.iter().any(|n| n.0 == s.0)))
-            .map(|(path, ..)| agent::instructions::short(path, &root))
+            .map(|(path, ..)| crate::core::instructions::short(path, &root))
             .collect();
         match self.try_reload() {
             Ok(mut said) => {

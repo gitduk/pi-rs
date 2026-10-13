@@ -75,6 +75,9 @@ pub struct Subagent {
     background: bool,
 }
 
+// How long a child may run silent unless `with_deadline` says otherwise.
+const DEADLINE: Duration = Duration::from_secs(1800);
+
 impl Subagent {
     pub const NAME: &'static str = "subagent";
 
@@ -91,9 +94,6 @@ impl Subagent {
         standing: &str,
         retry: Retry,
     ) -> Self {
-        let deadline = brief
-            .subagent_deadline
-            .unwrap_or_else(|| Duration::from_secs(1800));
         let mut child = brief;
         let patch = Arc::make_mut(&mut child);
         patch.registry = std::mem::take(&mut patch.registry).without(Self::NAME);
@@ -106,7 +106,7 @@ impl Subagent {
         Self {
             agent: Arc::new(agent),
             archive,
-            deadline,
+            deadline: DEADLINE,
             retry,
             background: false,
         }

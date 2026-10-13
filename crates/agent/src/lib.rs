@@ -17,8 +17,6 @@ mod calls;
 pub mod compaction;
 pub mod event;
 pub mod hooks;
-pub mod instructions;
-pub mod prompt;
 pub mod retry;
 pub mod seams;
 mod turn;
@@ -32,8 +30,6 @@ pub use event::{Event, Totals};
 pub use hooks::{Hooks, NoHooks};
 pub use retry::Retry;
 pub use seams::{Approver, Archive, Compactor, Decision, Fitted, Untouched, Working};
-
-pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
 
 // Headroom for framing the estimate does not model.
 const SAFETY_MARGIN: usize = 2_000;
@@ -95,9 +91,6 @@ pub struct Briefing {
     pub approver: Arc<dyn Approver>,
     /// What runs around each call the approver let through.
     pub hooks: Arc<dyn Hooks>,
-    /// How long a subagent may run silent before it is read as wedged.
-    /// None defaults to 1800 s.
-    pub subagent_deadline: Option<std::time::Duration>,
 }
 
 #[derive(Clone)]
@@ -110,18 +103,17 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// An agent with no tools: whoever assembles it installs a registry on
-    /// the brief, as the identity compactor waits for a real one.
+    /// An agent with no tools and no prompt: whoever assembles it installs
+    /// both on the brief, as the identity compactor waits for a real one.
     pub fn new(transport: Arc<dyn Transport>, spec: ModelSpec) -> Self {
         Self {
             model: Arc::new(Model { transport, spec }),
             brief: Arc::new(Briefing {
                 registry: Registry::new(),
-                system: DEFAULT_SYSTEM.to_string(),
+                system: String::new(),
                 effort: Effort::Off,
                 approver: Arc::new(Ceiling(tool::Tier::Exec)),
                 hooks: Arc::new(NoHooks),
-                subagent_deadline: None,
             }),
             compactor: Arc::new(seams::Untouched),
         }
