@@ -224,7 +224,8 @@ fn reply(mut said: String, ended: &Ended) -> String {
 }
 
 impl Drivers {
-    // `/jobs`: what runs in the background here, or `stop <id>` to end one.
+    // `/jobs`: what runs in the background here, or `stop [id…]` to end
+    // them, every one when none is named.
     fn jobs_command(&self, arg: &str, ctx: &Ctx) -> Vec<String> {
         let root = ctx.workspace.root();
         match arg.split_whitespace().collect::<Vec<_>>().as_slice() {
@@ -236,11 +237,20 @@ impl Drivers {
                     jobs
                 }
             }
-            ["stop", id] => match id.trim_start_matches('#').parse() {
-                Ok(id) => vec![self.jobs.stop(root, id).unwrap_or_else(|e| e)],
-                Err(_) => vec![format!("`{id}` is not an id; /jobs lists them")],
-            },
-            _ => vec!["/jobs lists what runs in the background; /jobs stop <id> ends one".into()],
+            ["stop", ids @ ..] => {
+                let parsed: Result<Vec<u64>, _> = ids
+                    .iter()
+                    .map(|id| id.trim_start_matches('#').parse().map_err(|_| id))
+                    .collect();
+                match parsed {
+                    Ok(ids) => self.jobs.stop_each(root, &ids).0,
+                    Err(id) => vec![format!("`{id}` is not an id; /jobs lists them")],
+                }
+            }
+            _ => vec![
+                "/jobs lists what runs in the background; /jobs stop [id…] ends them, or all"
+                    .into(),
+            ],
         }
     }
 }

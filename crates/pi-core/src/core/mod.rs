@@ -406,7 +406,15 @@ mod tests {
         let commands = commands(&[], &mut notes);
         let line = |text: &str| {
             asked.borrow_mut().clear();
-            crate::input::commands::complete(text, &commands, &[], sessions, worktrees, editable);
+            crate::input::commands::complete(
+                text,
+                &commands,
+                &[],
+                &[],
+                sessions,
+                worktrees,
+                editable,
+            );
             asked.borrow().join(",")
         };
 
@@ -430,6 +438,7 @@ mod tests {
         let offered = crate::input::commands::complete(
             "/resume f",
             &commands,
+            &[],
             &[],
             || &one[..],
             || &[],

@@ -104,8 +104,8 @@ pub(crate) const BUILTIN: &[Command] = &[
     ),
     Command::builtin(
         "/jobs",
-        "[stop id]",
-        "what runs in the background here; stop ends one",
+        "[stop [id…]]",
+        "what runs in the background here; stop ends them, bare every running one",
         |_, rest| Intent::Builtin(Builtin::Jobs(rest)),
     ),
     Command::builtin(
@@ -292,10 +292,11 @@ pub struct Candidate {
     /// Something is still expected after it, so accepting leaves a trailing
     /// space and the caret past it.
     pub more: bool,
+    /// Taken by Tab, or by Enter once moved onto; Enter on the line as it
+    /// stands runs what was typed, which this would turn into something else.
+    pub tab_only: bool,
 }
 
-// A worktree name completed against `prefix`; the whole line an accept makes
-// is `head` plus the name, which is what tells entering from removing.
 // The names among `choices` that `typed` begins and does not already finish,
 // each as the whole line `head` plus the name.
 fn offer(choices: &[Choice], head: &str, typed: &str) -> Vec<Candidate> {
@@ -307,6 +308,35 @@ fn offer(choices: &[Choice], head: &str, typed: &str) -> Vec<Candidate> {
             line: format!("{head}{}", c.name),
             help: c.note.clone(),
             more: false,
+            tab_only: false,
+        })
+        .collect()
+}
+
+// The ids after `/jobs stop` not named yet, completing the one being typed.
+// Once one is named, a bare space offers nothing: Enter then runs the line
+// as typed, not the highlighted id tacked on.
+fn stop_ids(jobs: &[Choice], args: &str) -> Vec<Candidate> {
+    let mut named: Vec<&str> = args.split_whitespace().collect();
+    let typing = if args.is_empty() || args.ends_with(char::is_whitespace) {
+        ""
+    } else {
+        named.pop().unwrap_or("")
+    };
+    let typing = typing.trim_start_matches('#');
+    let settled = |id: &str| named.iter().any(|n| n.trim_start_matches('#') == id);
+    if (typing.is_empty() && !named.is_empty()) || jobs.iter().any(|j| j.name == typing) {
+        return Vec::new();
+    }
+    let head: String = named.iter().map(|n| format!("{n} ")).collect();
+    jobs.iter()
+        .filter(|j| j.name.starts_with(typing) && !settled(&j.name))
+        .map(|j| Candidate {
+            show: format!("#{}", j.name),
+            line: format!("/jobs stop {head}{}", j.name),
+            help: j.note.clone(),
+            more: false,
+            tab_only: false,
         })
         .collect()
 }
@@ -315,7 +345,7 @@ fn offer(choices: &[Choice], head: &str, typed: &str) -> Vec<Candidate> {
 /// then that command's own argument once the word is settled.
 ///
 /// Only args with a known name set are completed (`/model`, `/resume`,
-/// `/worktree`, `/edit`); a prompt or focus phrase is prose, not guessed.
+/// `/worktree`, `/edit`, `/jobs`); a prompt or focus phrase is prose, not guessed.
 ///
 /// Sessions, worktrees and files are asked for lazily: walking transcripts,
 /// running `git worktree list` or reading directories is paid only by the
@@ -324,6 +354,7 @@ pub fn complete<'a>(
     line: &str,
     commands: &[Command],
     models: &[Choice],
+    jobs: &[Choice],
     sessions: impl Fn() -> &'a [ResumeChoice],
     worktrees: impl Fn() -> &'a [Choice],
     editable: impl Fn() -> &'a [Choice],
@@ -342,6 +373,7 @@ pub fn complete<'a>(
                 line: c.word.to_string(),
                 help: c.help.to_string(),
                 more: !c.args.is_empty(),
+                tab_only: false,
             })
             .collect();
     };
@@ -362,6 +394,20 @@ pub fn complete<'a>(
         "/model" if typed.contains(char::is_whitespace) => Vec::new(),
         "/model" => offer(models, "/model ", typed),
         "/edit" => offer(editable(), "/edit ", typed),
+        "/jobs" if typed.starts_with("stop ") => {
+            stop_ids(jobs, typed["stop ".len()..].trim_start())
+        }
+        "/jobs" if typed.contains(char::is_whitespace) => Vec::new(),
+        // Enter on a bare `/jobs ` still lists them, not stops them all.
+        "/jobs" if "stop".starts_with(typed) && typed != "stop" && !jobs.is_empty() => {
+            vec![Candidate {
+                show: "stop".into(),
+                line: "/jobs stop".into(),
+                help: "end them by id, or every running one".into(),
+                more: true,
+                tab_only: typed.is_empty(),
+            }]
+        }
         // `rm` marks what follows it for removal; a bare `rm` still means the
         // name of a worktree, so nothing is offered until the space says.
         "/worktree" if typed == "rm" => Vec::new(),
@@ -393,6 +439,7 @@ pub fn complete<'a>(
                     line: format!("/resume {}", s.id),
                     help,
                     more: false,
+                    tab_only: false,
                 })
                 .collect()
         }

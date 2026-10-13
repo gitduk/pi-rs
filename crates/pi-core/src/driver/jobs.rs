@@ -292,6 +292,37 @@ impl Table {
         Ok(format!("stopped #{id}: {}", item.description))
     }
 
+    /// Stop each of `ids` of `root`'s, or every one still running there when
+    /// none are named: a line for each, and whether any of them was stopped.
+    pub fn stop_each(&self, root: &Path, ids: &[u64]) -> (Vec<String>, bool) {
+        // A finished one's results only wait for the lane: stopping it
+        // would throw them away, not stop anything.
+        let ids = if ids.is_empty() {
+            (self.jobs(root).iter())
+                .filter(|j| !j.ended)
+                .map(|j| j.id)
+                .collect()
+        } else {
+            ids.to_vec()
+        };
+        if ids.is_empty() {
+            return (
+                vec!["nothing running in the background to stop".into()],
+                false,
+            );
+        }
+        let mut any = false;
+        let lines = ids
+            .into_iter()
+            .map(|id| {
+                let said = self.stop(root, id);
+                any |= said.is_ok();
+                said.unwrap_or_else(|e| e)
+            })
+            .collect();
+        (lines, any)
+    }
+
     /// Stop and forget every job of checkouts at or under `root`: the
     /// checkout is gone, and a new one there is not it.
     pub fn drop_under(&self, root: &Path) {
@@ -459,7 +490,8 @@ impl Tool for Jobs {
     fn description(&self) -> &str {
         "List what runs in the background for this checkout — subagents sent \
          off with `background`, tools that went on after their call returned — \
-         or `stop` one by id. A stopped job's results never come back."
+         or `stop` some by id, or `stop_all`. A stopped job's results never \
+         come back."
     }
 
     fn tier(&self) -> Tier {
@@ -470,19 +502,38 @@ impl Tool for Jobs {
         json!({
             "type": "object",
             "properties": {
-                "stop": { "type": "integer", "description": "The id of one to stop." },
+                "stop": {
+                    "type": "array",
+                    "items": { "type": "integer" },
+                    "description": "The ids of those to stop.",
+                },
+                "stop_all": { "type": "boolean", "description": "Stop every one still running." },
             },
         })
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let root = ctx.workspace.root();
-        if let Some(id) = args.get("stop").and_then(Value::as_u64) {
-            return self
-                .table
-                .stop(root, id)
-                .map(ToolOutput::text)
-                .map_err(ToolError::Invalid);
+        // A lone id, as the field once took, still names one; so does `"#3"`.
+        let id = |v: &Value| {
+            v.as_u64()
+                .or_else(|| v.as_str()?.trim_start_matches('#').parse().ok())
+                .ok_or_else(|| ToolError::Invalid(format!("`{v}` is not a job id")))
+        };
+        let ids: Vec<u64> = match args.get("stop") {
+            Some(Value::Array(ids)) => ids.iter().map(id).collect::<Result<_, _>>()?,
+            Some(Value::Null) | None => Vec::new(),
+            Some(v) => vec![id(v)?],
+        };
+        let all = args.get("stop_all").and_then(Value::as_bool) == Some(true);
+        if all || !ids.is_empty() {
+            let (lines, any) = self.table.stop_each(root, if all { &[] } else { &ids });
+            let said = lines.join("\n");
+            return if any {
+                Ok(ToolOutput::text(said))
+            } else {
+                Err(ToolError::Invalid(said))
+            };
         }
         let jobs = self.table.listing(root);
         Ok(ToolOutput::text(if jobs.is_empty() {

@@ -227,7 +227,7 @@ impl Ui {
                 // Enter with a menu open runs what's highlighted, the typed
                 // text a mere prefix. Pick before draining the editor.
                 return match self.highlighted() {
-                    Some(MenuEntry::Completion(c)) => {
+                    Some(MenuEntry::Completion(c)) if !c.tab_only || self.picked.is_some() => {
                         // The completion's line runs; the prefix that
                         // produced it goes, so it can't resubmit as a stray prompt.
                         self.editor.take();
@@ -245,7 +245,7 @@ impl Ui {
                         self.apply_file(start, end, &path, dir);
                         Asked::Own(Deed::Nothing)
                     }
-                    Some(MenuEntry::Message { .. }) | None => {
+                    Some(MenuEntry::Completion(_) | MenuEntry::Message { .. }) | None => {
                         let typed = self.editor.take();
                         self.run_line(typed)
                     }
