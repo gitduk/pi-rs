@@ -145,7 +145,7 @@ impl Drop for Group {
     }
 }
 
-// How much of what a job printed last `jobs` can show while it runs.
+// How much of what a job printed last can be read while it runs.
 const PEEK: usize = 8 * 1024;
 
 /// The last of what a job's streams printed, both in the order it arrived.
