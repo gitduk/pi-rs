@@ -13,8 +13,8 @@ use pi_store::icons;
 pub struct FoldedTool {
     pub name: String,
     pub preview: String,
-    // What the step shows opened, under its line: the lines of the argument
-    // past the first the line names (`asked` of them), then what came back.
+    // What the step shows opened, under its line: the argument's lines the
+    // line doesn't read already (`asked` of them), then what came back.
     body: Vec<String>,
     asked: usize,
     open: bool,
@@ -24,7 +24,12 @@ impl FoldedTool {
     /// `asked` is the call's whole leading argument, `output` what it
     /// printed; both are what opening the step shows.
     pub fn new(name: &str, preview: &str, asked: &str, output: &str) -> Self {
-        let mut body: Vec<String> = asked.lines().skip(1).map(str::to_string).collect();
+        // Only a head that reads the first line already can leave it out:
+        // a script's head is its name alone.
+        let first = asked.lines().next().unwrap_or_default().trim();
+        let read = preview.lines().next().is_some_and(|h| h.contains(first));
+        let skip = usize::from(read);
+        let mut body: Vec<String> = asked.lines().skip(skip).map(str::to_string).collect();
         let asked = body.len();
         body.extend(pi_core::core::tools::shown(name, output).map(str::to_string));
         Self {
