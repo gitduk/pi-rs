@@ -54,8 +54,9 @@ refused at load.
 A `.pi.toml` between the workspace and the repository root overrides the same
 keys, every one of them. The keys that reach past the checkout — `mcp`,
 `hooks`, `keep_days`, `write_roots`, `base_url`, `api_key`, and a model's own
-`base_url` or `api_key` — are named under the banner when pi starts. Read the
-file in a checkout you did not write before running pi there.
+`base_url` or `api_key` — are named under the banner when pi starts, and so
+are the checkout's own script tools. Read both in a checkout you did not write
+before running pi there.
 
 Nothing needs a restart. Within a second of a save to the settings, the lane
 in front is rebuilt from them; a file that does not parse is named once and the
@@ -143,6 +144,9 @@ refused, and resuming one from another directory moves it here.
   `cargo +nightly -Zscript`. A script that does not read is listed as not
   usable, with the reason. `~/.pi/tools/.env` holds `NAME=value` lines every
   script starts with, such as its service's key; `bash` never sees them.
+  A checkout's own scripts go in the nearest `.pi/tools/` up to the
+  repository root (outside a repository, the workspace's own), with its own
+  `.env`; yours keeps a name both use.
   A script may also write JSON lines to fd 3 (`PI_EVENTS_FD`): `status` for
   its progress, `detach` to end the call and run on as a job, then `result`
   for each turn it sends back (its stdout at exit is the last), `input` for a
@@ -211,6 +215,7 @@ Memory starts with the first session to end and never reads tool output.
 | `~/.pi/memory/*.md`                      | memory: global, and one file per project   |
 | `~/.pi/tools/`                           | script tools                               |
 | `~/.pi/tools/.env`                       | values every script starts with; `0600`    |
+| `.pi/tools/`                             | a project's script tools                   |
 | `~/.pi/images/`                          | images pasted with `ctrl+v`                |
 | `~/.pi/bar.rs`                           | a cargo script that lays out the bar       |
 | `~/.pi/sessions/<project>/<session>/`    | the transcript and `journal.jsonl`         |

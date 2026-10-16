@@ -619,13 +619,47 @@ pub fn system_file() -> Option<PathBuf> {
 /// The nearest project file at or above `start`, stopping at the repo root.
 /// `home` is never searched: a `.pi.toml` there applies outside any repo.
 fn project_path(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    nearest(start, home, |dir| {
+        Some(dir.join(".pi.toml")).filter(|p| p.is_file())
+    })
+}
+
+/// A checkout's `.pi/<name>` directory: the nearest one up to the repository
+/// root, else where one belongs, at that root; outside a repository, the
+/// workspace's own. `None` in `$HOME` itself, whose `.pi` is pi's home.
+pub fn project_dir(workspace: &Path, name: &str) -> Option<PathBuf> {
+    project_dir_in(workspace, home().as_deref(), name)
+}
+
+fn project_dir_in(workspace: &Path, home: Option<&Path>, name: &str) -> Option<PathBuf> {
+    let at = |dir: &Path| dir.join(".pi").join(name);
+    // With no repository to bound the walk, a parent such as `/tmp` is
+    // anyone's to write, and what is found there gets run.
+    let Some(repo) = workspace
+        .ancestors()
+        .take_while(|dir| home != Some(*dir))
+        .find(|dir| dir.join(".git").exists())
+    else {
+        return (home != Some(workspace)).then(|| at(workspace));
+    };
+    Some(
+        nearest(workspace, home, |dir| Some(at(dir)).filter(|p| p.is_dir()))
+            .unwrap_or_else(|| at(repo)),
+    )
+}
+
+// `$HOME` itself is never a project: its `.pi` is pi's home.
+fn nearest(
+    start: &Path,
+    home: Option<&Path>,
+    found: impl Fn(&Path) -> Option<PathBuf>,
+) -> Option<PathBuf> {
     for dir in start.ancestors() {
         if home == Some(dir) {
             return None;
         }
-        let candidate = dir.join(".pi.toml");
-        if candidate.is_file() {
-            return Some(candidate);
+        if let Some(path) = found(dir) {
+            return Some(path);
         }
         // Above the repository root is not this project any more.
         if dir.join(".git").exists() {
@@ -1001,5 +1035,34 @@ api_key = "local-key"
         let inside = repo.join(".pi.toml");
         std::fs::write(&inside, "").unwrap();
         assert_eq!(project_path(&deep, None), Some(inside));
+    }
+
+    #[test]
+    fn a_project_dir_outside_a_repository_is_only_the_workspace_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shared = tmp.path();
+        std::fs::create_dir_all(shared.join(".pi/tools")).unwrap();
+        let deep = shared.join("scratch/today");
+        std::fs::create_dir_all(&deep).unwrap();
+        let own = deep.join(".pi/tools");
+        assert_eq!(
+            project_dir_in(&deep, None, "tools"),
+            Some(own),
+            "climbed out"
+        );
+        assert_eq!(
+            project_dir_in(shared, Some(shared), "tools"),
+            None,
+            "pi's home"
+        );
+
+        // Inside a repository: its root's until a nearer one exists, and
+        // never one above it.
+        std::fs::create_dir(shared.join("scratch/.git")).unwrap();
+        let root = shared.join("scratch/.pi/tools");
+        assert_eq!(project_dir_in(&deep, None, "tools"), Some(root));
+        let near = deep.join(".pi/tools");
+        std::fs::create_dir_all(&near).unwrap();
+        assert_eq!(project_dir_in(&deep, None, "tools"), Some(near));
     }
 }

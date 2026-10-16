@@ -64,8 +64,8 @@ pub struct Resolved {
     pub endpoint: Option<String>,
     /// The MCP servers the config names, shown with what the run stands on.
     pub mcp: Vec<String>,
-    /// What the project file sets that reaches past its checkout, as key and
-    /// value, said at startup: nothing refuses it.
+    /// What the checkout sets that reaches past it, as key and value — its
+    /// project file's keys and its own scripts — said at startup: nothing refuses it.
     pub project: Vec<(String, String)>,
 }
 
@@ -193,27 +193,47 @@ pub fn resolve(
         registry.read(shelf.clone());
     }
 
-    // Read live: a script written while pi runs is a tool from the next turn.
-    let scripts =
-        pi_store::dir().map(|root| Arc::new(toolbox::scripts::Dir::new(root.join("tools"))));
-    if let Some(scripts) = &scripts {
-        notes.extend(
-            pi_store::dir().and_then(|root| toolbox::scripts::env::loose(&root.join("tools"))),
-        );
+    // Read live: a script written while pi runs is a tool from the next turn,
+    // the checkout's directory too, though it is not there yet.
+    // Yours come first: a checkout's script may add a tool, never stand in
+    // for one you trust and so take what you meant for it.
+    let home_tools = pi_store::dir().map(|root| root.join("tools"));
+    let same = |a: &Path, b: &Path| {
+        a.canonicalize()
+            .ok()
+            .is_some_and(|a| b.canonicalize().ok() == Some(a))
+    };
+    let project_tools = config::project_dir(root, "tools")
+        .filter(|dir| !home_tools.as_deref().is_some_and(|home| same(dir, home)));
+    let script_dirs: Vec<(Arc<toolbox::scripts::Dir>, bool)> = (home_tools.iter())
+        .map(|dir| (dir, false))
+        .chain(project_tools.iter().map(|dir| (dir, true)))
+        .map(|(dir, project)| {
+            notes.extend(toolbox::scripts::env::loose(dir));
+            (Arc::new(toolbox::scripts::Dir::new(dir)), project)
+        })
+        .collect();
+    let mut project_scripts = Vec::new();
+    let mut named = std::collections::BTreeSet::new();
+    for (scripts, project) in &script_dirs {
         notes.extend(
             scripts
                 .skipped()
                 .iter()
                 .map(|p| format!("tool skipped — {p}")),
         );
+        let whose = if *project { "project" } else { "user" };
         // Offered tools win a name, the subagent among them though it is
-        // offered later, per lane.
+        // offered later, per lane; then a directory read earlier.
         for script in tool::Source::tools(&**scripts) {
-            if registry.get(script.name()).is_some() || script.name() == subagent::Subagent::NAME {
+            let name = script.name();
+            let earlier = !named.insert(name.to_string());
+            if registry.get(name).is_some() || name == subagent::Subagent::NAME || earlier {
                 notes.push(format!(
-                    "tool skipped — user script {}: the name is taken",
-                    script.name()
+                    "tool skipped — {whose} script {name}: the name is taken"
                 ));
+            } else if *project {
+                project_scripts.push(name.to_string());
             }
         }
     }
@@ -222,7 +242,7 @@ pub fn resolve(
     if registry.get(subagent::Subagent::NAME).is_some() {
         notes.push("tool skipped — subagent: the name is taken".to_string());
     }
-    if let Some(scripts) = scripts {
+    for (scripts, _) in script_dirs {
         registry.read(scripts);
     }
     // Read live like the scripts: a server's tools join once it has listed them.
@@ -313,7 +333,12 @@ pub fn resolve(
         project: settings
             .project_reaching()
             .map(|(_, keys)| keys)
-            .unwrap_or_default(),
+            .unwrap_or_default()
+            .into_iter()
+            .chain(
+                (!project_scripts.is_empty()).then(|| ("tools".into(), project_scripts.join(", "))),
+            )
+            .collect(),
     })
 }
 

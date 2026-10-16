@@ -24,6 +24,10 @@ a-z, A-Z, 0-9, `-` and `_`. Two kinds:
 
 Any other file in `tools/` is skipped without a word.
 
+A tool only this checkout needs goes in its own `.pi/tools/` instead, at the
+repository root (outside a repository, in the workspace), read live the same
+way and with its own `.env`. A name already offered keeps its tool.
+
 ```sh
 #!/usr/bin/env bash
 # ---
@@ -83,7 +87,7 @@ fn main() {
 
 Steps:
 
-1. Check the name is free: a built-in tool or an earlier script keeps it.
+1. Check the name is free: a tool already offered keeps it.
 2. Write the file.
 3. Run it once by hand the way pi will, then a failing case, and check the
    error reads well: `echo '{"file":"Cargo.toml"}' | file=Cargo.toml bash
