@@ -525,6 +525,28 @@ fn diverged(was: &str, is: &str) -> (Range<usize>, Range<usize>) {
     (was_at..was_at + cut(was_rest), is_at..is_at + cut(is_rest))
 }
 
+/// `at`, in wall-clock seconds, as the local time of day; on a day other
+/// than `now`'s, led by its date.
+pub fn clock(at: u64, now: u64) -> String {
+    let (Some(when), Some(today)) = (local(at), local(now)) else {
+        return String::new();
+    };
+    let time = format!("{:02}:{:02}", when.tm_hour, when.tm_min);
+    if (when.tm_year, when.tm_yday) == (today.tm_year, today.tm_yday) {
+        time
+    } else {
+        format!("{:02}-{:02} {time}", when.tm_mon + 1, when.tm_mday)
+    }
+}
+
+fn local(secs: u64) -> Option<libc::tm> {
+    let t = libc::time_t::try_from(secs).ok()?;
+    // SAFETY: `tm` is plain data, and `localtime_r` writes only into it.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let filled = unsafe { libc::localtime_r(&t, &mut tm) };
+    (!filled.is_null()).then_some(tm)
+}
+
 pub fn fmt_delay(ms: u64) -> String {
     if ms >= 1000 {
         format!("{:.2}s", ms as f64 / 1000.0)

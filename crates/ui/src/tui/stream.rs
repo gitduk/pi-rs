@@ -245,7 +245,7 @@ impl Ui {
     }
 
     pub(super) fn submit_relayed(&mut self, view: &mut View, label: &str, line: &str) {
-        let row = Row::relayed(label, line, &self.paint);
+        let row = Row::relayed(label, line, agent::session::now(), &self.paint);
         super::scrollback::open_turn(&mut view.surface.scrollback);
         view.surface.scrollback.push(row);
         view.surface

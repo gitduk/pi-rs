@@ -11,6 +11,8 @@ use pi_store::icons;
 
 pub(super) struct Relayed {
     label: String,
+    // When it came in, in wall-clock seconds.
+    at: u64,
     // Each line, and whether it sits in a code block.
     body: Vec<(Line<'static>, bool)>,
     open: bool,
@@ -18,11 +20,12 @@ pub(super) struct Relayed {
 }
 
 impl Relayed {
-    pub(super) fn new(label: &str, text: &str, paint: &Paint) -> Self {
+    pub(super) fn new(label: &str, text: &str, at: u64, paint: &Paint) -> Self {
         // A one-line text the label already says opens onto nothing new.
         let said = !text.trim().contains('\n') && label.contains(text.trim());
         Self {
             label: label.to_string(),
+            at,
             body: render::render_coded(text, paint)
                 .into_iter()
                 .map(|(line, coded)| (line, coded == render::Coded::Code))
@@ -59,12 +62,14 @@ impl Relayed {
         self.hovered = hovered;
     }
 
-    // Its own line: the label, and how much opening it shows.
+    // Its own line: the label, how much opening it shows, when it came in.
     fn head(&self, hovered: bool, paint: &Paint, width: usize) -> Line<'static> {
-        let tail = match self.body.len() {
+        let lines = match self.body.len() {
             0 => String::new(),
             n => format!("{}{}", icons::PART_SEP, count(n, "line")),
         };
+        let now = agent::session::now();
+        let tail = format!("{lines}{}{}", icons::PART_SEP, render::clock(self.at, now));
         let room = width.saturating_sub(2 + UnicodeWidthStr::width(tail.as_str()) + 1);
         let text = pi_store::text::clip(&self.label, room.max(8));
         Line::from(vec![

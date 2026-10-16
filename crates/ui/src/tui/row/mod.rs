@@ -204,9 +204,10 @@ impl Row {
         matches!(&self.0, Kind::Said { .. } | Kind::Relayed(_))
     }
 
-    /// A turn pi sent on the model's behalf, folded under `label`.
-    pub fn relayed(label: &str, text: &str, paint: &Paint) -> Self {
-        Self::new(Kind::Relayed(Relayed::new(label, text, paint)))
+    /// A turn pi sent on the model's behalf, folded under `label`, come in
+    /// at `at` (wall-clock seconds).
+    pub fn relayed(label: &str, text: &str, at: u64, paint: &Paint) -> Self {
+        Self::new(Kind::Relayed(Relayed::new(label, text, at, paint)))
     }
 
     /// Plain text as notice rows, one per line — shared by the live

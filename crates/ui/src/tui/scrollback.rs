@@ -574,8 +574,8 @@ pub(super) fn open_turn(rows: &mut Scrollback) {
 /// Answers don't pass through here — their rows stream directly.
 pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
     match entry {
-        LogEntry::Ask { ask, .. } if ask.relayed.is_some() => {
-            Some(vec![Row::relayed(ask.shown_text(), &ask.text, paint)])
+        LogEntry::Ask { ask, at, .. } if ask.relayed.is_some() => {
+            Some(vec![Row::relayed(ask.shown_text(), &ask.text, *at, paint)])
         }
         LogEntry::Ask { ask, .. } => Some(Row::prompt(ask.shown_text(), paint)),
         LogEntry::Bash { run, .. } => {
