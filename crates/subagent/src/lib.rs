@@ -137,21 +137,17 @@ struct Heard {
     spent: llm::stream::Usage,
     // The turn in flight's own count so far, until its end folds it into `spent`.
     turn: llm::stream::Usage,
-    // The child's calls still out, oldest first.
-    out: Vec<(String, String)>,
 }
 
 impl Heard {
-    // `turn 3 · 41.2k/3.1k · grep`: where the child is, for the caller's row.
+    // `turn 3 · 41.2k/3.1k`: where the child is, for the caller's row. No call
+    // name: short calls one after another made the row jump with each.
     fn progress(&self) -> String {
         let mut spent = self.spent;
         spent.add(&self.turn);
         let mut parts = vec![format!("turn {}", self.turns.max(1))];
         if spent.input + spent.output > 0 {
             parts.push(llm::figures::slash(spent.input, spent.output));
-        }
-        if let Some((_, name)) = self.out.last() {
-            parts.push(name.clone());
         }
         parts.join(" · ")
     }
@@ -335,10 +331,6 @@ impl Subagent {
                     Event::TurnEnd { usage, .. } => {
                         heard.spent.add(&usage);
                         heard.turn = Default::default();
-                    }
-                    Event::ToolStart { id, name, .. } => heard.out.push((id, name)),
-                    Event::ToolEnd { id, .. } | Event::ToolDenied { id, .. } => {
-                        heard.out.retain(|(out, _)| *out != id)
                     }
                     _ => {}
                 }
