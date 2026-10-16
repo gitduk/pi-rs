@@ -46,11 +46,23 @@ impl Ui {
             .map_or(0, |b| b.width())
     }
 
-    // The job whose row of the bar is at screen row `row`.
-    pub(super) fn job_at(&self, row: u16) -> Option<u64> {
+    // What row of the job list is at screen row `row`.
+    fn job_row_at(&self, row: u16) -> Option<super::call::JobRow> {
         let bar = self.regions.bar;
         let at = row.checked_sub(bar.y).filter(|r| *r < bar.height)? as usize;
-        let id = (*self.job_rows.get(at)?)?;
+        self.job_rows.get(at).copied()
+    }
+
+    // Whether screen row `row` folds or unfolds the job list.
+    pub(super) fn fold_at(&self, row: u16) -> bool {
+        self.job_row_at(row) == Some(super::call::JobRow::Fold)
+    }
+
+    // The job whose row of the bar is at screen row `row`.
+    pub(super) fn job_at(&self, row: u16) -> Option<u64> {
+        let Some(super::call::JobRow::Job(id)) = self.job_row_at(row) else {
+            return None;
+        };
         let job = self.jobs.iter().find(|job| job.id == id)?;
         let opens = super::call::job_opens(job, self.screen.usable());
         (self.job_open == Some(id) || opens).then_some(id)
@@ -97,6 +109,10 @@ impl Ui {
     }
 
     pub(super) fn on_mouse_click(&mut self, view: &mut View, col: u16, row: u16) {
+        if self.fold_at(row) {
+            self.jobs_all = !self.jobs_all;
+            return;
+        }
         match self.target_at(row) {
             // Live rows rebuild every frame, so a flag flip is enough.
             Some(Target::PendingTools(_)) => self.live_tools_shown = !self.live_tools_shown,
@@ -178,10 +194,10 @@ impl Ui {
             return;
         };
         let job = self.job_at(row);
+        // A row that answers a click is clicked, never double-clicked.
+        let single = job.is_some() || self.fold_at(row);
         let count = match &self.press {
-            Some(p) if job.is_none() && p.at == at && p.when.elapsed() < MULTI_CLICK => {
-                (p.count % 3) + 1
-            }
+            Some(p) if !single && p.at == at && p.when.elapsed() < MULTI_CLICK => (p.count % 3) + 1,
             _ => 1,
         };
         self.press = Some(Press {

@@ -145,17 +145,29 @@ const BODY_SHOWN: usize = 8;
 // One row per job, `hovered` bold; the `open` one whole, wrapped, with the
 // tail of `body` under it. Also the job whose own row each is, for a click
 // to find; what it printed under it is no one's.
+/// What a row of the job list is, for a click to find.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum JobRow {
+    Job(u64),
+    // What an open job printed, under its row.
+    Under,
+    // The row folding the list past `JOBS_SHOWN`, or unfolding it.
+    Fold,
+}
+
 pub(super) fn job_lines(
     jobs: &[Job],
-    hovered: Option<u64>,
+    hovered: Option<JobRow>,
     (open, body): (Option<u64>, &str),
+    all: bool,
     paint: &Paint,
     width: usize,
-) -> (Vec<Line<'static>>, Vec<Option<u64>>) {
+) -> (Vec<Line<'static>>, Vec<JobRow>) {
     let room = width.saturating_sub(1);
     let (mut lines, mut ids) = (Vec::new(), Vec::new());
-    for job in jobs.iter().take(JOBS_SHOWN) {
-        let shine = hovered == Some(job.id);
+    let shown = if all { jobs.len() } else { JOBS_SHOWN };
+    for job in jobs.iter().take(shown) {
+        let shine = hovered == Some(JobRow::Job(job.id));
         let (rows, under) = if open == Some(job.id) {
             let (head, tail) = job_text(job);
             let row = Line::from(paint.span_hovered(shine, &paint.theme.muted, head + &tail));
@@ -193,13 +205,22 @@ pub(super) fn job_lines(
             let row = Line::from(vec![muted(head), muted(sep), said, muted(tail)]);
             (vec![row], 0)
         };
-        ids.extend(std::iter::repeat_n(Some(job.id), rows.len() - under));
-        ids.extend(std::iter::repeat_n(None, under));
+        ids.extend(std::iter::repeat_n(JobRow::Job(job.id), rows.len() - under));
+        ids.extend(std::iter::repeat_n(JobRow::Under, under));
         lines.extend(rows);
     }
     if jobs.len() > JOBS_SHOWN {
-        let more = format!("+{} more · /job", jobs.len() - JOBS_SHOWN);
-        lines.push(Line::from(paint.span(&paint.theme.muted, more)));
+        let fold = match all {
+            true => "click to collapse".to_string(),
+            false => format!("{} {} more", icons::ELLIPSIS, jobs.len() - JOBS_SHOWN),
+        };
+        let shine = hovered == Some(JobRow::Fold);
+        lines.push(Line::from(paint.span_hovered(
+            shine,
+            &paint.theme.muted,
+            fold,
+        )));
+        ids.push(JobRow::Fold);
     }
     (lines, ids)
 }

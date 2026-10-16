@@ -30,10 +30,19 @@ impl Ui {
         let slash = matches!(self.page(), Some(Page::Slash(_)));
         let keep = self.keeps();
         let text = self.page_lines();
-        let hovered_job = self.pointer.and_then(|(_, row)| self.job_at(row));
+        let hovered_job = self.pointer.and_then(|(_, row)| {
+            (self.job_at(row).map(call::JobRow::Job))
+                .or(self.fold_at(row).then_some(call::JobRow::Fold))
+        });
         let open = (self.job_open, self.job_body.as_str());
-        let (mut bar, job_rows) =
-            call::job_lines(&self.jobs, hovered_job, open, &self.paint, width);
+        let (mut bar, job_rows) = call::job_lines(
+            &self.jobs,
+            hovered_job,
+            open,
+            self.jobs_all,
+            &self.paint,
+            width,
+        );
         self.job_rows = job_rows;
         bar.extend(self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width));
         let caret_shown =

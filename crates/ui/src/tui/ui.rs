@@ -126,7 +126,9 @@ pub(super) struct Ui {
     pub(super) job_open: Option<u64>,
     pub(super) job_body: String,
     // Whose own row each bar row the last frame drew is, from the top.
-    pub(super) job_rows: Vec<Option<u64>>,
+    pub(super) job_rows: Vec<super::call::JobRow>,
+    // Every job listed, not the first few: the fold row flips it.
+    pub(super) jobs_all: bool,
 }
 
 /// Who has the keyboard.
@@ -243,6 +245,7 @@ impl Ui {
             job_open: None,
             job_body: String::new(),
             job_rows: Vec::new(),
+            jobs_all: false,
             images: Vec::new(),
             layout: Default::default(),
             hovered_scrollback: None,

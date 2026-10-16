@@ -424,7 +424,7 @@ pub fn result_rows(
             diff_lines.len() - SKETCH_LIMIT
         )));
     } else if diff_lines.len() > SKETCH_LIMIT && shown == Shown::Open {
-        out.push(footer("  ▴ collapse"));
+        out.push(footer("  click to collapse"));
     }
     out
 }
