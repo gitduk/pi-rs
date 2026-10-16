@@ -371,6 +371,15 @@ const SKETCH_LIMIT: usize = 16;
 /// The preview rows a folded result shows: the head plus the sketch limit.
 pub const SKETCHED_ROWS: usize = 1 + SKETCH_LIMIT;
 
+/// How much of a result its rows show: the sketch, or the whole of it in
+/// place or on a page of its own, where there is nothing to fold back.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Shown {
+    Sketch,
+    Open,
+    Page,
+}
+
 /// The columns a result's lines are cut to at `width`.
 pub fn result_room(width: usize) -> usize {
     width.saturating_sub(2).max(20)
@@ -382,7 +391,7 @@ pub fn result_rows(
     is_error: bool,
     name: &str,
     preview: &str,
-    expanded: bool,
+    shown: Shown,
     hovered: bool,
     p: &Paint,
     width: usize,
@@ -401,20 +410,20 @@ pub fn result_rows(
     ])];
     let diff_lines: Vec<&str> = rest.lines().collect();
     let footer = |text: &str| Line::from(p.span_hovered(hovered, &p.theme.muted, text));
-    let sketched = diff_lines.len() > SKETCH_LIMIT && !expanded;
-    let shown = if sketched {
+    let sketched = diff_lines.len() > SKETCH_LIMIT && shown == Shown::Sketch;
+    let rows = if sketched {
         &diff_lines[..SKETCH_LIMIT]
     } else {
         &diff_lines[..]
     };
-    out.extend(sketch_rows(shown, p, room));
+    out.extend(sketch_rows(rows, p, room));
     if sketched {
         out.push(footer(&format!(
             "  {} {} more",
             icons::ELLIPSIS,
             diff_lines.len() - SKETCH_LIMIT
         )));
-    } else if diff_lines.len() > SKETCH_LIMIT {
+    } else if diff_lines.len() > SKETCH_LIMIT && shown == Shown::Open {
         out.push(footer("  ▴ collapse"));
     }
     out
@@ -549,7 +558,13 @@ pub fn describe(
             ..
         } => {
             return Some(result_rows(
-                *is_error, name, preview, false, false, p, width,
+                *is_error,
+                name,
+                preview,
+                Shown::Sketch,
+                false,
+                p,
+                width,
             ));
         }
         Event::ToolDenied { name, reason, .. } => Line::from(vec![

@@ -63,7 +63,11 @@ impl ToolOut {
                     !self.ok,
                     &self.name,
                     &self.preview,
-                    self.expanded,
+                    if self.expanded {
+                        render::Shown::Open
+                    } else {
+                        render::Shown::Sketch
+                    },
                     self.hovered,
                     paint,
                     width,
@@ -110,7 +114,7 @@ impl Fold for ToolOut {
             !self.ok,
             &self.name,
             &self.preview,
-            true,
+            render::Shown::Page,
             false,
             paint,
             usize::MAX,

@@ -182,6 +182,18 @@ impl Ui {
             rows.resize(room, (Line::default(), Target::Text(0), 0));
             rows.extend(text);
             (rows, scroll)
+        } else if alone {
+            // The head closes the page, so it stays on the top rows however
+            // far down the rest is read.
+            let mut text = text_stream;
+            let mut rows: Vec<_> = text.next().map_or_else(Vec::new, |(head, target)| {
+                let pieces = screen::Piece::pieces(head).into_iter().enumerate();
+                pieces.map(|(at, row)| (row, target, at)).collect()
+            });
+            let room = hist_view.saturating_sub(rows.len());
+            let (rest, scroll) = screen::window_tagged(text, room, scroll, at, most);
+            rows.extend(rest);
+            (rows, scroll)
         } else {
             screen::window_tagged(
                 scrollback.chain(live_stream).chain(text_stream),

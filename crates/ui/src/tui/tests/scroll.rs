@@ -450,8 +450,8 @@ fn a_panel_dims_the_transcript_under_it() {
     assert!(!dimmed(&ui), "the panel closed");
 }
 
-// A found line comes up to the top of the preview, `n` / `N` step round
-// the lines holding it, and esc puts the view back where `/` found it.
+// A found line comes up under the preview's pinned head, `n` / `N` step
+// round the lines holding it, and esc puts the view back where `/` found it.
 #[test]
 fn a_search_brings_each_line_holding_it_to_the_top() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -466,14 +466,15 @@ fn a_search_brings_each_line_holding_it_to_the_top() {
     let press = |ui: &mut crate::tui::Ui, view: &mut View, event| {
         ui.key(&lane, view, event, false);
         ui.flush(&lane, view);
-        ui.drawn[0].trim_end().to_string()
+        assert_eq!(ui.drawn[0].trim_end(), "line 0", "the head stays pinned");
+        ui.drawn[1].trim_end().to_string()
     };
     let key = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
     ui.flush(&lane, &mut view);
-    assert_eq!(press(&mut ui, &mut view, typed('/')), "line 0");
+    assert_eq!(press(&mut ui, &mut view, typed('/')), "line 1");
     assert_eq!(press(&mut ui, &mut view, typed('4')), "line 4");
     let reversed = |ui: &crate::tui::Ui, col| {
-        ui.screen.test_buffer()[(col, 0)]
+        ui.screen.test_buffer()[(col, 1)]
             .modifier
             .contains(ratatui::style::Modifier::REVERSED)
     };
