@@ -70,7 +70,10 @@ impl Ui {
             self.editor.text(),
             &self.commands,
             &self.choices,
-            &jobs,
+            pi_core::input::commands::Job {
+                jobs: &jobs,
+                tools: self.tools.as_ref().map(|brief| &brief.registry),
+            },
             || self.lists.sessions(),
             || self.lists.worktrees(),
             || self.lists.editable(),

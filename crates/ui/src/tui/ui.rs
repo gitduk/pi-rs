@@ -119,6 +119,9 @@ pub(super) struct Ui {
     pub(super) live_tools_shown: bool,
     // The front checkout's subagents in the background, drawn over the bar.
     pub(super) jobs: Vec<pi_core::driver::jobs::Job>,
+    // The front lane's tools, for `/job` to complete; read only when it does,
+    // since reading one re-stats the tools directory.
+    pub(super) tools: Option<Arc<agent::Briefing>>,
     // The job a click opened under its row, and what it has to show there.
     pub(super) job_open: Option<u64>,
     pub(super) job_body: String,
@@ -236,6 +239,7 @@ impl Ui {
             flash: None,
             copied: None,
             jobs: Vec::new(),
+            tools: None,
             job_open: None,
             job_body: String::new(),
             job_rows: Vec::new(),

@@ -104,9 +104,10 @@ pub(crate) const BUILTIN: &[Command] = &[
     ),
     Command::builtin(
         "/job",
-        "[stop [id…] | output id | text]",
+        "[stop [id…] | output id | tool [key=value…] | text]",
         "what runs in the background here; stop ends them, bare every running one; \
-         output shows what one printed; anything else has the model start it there",
+         output shows what one printed; a tool by name starts at once; \
+         anything else has the model start it there",
         |_, rest| job(rest),
     ),
     Command::builtin(
@@ -326,6 +327,145 @@ fn job(rest: String) -> Intent {
     }
 }
 
+/// `/job` text read as a tool to start with no model in between: `None` when
+/// it is not one, which leaves it prose; else the tool, and its arguments or
+/// why they do not read. A tool's name, then only `key=value` for its keys.
+pub(crate) fn start_of(
+    text: &str,
+    tools: &tool::Registry,
+) -> Option<(String, Result<serde_json::Value, String>)> {
+    let mut words = words(text)?.into_iter();
+    let name = words.next()?;
+    let schema = tools.get(&name)?.schema();
+    let mut args = serde_json::Map::new();
+    // Any word without `=` makes it prose; past that, a wrong key is a typo.
+    let pairs: Vec<(String, String)> = (words
+        .map(|w| w.split_once('=').map(|(k, v)| (k.into(), v.into()))))
+    .collect::<Option<_>>()?;
+    for (key, value) in pairs {
+        let Some(about) = schema["properties"].get(&key) else {
+            let keys: Vec<&str> = params(&schema).map(|p| p.name).collect();
+            let why = format!("{name} has no `{key}`; it takes {}", keys.join(", "));
+            return Some((name, Err(why)));
+        };
+        match typed(about["type"].as_str(), &value) {
+            Ok(value) => args.insert(key, value),
+            Err(why) => return Some((name, Err(format!("{key}: {why}")))),
+        };
+    }
+    let missing: Vec<&str> = params(&schema)
+        .filter(|p| p.required && !args.contains_key(p.name))
+        .map(|p| p.name)
+        .collect();
+    let args = match missing.as_slice() {
+        [] => Ok(serde_json::Value::Object(args)),
+        _ => Err(format!("{name} needs {}", missing.join(", "))),
+    };
+    Some((name, args))
+}
+
+// Split at whitespace, a `"…"` run kept whole, `\"` a quote inside one;
+// `None` for a quote left open.
+fn words(text: &str) -> Option<Vec<String>> {
+    let (mut out, mut word, mut quoted, mut started) = (Vec::new(), String::new(), false, false);
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => (quoted, started) = (!quoted, true),
+            '\\' if quoted => word.extend(chars.next()),
+            c if c.is_whitespace() && !quoted => {
+                if std::mem::take(&mut started) {
+                    out.push(std::mem::take(&mut word));
+                }
+            }
+            c => {
+                word.push(c);
+                started = true;
+            }
+        }
+    }
+    if quoted {
+        return None;
+    }
+    if started {
+        out.push(word);
+    }
+    Some(out)
+}
+
+// A value as the schema's type for it, which is a string when none is given.
+fn typed(kind: Option<&str>, value: &str) -> Result<serde_json::Value, String> {
+    use serde_json::Value;
+    let bad = || format!("`{value}` is not {}", kind.unwrap_or("string"));
+    match kind {
+        Some("integer") => value.parse::<i64>().map(Value::from).map_err(|_| bad()),
+        Some("number") => value
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number)
+            .ok_or_else(bad),
+        Some("boolean") => value.parse::<bool>().map(Value::Bool).map_err(|_| bad()),
+        Some("array") => match serde_json::from_str(value) {
+            Ok(Value::Array(items)) => Ok(Value::Array(items)),
+            _ => Err(bad()),
+        },
+        Some("object") => match serde_json::from_str(value) {
+            Ok(Value::Object(map)) => Ok(Value::Object(map)),
+            _ => Err(bad()),
+        },
+        _ => Ok(Value::String(value.to_string())),
+    }
+}
+
+struct Param<'a> {
+    name: &'a str,
+    help: &'a str,
+    required: bool,
+}
+
+// A schema's arguments, the required ones first.
+fn params(schema: &serde_json::Value) -> impl Iterator<Item = Param<'_>> {
+    let required = |name: &str| {
+        schema["required"]
+            .as_array()
+            .is_some_and(|r| r.iter().any(|n| n == name))
+    };
+    let mut out: Vec<Param<'_>> = (schema["properties"].as_object().into_iter().flatten())
+        .map(|(name, about)| Param {
+            name,
+            help: about["description"].as_str().unwrap_or_default(),
+            required: required(name),
+        })
+        .collect();
+    out.sort_by_key(|p| !p.required);
+    out.into_iter()
+}
+
+// After `/job <tool> `: the keys not given yet, while no `=` is typed.
+fn tool_args(tool: &dyn tool::Tool, head: &str, typed: &str) -> Vec<Candidate> {
+    let schema = tool.schema();
+    let given: Vec<&str> = (head.split_whitespace().skip(1))
+        .filter_map(|w| w.split_once('=').map(|(k, _)| k))
+        .collect();
+    if typed.contains(['=', '"']) {
+        return Vec::new();
+    }
+    params(&schema)
+        .filter(|p| p.name.starts_with(typed) && !given.contains(&p.name))
+        .map(|p| Candidate {
+            show: format!("{}=", p.name),
+            line: format!("/job {head}{}=", p.name),
+            help: match p.required {
+                true => format!("required · {}", p.help),
+                false => p.help.to_string(),
+            },
+            more: false,
+            picked_only: true,
+        })
+        .collect()
+}
+
 // The ids after `/job <verb>` not named yet, completing the one being typed.
 // Once one is named, a bare space offers nothing: submitting runs the line
 // as typed, not an offered id tacked on.
@@ -354,6 +494,14 @@ fn job_ids(verb: &str, jobs: &[Choice], args: &str) -> Vec<Candidate> {
         .collect()
 }
 
+/// What `/job` completes against: the jobs running, by id, and the tools it
+/// can start, which only a lane has.
+#[derive(Clone, Copy, Default)]
+pub struct Job<'a> {
+    pub jobs: &'a [Choice],
+    pub tools: Option<&'a tool::Registry>,
+}
+
 /// What the line could still become: a command while its word is typed,
 /// then that command's own argument once the word is settled.
 ///
@@ -367,11 +515,12 @@ pub fn complete<'a>(
     line: &str,
     commands: &[Command],
     models: &[Choice],
-    jobs: &[Choice],
+    job: Job<'_>,
     sessions: impl Fn() -> &'a [ResumeChoice],
     worktrees: impl Fn() -> &'a [Choice],
     editable: impl Fn() -> &'a [Choice],
 ) -> Vec<Candidate> {
+    let Job { jobs, tools } = job;
     if !line.starts_with('/') {
         return Vec::new();
     }
@@ -418,23 +567,43 @@ pub fn complete<'a>(
                 job_ids("output", jobs, arg)
             }
         }
-        "/job" if typed.contains(char::is_whitespace) => Vec::new(),
+        "/job" if typed.contains(char::is_whitespace) => {
+            let (head, last) = typed.rsplit_once(char::is_whitespace).unwrap_or_default();
+            let named = head.split_whitespace().next().unwrap_or_default();
+            match tools.and_then(|t| t.get(named)) {
+                Some(tool) => tool_args(tool.as_ref(), &typed[..typed.len() - last.len()], last),
+                None => Vec::new(),
+            }
+        }
         // Submitting a bare `/job ` still lists them, not stops them all.
-        "/job" => [
-            ("stop", "end them by id, or every running one"),
-            ("output", "what one has printed so far"),
-        ]
-        .into_iter()
-        .filter(|(verb, _)| verb.starts_with(typed) && *verb != typed)
-        .map(|(verb, help)| Candidate {
-            show: verb.into(),
-            line: format!("/job {verb}"),
-            help: help.into(),
-            more: true,
-            // A prefix of a verb may be the first word of something to start.
-            picked_only: true,
-        })
-        .collect(),
+        "/job" => {
+            let verbs = [
+                ("stop", "end them by id, or every running one"),
+                ("output", "what one has printed so far"),
+            ]
+            .into_iter()
+            .filter(|(verb, _)| verb.starts_with(typed) && *verb != typed)
+            .map(|(verb, help)| Candidate {
+                show: verb.into(),
+                line: format!("/job {verb}"),
+                help: help.into(),
+                more: true,
+                // A prefix of a verb may be the first word of something to start.
+                picked_only: true,
+            });
+            let listed = tools.map(tool::Registry::listed).unwrap_or_default();
+            let started = listed
+                .into_iter()
+                .filter(|t| t.name().starts_with(typed) && t.name() != typed)
+                .map(|t| Candidate {
+                    show: t.name().to_string(),
+                    line: format!("/job {}", t.name()),
+                    help: gist(t.description()),
+                    more: params(&t.schema()).next().is_some(),
+                    picked_only: true,
+                });
+            verbs.chain(started).collect()
+        }
         // `rm` marks what follows it for removal; a bare `rm` still means the
         // name of a worktree, so nothing is offered until the space says.
         "/worktree" if typed == "rm" => Vec::new(),

@@ -441,6 +441,10 @@ impl Tui {
     // The one gate every input passes, so two ways of asking the same
     // thing can't get different answers. `fate` decides only mid-run.
     fn admit(&mut self, asked: Asked, origin: Origin, line: Option<String>) -> Wake {
+        let asked = match asked {
+            Asked::Core(intent) => Asked::Core(self.core.direct(intent)),
+            own => own,
+        };
         if !self.core.lane().is_running() {
             return Wake::Do(asked, line);
         }
@@ -519,6 +523,10 @@ impl Tui {
         // on, who asked, the line as typed, and the text or why there is none.
         let (fetched_tx, mut fetched_rx) =
             tokio::sync::mpsc::unbounded_channel::<(u64, Origin, String, Result<String, String>)>();
+        // A tool `/job` started, back from its call: the lane, its name, and
+        // what it said or why it failed.
+        let (started_tx, mut started_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(u64, String, Result<String, String>)>();
         let mut tick = tokio::time::interval(status::SPIN);
         let mut looked = std::time::Instant::now();
         // Off while nothing runs, so the interval falls behind; one
@@ -573,6 +581,7 @@ impl Tui {
             }
             let root = self.core.lane().root();
             self.ui.jobs = jobs.jobs(root);
+            self.ui.tools = Some(self.core.lane().agent().brief.clone());
             let body = self.ui.job_open.and_then(|id| jobs.body(root, id));
             self.ui.job_open = self.ui.job_open.filter(|_| body.is_some());
             self.ui.job_body = body.unwrap_or_default();
@@ -610,6 +619,10 @@ impl Tui {
                 // `recv()` and `tick()` are; a blocking read gets its own thread.
                 tokio::select! {
                     Some(done) = done_rx.recv() => Wake::Turn(done),
+                    Some((token, name, said)) = started_rx.recv() => {
+                        self.land_started(token, &name, said);
+                        Wake::Nothing
+                    }
                     Some((token, from, typed, text)) = fetched_rx.recv() => {
                         let front = self.core.lane().token() == token;
                         let started = match text {
@@ -763,6 +776,7 @@ impl Tui {
                 }
                 Step::Handled(lines) => self.land_lines(lines),
                 Step::Compact(focus) => self.start_compact(focus, &done_tx),
+                Step::Start { name, args } => self.start_tool(name, args, &started_tx),
                 Step::Drive(drive) => {
                     let lane = self.core.lane();
                     match self.drivers.command(drive, lane.token(), lane.ctx()) {

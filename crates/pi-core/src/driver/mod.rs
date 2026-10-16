@@ -276,7 +276,8 @@ impl Drivers {
             },
             _ => vec![
                 "/job lists what runs in the background; /job stop [id…] ends them, or all; \
-                 /job output <id> shows what one printed; /job <text> starts it there"
+                 /job output <id> shows what one printed; /job <tool> [key=value…] starts one; \
+                 /job <text> has the model start it there"
                     .into(),
             ],
         };

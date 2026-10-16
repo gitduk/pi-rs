@@ -70,6 +70,11 @@ impl Registry {
         }
     }
 
+    /// Every tool in the set, name order, from one read of the sources.
+    pub fn listed(&self) -> Vec<Arc<dyn Tool>> {
+        self.all().into_values().collect()
+    }
+
     pub fn names(&self) -> Vec<String> {
         self.all().into_keys().collect()
     }

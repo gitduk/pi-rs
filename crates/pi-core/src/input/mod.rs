@@ -55,6 +55,12 @@ pub enum Builtin {
     Job(String),
     // Something the model is asked to start in the background.
     Background(String),
+    // A tool run off the loop as named, with no model in between, and its
+    // arguments or why they do not read. `Core::direct` makes it from a `Background`.
+    Start {
+        name: String,
+        args: Result<serde_json::Value, String>,
+    },
     // Bare, the MCP servers and their tools; `restart [name]` reconnects.
     Mcp(String),
     // `/new` and the keys bound to it are one variant: a fresh session, old one
@@ -129,6 +135,8 @@ impl Intent {
             // Its first round is due at once, and a round wants the lane free.
             Intent::Builtin(Builtin::Loop(_)) => Fate::Queued,
             Intent::Builtin(Builtin::Background(_)) => Fate::Queued,
+            // A job beside the run: it touches neither the transcript nor the turn.
+            Intent::Builtin(Builtin::Start { .. }) => Fate::Now,
             // A `!` files its result in the transcript, which the run has.
             Intent::Bash(_) => Fate::Queued,
             // Both reach for the transcript, and the run is holding it.
@@ -311,6 +319,11 @@ pub enum Step {
     },
     // Needs the network, so the surface runs it and reports.
     Compact(Option<String>),
+    // A tool to run off the loop by name, as `/job <tool>` asked.
+    Start {
+        name: String,
+        args: serde_json::Value,
+    },
     // An MCP prompt to ask its server for, then send as a turn showing
     // `typed`. Asked off the loop: a slow server must not hold the screen.
     McpPrompt {
@@ -357,6 +370,7 @@ impl Step {
             Step::McpPrompt { .. } => false,
             Step::Answer(_)
             | Step::Compact(_)
+            | Step::Start { .. }
             | Step::Drive(_)
             | Step::Edit(_)
             | Step::Handled(_)

@@ -221,6 +221,48 @@ impl Tui {
         self.core.lane_mut().begin(cancel);
     }
 
+    // Runs the tool `/job` named off the loop, beside whatever turn is going.
+    pub(super) fn start_tool(
+        &mut self,
+        name: String,
+        args: serde_json::Value,
+        started: &UnboundedSender<(u64, String, Result<String, String>)>,
+    ) {
+        let Some(tool) = self.core.lane().agent().brief.registry.get(&name) else {
+            self.ui.flash(format!("{name} cannot start here"));
+            return;
+        };
+        self.ui.flash(format!("starting {name} …"));
+        let ctx = self.core.turn_ctx(CancellationToken::new());
+        let (token, started) = (self.core.lane().token(), started.clone());
+        tokio::spawn(async move {
+            let said = core::tools::run_named(tool, args, &ctx).await;
+            let _ = started.send((token, name, said));
+        });
+    }
+
+    // What a started tool said lands on its lane as a note, so the model
+    // knows of the job too; a failure is only the user's to read.
+    pub(super) fn land_started(&mut self, token: u64, name: &str, said: Result<String, String>) {
+        let note = match said {
+            Ok(text) => format!("The user ran `{name}` directly, and it answered:\n\n{text}"),
+            Err(why) => {
+                let head = format!("{name} did not start:");
+                self.ui.open_slash(Listing::say(
+                    [head].into_iter().chain(why.lines().map(str::to_string)),
+                ));
+                return;
+            }
+        };
+        let Some(at) = self.core.position_of(token) else {
+            self.ui.flash(format!("{name} started; its lane has gone"));
+            return;
+        };
+        let lane = &mut self.core.lanes[at];
+        let view = super::view::opened(&mut self.views, lane, &self.ui.paint);
+        self.ui.file_note(lane, view, &note);
+    }
+
     // Runs `/compact` off the loop — summarizing what it drops is a model
     // call — while the lane keeps drawing and serving the others.
     pub(super) fn start_compact(&mut self, focus: Option<String>, done: &UnboundedSender<Done>) {
