@@ -282,10 +282,14 @@ pub trait JobHandle: Send + Sync {
     fn interrupt(&self);
     /// Where the latest of what it prints can be read while it runs.
     fn watch(&self, output: Peek);
+    /// From now on it is told of every turn its checkout runs, not only
+    /// the ones its `input` opened.
+    fn follow(&self);
     fn end(&self);
 }
 
-/// What the host tells a job about the turns its `input` opened.
+/// What the host tells a job about the turns its `input` opened, or every
+/// turn once it follows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Told {
     /// A turn one of its inputs opened has begun.

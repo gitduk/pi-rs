@@ -320,7 +320,8 @@ impl Tui {
             while let Ok(event) = self.core.lanes[at].inbox().try_recv() {
                 // Every lane, not just the one in front: a turn a job's input
                 // opened is still owed its answer after a switch.
-                self.drivers.observe(self.core.lanes[at].token(), &event);
+                let lane = &self.core.lanes[at];
+                self.drivers.observe(lane.token(), lane.root(), &event);
                 // Opened first: a banner drawn later would replace the rows.
                 let view = view::opened(&mut self.views, &self.core.lanes[at], &self.ui.paint);
                 self.ui.on_event(&mut self.core.lanes[at], view, event);

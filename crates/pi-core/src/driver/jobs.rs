@@ -55,6 +55,8 @@ struct Item {
     dropped: usize,
     // Where the turns its inputs opened are told of; None if it never listens.
     told: Option<UnboundedSender<Told>>,
+    // It asked to be told of every turn on its checkout, not just its inputs'.
+    follows: bool,
     // It asked to stop its checkout's running turn, not yet acted on.
     interrupt: bool,
     // Lines for the screen, not yet shown.
@@ -236,6 +238,14 @@ impl Table {
         {
             let _ = to.send(told);
         }
+    }
+
+    /// The running jobs on `root` told of every turn there.
+    pub fn followers(&self, root: &Path) -> Vec<u64> {
+        (self.lock().items.iter())
+            .filter(|i| i.root == root && i.running && i.follows && i.told.is_some())
+            .map(|i| i.id)
+            .collect()
     }
 
     /// The jobs for `root`, oldest first.
@@ -424,6 +434,7 @@ impl Table {
             waiting: VecDeque::new(),
             dropped: 0,
             told,
+            follows: false,
             interrupt: false,
             notices: VecDeque::new(),
             stop,
@@ -539,6 +550,11 @@ impl tool::JobHandle for Handle {
 
     fn watch(&self, output: tool::Peek) {
         self.table.update(self.id, |i| i.output = Some(output));
+    }
+
+    fn follow(&self) {
+        tracing::info!(target: "pi::job", job = self.id, "follows");
+        self.table.update(self.id, |i| i.follows = true);
     }
 
     fn end(&self) {

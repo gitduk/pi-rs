@@ -705,6 +705,7 @@ impl tool::JobHandle for Host {
     fn notice(&self, _text: String) {}
     fn interrupt(&self) {}
     fn watch(&self, _output: tool::Peek) {}
+    fn follow(&self) {}
     fn end(&self) {
         self.said.lock().unwrap().push("end".into());
         self.ended.notify_one();

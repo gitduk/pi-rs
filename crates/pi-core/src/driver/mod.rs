@@ -62,7 +62,8 @@ pub struct Next {
 pub struct Drivers {
     loops: Loops,
     jobs: Arc<jobs::Table>,
-    // Turns a job's input opened, each with its answer so far.
+    // Runs a job is told the end of — its input opened them, or it follows
+    // its checkout — each with its answer so far.
     owed: Vec<Owed>,
 }
 
@@ -147,15 +148,7 @@ impl Drivers {
         match origin {
             // Only a model turn ends with an answer to send back: a `!` never
             // reaches `Done`, so its answer would be owed forever.
-            Origin::Input(job) if prompt && started => {
-                self.owed.push(Owed {
-                    job,
-                    lane,
-                    said: String::new(),
-                    turn_from: 0,
-                });
-                self.jobs.tell(job, tool::Told::Started);
-            }
+            Origin::Input(job) if prompt && started => self.owe(job, lane),
             Origin::Loop if started => self.loops.ask(lane),
             Origin::Loop => return self.loops.unstarted(lane),
             Origin::Typed | Origin::Job | Origin::Input(_) => {}
@@ -163,8 +156,16 @@ impl Drivers {
         None
     }
 
-    /// One event from any lane's run; each driver keeps its own turns'.
-    pub fn observe(&mut self, lane: u64, event: &Event) {
+    /// One event from any lane's run, on the checkout at `root`; each driver
+    /// keeps its own turns'.
+    pub fn observe(&mut self, lane: u64, root: &std::path::Path, event: &Event) {
+        // Each request, not just the run's first: one that follows from
+        // mid-run still hears how the run ends.
+        if let Event::TurnStart { .. } = event {
+            for job in self.jobs.followers(root) {
+                self.owe(job, lane);
+            }
+        }
         for owed in self.owed.iter_mut().filter(|o| o.lane == lane) {
             match event {
                 Event::TextDelta(text) => owed.said.push_str(text),
@@ -208,6 +209,22 @@ impl Drivers {
             );
         }
         self.loops.retain(live)
+    }
+}
+
+impl Drivers {
+    // A job is owed a run's answer once, however many reasons it has.
+    fn owe(&mut self, job: u64, lane: u64) {
+        if self.owed.iter().any(|o| o.job == job && o.lane == lane) {
+            return;
+        }
+        self.owed.push(Owed {
+            job,
+            lane,
+            said: String::new(),
+            turn_from: 0,
+        });
+        self.jobs.tell(job, tool::Told::Started);
     }
 }
 
@@ -314,8 +331,8 @@ mod tests {
 
         drivers.dispatched(next.origin, 1, true, true);
         assert_eq!(rx.try_recv(), Ok(Told::Started));
-        drivers.observe(1, &Event::TextDelta("parse.rs".into()));
-        drivers.observe(2, &Event::TextDelta("another lane".into()));
+        drivers.observe(1, &root, &Event::TextDelta("parse.rs".into()));
+        drivers.observe(2, &root, &Event::TextDelta("another lane".into()));
         drivers.turn_ended(1, &Ended::Stopped, &ctx, None);
         assert_eq!(
             rx.try_recv(),
@@ -386,9 +403,52 @@ mod tests {
             retrying,
             Event::TextDelta("83057.6".into()),
         ] {
-            drivers.observe(1, &ev);
+            drivers.observe(1, &root, &ev);
         }
         drivers.turn_ended(1, &Ended::Done, &ctx, None);
         assert_eq!(rx.try_recv(), Ok(Told::Reply("checking. 83057.6".into())));
+    }
+
+    // A job that follows hears every run on its checkout from its next
+    // request on — typed ones too — and its own input's run only once.
+    #[tokio::test]
+    async fn a_job_that_follows_is_told_every_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let ctx = Ctx::new(tool::Workspace::new(&root).unwrap());
+        let mut drivers = Drivers::default();
+        let sink = jobs::Jobs::new(drivers.jobs());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let job = sink.start(root.clone(), "wechat".into(), Default::default(), Some(tx));
+        let (quiet_tx, mut quiet) = tokio::sync::mpsc::unbounded_channel();
+        let _quiet = sink.start(
+            root.clone(),
+            "build".into(),
+            Default::default(),
+            Some(quiet_tx),
+        );
+
+        drivers.observe(1, &root, &Event::TurnStart { turn: 1 });
+        drivers.observe(1, &root, &Event::TextDelta("before".into()));
+        job.follow();
+        drivers.observe(1, &root, &Event::TurnStart { turn: 2 });
+        assert_eq!(rx.try_recv(), Ok(Told::Started));
+        drivers.observe(1, &root, &Event::TextDelta("connected".into()));
+        drivers.turn_ended(1, &Ended::Done, &ctx, None);
+        assert_eq!(rx.try_recv(), Ok(Told::Reply("connected".into())));
+        assert!(
+            quiet.try_recv().is_err(),
+            "one that does not follow hears nothing"
+        );
+
+        job.input("btc".into());
+        let next = drivers.next(1, &root).expect("the input is due");
+        drivers.dispatched(next.origin, 1, true, true);
+        drivers.observe(1, &root, &Event::TurnStart { turn: 1 });
+        drivers.observe(1, &root, &Event::TextDelta("83057.6".into()));
+        drivers.turn_ended(1, &Ended::Done, &ctx, None);
+        assert_eq!(rx.try_recv(), Ok(Told::Started));
+        assert_eq!(rx.try_recv(), Ok(Told::Reply("83057.6".into())));
+        assert!(rx.try_recv().is_err(), "told once");
     }
 }

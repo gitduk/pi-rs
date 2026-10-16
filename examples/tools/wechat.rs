@@ -47,8 +47,9 @@ async fn main() -> ExitCode {
 
 mod bridge {
     //! wechat as a pi job: what the person types on the phone goes up fd 3 as
-    //! `input` (or `interrupt` for `/stop`), and the turn it opens comes back as
-    //! `started`, then one `reply`, cut into messages and sent on to the phone.
+    //! `input` (or `interrupt` for `/stop`). Once connected it follows, so every
+    //! turn on the checkout comes back as `started`, then one `reply`, cut into
+    //! messages and sent on to the phone — not only the ones the phone opened.
 
     use std::os::fd::FromRawFd;
     use std::path::PathBuf;
@@ -194,6 +195,7 @@ mod bridge {
             login(&mut client, &kept, &pi).await?;
         }
         pi.say(json!({ "status": "connected" }));
+        pi.say(json!({ "follow": true }));
         tokio::select! {
             r = poll(&client, &kept, &pi) => r,
             () = answer(&client, &kept, &pi, read) => Ok(()),

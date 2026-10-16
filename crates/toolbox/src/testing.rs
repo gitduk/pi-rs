@@ -66,6 +66,9 @@ impl JobHandle for Handle {
     fn interrupt(&self) {
         self.said.lock().unwrap().push("interrupt".into());
     }
+    fn follow(&self) {
+        self.said.lock().unwrap().push("follow".into());
+    }
     fn watch(&self, output: tool::Peek) {
         *self.output.lock().unwrap() = Some(output);
     }

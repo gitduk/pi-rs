@@ -109,10 +109,12 @@ is `3` when pi is listening. A script that never writes fd 3 is a plain tool.
 | `{"notice": "..."}` | a line on the screen only, which the model never reads: a QR to scan |
 | `{"input": "..."}` | a person's words, sent to the model as written, never run as a command |
 | `{"interrupt": true}` | stop the turn running on its checkout, as esc does |
+| `{"follow": true}` | be told of every turn on its checkout from now on, not only those its `input` opened |
 
 For each turn an `input` opened, pi writes back on the same fd
 `{"started": true}`, then `{"reply": "..."}`: the whole answer, ended with
-`(stopped)` or `(failed: …)` when it did not finish. Every input gets one.
+`(stopped)` or `(failed: …)` when it did not finish. Every input gets one;
+after `follow`, so does every turn its checkout runs, each told once.
 
 ```python
 #!/usr/bin/env python3
@@ -145,7 +147,7 @@ while True:
   the 300 s limit applies. After it, no limit: the job runs until it exits, a
   `job` stop (SIGTERM, then SIGKILL), or pi exits, and takes its process
   group along each time.
-- `result`, `input` and `interrupt` count only after `detach`.
+- `result`, `input`, `interrupt` and `follow` count only after `detach`.
 - Its stdout at exit is its last result; a non-zero exit adds stderr.
 - What it saves between runs, it keeps itself, under `$PI_HOME`. A login
   token is written readable by its owner alone.

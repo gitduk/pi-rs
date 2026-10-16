@@ -2,8 +2,9 @@
 //! `status` says how far it has got; `detach` ends the call and runs on as a
 //! job; after it, each `result` comes back as a turn, as does stdout at exit,
 //! `input` is a person's line, `interrupt` stops the checkout's turn, and
-//! `notice` is a line for the screen only.
-//! A turn an input opened is told back: `started`, then its whole `reply`.
+//! `notice` is a line for the screen only, and `follow` asks to hear every
+//! turn. A turn an input opened, or any once it follows, is told back:
+//! `started`, then its whole `reply`.
 
 use std::os::fd::AsRawFd;
 use std::process::{ExitStatus, Stdio};
@@ -41,6 +42,7 @@ enum Said {
     Input(String),
     Notice(String),
     Interrupt,
+    Follow,
 }
 
 /// Run `cmd` with `input` on stdin and fd 3 open for what it says. Until it
@@ -136,7 +138,7 @@ pub async fn run(
                     });
                         return Ok(Ran::Detached { said: text, id });
                     }
-                Said::Result(_) | Said::Input(_) | Said::Notice(_) | Said::Interrupt => tracing::warn!(
+                Said::Result(_) | Said::Input(_) | Said::Notice(_) | Said::Interrupt | Said::Follow => tracing::warn!(
                     target: "pi::scripts", script = name, "said before detach, dropped"
                 ),
             },
@@ -179,6 +181,7 @@ async fn go_on(
                 Said::Input(text) => job.input(text),
                 Said::Notice(text) => job.notice(text),
                 Said::Interrupt => job.interrupt(),
+                Said::Follow => job.follow(),
                 Said::Detach(_) => {}
             },
             status = child.wait() => break status,
@@ -274,6 +277,9 @@ fn parse(line: &str) -> Option<Said> {
     let text = |key| v.get(key).and_then(Value::as_str).map(str::to_string);
     if v.get("interrupt").and_then(Value::as_bool) == Some(true) {
         return Some(Said::Interrupt);
+    }
+    if v.get("follow").and_then(Value::as_bool) == Some(true) {
+        return Some(Said::Follow);
     }
     text("detach")
         .map(Said::Detach)
@@ -529,6 +535,7 @@ echo 'all done'"#,
 echo '{"input":"why did it fail"}' >&3
 echo '{"notice":"scan the QR"}' >&3
 echo '{"interrupt":true}' >&3
+echo '{"follow":true}' >&3
 read -r a <&3; read -r b <&3
 printf '%s\n%s\n' "$a" "$b" > heard"#,
         );
@@ -543,8 +550,13 @@ printf '%s\n%s\n' "$a" "$b" > heard"#,
             .await
             .expect("it ended");
         assert_eq!(
-            sink.said.lock().unwrap()[1..4],
-            ["input why did it fail", "notice scan the QR", "interrupt"]
+            sink.said.lock().unwrap()[1..5],
+            [
+                "input why did it fail",
+                "notice scan the QR",
+                "interrupt",
+                "follow"
+            ]
         );
         let heard = std::fs::read_to_string(dir.path().join("heard")).unwrap();
         assert_eq!(heard, "{\"started\":true}\n{\"reply\":\"parse.rs:40\"}\n");
