@@ -96,8 +96,10 @@ impl Fold for ToolOut {
         self.widest > render::result_room(width)
     }
 
-    fn click_line(&self, _i: usize, width: usize) -> Option<usize> {
-        (self.expandable() || self.clipped(width)).then_some(0)
+    // The head and the footer under the diff answer; the diff is for reading.
+    fn click_line(&self, i: usize, width: usize) -> Option<usize> {
+        let edge = i == 0 || (self.expandable() && i + 1 == self.len());
+        (edge && (self.expandable() || self.clipped(width))).then_some(0)
     }
 
     fn flip(&mut self) {

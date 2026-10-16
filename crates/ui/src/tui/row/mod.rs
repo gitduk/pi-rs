@@ -335,8 +335,8 @@ impl Row {
         self.toggle_at(0, 0)
     }
 
-    /// The line a click on line `i` opens or closes, if any: a result opens
-    /// from anywhere on it, a group from its own line or a step's.
+    /// The line a click on line `i` opens or closes, if any: a result from
+    /// its head or footer, a group from its own line or a step's.
     pub fn click_line(&self, i: usize, width: usize) -> Option<usize> {
         match &self.0 {
             Kind::Code(_) | Kind::Block(_) => Some(0),
