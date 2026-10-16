@@ -129,6 +129,9 @@ pub(super) struct Ui {
     pub(super) job_rows: Vec<super::call::JobRow>,
     // Every job listed, not the first few: the fold row flips it.
     pub(super) jobs_all: bool,
+    // The rows under the window the last frame drew; scrolled up, the row
+    // under the history says so, and a click on it goes down to them.
+    pub(super) below: usize,
 }
 
 /// Who has the keyboard.
@@ -246,6 +249,7 @@ impl Ui {
             job_body: String::new(),
             job_rows: Vec::new(),
             jobs_all: false,
+            below: 0,
             images: Vec::new(),
             layout: Default::default(),
             hovered_scrollback: None,

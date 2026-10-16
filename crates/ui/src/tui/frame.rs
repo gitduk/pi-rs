@@ -255,6 +255,19 @@ impl Ui {
             None => (rows, bar),
         };
 
+        let below = (scroll > 0).then(|| {
+            let shine = self
+                .pointer
+                .is_some_and(|(_, row)| (regions.gap.y..regions.gap.bottom()).contains(&row));
+            let more = format!("{} {scroll} more below", icons::ELLIPSIS);
+            vec![Line::from(self.paint.span_hovered(
+                shine,
+                &self.paint.theme.muted,
+                more,
+            ))]
+        });
+        self.below = scroll;
+
         // Scrolled up, the next frame opens on this one's top row.
         let top = (scroll > 0).then(|| self.anchor_here(view)).flatten();
         let (was, top_was) = self.window_mut(view);
@@ -308,6 +321,9 @@ impl Ui {
                     &mut state,
                 );
                 self.menu_top = state.offset();
+            }
+            if let Some(below) = &below {
+                frame.render_widget(Rows(below), regions.gap);
             }
             frame.render_widget(Rows(&bar), regions.bar);
             // Before the rows, so a span over the band keeps it: the columns the

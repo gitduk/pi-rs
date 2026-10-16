@@ -108,7 +108,17 @@ impl Ui {
         self.hovered_scrollback = self.hovered_row(view, col, row);
     }
 
+    // Whether screen row `row` is the one that jumps to the bottom.
+    pub(super) fn jump_at(&self, row: u16) -> bool {
+        let gap = self.regions.gap;
+        self.below > 0 && (gap.y..gap.bottom()).contains(&row)
+    }
+
     pub(super) fn on_mouse_click(&mut self, view: &mut View, col: u16, row: u16) {
+        if self.jump_at(row) {
+            self.scroll_view(view, false, super::screen::TOP);
+            return;
+        }
         if self.fold_at(row) {
             self.jobs_all = !self.jobs_all;
             return;
@@ -372,6 +382,8 @@ pub(super) enum Target {
 pub(super) struct Regions {
     // The scrolled transcript, the live region's rows included.
     pub(super) history: Rect,
+    // The blank row under it, which says what is below once scrolled up.
+    pub(super) gap: Rect,
     // The completion list or the rewind selector.
     pub(super) menu: Rect,
     // The bar: the checkouts, or the flash that took its row.
@@ -426,6 +438,7 @@ impl Regions {
         .split(area);
         Self {
             history: chunks[0],
+            gap: chunks[1],
             menu: chunks[2],
             bar: chunks[3],
             editor: chunks[4],
