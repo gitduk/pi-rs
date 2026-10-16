@@ -380,29 +380,42 @@ impl From<Editable> for crate::input::commands::Choice {
 /// What the model is given from files in `root`, to edit: the system prompt
 /// and this checkout's `AGENTS.md` even before they exist, since saving one
 /// is how it starts; every other instructions file and memory as they stand.
+/// This checkout's own files come first, then those every checkout shares.
 pub fn editable(pinned: &Pinned, root: &Path) -> Vec<Editable> {
     let mut files: Vec<(PathBuf, &str)> = Vec::new();
-    files.extend(system_file(pinned).map(|p| (p, "replaces the system prompt")));
+    let mut shared: Vec<(PathBuf, &str)> = Vec::new();
     if !pinned.no_context_files {
-        let found = instructions::paths(
-            root,
-            instructions::home().as_deref(),
-            pi_store::dir().as_deref(),
-        );
+        let pi = pi_store::dir();
+        let personal = pi.as_ref().map(|d| d.join("AGENTS.md"));
         let here = root.join("AGENTS.md");
-        if !found.contains(&here) {
-            files.push((here, "instructions"));
+        files.push((here.clone(), "instructions"));
+        // Innermost first: the nearer a file, the likelier it is the one edited.
+        for path in instructions::paths(root, instructions::home().as_deref(), pi.as_deref())
+            .into_iter()
+            .rev()
+            .filter(|p| *p != here)
+        {
+            let to = if personal.as_ref() == Some(&path) {
+                &mut shared
+            } else {
+                &mut files
+            };
+            to.push((path, "instructions"));
         }
-        files.extend(found.into_iter().map(|p| (p, "instructions")));
         let memory = pi_store::memory::Memory::default();
-        files.extend(
-            memory
-                .paths(&crate::core::worktree::main_root(root))
-                .into_iter()
-                .filter(|p| p.is_file())
-                .map(|p| (p, "memory")),
-        );
+        let main = crate::core::worktree::main_root(root);
+        let project = memory.project_path(&main);
+        for path in memory.paths(&main).into_iter().filter(|p| p.is_file()) {
+            let to = if path == project {
+                &mut files
+            } else {
+                &mut shared
+            };
+            to.push((path, "memory"));
+        }
     }
+    shared.extend(system_file(pinned).map(|p| (p, "replaces the system prompt")));
+    files.extend(shared);
     files
         .into_iter()
         .map(|(path, what)| {
