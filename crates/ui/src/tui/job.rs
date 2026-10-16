@@ -89,6 +89,7 @@ impl Tui {
         view.state.started = Some(std::time::Instant::now());
         view.state.committed = committed;
         view.state.stopping = false;
+        view.state.compacting = false;
         view.state.retry = None;
         self.core.lane_mut().seed_meter();
     }
@@ -272,6 +273,9 @@ impl Tui {
         let cancel = CancellationToken::new();
         // Work under way like any turn's, and nothing anyone can take back.
         self.arm_view(true);
+        front_view(&mut self.views, self.core.lane())
+            .state
+            .compacting = true;
 
         let agent = self.core.lane_mut().agent().clone();
         let token = self.core.lane().token();

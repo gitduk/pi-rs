@@ -496,6 +496,9 @@ impl Ui {
 
         if lane.is_running() && !self.browsing() {
             let mut parts = status::parts(&self.status, &snapshot(lane, view));
+            if view.state.compacting {
+                parts.insert(0, format!("compacting{}", icons::ELLIPSIS));
+            }
             // A stopping run says so; an ordinary one needs no word — its
             // ticking clock already says the turn is on.
             parts.extend(view.state.retry.clone());

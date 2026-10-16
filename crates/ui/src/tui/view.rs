@@ -79,6 +79,8 @@ pub struct State {
     pub(super) committed: bool,
     // The run has been asked to stop and is still winding down.
     pub(super) stopping: bool,
+    // The run is a `/compact`, not a turn: no figures of its own to show.
+    pub(super) compacting: bool,
     // The retry the run is waiting out, worded for the status line; any
     // other event means the wait is over.
     pub(super) retry: Option<String>,
