@@ -128,10 +128,10 @@ impl Ui {
             Some(Page::Slash(_)) => {
                 (self.row_targets.iter()).position(|t| matches!(t, Target::Text(_)))?
             }
-            // Under the pinned head: the window scrolls the rest.
-            Some(Page::Preview(_)) => {
-                (self.row_targets.iter()).position(|t| !matches!(t, Target::Text(0)))?
-            }
+            // Under the pinned head: the window scrolls the rest, if any.
+            Some(Page::Preview(_)) => (self.row_targets.iter())
+                .position(|t| !matches!(t, Target::Text(0)))
+                .unwrap_or(0),
             _ => 0,
         };
         self.place_at(n)
