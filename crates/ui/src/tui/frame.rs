@@ -232,13 +232,18 @@ impl Ui {
             }
             None => rows,
         };
-        self.drawn = rows
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect();
-        let rows = match &self.selection {
-            Some(sel) => super::select::highlight(rows, sel, |at| self.lead(view, at)),
-            None => rows,
+        let plain = |l: &Line<'_>| l.spans.iter().map(|s| s.content.as_ref()).collect();
+        // The bar's rows are selected under the history's, at its full height.
+        let base = regions.history.height as usize;
+        self.drawn = rows.iter().map(plain).collect();
+        self.drawn.resize(base, String::new());
+        self.drawn.extend(bar.iter().map(plain));
+        let (rows, bar) = match &self.selection {
+            Some(sel) => (
+                super::select::highlight(rows, sel, 0, |at| self.lead(view, at)),
+                super::select::highlight(bar, sel, base, |_| 0),
+            ),
+            None => (rows, bar),
         };
 
         // Scrolled up, the next frame opens on this one's top row.

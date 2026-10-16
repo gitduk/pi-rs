@@ -165,15 +165,16 @@ pub(super) fn modified(
 }
 
 /// Every drawn row with what `sel` covers of it reversed, past each row's
-/// lead as the copy reads it.
+/// lead as the copy reads it; the rows start at `from` of the selection's.
 pub(super) fn highlight(
     rows: Vec<Line<'static>>,
     sel: &Selection,
+    from: usize,
     lead: impl Fn(usize) -> usize,
 ) -> Vec<Line<'static>> {
     rows.into_iter()
         .enumerate()
-        .map(|(at, line)| match sel.cols(at) {
+        .map(|(at, line)| match sel.cols(from + at) {
             Some((from, to)) => reversed(line, from.max(lead(at)), to),
             None => line,
         })

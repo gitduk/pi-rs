@@ -454,15 +454,12 @@ impl Ui {
                 self.on_drag(mouse.column, mouse.row);
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                if let Some(id) = self.job_at(mouse.row) {
-                    self.selection = None;
-                    self.press = None;
-                    return Asked::Own(Deed::Job(id));
-                }
                 self.on_press(view, mouse.column, mouse.row);
             }
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
-                self.on_release(view, mouse.column, mouse.row);
+                if let Some(id) = self.on_release(view, mouse.column, mouse.row) {
+                    return Asked::Own(Deed::Job(id));
+                }
             }
             _ => {}
         }

@@ -146,10 +146,14 @@ impl Ui {
         }
     }
 
-    // The transcript cell under the pointer, if it is over the transcript.
+    // The cell under the pointer, if it is over the transcript or the bar:
+    // the bar's rows count on from the history's full height.
     fn point(&self, col: u16, row: u16) -> Option<Point> {
-        let h = self.regions.history;
-        let row = row.checked_sub(h.y).filter(|r| *r < h.height)?;
+        let (h, b) = (self.regions.history, self.regions.bar);
+        let row = match row.checked_sub(h.y).filter(|r| *r < h.height) {
+            Some(r) => r,
+            None => h.height + row.checked_sub(b.y).filter(|r| *r < b.height)?,
+        };
         Some(Point {
             row: row as usize,
             col: col.saturating_sub(h.x) as usize,
@@ -160,19 +164,24 @@ impl Ui {
         self.selection = None;
         // Only transcript rows hold text to select; the pending-calls toggle
         // and the like answer the press itself, as they always did.
+        let in_bar = (self.regions.bar.y..self.regions.bar.bottom()).contains(&row);
         let at = self.point(col, row).filter(|_| {
-            matches!(
-                self.target_at(row),
-                Some(Target::Scrollback(..) | Target::Text(_))
-            )
+            in_bar
+                || matches!(
+                    self.target_at(row),
+                    Some(Target::Scrollback(..) | Target::Text(_))
+                )
         });
         let Some(at) = at else {
             self.press = None;
             self.on_mouse_click(view, col, row);
             return;
         };
+        let job = self.job_at(row);
         let count = match &self.press {
-            Some(p) if p.at == at && p.when.elapsed() < MULTI_CLICK => (p.count % 3) + 1,
+            Some(p) if job.is_none() && p.at == at && p.when.elapsed() < MULTI_CLICK => {
+                (p.count % 3) + 1
+            }
             _ => 1,
         };
         self.press = Some(Press {
@@ -180,6 +189,7 @@ impl Ui {
             when: std::time::Instant::now(),
             count,
             moved: false,
+            job,
         });
         let picked = match count {
             2 => self.word_selection(at),
@@ -193,9 +203,20 @@ impl Ui {
     }
 
     pub(super) fn on_drag(&mut self, col: u16, row: u16) {
-        let h = self.regions.history;
-        // Past the region's edge the drag holds at the edge row.
-        let row = row.clamp(h.y, h.y + h.height.saturating_sub(1));
+        let (h, b) = (self.regions.history, self.regions.bar);
+        // Past the edge the drag holds at the edge row; between the two, at
+        // the history's last.
+        let last = if b.height > 0 {
+            b.bottom() - 1
+        } else {
+            h.bottom().saturating_sub(1)
+        };
+        let row = row.clamp(h.y, last);
+        let row = if row >= h.bottom() && row < b.y {
+            h.bottom().saturating_sub(1)
+        } else {
+            row
+        };
         let (Some(head), Some(press)) = (self.point(col, row), self.press.as_mut()) else {
             return;
         };
@@ -210,15 +231,17 @@ impl Ui {
         }
     }
 
-    pub(super) fn on_release(&mut self, view: &mut View, col: u16, row: u16) {
-        let Some(press) = &self.press else {
-            return;
-        };
+    // A click on a job's row that opens hands back that job to open.
+    pub(super) fn on_release(&mut self, view: &mut View, col: u16, row: u16) -> Option<u64> {
+        let press = self.press.as_ref()?;
         if press.moved {
             self.copy_selection(view);
+        } else if let Some(id) = press.job {
+            return Some(id);
         } else if press.count == 1 {
             self.on_mouse_click(view, col, row);
         }
+        None
     }
 
     fn word_selection(&self, at: Point) -> Option<Selection> {
@@ -235,7 +258,20 @@ impl Ui {
 
     // The whole logical line under `at`: every row wrapped from it.
     fn line_selection(&self, at: Point) -> Option<Selection> {
-        let target = *self.row_targets.get(at.row)?;
+        let whole = Selection {
+            anchor: Point {
+                row: at.row,
+                col: 0,
+            },
+            head: Point {
+                row: at.row,
+                col: usize::MAX - 1,
+            },
+        };
+        // A bar row is a line of its own.
+        let Some(&target) = self.row_targets.get(at.row) else {
+            return Some(whole);
+        };
         let same = |r: &usize| {
             matches!(
                 (self.row_targets.get(*r), target),
@@ -265,15 +301,11 @@ impl Ui {
             return;
         };
         let width = self.screen.usable();
-        let rows: Vec<Drawn> = self
-            .drawn
-            .iter()
-            .zip(&self.row_targets)
-            .enumerate()
-            .map(|(at, (text, target))| Drawn {
+        let rows: Vec<Drawn> = (self.drawn.iter().enumerate())
+            .map(|(at, text)| Drawn {
                 text: text.clone(),
-                line: match target {
-                    Target::Scrollback(idx, line) => Some((*idx, *line)),
+                line: match self.row_targets.get(at) {
+                    Some(Target::Scrollback(idx, line)) => Some((*idx, *line)),
                     _ => None,
                 },
                 lead: self.lead(view, at),

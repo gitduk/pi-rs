@@ -103,8 +103,8 @@ pub(super) struct Ui {
     pub(super) row_targets: Vec<Target>,
     // Which row of its line each drawn row is, row for row with `row_targets`.
     pub(super) row_of: Vec<usize>,
-    // The transcript rows as last drawn, in plain text: what a selection
-    // reads, row for row with `row_targets`.
+    // The rows as last drawn, in plain text: what a selection reads. The
+    // history's, row for row with `row_targets`, then the bar's under them.
     pub(super) drawn: Vec<String>,
     // What the mouse has selected, drawn reversed until the next press.
     pub(super) selection: Option<super::select::Selection>,
@@ -380,4 +380,6 @@ pub(super) struct Press {
     pub(super) when: Instant,
     pub(super) count: u8,
     pub(super) moved: bool,
+    // The job a click on its row opens: no double click there, only this.
+    pub(super) job: Option<u64>,
 }
