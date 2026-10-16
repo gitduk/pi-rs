@@ -79,7 +79,7 @@ impl Core {
                 ),
             ]));
         }
-        // Behind the usage line's `compacted N×` and `↓`.
+        // Behind the usage line's `compacted ×N` and `↓`.
         if let Some(report) = tally.compacted() {
             let line = super::meter::compaction_line(report);
             let line = line.strip_prefix("compacted ").unwrap_or(&line);
