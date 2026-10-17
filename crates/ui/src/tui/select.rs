@@ -2,7 +2,7 @@
 //! line clicked twice or thrice. Read off the drawn rows, frames and borders
 //! left out and wrapped rows joined back into the line they came from.
 
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthChar;
 
@@ -133,6 +133,25 @@ pub(super) fn word_at(s: &str, col: usize) -> (usize, usize) {
     (cells[first].0, end_at + cell(end_c))
 }
 
+/// The column ranges of `line` drawn in `fg` on no band: inline code, which
+/// the markdown sets off by colour alone once its backticks are gone.
+pub(super) fn code_runs(line: &Line<'_>, fg: Color) -> Vec<(usize, usize)> {
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut at = 0;
+    for span in &line.spans {
+        let width: usize = span.content.chars().map(cell).sum();
+        let style = line.style.patch(span.style);
+        if style.fg == Some(fg) && style.bg.is_none() && width > 0 {
+            match runs.last_mut() {
+                Some((_, end)) if *end == at => *end += width,
+                _ => runs.push((at, at + width)),
+            }
+        }
+        at += width;
+    }
+    runs
+}
+
 /// `line` with the cells `from..to` drawn reversed.
 pub(super) fn reversed(line: Line<'static>, from: usize, to: usize) -> Line<'static> {
     modified(line, from, to, Modifier::REVERSED)
@@ -202,6 +221,19 @@ mod tests {
 
     // What lands on the clipboard is the text, not the screen: no frame, no
     // break where only the width broke the line, a break where it ended.
+    #[test]
+    fn code_runs_are_the_spans_in_the_code_colour_merged() {
+        let fg = Color::Rgb(1, 2, 3);
+        let line = Line::from(vec![
+            Span::raw("run "),
+            Span::styled("ls ", ratatui::style::Style::new().fg(fg)),
+            Span::styled("-al", ratatui::style::Style::new().fg(fg).bold()),
+            Span::raw(" now "),
+            Span::styled("badge", ratatui::style::Style::new().fg(fg).bg(fg)),
+        ]);
+        assert_eq!(code_runs(&line, fg), vec![(4, 10)]);
+    }
+
     #[test]
     fn a_selection_copies_the_text_not_the_frame_or_the_wraps() {
         let width = 10;

@@ -218,7 +218,9 @@ impl Ui {
             job,
         });
         let picked = match count {
-            2 => self.word_selection(at),
+            2 => self
+                .code_selection(view, at)
+                .or_else(|| self.word_selection(at)),
             3 => self.line_selection(at),
             _ => None,
         };
@@ -282,6 +284,51 @@ impl Ui {
         })
     }
 
+    // The inline code under `at`, whole, followed onto the rows its line
+    // wrapped to: a command copies as one, not word by word.
+    fn code_selection(&self, view: &View, at: Point) -> Option<Selection> {
+        let runs = |r: usize| self.drawn_code.get(r).map_or(&[][..], Vec::as_slice);
+        let &(from, to) = runs(at.row)
+            .iter()
+            .find(|(f, t)| (*f..*t).contains(&at.col))?;
+        // Filled to its end: the text runs on in the next row of its line.
+        let ends = |r: usize, end: usize| {
+            let text = self.drawn.get(r).map_or("", String::as_str);
+            end >= text.trim_end().chars().map(select::cell).sum::<usize>()
+        };
+        let (mut anchor, mut head) = (Point { col: from, ..at }, Point { col: to - 1, ..at });
+        while anchor.row > 0
+            && anchor.col == self.lead(view, anchor.row)
+            && self.same_line(anchor.row - 1, anchor.row)
+            && let Some(&(f, t)) = runs(anchor.row - 1).last()
+            && ends(anchor.row - 1, t)
+        {
+            anchor = Point {
+                row: anchor.row - 1,
+                col: f,
+            };
+        }
+        while ends(head.row, head.col + 1)
+            && self.same_line(head.row, head.row + 1)
+            && let Some(&(f, t)) = runs(head.row + 1).first()
+            && f == self.lead(view, head.row + 1)
+        {
+            head = Point {
+                row: head.row + 1,
+                col: t - 1,
+            };
+        }
+        Some(Selection { anchor, head })
+    }
+
+    // Whether drawn rows `a` and `b` are wraps of one logical line.
+    fn same_line(&self, a: usize, b: usize) -> bool {
+        matches!(
+            (self.row_targets.get(a), self.row_targets.get(b)),
+            (Some(Target::Scrollback(i, l)), Some(Target::Scrollback(j, m))) if i == j && l == m
+        )
+    }
+
     // The whole logical line under `at`: every row wrapped from it.
     fn line_selection(&self, at: Point) -> Option<Selection> {
         let whole = Selection {
@@ -295,21 +342,15 @@ impl Ui {
             },
         };
         // A bar row is a line of its own.
-        let Some(&target) = self.row_targets.get(at.row) else {
+        if self.row_targets.get(at.row).is_none() {
             return Some(whole);
-        };
-        let same = |r: &usize| {
-            matches!(
-                (self.row_targets.get(*r), target),
-                (Some(Target::Scrollback(i, l)), Target::Scrollback(ti, tl)) if *i == ti && *l == tl
-            )
-        };
+        }
         let mut first = at.row;
-        while first > 0 && same(&(first - 1)) {
+        while first > 0 && self.same_line(first - 1, at.row) {
             first -= 1;
         }
         let mut last = at.row;
-        while same(&(last + 1)) {
+        while self.same_line(at.row, last + 1) {
             last += 1;
         }
         Some(Selection {

@@ -247,6 +247,11 @@ impl Ui {
         self.drawn = rows.iter().map(plain).collect();
         self.drawn.resize(base, String::new());
         self.drawn.extend(bar.iter().map(plain));
+        let code = crate::sgr::style_to_ratatui(&self.paint.theme.code).fg;
+        let runs = |l: &Line<'_>| code.map_or_else(Vec::new, |fg| super::select::code_runs(l, fg));
+        self.drawn_code = rows.iter().map(runs).collect();
+        self.drawn_code.resize(base, Vec::new());
+        self.drawn_code.extend(bar.iter().map(runs));
         let (rows, bar) = match &self.selection {
             Some(sel) => (
                 super::select::highlight(rows, sel, 0, |at| self.lead(view, at)),
