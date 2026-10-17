@@ -118,6 +118,7 @@ impl Core {
                 resolved.instructions.join(", "),
             ]));
         }
+        rows.push(Row::new(["pi", concat!("v", env!("CARGO_PKG_VERSION"))]));
         rows.push(match toolbox::rtk::state() {
             toolbox::rtk::State::On(version) => Row::new(["rtk".into(), version]),
             toolbox::rtk::State::Off => Row::new(["rtk", "off"]).noting("RTK_DISABLED=1"),
