@@ -30,22 +30,32 @@ impl Ui {
         if self.dismissed_at.as_deref() == Some(self.editor.text()) {
             return Vec::new();
         }
-        // An @ token outranks the word completions: it names a path, and the
-        // filesystem holds the answer, not the command tables.
-        if let Some((start, end, query)) =
-            pi_core::input::complete::at_prefix(self.editor.text(), self.editor.cursor())
-        {
-            // The cache is keyed by the query: every keystroke moves it, but
-            // every frame redraws the menu against the same one.
-            if self
-                .at_menu
-                .as_ref()
-                .is_none_or(|(q, _)| q.as_str() != query)
-            {
-                let items = pi_core::input::complete::candidates(query, &self.at_root);
-                self.at_menu = Some((query.to_string(), items));
+        // A path token outranks the word completions: the filesystem holds
+        // the answer, not the command tables.
+        use pi_core::input::complete as path;
+        let (text, cursor) = (self.editor.text(), self.editor.cursor());
+        // `/cd`'s argument is read first, `~/` and all: only a directory
+        // is somewhere to go there.
+        let found = (path::cd_prefix(text, cursor).map(|t| (t, Path::Cd)))
+            .or_else(|| path::at_prefix(text, cursor).map(|t| (t, Path::At)))
+            .or_else(|| path::home_prefix(text, cursor).map(|t| (t, Path::Home)));
+        if let Some(((start, end, query), kind)) = found {
+            // Keyed by the whole token: every keystroke moves it, but every
+            // frame redraws the menu against the same one.
+            let token = &text[start..end];
+            if (self.at_menu.as_ref()).is_none_or(|(k, t, _)| (*k, t.as_str()) != (kind, token)) {
+                let home = pi_core::core::instructions::home();
+                let items = match kind {
+                    Path::At => path::candidates(query, &self.at_root),
+                    Path::Home => home.map_or_else(Vec::new, |h| path::home_candidates(query, &h)),
+                    Path::Cd => path::cd_candidates(query, &self.at_root, home.as_deref()),
+                };
+                self.at_menu = Some((kind, token.to_string(), items));
             }
-            let (_, items) = self.at_menu.as_ref().expect("set above");
+            let lead = if kind == Path::At { "@" } else { "" };
+            // Nothing typed in the folder yet: the list is to browse, not a guess.
+            let browse = query.is_empty() || query.ends_with('/');
+            let (_, _, items) = self.at_menu.as_ref().expect("set above");
             return items
                 .iter()
                 .rev()
@@ -53,8 +63,10 @@ impl Ui {
                     start,
                     end,
                     show: at_row_name(&f.path, f.dir),
+                    lead,
                     path: f.path.clone(),
                     dir: f.dir,
+                    picked_only: browse,
                 })
                 .collect();
         }
@@ -102,13 +114,20 @@ impl Ui {
         Some(menu.swap_remove(at))
     }
 
-    // Splice the accepted @ path over the token the list grew from. A
+    // Splice the accepted path over the token the list grew from. A
     // directory keeps completing: no trailing space, the caret stays on it.
-    pub(super) fn apply_file(&mut self, start: usize, end: usize, path: &str, dir: bool) {
+    pub(super) fn apply_file(
+        &mut self,
+        start: usize,
+        end: usize,
+        lead: &str,
+        path: &str,
+        dir: bool,
+    ) {
         let token = if dir {
-            format!("@{path}/")
+            format!("{lead}{path}/")
         } else {
-            format!("@{path} ")
+            format!("{lead}{path} ")
         };
         self.editor.splice(start, end, &token);
     }
@@ -171,20 +190,31 @@ impl Ui {
     }
 }
 
-// One row either menu can offer: a completion of the line, an @ path, or a
+// What a path token is completed against.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Path {
+    At,
+    Home,
+    Cd,
+}
+
+// One row either menu can offer: a completion of the line, a path, or a
 // message from the rewind selector to go back to.
 #[derive(Clone)]
 pub(super) enum MenuEntry {
     Completion(Candidate),
-    // An @ path: accepting splices `@path` over the token it grew from —
-    // Enter applies it and stays, where a command submits.
+    // A path: accepting splices `lead` and `path` over the token it grew
+    // from — Enter applies it and stays, where a command submits.
     File {
         start: usize,
         end: usize,
         // The row's left column: the file's own name, `/` for a directory.
         show: String,
+        lead: &'static str,
         path: String,
         dir: bool,
+        // As a `Candidate`'s: Enter takes it only once moved to.
+        picked_only: bool,
     },
     // Something the user said, to rewind to. Every row does the same, so
     // none carries a note saying what.

@@ -71,9 +71,13 @@ pub(super) struct Ui {
     pub(super) last_press: Option<LastPress>,
     // How long a bare character waits for the second of its pair.
     pub(super) pair_window: std::time::Duration,
-    // The @-completion cache, keyed by the query the walk was built for —
+    // The path-completion cache, keyed by the token the list was built for —
     // a directory walk sits behind every keystroke otherwise.
-    pub(super) at_menu: Option<(String, Vec<pi_core::input::complete::FileEntry>)>,
+    pub(super) at_menu: Option<(
+        super::menu::Path,
+        String,
+        Vec<pi_core::input::complete::FileEntry>,
+    )>,
     // The directory @ paths resolve against: the lane's workspace root.
     pub(super) at_root: std::path::PathBuf,
     pub(super) spinner: usize,

@@ -1,4 +1,4 @@
-//! The `@` file completion's pure logic: pulling the token out of the line,
+//! The `@` and `~/` path completion's pure logic: pulling the token out of the line,
 //! walking the workspace, and ranking what it finds. No terminal here, so
 //! the tests run against a scratch tree.
 
@@ -24,18 +24,26 @@ pub struct FileEntry {
 /// ends, and the query after the `@`. `None` when the caret is not in one —
 /// the `@` must start the token, so `a@b` stays an email.
 pub fn at_prefix(line: &str, cursor: usize) -> Option<(usize, usize, &str)> {
-    let head = &line[..cursor];
-    let start = head
+    let start = token_start(line, cursor);
+    let query = line[start..cursor].strip_prefix('@')?;
+    Some((start, cursor, query))
+}
+
+/// The `~/token` under the caret, read as `at_prefix` reads an `@` one; the
+/// query is what follows `~/`.
+pub fn home_prefix(line: &str, cursor: usize) -> Option<(usize, usize, &str)> {
+    let start = token_start(line, cursor);
+    let query = line[start..cursor].strip_prefix("~/")?;
+    Some((start, cursor, query))
+}
+
+fn token_start(line: &str, cursor: usize) -> usize {
+    line[..cursor]
         .char_indices()
         .rev()
         .find(|(_, c)| DELIMS.contains(c))
         .map(|(i, c)| i + c.len_utf8())
-        .unwrap_or(0);
-    let token = &line[start..cursor];
-    if !token.starts_with('@') {
-        return None;
-    }
-    Some((start, cursor, &token[1..]))
+        .unwrap_or(0)
 }
 
 /// Ranked candidates for the text after the `@`, best first, at most `TOP`.
@@ -52,14 +60,7 @@ pub fn candidates(query: &str, root: &Path) -> Vec<FileEntry> {
     if query.starts_with(['/', '~']) || query.split('/').any(|s| s == "..") {
         return Vec::new();
     }
-    let (scope, display_base, name) = match query.rfind('/') {
-        Some(i) => (
-            root.join(&query[..i]),
-            query[..=i].to_string(),
-            query[i + 1..].to_string(),
-        ),
-        None => (root.to_path_buf(), String::new(), query),
-    };
+    let (scope, display_base, name) = split(&query, root, "");
 
     // The tools' walk, so `@` offers what grep and glob would find. The scope
     // never leaves the root, so the global gitignore applies.
@@ -83,7 +84,75 @@ pub fn candidates(query: &str, root: &Path) -> Vec<FileEntry> {
             break;
         }
     }
+    rank(raw, name, &display_base)
+}
 
+/// Candidates under `home` for the text after `~/`, each spelled from `~/`.
+///
+/// One level, as `candidates`; `..` is refused, as there.
+pub fn home_candidates(query: &str, home: &Path) -> Vec<FileEntry> {
+    if query.split('/').any(|s| s == "..") {
+        return Vec::new();
+    }
+    listed(query, home, "~/", false)
+}
+
+/// The argument of `/cd` under the caret: from after the word's spacing to
+/// the caret, spaces and all, since a directory name may hold them.
+pub fn cd_prefix(line: &str, cursor: usize) -> Option<(usize, usize, &str)> {
+    let rest = line.strip_prefix("/cd")?;
+    let arg = rest.trim_start();
+    let start = line.len() - arg.len();
+    (arg.len() < rest.len() && start <= cursor).then(|| (start, cursor, &line[start..cursor]))
+}
+
+/// Directories `/cd` could go to, spelled as typed: from `~/` under `home`,
+/// from `/` absolute, otherwise against `root` — `..` included.
+pub fn cd_candidates(query: &str, root: &Path, home: Option<&Path>) -> Vec<FileEntry> {
+    if let Some(rest) = query.strip_prefix("~/") {
+        return home.map_or_else(Vec::new, |home| listed(rest, home, "~/", true));
+    }
+    if let Some(rest) = query.strip_prefix('/') {
+        return listed(rest, Path::new("/"), "/", true);
+    }
+    listed(query, root, "", true)
+}
+
+// One folder read as it is, no ignore file: outside a project none applies.
+// Dot entries wait for a typed `.`, as in a shell.
+fn listed(query: &str, base: &Path, lead: &str, dirs_only: bool) -> Vec<FileEntry> {
+    let (scope, display_base, name) = split(query, base, lead);
+    let Ok(read) = std::fs::read_dir(&scope) else {
+        return Vec::new();
+    };
+    let hidden = name.starts_with('.');
+    let raw: Vec<(String, bool)> = read
+        .flatten()
+        .filter_map(|e| {
+            let rel = e.file_name().into_string().ok()?;
+            // Followed: a link to a directory is somewhere to go.
+            let dir = e.path().is_dir();
+            ((hidden || !rel.starts_with('.')) && (dir || !dirs_only)).then_some((rel, dir))
+        })
+        .take(WALK_CAP)
+        .collect();
+    rank(raw, name, &display_base)
+}
+
+// The folder `query` names under `root`, how its entries are spelled from
+// `lead`, and the name being typed in it.
+fn split(query: &str, root: &Path, lead: &str) -> (std::path::PathBuf, String, String) {
+    match query.rfind('/') {
+        Some(i) => (
+            root.join(&query[..i]),
+            format!("{lead}{}", &query[..=i]),
+            query[i + 1..].to_string(),
+        ),
+        None => (root.to_path_buf(), lead.to_string(), query.to_string()),
+    }
+}
+
+fn rank(raw: Vec<(String, bool)>, name: String, display_base: &str) -> Vec<FileEntry> {
     let query_lower = name.to_lowercase();
     let mut scored: Vec<(i32, FileEntry)> = raw
         .into_iter()
@@ -189,6 +258,49 @@ mod tests {
         let (_dir, root) = tree();
         assert!(candidates("ta", &root).is_empty());
         assert_eq!(names(&candidates(".gi", &root)), vec![".gitignore"]);
+    }
+
+    #[test]
+    fn home_paths_spell_from_the_tilde_and_hide_dot_entries() {
+        let (_dir, root) = tree();
+        assert_eq!(home_prefix("/cd ~/src/m", 11), Some((4, 11, "src/m")));
+        assert_eq!(home_prefix("~5 min", 2), None);
+        assert_eq!(
+            names(&home_candidates("", &root)),
+            vec!["~/src", "~/target", "~/README.md"]
+        );
+        assert_eq!(
+            names(&home_candidates(".gi", &root)),
+            vec!["~/.git", "~/.gitignore"]
+        );
+        assert_eq!(
+            names(&home_candidates("src/m", &root)),
+            vec!["~/src/main.rs"]
+        );
+        assert!(home_candidates("../out", &root).is_empty());
+    }
+
+    #[test]
+    fn cd_offers_directories_against_the_root_or_as_spelled() {
+        let (_dir, root) = tree();
+        assert_eq!(cd_prefix("/cd src/l", 9), Some((4, 9, "src/l")));
+        assert_eq!(cd_prefix("/cd", 3), None);
+        assert_eq!(cd_prefix("/cdx", 4), None);
+        assert_eq!(
+            names(&cd_candidates("", &root, None)),
+            vec!["src", "target"]
+        );
+        assert_eq!(names(&cd_candidates("src/", &root, None)), vec!["src/lib"]);
+        assert_eq!(
+            names(&cd_candidates("src/../s", &root, None)),
+            vec!["src/../src"]
+        );
+        assert_eq!(names(&cd_candidates("~/", &root, Some(&root)))[0], "~/src");
+        let abs = format!("{}/s", root.display());
+        assert_eq!(
+            names(&cd_candidates(&abs, &root, None)),
+            vec![format!("{}/src", root.display())]
+        );
     }
 
     #[test]

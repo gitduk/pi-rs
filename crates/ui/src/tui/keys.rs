@@ -253,16 +253,23 @@ impl Ui {
                     Some(MenuEntry::File {
                         start,
                         end,
+                        lead,
                         path,
                         dir,
+                        picked_only,
                         ..
-                    }) => {
+                    }) if !picked_only || self.picked.is_some() => {
                         // Enter on a path applies it and stays: the prompt
                         // is not done until the user says so.
-                        self.apply_file(start, end, &path, dir);
+                        self.apply_file(start, end, lead, &path, dir);
                         Asked::Own(Deed::Nothing)
                     }
-                    Some(MenuEntry::Completion(_) | MenuEntry::Message { .. }) | None => {
+                    Some(
+                        MenuEntry::Completion(_)
+                        | MenuEntry::File { .. }
+                        | MenuEntry::Message { .. },
+                    )
+                    | None => {
                         let typed = self.editor.take();
                         self.run_line(typed)
                     }
@@ -404,10 +411,11 @@ impl Ui {
                 Some(MenuEntry::File {
                     start,
                     end,
+                    lead,
                     path,
                     dir,
                     ..
-                }) => self.apply_file(start, end, &path, dir),
+                }) => self.apply_file(start, end, lead, &path, dir),
                 Some(MenuEntry::Message { .. }) | None => {}
             },
             Some(action @ (Action::MenuNext | Action::MenuPrevious)) => self.step_menu(action),
