@@ -4,11 +4,14 @@
 use std::cell::RefCell;
 use std::time::Instant;
 
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style as RStyle};
 use ratatui::text::{Line, Span};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::block::Form;
+use crate::block::{self, Form};
 use crate::render::{self, Paint};
+use crate::sgr::style_to_ratatui;
+use crate::unit::Units;
 
 // A code block's badge, holding the block's text for a click to copy.
 pub(super) struct Code {
@@ -22,9 +25,17 @@ pub(super) struct Code {
 pub(super) struct Block {
     form: Form,
     pub(super) source: String,
-    // At which width, and whether a badge heads it.
-    painted: RefCell<Option<(usize, Line<'static>, bool)>>,
+    // At which width: the line, whether a badge heads it, and the cells
+    // that read as one, counted from where the source starts.
+    painted: RefCell<Option<(usize, Painted)>>,
     pub(super) note: Note,
+}
+
+#[derive(Clone)]
+struct Painted {
+    line: Line<'static>,
+    badged: bool,
+    units: Units,
 }
 
 // What both say of themselves: lit under the pointer, and what a copy did.
@@ -78,24 +89,39 @@ impl Block {
     }
 
     pub(super) fn line(&self, paint: &Paint, width: usize) -> Line<'static> {
-        let (line, badged) = self.drawn(paint, width);
+        let Painted { line, badged, .. } = self.drawn(paint, width);
         let line = bolded(line, self.note.hovered && badged);
         // Beside a table's border it could wrap and split the table.
         beside(line, self.note.said().filter(|_| badged), paint)
     }
 
     pub(super) fn badged(&self, paint: &Paint, width: usize) -> bool {
-        self.drawn(paint, width).1
+        self.drawn(paint, width).badged
     }
 
-    fn drawn(&self, paint: &Paint, width: usize) -> (Line<'static>, bool) {
+    // The cells of `line` that read as one: past the badge row as drawn
+    // now, whatever note stands beside it.
+    pub(super) fn units(&self, paint: &Paint, width: usize) -> Units {
+        let head: usize = (self.line(paint, width).spans.iter())
+            .flat_map(|s| s.content.chars())
+            .take_while(|c| *c != '\n')
+            .map(|c| c.width().unwrap_or(0))
+            .sum();
+        let units = self.drawn(paint, width).units;
+        units
+            .into_iter()
+            .map(|u| u.start + head..u.end + head)
+            .collect()
+    }
+
+    fn drawn(&self, paint: &Paint, width: usize) -> Painted {
         let mut held = self.painted.borrow_mut();
         match held.as_ref() {
-            Some((at, line, badged)) if *at == width => (line.clone(), *badged),
+            Some((at, painted)) if *at == width => painted.clone(),
             _ => {
-                let (line, badged) = block_at(self.form, &self.source, paint, width);
-                *held = Some((width, line.clone(), badged));
-                (line, badged)
+                let painted = block_at(self.form, &self.source, paint, width);
+                *held = Some((width, painted.clone()));
+                painted
             }
         }
     }
@@ -125,7 +151,7 @@ fn beside(mut line: Line<'static>, said: Option<&str>, paint: &Paint) -> Line<'s
 
 // A block row at `width`: drawn when it fits, else its source under a badge
 // saying what it would need. Whether a badge heads it: a drawn table has none.
-fn block_at(form: Form, source: &str, paint: &Paint, width: usize) -> (Line<'static>, bool) {
+fn block_at(form: Form, source: &str, paint: &Paint, width: usize) -> Painted {
     use crate::block::{Drawn, draw, note};
     let joined = |lines: Vec<Line<'static>>| {
         let mut spans = Vec::new();
@@ -137,29 +163,80 @@ fn block_at(form: Form, source: &str, paint: &Paint, width: usize) -> (Line<'sta
         }
         Line::from(spans)
     };
-    let source_under = |lang: &str, note: &str| {
+    let under = |lang: &str, note: &str, body: Vec<Span<'static>>, units: Units| {
         let mut spans = render::badge(lang, note, paint).spans;
-        spans.push(Span::raw(format!("\n{source}")));
-        Line::from(spans)
+        spans.extend(body);
+        Painted {
+            line: Line::from(spans),
+            badged: true,
+            units,
+        }
     };
+    let plain = || vec![Span::raw(format!("\n{source}"))];
     match form {
         Form::Mermaid => match draw(source, Some(width)) {
-            Drawn::Fits(diagram) => {
-                let mut spans = render::badge("mermaid", "", paint).spans;
-                spans.push(Span::raw(format!("\n{diagram}")));
-                (Line::from(spans), true)
-            }
-            Drawn::Wide { needs, has } => (source_under("mermaid", &note(needs, has)), true),
-            Drawn::Unread => (source_under("mermaid", ""), true),
+            Drawn::Fits(diagram) => under(
+                "mermaid",
+                "",
+                vec![Span::raw(format!("\n{diagram}"))],
+                Vec::new(),
+            ),
+            Drawn::Wide { needs, has } => under("mermaid", &note(needs, has), plain(), Vec::new()),
+            Drawn::Unread => under("mermaid", "", plain(), Vec::new()),
         },
         Form::Table => {
             let lines = render::render_markdown(source, paint);
             let needs = lines.iter().map(Line::width).max().unwrap_or(0);
             if needs <= width {
-                (joined(lines), false)
-            } else {
-                (source_under("table", &note(needs, width)), true)
+                return Painted {
+                    line: joined(lines),
+                    badged: false,
+                    units: Vec::new(),
+                };
             }
+            let (body, units) = table_source(source, paint);
+            under("table", &note(needs, width), body, units)
         }
     }
+}
+
+// A table as its source, read across a wrap: each column's text in a colour
+// of its own, the pipes and the delimiter row muted, the header bold.
+fn table_source(source: &str, paint: &Paint) -> (Vec<Span<'static>>, Units) {
+    let palette: Vec<RStyle> = paint.theme.table.iter().map(style_to_ratatui).collect();
+    let muted = |text: &str| paint.span(&paint.theme.muted, text);
+    let (mut spans, mut units, mut col) = (Vec::new(), Units::new(), 0);
+    for (i, row) in source.lines().enumerate() {
+        spans.push(Span::raw("\n"));
+        if block::delimiter(row) {
+            spans.push(muted(row));
+            col += UnicodeWidthStr::width(row);
+            continue;
+        }
+        let mut from = 0;
+        for (k, cell) in block::cells(row).into_iter().enumerate() {
+            let gap = &row[from..cell.start];
+            spans.push(muted(gap));
+            col += UnicodeWidthStr::width(gap);
+            let text = &row[cell.clone()];
+            let mut style = palette
+                .get(k % palette.len().max(1))
+                .copied()
+                .unwrap_or_default();
+            if i == 0 {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            let w = UnicodeWidthStr::width(text);
+            if w > 0 {
+                spans.push(Span::styled(text.to_string(), style));
+                units.push(col..col + w);
+            }
+            col += w;
+            from = cell.end;
+        }
+        spans.push(muted(&row[from..]));
+        col += UnicodeWidthStr::width(&row[from..]);
+    }
+    spans.retain(|s| !s.content.is_empty());
+    (spans, units)
 }

@@ -299,14 +299,14 @@ impl Ui {
             Target::Scrollback(idx, i) => {
                 let row = view.surface.scrollback.get(*idx)?;
                 let (line, border) = row.line(*i, &self.paint, width);
-                (line, border, row.units(*i))
+                (line, border, row.units(*i, &self.paint, width))
             }
             Target::Text(n) => {
                 let Some(Page::Preview(lines)) = self.page() else {
                     return None;
                 };
                 let page = lines.get(*n)?;
-                (page.line.clone(), None, &page.units[..])
+                (page.line.clone(), None, page.units.clone())
             }
             _ => return None,
         };
@@ -319,8 +319,10 @@ impl Ui {
             .collect();
         let k = *self.row_of.get(at.row)?;
         let col = rows.iter().take(k).sum::<usize>() + at.col.checked_sub(lead)?;
-        let unit = crate::unit::at(units, col)?;
-        let text = select::cols(&screen::plain(&line), unit.start, unit.end);
+        let unit = crate::unit::at(&units, col)?;
+        // A block's rows break at its `\n`s, which take no cells.
+        let plain = screen::plain(&line).replace('\n', "");
+        let text = select::cols(&plain, unit.start, unit.end);
         // Cell `c` of the line where it is drawn: which of its rows, what column.
         let place = |mut c: usize| {
             let mut j = 0;

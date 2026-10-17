@@ -323,6 +323,10 @@ pub struct Theme {
     pub prompt: Prompt,
     #[serde(default = "default_input")]
     pub input: Style,
+    /// A table too wide to draw, read as its source: one per column, in
+    /// turn; none leaves the source plain.
+    #[serde(default = "default_table")]
+    pub table: Vec<Style>,
 }
 
 const GREEN: Color = Color::Rgb(137, 210, 129);
@@ -443,6 +447,19 @@ fn default_emphasis() -> Style {
 fn default_code() -> Style {
     Style::color(Color::Rgb(88, 166, 255))
 }
+// Clear of `code`'s colour and of the diff's green and red, which say
+// something of their own.
+fn default_table() -> Vec<Style> {
+    [
+        (229, 192, 123),
+        (86, 182, 194),
+        (198, 120, 221),
+        (209, 154, 102),
+    ]
+    .into_iter()
+    .map(|(r, g, b)| Style::color(Color::Rgb(r, g, b)))
+    .collect()
+}
 fn default_add() -> Style {
     Style::color(GREEN)
 }
@@ -495,6 +512,7 @@ impl Default for Theme {
             menu: Menu::default(),
             prompt: Prompt::default(),
             input: default_input(),
+            table: default_table(),
         }
     }
 }

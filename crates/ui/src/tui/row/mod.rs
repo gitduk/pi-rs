@@ -578,13 +578,14 @@ impl Row {
         }
     }
 
-    /// What in line `i` reads as one — a stretch of code, a link — as cell
-    /// ranges of the line `line` gives, its border not counted.
-    pub fn units(&self, i: usize) -> &[std::ops::Range<usize>] {
+    /// What in line `i` reads as one — a stretch of code, a link, a table's
+    /// cell — as cell ranges of the line `line` gives, its border not counted.
+    pub fn units(&self, i: usize, paint: &Paint, width: usize) -> crate::unit::Units {
         match &self.0 {
-            Kind::Answer(_, units) => units,
-            Kind::Relayed(r) => r.units(i),
-            _ => &[],
+            Kind::Answer(_, units) => units.clone(),
+            Kind::Relayed(r) => r.units(i).to_vec(),
+            Kind::Block(b) => b.units(paint, width),
+            _ => Vec::new(),
         }
     }
 

@@ -779,3 +779,36 @@ fn a_double_click_takes_wrapped_code_whole() {
     let words = crate::tui::select::Point { row: first, col: 1 };
     assert!(ui.unit_selection(&view, words).is_none());
 }
+
+// A table too wide to draw reads as its source, and a double click on a
+// cell takes that cell, wherever the badge and the wrap put it.
+#[test]
+fn a_double_click_takes_a_cell_of_a_wide_table() {
+    let mut ui = test_ui(30, 12);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    let table = "| name | what it does |\n|---|---|\n| pi | a very long description of it |\n\
+                 | 中文 | 宽 x |\n";
+    view.surface.scrollback = Row::answer(table, &Paint::new(true)).into();
+    ui.flush(&lane, &mut view);
+    let row = ui.drawn.iter().position(|r| r.contains("| pi |")).unwrap();
+    let col = ui.drawn[row].find("pi |").unwrap();
+    let at = crate::tui::select::Point { row, col };
+    let (_, text) = ui
+        .unit_selection(&view, at)
+        .expect("a cell under the click");
+    assert_eq!(text, "pi");
+    let col = ui.drawn[row].find("a very").unwrap() + 2;
+    let at = crate::tui::select::Point { row, col };
+    let (sel, text) = ui
+        .unit_selection(&view, at)
+        .expect("a cell under the click");
+    assert_eq!(text, "a very long description of it");
+    assert!(sel.head.row > row, "the cell wrapped on");
+    // Wide chars take two cells each, before the click and in the cell.
+    let row = ui.drawn.iter().position(|r| r.contains("中文")).unwrap();
+    let at = crate::tui::select::Point { row, col: 3 };
+    assert_eq!(ui.unit_selection(&view, at).unwrap().1, "中文");
+    let at = crate::tui::select::Point { row, col: 11 };
+    assert_eq!(ui.unit_selection(&view, at).unwrap().1, "宽 x");
+}

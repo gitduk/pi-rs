@@ -72,8 +72,8 @@ pub fn pieces(text: &str) -> Vec<Piece<'_>> {
     out
 }
 
-// A table's second line: `|---|:--:|`, each cell dashes with optional colons.
-fn delimiter(line: &str) -> bool {
+/// A table's second line: `|---|:--:|`, each cell dashes with optional colons.
+pub fn delimiter(line: &str) -> bool {
     let t = line.trim();
     let t = t.strip_prefix('|').unwrap_or(t);
     let t = t.strip_suffix('|').unwrap_or(t);
@@ -84,6 +84,40 @@ fn delimiter(line: &str) -> bool {
             let c = c.strip_suffix(':').unwrap_or(c);
             !c.is_empty() && c.chars().all(|ch| ch == '-')
         })
+}
+
+/// The cells of a table row, by the bytes of each one's text, the spaces
+/// around it left out; an empty cell is an empty range where it stands.
+/// `\|` is text, not a border, and the outer pipes may be left off.
+pub fn cells(row: &str) -> Vec<std::ops::Range<usize>> {
+    let mut pipes = Vec::new();
+    let mut escaped = false;
+    for (at, c) in row.char_indices() {
+        if c == '|' && !escaped {
+            pipes.push(at);
+        }
+        escaped = c == '\\' && !escaped;
+    }
+    let mut bounds = vec![0];
+    bounds.extend(pipes.iter().flat_map(|&p| [p, p + 1]));
+    bounds.push(row.len());
+    let cell = |from: usize, to: usize| {
+        let text = &row[from..to];
+        let start = from + (text.len() - text.trim_start().len());
+        start..(start + text.trim().len())
+    };
+    let mut out: Vec<_> = bounds.chunks(2).map(|b| cell(b[0], b[1])).collect();
+    // Outside an outer pipe there is no cell, only the row's margin.
+    if pipes.first().is_some_and(|&p| row[..p].trim().is_empty()) {
+        out.remove(0);
+    }
+    if pipes
+        .last()
+        .is_some_and(|&p| row[p + 1..].trim().is_empty())
+    {
+        out.pop();
+    }
+    out
 }
 
 /// `text` with each closed mermaid block drawn as a code block when it fits
@@ -157,6 +191,22 @@ fn squeeze(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{cells, delimiter};
+
+    // A cell split wrong colours the wrong text, and nobody would notice.
+    #[test]
+    fn a_row_splits_at_its_unescaped_pipes() {
+        let texts = |row: &'static str| -> Vec<&'static str> {
+            cells(row).into_iter().map(|r| &row[r]).collect()
+        };
+        assert_eq!(texts("| a | `b` |"), ["a", "`b`"]);
+        assert_eq!(texts("a | b"), ["a", "b"]);
+        assert_eq!(texts("| x \\| y | z |"), ["x \\| y", "z"]);
+        assert_eq!(texts("|  | z |"), ["", "z"]);
+        assert_eq!(texts("  | a |  "), ["a"]);
+        assert!(delimiter("|---|:--:|") && !delimiter("| a | b |"));
+    }
+
     // `squeeze` is only right while mermaid-text pads wide chars; once it
     // stops, this fails and `squeeze` has to go.
     #[test]
