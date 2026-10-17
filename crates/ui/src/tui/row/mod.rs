@@ -88,9 +88,9 @@ enum Kind {
         body: Line<'static>,
         band: Option<RStyle>,
     },
-    // What the model answered, one row per markdown line. Its own kind,
-    // not a notice — an answer is half the conversation, not screen-only.
-    Answer(Line<'static>),
+    // What the model answered, one row per markdown line, with what in it
+    // reads as one. Its own kind, not a notice: it is half the conversation.
+    Answer(Line<'static>, crate::unit::Units),
     // A line of an answer's code block, indented by `CODE_INDENT`.
     CodeLine(Line<'static>),
     Code(Code),
@@ -171,7 +171,7 @@ impl Row {
         matches!(
             &self.0,
             Kind::Said { .. }
-                | Kind::Answer(_)
+                | Kind::Answer(..)
                 | Kind::CodeLine(_)
                 | Kind::Code(_)
                 | Kind::Block(_)
@@ -196,7 +196,7 @@ impl Row {
 
     /// The blank line a turn after the first opens on.
     pub fn gap() -> Self {
-        Self::new(Kind::Answer(Line::default()))
+        Self::new(Kind::Answer(Line::default(), Vec::new()))
     }
 
     /// Whether this row is where a turn begins: something said, or relayed.
@@ -247,21 +247,22 @@ impl Row {
         let markdown = |text: &str| {
             render::render_coded(text, paint)
                 .into_iter()
-                .map(|(line, coded)| match coded {
+                .map(|r| match r.coded {
                     render::Coded::Badge(code) => Self::new(Kind::Code(Code {
-                        badge: line,
+                        badge: r.line,
                         code,
                         note: Default::default(),
                     })),
-                    render::Coded::Code => Self::new(Kind::CodeLine(line)),
-                    render::Coded::Text => Self::new(Kind::Answer(line)),
+                    render::Coded::Code => Self::new(Kind::CodeLine(r.line)),
+                    render::Coded::Text => Self::new(Kind::Answer(r.line, r.units)),
                 })
         };
         if !paint.color {
             return markdown(text).collect();
         }
-        let blank = || Self::new(Kind::Answer(Line::default()));
-        let is_blank = |row: &Self| matches!(row, Self(Kind::Answer(l), _) if l.spans.is_empty());
+        let blank = Self::gap;
+        let is_blank =
+            |row: &Self| matches!(row, Self(Kind::Answer(l, _), _) if l.spans.is_empty());
         let mut rows: Vec<Self> = Vec::new();
         for piece in block::pieces(text) {
             match piece {
@@ -523,7 +524,7 @@ impl Row {
     /// Wraps not counted; `line_height` gives a line's screen rows.
     pub fn len(&self) -> usize {
         match &self.0 {
-            Kind::Answer(_)
+            Kind::Answer(..)
             | Kind::CodeLine(_)
             | Kind::Code(_)
             | Kind::Block(_)
@@ -558,7 +559,7 @@ impl Row {
     ) -> (Line<'static>, Option<Line<'static>>) {
         match &self.0 {
             Kind::Said { border, body, .. } => (body.clone(), Some(border.clone())),
-            Kind::Answer(text) => (text.clone(), None),
+            Kind::Answer(text, _) => (text.clone(), None),
             Kind::Lines(lines) => (lines[i].clone(), None),
             Kind::CodeLine(line) => (line.clone(), Some(Line::from(CODE_INDENT))),
             Kind::Code(c) => (c.line(paint), None),
@@ -574,6 +575,16 @@ impl Row {
             Kind::Result(r) => (r.line(i, paint, width), None),
             Kind::Relayed(r) => r.line(i, paint, width),
             Kind::Steps(g) => g.line(i, paint, width),
+        }
+    }
+
+    /// What in line `i` reads as one — a stretch of code, a link — as cell
+    /// ranges of the line `line` gives, its border not counted.
+    pub fn units(&self, i: usize) -> &[std::ops::Range<usize>] {
+        match &self.0 {
+            Kind::Answer(_, units) => units,
+            Kind::Relayed(r) => r.units(i),
+            _ => &[],
         }
     }
 
@@ -785,12 +796,27 @@ mod height_tests {
     }
 }
 
-// A code block's line indented as an answer's is, standing on its own.
-fn set_off(line: Line<'static>, code: bool) -> Line<'static> {
-    if !code {
-        return line;
+// A badge copies its block, as an answer's does; a block's line is
+// indented as an answer's is, standing on its own.
+impl From<crate::render::Rendered> for PageLine {
+    fn from(r: crate::render::Rendered) -> Self {
+        use crate::render::Coded;
+        match r.coded {
+            Coded::Badge(code) => Self {
+                line: r.line,
+                copies: Some(code),
+                units: Vec::new(),
+            },
+            Coded::Code => {
+                let mut spans = vec![Span::raw(CODE_INDENT)];
+                spans.extend(r.line.spans);
+                Line::from(spans).into()
+            }
+            Coded::Text => Self {
+                line: r.line,
+                copies: None,
+                units: r.units,
+            },
+        }
     }
-    let mut spans = vec![Span::raw(CODE_INDENT)];
-    spans.extend(line.spans);
-    Line::from(spans)
 }

@@ -4,6 +4,7 @@
 //! What a config names is below this (`pi_store::theme`), and so is what a
 //! string occupies (`pi_store::text`); what is here puts the two on a screen.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::io::{IsTerminal, Write};
 use std::ops::Range;
@@ -208,13 +209,13 @@ fn badge_with(
 // A code block's opening fence becomes its badge, carrying the block's text;
 // the rest of its info string is the note, and the closing fence goes.
 fn fenced(
-    lines: Vec<Line<'static>>,
+    lines: Vec<(Line<'static>, crate::unit::Units)>,
     badge: ratatui::style::Style,
     muted: ratatui::style::Style,
-) -> Vec<(Line<'static>, Coded)> {
+) -> Vec<Rendered> {
     let mut open: Option<(usize, Vec<String>)> = None;
-    let mut out = Vec::with_capacity(lines.len());
-    for line in lines {
+    let mut out: Vec<Rendered> = Vec::with_capacity(lines.len());
+    for (line, units) in lines {
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         let Some(lang) = text.strip_prefix(FENCE) else {
             let coded = match &mut open {
@@ -224,21 +225,24 @@ fn fenced(
                 }
                 None => Coded::Text,
             };
-            out.push((line, coded));
+            out.push(Rendered { line, coded, units });
             continue;
         };
         match open.take() {
-            Some((at, body)) => out[at].1 = Coded::Badge(body.join("\n")),
+            Some((at, body)) => out[at].coded = Coded::Badge(body.join("\n")),
             None => {
                 let (lang, note) = lang.trim().split_once(' ').unwrap_or((lang.trim(), ""));
                 open = Some((out.len(), Vec::new()));
-                let badge = badge_with(lang, note.trim(), badge, muted);
-                out.push((badge, Coded::Badge(String::new())));
+                out.push(Rendered {
+                    line: badge_with(lang, note.trim(), badge, muted),
+                    coded: Coded::Badge(String::new()),
+                    units: Vec::new(),
+                });
             }
         }
     }
     if let Some((at, body)) = open {
-        out[at].1 = Coded::Badge(body.join("\n"));
+        out[at].coded = Coded::Badge(body.join("\n"));
     }
     out
 }
@@ -310,17 +314,27 @@ pub enum Coded {
     Code,
 }
 
+/// A rendered line, what it is to a code block, and its stretches that
+/// read as one.
+#[derive(Debug, Clone)]
+pub struct Rendered {
+    pub line: Line<'static>,
+    pub coded: Coded,
+    pub units: crate::unit::Units,
+}
+
 /// Parse and render markdown into styled lines using `tui-markdown` and theme.
 /// Styles ride on the spans; nothing here speaks SGR.
 pub fn render_markdown(text: &str, paint: &Paint) -> Vec<ratatui::text::Line<'static>> {
     render_coded(text, paint)
         .into_iter()
-        .map(|(line, _)| line)
+        .map(|r| r.line)
         .collect()
 }
 
-/// The same lines, each with what it is to a code block.
-pub fn render_coded(text: &str, paint: &Paint) -> Vec<(Line<'static>, Coded)> {
+/// The same lines, each with what it is to a code block and what in it
+/// reads as one.
+pub fn render_coded(text: &str, paint: &Paint) -> Vec<Rendered> {
     if text.is_empty() {
         return Vec::new();
     }
@@ -328,7 +342,11 @@ pub fn render_coded(text: &str, paint: &Paint) -> Vec<(Line<'static>, Coded)> {
     if !paint.color {
         return text
             .lines()
-            .map(|l| (Line::from(l.to_string()), Coded::Text))
+            .map(|l| Rendered {
+                line: Line::from(l.to_string()),
+                coded: Coded::Text,
+                units: Vec::new(),
+            })
             .collect();
     }
     let trimmed = trim_partial_fences(text);
@@ -337,6 +355,7 @@ pub fn render_coded(text: &str, paint: &Paint) -> Vec<(Line<'static>, Coded)> {
         .ok()
         .map(|(w, _)| usize::from(w));
     let drawn = crate::block::drawn(trimmed, width);
+    let marked = crate::unit::mark(&drawn);
     let sheet = PiStyleSheet {
         heading: style_to_ratatui(&paint.theme.heading),
         code: style_to_ratatui(&paint.theme.code),
@@ -347,7 +366,7 @@ pub fn render_coded(text: &str, paint: &Paint) -> Vec<(Line<'static>, Coded)> {
         .patch(band_to_ratatui(&paint.theme.prompt.panel.said));
     let muted = sheet.muted;
     let options = tui_markdown::Options::new(sheet);
-    let parsed = tui_markdown::from_str_with_options(&drawn, &options);
+    let parsed = tui_markdown::from_str_with_options(&marked, &options);
     // The parsed text borrows the input; flatten text/line styles onto the
     // spans and own the content, so the lines outlive this call.
     let lines = parsed
@@ -363,6 +382,10 @@ pub fn render_coded(text: &str, paint: &Paint) -> Vec<(Line<'static>, Coded)> {
             Line::from(spans)
         })
         .collect();
+    let lines = match marked {
+        Cow::Owned(_) => crate::unit::strip(lines),
+        Cow::Borrowed(_) => lines.into_iter().map(|l| (l, Vec::new())).collect(),
+    };
     fenced(lines, badge, muted)
 }
 
@@ -821,7 +844,7 @@ mod tests {
         let coded = super::render_coded(&text, &super::Paint::new(true));
         let carried: Vec<_> = coded
             .iter()
-            .filter_map(|(_, c)| match c {
+            .filter_map(|r| match &r.coded {
                 super::Coded::Badge(code) => Some(code.as_str()),
                 _ => None,
             })
@@ -830,7 +853,7 @@ mod tests {
         // Every line of the block, and nothing past it, is set off as code.
         let set_off = coded
             .iter()
-            .filter(|(_, c)| *c == super::Coded::Code)
+            .filter(|r| r.coded == super::Coded::Code)
             .count();
         assert_eq!(set_off, code.lines().count());
     }

@@ -5,16 +5,16 @@ use ratatui::text::Line;
 use unicode_width::UnicodeWidthStr;
 
 use super::steps::STEP_INDENT;
-use super::{CODE_INDENT, Fold, Opening, count, set_off};
+use super::{CODE_INDENT, Fold, Opening, count};
 use crate::render::{self, Paint};
+use crate::tui::browse::PageLine;
 use pi_store::icons;
 
 pub(super) struct Relayed {
     label: String,
     // When it came in, in wall-clock seconds.
     at: u64,
-    // Each line, and whether it sits in a code block.
-    body: Vec<(Line<'static>, bool)>,
+    body: Vec<render::Rendered>,
     open: bool,
     hovered: bool,
 }
@@ -26,11 +26,11 @@ impl Relayed {
         Self {
             label: label.to_string(),
             at,
-            body: render::render_coded(text, paint)
-                .into_iter()
-                .map(|(line, coded)| (line, coded == render::Coded::Code))
-                .filter(|_| !said)
-                .collect(),
+            body: if said {
+                Vec::new()
+            } else {
+                render::render_coded(text, paint)
+            },
             open: false,
             hovered: false,
         }
@@ -49,13 +49,21 @@ impl Relayed {
         if i == 0 {
             return (self.head(self.hovered, paint, width), None);
         }
-        let (line, code) = self.body.get(i - 1).cloned().unwrap_or_default();
-        let indent = if code {
+        let Some(r) = self.body.get(i - 1) else {
+            return (Line::default(), Some(Line::from(STEP_INDENT)));
+        };
+        let indent = if r.coded == render::Coded::Code {
             format!("{STEP_INDENT}{CODE_INDENT}")
         } else {
             STEP_INDENT.to_string()
         };
-        (line, Some(Line::from(indent)))
+        (r.line.clone(), Some(Line::from(indent)))
+    }
+
+    // What in line `i` reads as one; its own line holds nothing such.
+    pub(super) fn units(&self, i: usize) -> &[std::ops::Range<usize>] {
+        let body = i.checked_sub(1).and_then(|i| self.body.get(i));
+        body.map_or(&[], |r| &r.units)
     }
 
     pub(super) fn hover(&mut self, hovered: bool) {
@@ -95,7 +103,7 @@ impl Fold for Relayed {
         let body = self
             .body
             .iter()
-            .map(|(line, code)| (set_off(line.clone(), *code), None))
+            .map(|r| PageLine::from(r.clone()))
             .collect();
         Some((self.head(false, paint, width), body))
     }

@@ -13,9 +13,23 @@ use super::ui::Focus;
 use super::view::View;
 use pi_store::listing::Listing;
 
-// A line of a text page, with the code block a click on it copies when it
-// is that block's badge.
-pub(super) type PageLine = (Line<'static>, Option<String>);
+// A line of a text page: the code block a click on it copies when it is
+// that block's badge, and what in it a double click takes whole.
+pub(super) struct PageLine {
+    pub(super) line: Line<'static>,
+    pub(super) copies: Option<String>,
+    pub(super) units: crate::unit::Units,
+}
+
+impl From<Line<'static>> for PageLine {
+    fn from(line: Line<'static>) -> Self {
+        Self {
+            line,
+            copies: None,
+            units: Vec::new(),
+        }
+    }
+}
 
 // What a click on a line of a text page does.
 pub(super) enum TextClick {
@@ -71,7 +85,7 @@ impl Ui {
         let Some(Page::Preview(lines)) = self.page() else {
             return None;
         };
-        match &lines.get(n)?.1 {
+        match &lines.get(n)?.copies {
             Some(code) => Some(TextClick::Copy(code.clone())),
             None => (n == 0).then_some(TextClick::Close),
         }

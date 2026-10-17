@@ -110,8 +110,6 @@ pub(super) struct Ui {
     // The rows as last drawn, in plain text: what a selection reads. The
     // history's, row for row with `row_targets`, then the bar's under them.
     pub(super) drawn: Vec<String>,
-    // Row for row with `drawn`: the columns of each set as inline code.
-    pub(super) drawn_code: Vec<Vec<(usize, usize)>>,
     // What the mouse has selected, drawn reversed until the next press.
     pub(super) selection: Option<super::select::Selection>,
     // The last press: where, when, how many in a row there, and whether the
@@ -264,7 +262,6 @@ impl Ui {
             row_targets: Vec::new(),
             row_of: Vec::new(),
             drawn: Vec::new(),
-            drawn_code: Vec::new(),
             selection: None,
             press: None,
             live_tools_shown: false,

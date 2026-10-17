@@ -443,9 +443,9 @@ pub(super) fn body(
         let indent = Line::from(super::row::CODE_INDENT);
         render::render_coded(partial, paint)
             .into_iter()
-            .flat_map(|(line, coded)| {
-                let border = (coded == render::Coded::Code).then_some(&indent);
-                screen::wrap(border, &line, width)
+            .flat_map(|r| {
+                let border = (r.coded == render::Coded::Code).then_some(&indent);
+                screen::wrap(border, &r.line, width)
             })
             .collect()
     }

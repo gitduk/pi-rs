@@ -3594,6 +3594,7 @@ dependencies = [
  "mermaid-text",
  "pi-core",
  "pi-store",
+ "pulldown-cmark",
  "ratatui",
  "serde",
  "serde_json",

@@ -2,9 +2,11 @@
 //! regions, and the row under the pointer.
 
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::text::Line;
 
 use super::Ui;
-use super::browse::TextClick;
+use super::browse::{Page, TextClick};
+use super::screen;
 use super::select::{self, Drawn, Point, Selection};
 use super::ui::Press;
 use super::view::View;
@@ -158,7 +160,7 @@ impl Ui {
                         && (body.len() > self.regions.history.height as usize / 2
                             || row.clipped(width))
                     {
-                        self.preview(std::iter::once((head, None)).chain(body).collect());
+                        self.preview(std::iter::once(head.into()).chain(body).collect());
                         return;
                     }
                     if !row.toggle_at(line, width) {
@@ -217,10 +219,15 @@ impl Ui {
             moved: false,
             job,
         });
+        if count == 2
+            && let Some((sel, text)) = self.unit_selection(view, at)
+        {
+            self.selection = Some(sel);
+            self.copy_text(&text);
+            return;
+        }
         let picked = match count {
-            2 => self
-                .code_selection(view, at)
-                .or_else(|| self.word_selection(at)),
+            2 => self.word_selection(at),
             3 => self.line_selection(at),
             _ => None,
         };
@@ -284,41 +291,60 @@ impl Ui {
         })
     }
 
-    // The inline code under `at`, whole, followed onto the rows its line
-    // wrapped to: a command copies as one, not word by word.
-    fn code_selection(&self, view: &View, at: Point) -> Option<Selection> {
-        let runs = |r: usize| self.drawn_code.get(r).map_or(&[][..], Vec::as_slice);
-        let &(from, to) = runs(at.row)
-            .iter()
-            .find(|(f, t)| (*f..*t).contains(&at.col))?;
-        // Filled to its end: the text runs on in the next row of its line.
-        let ends = |r: usize, end: usize| {
-            let text = self.drawn.get(r).map_or("", String::as_str);
-            end >= text.trim_end().chars().map(select::cell).sum::<usize>()
+    // The stretch under `at` that reads as one — code, a link — and its
+    // text, found in the line it belongs to however that wrapped.
+    pub(super) fn unit_selection(&self, view: &View, at: Point) -> Option<(Selection, String)> {
+        let width = self.screen.usable();
+        let (line, border, units) = match self.row_targets.get(at.row)? {
+            Target::Scrollback(idx, i) => {
+                let row = view.surface.scrollback.get(*idx)?;
+                let (line, border) = row.line(*i, &self.paint, width);
+                (line, border, row.units(*i))
+            }
+            Target::Text(n) => {
+                let Some(Page::Preview(lines)) = self.page() else {
+                    return None;
+                };
+                let page = lines.get(*n)?;
+                (page.line.clone(), None, &page.units[..])
+            }
+            _ => return None,
         };
-        let (mut anchor, mut head) = (Point { col: from, ..at }, Point { col: to - 1, ..at });
-        while anchor.row > 0
-            && anchor.col == self.lead(view, anchor.row)
-            && self.same_line(anchor.row - 1, anchor.row)
-            && let Some(&(f, t)) = runs(anchor.row - 1).last()
-            && ends(anchor.row - 1, t)
-        {
-            anchor = Point {
-                row: anchor.row - 1,
-                col: f,
-            };
+        if units.is_empty() {
+            return None;
         }
-        while ends(head.row, head.col + 1)
-            && self.same_line(head.row, head.row + 1)
-            && let Some(&(f, t)) = runs(head.row + 1).first()
-            && f == self.lead(view, head.row + 1)
-        {
-            head = Point {
-                row: head.row + 1,
-                col: t - 1,
-            };
-        }
-        Some(Selection { anchor, head })
+        let lead = border.as_ref().map_or(0, Line::width);
+        let rows: Vec<usize> = (screen::wrap(border.as_ref(), &line, width).iter())
+            .map(|r| r.width().saturating_sub(lead))
+            .collect();
+        let k = *self.row_of.get(at.row)?;
+        let col = rows.iter().take(k).sum::<usize>() + at.col.checked_sub(lead)?;
+        let unit = crate::unit::at(units, col)?;
+        let text = select::cols(&screen::plain(&line), unit.start, unit.end);
+        // Cell `c` of the line where it is drawn: which of its rows, what column.
+        let place = |mut c: usize| {
+            let mut j = 0;
+            while j + 1 < rows.len() && c >= rows[j] {
+                c -= rows[j];
+                j += 1;
+            }
+            (j, c + lead)
+        };
+        // Rows past the window's edges are held at the edge row.
+        let last = (self.regions.history.height as usize).saturating_sub(1);
+        let point = |(j, col): (usize, usize), edge: Point| match (at.row + j).checked_sub(k) {
+            Some(row) if row <= last => Point { row, col },
+            _ => edge,
+        };
+        let anchor = point(place(unit.start), Point { row: 0, col: lead });
+        let head = point(
+            place(unit.end - 1),
+            Point {
+                row: last,
+                col: usize::MAX - 1,
+            },
+        );
+        Some((Selection { anchor, head }, text))
     }
 
     // Whether drawn rows `a` and `b` are wraps of one logical line.
@@ -362,7 +388,7 @@ impl Ui {
         })
     }
 
-    // The selection to the clipboard, the bar saying how much went.
+    // The selection to the clipboard.
     fn copy_selection(&mut self, view: &View) {
         let Some(sel) = self.selection else {
             return;
@@ -378,13 +404,17 @@ impl Ui {
                 lead: self.lead(view, at),
             })
             .collect();
-        let text = select::text(&sel, &rows, width);
+        self.copy_text(&select::text(&sel, &rows, width));
+    }
+
+    // `text` to the clipboard, the bar saying how much went.
+    fn copy_text(&mut self, text: &str) {
         if text.is_empty() {
             return;
         }
         let copied = crossterm::execute!(
             std::io::stdout(),
-            crossterm::clipboard::CopyToClipboard::to_clipboard_from(text.as_str())
+            crossterm::clipboard::CopyToClipboard::to_clipboard_from(text)
         );
         self.flash(match copied {
             Ok(()) => format!("copied {}", super::row::count(text.chars().count(), "char")),

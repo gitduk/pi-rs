@@ -460,7 +460,7 @@ fn a_search_brings_each_line_holding_it_to_the_top() {
     let mut view = View::default();
     ui.preview(
         (0..100)
-            .map(|i| (Line::from(format!("line {i}")), None))
+            .map(|i| Line::from(format!("line {i}")).into())
             .collect(),
     );
     let press = |ui: &mut crate::tui::Ui, view: &mut View, event| {
@@ -536,7 +536,7 @@ fn a_search_query_takes_the_line_editing_keys() {
     let mut ui = test_ui(30, 12);
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
-    ui.preview(vec![(Line::from("head"), None)]);
+    ui.preview(vec![Line::from("head").into()]);
     ui.flush(&lane, &mut view);
     for c in "/one two".chars() {
         ui.key(&lane, &mut view, typed(c), false);
@@ -561,9 +561,9 @@ fn a_search_counts_what_is_drawn_and_reaches_rows_below_the_window() {
         .collect::<Vec<_>>()
         .join(" ");
     ui.preview(vec![
-        (Line::from("head"), None),
-        (Line::from("\x1b[31mred\x1b[0m"), None),
-        (Line::from(long), None),
+        Line::from("head").into(),
+        Line::from("\x1b[31mred\x1b[0m").into(),
+        Line::from(long).into(),
     ]);
     ui.flush(&lane, &mut view);
     let count = |ui: &crate::tui::Ui| ui.search_prompt().map(|(_, c)| c.trim().to_string());
@@ -594,7 +594,7 @@ fn a_paste_goes_on_the_query() {
     let mut ui = test_ui(30, 12);
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
-    ui.preview(vec![(Line::from("head"), None)]);
+    ui.preview(vec![Line::from("head").into()]);
     ui.flush(&lane, &mut view);
     ui.key(&lane, &mut view, typed('/'), false);
     ui.key(
@@ -617,7 +617,7 @@ fn a_step_after_moving_the_view_goes_from_the_view() {
     let mut view = View::default();
     ui.preview(
         (0..100)
-            .map(|i| (Line::from(format!("line {i}")), None))
+            .map(|i| Line::from(format!("line {i}")).into())
             .collect(),
     );
     // The count as the one frame after the key drew it, not as kept.
@@ -754,4 +754,28 @@ fn a_top_row_in_the_stream_holds_as_it_grows_and_lands() {
     view.surface.scrollback.push(Row::notice("next"));
     ui.flush(&lane, &mut view);
     assert_eq!(ui.drawn[0], top, "as it landed");
+}
+
+// Code wrapped over rows is taken whole from any of them: as the line holds
+// it, not as the rows cut it.
+#[test]
+fn a_double_click_takes_wrapped_code_whole() {
+    let mut ui = test_ui(20, 8);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    let answer = Row::answer("run `cargo test --workspace` now", &Paint::new(true));
+    view.surface.scrollback = answer.into();
+    ui.flush(&lane, &mut view);
+    let first = ui.drawn.iter().position(|r| r.starts_with("run")).unwrap();
+    let at = crate::tui::select::Point {
+        row: first + 1,
+        col: 0,
+    };
+    let (sel, text) = ui.unit_selection(&view, at).expect("code under the click");
+    assert_eq!(text, "cargo test --workspace");
+    assert_eq!((sel.anchor.row, sel.anchor.col), (first, 4));
+    assert_eq!(sel.head.row, first + 1);
+    // Plain words around it are no stretch.
+    let words = crate::tui::select::Point { row: first, col: 1 };
+    assert!(ui.unit_selection(&view, words).is_none());
 }

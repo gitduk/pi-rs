@@ -4,8 +4,9 @@
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::{Fold, Opening, clipped, count, set_off};
+use super::{Fold, Opening, clipped, count};
 use crate::render::{self, Paint};
+use crate::tui::browse::PageLine;
 use crate::tui::{THINKING, screen};
 use pi_store::icons;
 
@@ -737,16 +738,11 @@ impl Fold for Group {
                 let text: Vec<String> = lines.iter().map(screen::plain).collect();
                 render::render_coded(&text.join("\n"), paint)
                     .into_iter()
-                    .map(|(line, coded)| match coded {
-                        // The badge copies its block, as an answer's does.
-                        render::Coded::Badge(code) => (line, Some(code)),
-                        render::Coded::Code => (set_off(line, true), None),
-                        render::Coded::Text => (line, None),
-                    })
+                    .map(PageLine::from)
                     .collect()
             }
             Step::Tool(t) => (0..t.body.len())
-                .map(|j| (body_line(t, j, paint), None))
+                .map(|j| body_line(t, j, paint).into())
                 .collect(),
         };
         Some((head, body))

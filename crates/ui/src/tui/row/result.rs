@@ -7,6 +7,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::{Fold, Opening};
 use crate::render::{self, Paint};
+use crate::tui::browse::PageLine;
 
 // Kept as its parts; clipped only when a frame needs it, since a row
 // clipped to its landing width could never regrow.
@@ -122,6 +123,6 @@ impl Fold for ToolOut {
             usize::MAX,
         )
         .into_iter();
-        Some((rows.next()?, rows.map(|line| (line, None)).collect()))
+        Some((rows.next()?, rows.map(PageLine::from).collect()))
     }
 }
