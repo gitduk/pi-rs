@@ -73,7 +73,7 @@ pub fn pieces(text: &str) -> Vec<Piece<'_>> {
 }
 
 /// A table's second line: `|---|:--:|`, each cell dashes with optional colons.
-pub fn delimiter(line: &str) -> bool {
+fn delimiter(line: &str) -> bool {
     let t = line.trim();
     let t = t.strip_prefix('|').unwrap_or(t);
     let t = t.strip_suffix('|').unwrap_or(t);

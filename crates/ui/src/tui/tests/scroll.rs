@@ -788,7 +788,7 @@ fn a_double_click_takes_a_cell_of_a_wide_table() {
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     let table = "| name | what it does |\n|---|---|\n| pi | a very long description of it |\n\
-                 | 中文 | 宽 x |\n";
+                 | 中文 | 宽 x |\n| --- | --- |\n";
     view.surface.scrollback = Row::answer(table, &Paint::new(true)).into();
     ui.flush(&lane, &mut view);
     let row = ui.drawn.iter().position(|r| r.contains("| pi |")).unwrap();
@@ -811,4 +811,8 @@ fn a_double_click_takes_a_cell_of_a_wide_table() {
     assert_eq!(ui.unit_selection(&view, at).unwrap().1, "中文");
     let at = crate::tui::select::Point { row, col: 11 };
     assert_eq!(ui.unit_selection(&view, at).unwrap().1, "宽 x");
+    // A body row of dashes is cells, not a second delimiter.
+    let row = ui.drawn.iter().position(|r| r.contains("| --- |")).unwrap();
+    let at = crate::tui::select::Point { row, col: 3 };
+    assert_eq!(ui.unit_selection(&view, at).unwrap().1, "---");
 }

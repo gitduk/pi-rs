@@ -208,7 +208,8 @@ fn table_source(source: &str, paint: &Paint) -> (Vec<Span<'static>>, Units) {
     let (mut spans, mut units, mut col) = (Vec::new(), Units::new(), 0);
     for (i, row) in source.lines().enumerate() {
         spans.push(Span::raw("\n"));
-        if block::delimiter(row) {
+        // Only the second line: a body row of dashes is cells like any other.
+        if i == 1 {
             spans.push(muted(row));
             col += UnicodeWidthStr::width(row);
             continue;
