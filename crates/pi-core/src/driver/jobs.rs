@@ -394,6 +394,18 @@ impl Table {
         (lines, stopped)
     }
 
+    /// Every job of `from` comes back to `to` from now on: the conversation
+    /// it reports to moved there. It goes on running where it started.
+    pub fn rehome(&self, from: &Path, to: &Path) {
+        let mut inner = self.lock();
+        for item in inner.items.iter_mut().filter(|i| i.root == from) {
+            tracing::info!(target: "pi::job", job = item.id, to = %to.display(), "rehomed");
+            item.root = to.to_path_buf();
+        }
+        drop(inner);
+        self.changed.notify_one();
+    }
+
     /// Stop and forget every job of checkouts at or under `root`: the
     /// checkout is gone, and a new one there is not it.
     pub fn drop_under(&self, root: &Path) {

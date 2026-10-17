@@ -10,6 +10,7 @@ use crate::input::{Step, refused};
 use pi_store::args::EffortArg;
 use pi_store::config::{self, Config};
 use pi_store::icons;
+use pi_store::settings::Settings;
 
 impl Core {
     /// Re-read the config and everything it decides, whole or not at all:
@@ -69,23 +70,23 @@ impl Core {
         Ok(said)
     }
     // Take this config as the one in force, whole or not at all — nothing
-    // is touched until it is all computed.
-    fn adopt(&mut self, config: Config) -> Result<Vec<String>, String> {
-        let root = self.lane().root().to_path_buf();
+    // is touched until it is all computed. `settings`, when given, replace the
+    // ones in force with it; `prompt_files` as `resolve` takes them.
+    pub(super) fn adopt(
+        &mut self,
+        config: Config,
+        workspace: tool::Workspace,
+        settings: Option<Settings>,
+        prompt_files: Option<std::sync::Arc<resolve::PromptFiles>>,
+    ) -> Result<Vec<String>, String> {
+        let root = workspace.root().to_path_buf();
         let failed = |e| Err(format!("nothing reloaded — {}", refused("reload", e)));
-        // `write_roots` widen the workspace, so it is built again from them.
-        let workspace = match tool::Workspace::new(&root)
-            .and_then(|ws| ws.with_write_roots(&config.writable()))
-        {
-            Ok(ws) => ws,
-            Err(e) => return failed(e.into()),
-        };
         let resolved = match crate::core::resolve::resolve(
             &self.pinned,
             &workspace,
             &config,
-            &self.settings,
-            Some(self.lane().resolved().prompt_files.clone()),
+            settings.as_ref().unwrap_or(&self.settings),
+            prompt_files,
         ) {
             Ok(r) => r,
             Err(e) => return failed(e),
@@ -132,6 +133,9 @@ impl Core {
                     ag.retarget(transport, spec);
                 }
             });
+        if let Some(settings) = settings {
+            self.settings = settings;
+        }
         self.in_force();
         crate::core::mcp::sync(&config, &root);
         self.config = std::sync::Arc::new(config);
@@ -153,7 +157,12 @@ impl Core {
             .settings
             .config()
             .map_err(|e| format!("nothing reloaded — {}", refused("settings", e)))?;
-        self.adopt(config)
+        // `write_roots` widen the workspace, so it is built again from them.
+        let workspace = tool::Workspace::new(self.lane().root())
+            .and_then(|ws| ws.with_write_roots(&config.writable()))
+            .map_err(|e| format!("nothing reloaded — {}", refused("reload", e.into())))?;
+        let prompt_files = self.lane().resolved().prompt_files.clone();
+        self.adopt(config, workspace, None, Some(prompt_files))
     }
     /// `/edit`: bare, the files it offers; with a name, that file to open.
     pub(super) fn edit(&self, name: &str) -> Step {

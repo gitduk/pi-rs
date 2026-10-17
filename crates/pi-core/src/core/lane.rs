@@ -27,10 +27,12 @@ use super::Core;
 use crate::core::meter::{Snapshot, Tally};
 use crate::core::resolve::Resolved;
 use crate::input::commands::session_facts;
-use crate::input::{Rewound, refused};
+use crate::input::{Rewound, Step, refused};
 use pi_store::icons;
 use pi_store::journal;
+use pi_store::listing::Listing;
 use pi_store::session::{self, Stored};
+use pi_store::settings::Settings;
 
 /// Where this lane's run stands.
 ///
@@ -115,6 +117,11 @@ enum Held {
 }
 
 impl Conversation {
+    // Held under another root now; the transcript and its figures stay.
+    fn reclaim(&mut self, claim: Option<session::Claim>) {
+        self._claim = claim;
+    }
+
     fn new(
         id: String,
         created: u64,
@@ -720,6 +727,83 @@ impl Core {
             None => Vec::new(),
         }
     }
+    /// `/cd`: the conversation in front carries on in `dir`, and all the tree
+    /// decides is decided again there; whole or not at all.
+    pub(super) fn move_to(&mut self, dir: &str) -> Result<Step, String> {
+        let from = self.lane().root().to_path_buf();
+        let failed = |e: anyhow::Error| format!("not moved — {}", refused("cd", e));
+        let target = match dir.strip_prefix('~') {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+                let home = crate::core::instructions::home()
+                    .ok_or_else(|| failed(anyhow::anyhow!("$HOME is not set")))?;
+                home.join(rest.trim_start_matches('/'))
+            }
+            _ => from.join(dir),
+        };
+        let settings = Settings::load(self.pinned.config.as_deref(), &target).map_err(&failed)?;
+        let config = settings.config().map_err(&failed)?;
+        let ws = tool::Workspace::new(&target)
+            .and_then(|ws| ws.with_write_roots(&config.writable()))
+            .map_err(|e| failed(anyhow::anyhow!("{}: {e}", target.display())))?;
+        let to = ws.root().to_path_buf();
+        if to == from {
+            return Ok(Step::Answer(format!("already in {}", to.display())));
+        }
+        if self.lane_at(&to).is_some() {
+            return Err(format!("{} is open in another lane already", to.display()));
+        }
+        let Some(empty) = self.lane().session().map(|s| s.is_empty()) else {
+            return Err("a run has the transcript — wait for it to end".into());
+        };
+        // Filed under the root it was written in before anything moves.
+        if !empty {
+            self.save().map_err(&failed)?;
+        }
+
+        let worktree = crate::core::worktree::list(&to).ok().and_then(|trees| {
+            let tree = trees
+                .into_iter()
+                .find(|t| !t.main && t.path.canonicalize().ok().as_ref() == Some(&to))?;
+            Some(tree.name)
+        });
+        let mut said = self.adopt(config, ws, Some(settings), None)?;
+        // Built, not kept: a `Ctx`'s tables key on absolute paths in one tree.
+        let id = self.lane().talk.id.clone();
+        let ws = self.lane().ctx().workspace.clone();
+        *self.lane_mut().ctx_mut() = Ctx::new(ws).with_session(&id, pi_store::spill_root());
+        self.lane_mut().checkout.worktree = worktree;
+
+        // The record follows under the same id: one rename takes the
+        // transcript, its journal and its subagents along.
+        self.lane_mut().talk.reclaim(None);
+        let claim = if self.store.path_of(&from, &id).is_file() {
+            match self.store.relocate(&to, &id) {
+                Ok(claim) => Some(claim),
+                Err(e) => {
+                    tracing::warn!(target: "pi::session", error = %e, "the session record did not move");
+                    said.push(format!("its record stays under {} — {e:#}", from.display()));
+                    self.store.claim(&to, &id).ok()
+                }
+            }
+        } else {
+            self.store.claim(&to, &id).ok()
+        };
+        self.lane_mut().talk.reclaim(claim);
+        journal::switched(&self.store.journal_path(&to, &id), &id);
+        if let Some(jobs) = &self.jobs {
+            jobs.rehome(&from, &to);
+        }
+        // Earlier calls name paths against the old root; nothing rewrites them.
+        self.lane_mut().push_note(&format!(
+            "The workspace moved from {} to {}: relative paths earlier in this \
+             conversation are relative to {}.",
+            from.display(),
+            to.display(),
+            from.display()
+        ));
+        said.insert(0, format!("now in {}", to.display()));
+        Ok(Step::Moved(Listing::say(said)))
+    }
     // Open a checkout as a new lane, in front; whole or not at all — a tree
     // whose skills won't resolve leaves the run where it was.
     pub(super) fn open_lane(
@@ -843,7 +927,7 @@ impl Core {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::tests::a_lane;
+    use crate::core::tests::{Recording, a_lane, a_repl};
     use llm::model::Pricing;
     use llm::stream::Usage;
 
@@ -917,5 +1001,32 @@ mod tests {
             ],
             "in the order they were drawn"
         );
+    }
+
+    // The conversation and its record land in the new tree;
+    // the model is told the old paths were the old root's.
+    #[tokio::test]
+    async fn a_move_carries_the_conversation_and_its_record_to_the_new_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().canonicalize().unwrap();
+        let to = from.join("new_project");
+        std::fs::create_dir(&to).unwrap();
+        let mut core = a_repl(&from, std::sync::Arc::new(Recording::default()), "model-a");
+        core.lane_mut().push_note("said before the move");
+        core.save().unwrap();
+
+        let step = core.move_to("new_project").unwrap();
+        assert!(matches!(step, crate::input::Step::Moved(_)));
+        assert_eq!(core.lane().root(), to);
+        assert!(core.store.path_of(&to, "s1").is_file(), "record moved");
+        assert!(!core.store.path_of(&from, "s1").exists(), "kept once");
+        let session = core.lane().session().unwrap();
+        let text = serde_json::to_string(session.entries()).unwrap();
+        assert!(text.contains("said before the move"), "transcript kept");
+        assert!(text.contains("moved from"), "the model is told");
+        assert!(core.store.claim(&to, "s1").is_err(), "still held here");
+
+        assert!(core.move_to("nowhere").is_err(), "a missing dir is refused");
+        assert_eq!(core.lane().root(), to, "and changes nothing");
     }
 }

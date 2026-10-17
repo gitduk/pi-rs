@@ -249,6 +249,19 @@ impl Tui {
         let _ = tool::state::write_private(&path, editor::encode(keep).as_bytes());
     }
 
+    // What the input keys on the root goes where the lane in front is now.
+    fn follow_root(&mut self) {
+        let root = self.core.lane().root().to_path_buf();
+        self.ui.lists.at(&root);
+        self.ui.at_menu = None;
+        // Recall follows the checkout like the lists do; the line just
+        // typed is already filed (`save_history` ran while still in front).
+        self.ui
+            .editor
+            .seed_history(history_of(&self.core.store, &root));
+        self.ui.at_root = root;
+    }
+
     // Brings the screen into step after a lane switch: parks the old
     // lane's draft, restores the new one's, follows lists, replays news.
     fn reconcile(&mut self, was: usize) {
@@ -259,13 +272,7 @@ impl Tui {
             .leave_lane(view_at(&mut self.views, self.core.lanes[was].token()));
         let parked = std::mem::take(&mut front_view(&mut self.views, self.core.lane()).draft);
         self.ui.editor.set_line(&parked);
-        self.ui.lists.at(self.core.lane().root());
-        self.ui.at_root = self.core.lane().root().to_path_buf();
-        self.ui.at_menu = None;
-        // Recall follows the checkout like the lists do; the line just
-        // typed is already filed (`save_history` ran while still in front).
-        let lines = history_of(&self.core.store, self.core.lane().root());
-        self.ui.editor.seed_history(lines);
+        self.follow_root();
         // A newly opened lane has no banner yet. Nothing reads the screen
         // here — the events below ask for it again, in their own lane.
         view::opened(&mut self.views, self.core.lane(), &self.ui.paint);
@@ -765,6 +772,10 @@ impl Tui {
                     });
                 }
                 Step::Swap(said) => self.land_swap(said),
+                Step::Moved(said) => {
+                    self.follow_root();
+                    self.land_lines(said);
+                }
                 Step::Worktrees(lines) => {
                     self.land_lines(lines);
                     // A checkout went; the cached list would go on offering it.

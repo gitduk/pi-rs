@@ -367,6 +367,12 @@ impl Core {
                 };
                 Step::Handled(Listing::say(rows))
             }
+            Intent::Builtin(Builtin::Cd(dir)) => match dir.trim() {
+                "" => Step::Answer(self.lane().root().display().to_string()),
+                dir => self
+                    .move_to(dir)
+                    .unwrap_or_else(|why| Step::Handled(Listing::say([why]))),
+            },
             Intent::Builtin(Builtin::Worktree(name)) => {
                 if name.is_empty() {
                     Step::Handled(Listing::say(self.worktree_listing()))
@@ -571,6 +577,7 @@ mod tests {
             Intent::Builtin(Builtin::Resume("1756240000-1".into())),
             Intent::Builtin(Builtin::Compact(String::new())),
             Intent::Builtin(Builtin::Restart),
+            Intent::Builtin(Builtin::Cd("~/elsewhere".into())),
         ] {
             assert!(
                 matches!(intent.fate(), Fate::Refused(_)),

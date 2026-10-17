@@ -85,6 +85,12 @@ pub(crate) const BUILTIN: &[Command] = &[
         |_, rest| Intent::Builtin(Builtin::Worktree(rest)),
     ),
     Command::builtin(
+        "/cd",
+        "[dir]",
+        "carry this conversation on in another directory",
+        |_, rest| Intent::Builtin(Builtin::Cd(rest)),
+    ),
+    Command::builtin(
         "/name",
         "[text]",
         "call this session something you will recognise",

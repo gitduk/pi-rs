@@ -440,11 +440,18 @@ impl Store {
     /// the last save, and no other pi makes another while it is held. One
     /// saved under another workspace moves here first, so it is kept once.
     pub fn take(&self, workspace: &Path, id: &str) -> Result<(Stored, Claim)> {
-        let mut claim = self.claim(workspace, id)?;
-        if !claim.dir.join(TRANSCRIPT).is_file() {
-            claim = self.bring(claim, id)?;
-        }
+        let claim = self.relocate(workspace, id)?;
         Ok((Self::read(&claim.dir.join(TRANSCRIPT))?, claim))
+    }
+
+    /// `take` without the read: `id` claimed under `workspace`, its files
+    /// moved there first when they are filed elsewhere.
+    pub fn relocate(&self, workspace: &Path, id: &str) -> Result<Claim> {
+        let claim = self.claim(workspace, id)?;
+        if claim.dir.join(TRANSCRIPT).is_file() {
+            return Ok(claim);
+        }
+        self.bring(claim, id)
     }
 
     // Move the newest copy of `id` filed elsewhere to where `here` holds,

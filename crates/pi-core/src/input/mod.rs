@@ -43,6 +43,8 @@ pub enum Builtin {
     Effort(String),
     // The name to work in, or empty to list what there is.
     Worktree(String),
+    // The directory this conversation carries on in, or empty to say the one now.
+    Cd(String),
     // Bare `/settings`: the project's `.pi.toml` in `$EDITOR`. An argument
     // after the word is refused.
     Settings(String),
@@ -111,17 +113,18 @@ impl Intent {
             // A restart drops only the servers' connections, never the run's.
             Intent::Builtin(Builtin::Mcp(_)) => Fate::Now,
             // Bare, these only list what there is.
-            Intent::Builtin(Builtin::Resume(name) | Builtin::Worktree(name))
-                if name.trim().is_empty() =>
-            {
-                Fate::Now
-            }
+            Intent::Builtin(
+                Builtin::Resume(name) | Builtin::Worktree(name) | Builtin::Cd(name),
+            ) if name.trim().is_empty() => Fate::Now,
             Intent::Builtin(Builtin::Resume(_)) => Fate::Refused(
                 "/resume would replace the transcript this run is writing — stop the run first",
             ),
             // A lane of its own to move to, and the one being left keeps
             // working in the tree it was already in.
             Intent::Builtin(Builtin::Worktree(_)) => Fate::Now,
+            Intent::Builtin(Builtin::Cd(_)) => {
+                Fate::Refused("/cd would move the tree this run is working in — stop the run first")
+            }
             Intent::Builtin(Builtin::New) => Fate::Refused(
                 "/new would replace the transcript this run is writing — stop the run first",
             ),
@@ -343,6 +346,9 @@ pub enum Step {
     // The session was replaced — a `/new` or a `/resume` — so the surface
     // has to rebuild its view from the new one, not just show the rows.
     Swap(Listing),
+    // The lane in front now works in another directory, the transcript kept:
+    // whatever the surface keys on its root follows.
+    Moved(Listing),
     // The set of worktrees changed (a removal): show the rows and drop the
     // cached list, which would keep naming the checkout that just went.
     Worktrees(Listing),
@@ -375,6 +381,7 @@ impl Step {
             | Step::Edit(_)
             | Step::Handled(_)
             | Step::Swap(_)
+            | Step::Moved(_)
             | Step::Worktrees(_)
             | Step::Quit
             | Step::Restart { .. } => false,

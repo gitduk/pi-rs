@@ -102,6 +102,7 @@ refused, and resuming one from another directory moves it here.
 | `/model [name]`                    | list the models, or move the session to one   |
 | `/effort [level]`                  | `off` `low` `medium` `high`, from now on      |
 | `/worktree [name]`, `/worktree rm` | work in `<repo>.worktrees/<name>`             |
+| `/cd <dir>`                        | carry this conversation on in another directory; its jobs follow |
 | `/compact [focus]`                 | summarize everything but the working tail     |
 | `/loop <line>`                     | resubmit a line until a round edits no file   |
 | `/job [text]`, `stop <id>`, `output <id>` | background jobs; have the model start one; stop one; what one printed |
