@@ -30,7 +30,6 @@ use crate::input::commands::session_facts;
 use crate::input::{Rewound, Step, refused};
 use pi_store::icons;
 use pi_store::journal;
-use pi_store::listing::Listing;
 use pi_store::session::{self, Stored};
 use pi_store::settings::Settings;
 
@@ -114,6 +113,7 @@ struct Conversation {
 enum Held {
     Screen(String),
     Note(String),
+    QuietNote(String),
 }
 
 impl Conversation {
@@ -576,6 +576,7 @@ impl Lane {
             match held {
                 Held::Screen(text) => session.push_screen(text),
                 Held::Note(text) => session.push_note(text),
+                Held::QuietNote(text) => session.push_quiet_note(text),
             };
         }
         self.talk.session = Some(session);
@@ -599,6 +600,16 @@ impl Lane {
                 self.talk.held.push(Held::Note(note.to_string()));
                 None
             }
+        }
+    }
+
+    /// `push_note` for one the screen leaves out, held the same way.
+    pub fn push_quiet_note(&mut self, note: &str) {
+        match self.talk.session.as_mut() {
+            Some(session) => {
+                session.push_quiet_note(note);
+            }
+            None => self.talk.held.push(Held::QuietNote(note.to_string())),
         }
     }
 
@@ -760,7 +771,7 @@ impl Core {
             .map_err(|e| failed(anyhow::anyhow!("{}: {e}", target.display())))?;
         let to = ws.root().to_path_buf();
         if to == from {
-            return Ok(Step::Answer(format!("already in {}", to.display())));
+            return Ok(Step::Notice(format!("already in {}", to.display())));
         }
         if self.lane_at(&to).is_some() {
             return Err(format!("{} is open in another lane already", to.display()));
@@ -815,7 +826,7 @@ impl Core {
             from.display()
         ));
         said.insert(0, format!("now in {}", to.display()));
-        Ok(Step::Moved(Listing::say(said)))
+        Ok(Step::Moved(crate::input::notice(said)))
     }
     // Open a checkout as a new lane, in front; whole or not at all — a tree
     // whose skills won't resolve leaves the run where it was.

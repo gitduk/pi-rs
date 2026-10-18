@@ -39,9 +39,12 @@ pub enum Said {
     Nothing,
     // The answer to the command, for whoever typed it.
     Command(Vec<String>),
-    // The answer to the command, and a note the model reads before it next
-    // speaks: something it started was changed under it.
-    Noted(Vec<String>, String),
+    // A refusal or what did not happen: a line for the bar, not an answer.
+    Notice(String),
+    // A notice (empty when there is none) and a note the model reads before
+    // it next speaks: something it started was changed under it. The note
+    // restates what the user did and saw, so it is filed out of sight.
+    Noted(String, String),
     // Something that happened to the lane, filed with its transcript.
     Transcript(String),
 }
@@ -122,16 +125,13 @@ impl Drivers {
         match drive {
             Drive::Loop(Some(goal)) => match self.loops.start(lane, goal, ctx) {
                 Ok(()) => Said::Nothing,
-                Err(why) => Said::Command(vec![why]),
+                Err(why) => Said::Notice(why),
             },
             Drive::Job(arg) => self.job_command(&arg, ctx),
             Drive::Loop(None) => match self.loops.stop(lane) {
                 // A loop really ended: that belongs in the transcript.
                 Some(said) => Said::Transcript(said),
-                None => Said::Command(vec![
-                    "no loop here — /loop <line> runs one again while it keeps changing files"
-                        .into(),
-                ]),
+                None => Said::Notice("no loop here".into()),
             },
         }
     }
@@ -264,9 +264,12 @@ impl Drivers {
                     .collect();
                 match parsed {
                     Ok(ids) => {
-                        let (lines, stopped) = self.jobs.stop_each(root, &ids);
+                        // Only what did not stop is said: a job gone from the
+                        // table is its own report.
+                        let (failed, stopped) = self.jobs.stop_each(root, &ids);
+                        let failed = crate::input::notice(failed);
                         if stopped.is_empty() {
-                            return Said::Command(lines);
+                            return Said::Notice(failed);
                         }
                         // A job it started ends without a word back: say so.
                         let (job, it) = match stopped.len() {
@@ -278,18 +281,19 @@ impl Drivers {
                              back from {it}.",
                             stopped.join(", ")
                         );
-                        return Said::Noted(lines, note);
+                        return Said::Noted(failed, note);
                     }
-                    Err(id) => vec![format!("`{id}` is not an id; /job lists them")],
+                    Err(id) => {
+                        return Said::Notice(format!("`{id}` is not a job id"));
+                    }
                 }
             }
             ["output", id] => match id.trim_start_matches('#').parse() {
-                Ok(id) => (self.jobs.output(root, id))
-                    .unwrap_or_else(|e| e)
-                    .lines()
-                    .map(str::to_string)
-                    .collect(),
-                Err(_) => vec![format!("`{id}` is not an id; /job lists them")],
+                Ok(id) => match self.jobs.output(root, id) {
+                    Ok(out) => out.lines().map(str::to_string).collect(),
+                    Err(why) => return Said::Notice(why),
+                },
+                Err(_) => return Said::Notice(format!("`{id}` is not a job id")),
             },
             _ => vec![
                 "/job lists what runs in the background; /job stop [id…] ends them, or all; \
@@ -366,7 +370,7 @@ mod tests {
         );
         assert!(matches!(
             drivers.command(Drive::Job(stop), 1, &ctx),
-            Said::Command(_)
+            Said::Notice(_)
         ));
     }
 

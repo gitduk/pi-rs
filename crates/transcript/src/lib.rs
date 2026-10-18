@@ -199,6 +199,9 @@ pub enum Entry {
         id: EntryId,
         at: u64,
         note: String,
+        // Restates what the user did and saw happen: kept off the screen.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        quiet: bool,
     },
     // The session's own mechanism: one compaction pass's record. Input to the
     // view, never content on the wire.
@@ -550,11 +553,22 @@ impl Session {
     /// anything pushed here must survive being read that way. Shown on screen
     /// as a notice.
     pub fn push_note(&mut self, text: impl Into<String>) -> EntryId {
+        self.note(text.into(), false)
+    }
+
+    /// `push_note` for one the screen leaves out: it restates what the user
+    /// did and saw happen.
+    pub fn push_quiet_note(&mut self, text: impl Into<String>) -> EntryId {
+        self.note(text.into(), true)
+    }
+
+    fn note(&mut self, note: String, quiet: bool) -> EntryId {
         let (id, at) = self.mint();
         self.entries.push(Entry::Note {
             id,
             at,
-            note: text.into(),
+            note,
+            quiet,
         });
         id
     }

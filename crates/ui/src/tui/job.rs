@@ -14,7 +14,6 @@ use super::view::{front_view, tail_of, view_at};
 use super::{NO_TRANSCRIPT, Tui};
 use pi_core::core;
 use pi_core::driver::Ended;
-use pi_store::listing::Listing;
 
 // What kind of job a finished `Done` was, carrying what only that kind
 // leaves behind — so no arm can be built holding another's.
@@ -247,11 +246,10 @@ impl Tui {
     pub(super) fn land_started(&mut self, token: u64, name: &str, said: Result<String, String>) {
         let note = match said {
             Ok(text) => format!("The user ran `{name}` directly, and it answered:\n\n{text}"),
+            // The bar holds a line; the rest is in the journal.
             Err(why) => {
-                let head = format!("{name} did not start:");
-                self.ui.open_slash(Listing::say(
-                    [head].into_iter().chain(why.lines().map(str::to_string)),
-                ));
+                let first = why.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                self.notice(format!("{name} did not start: {}", first.trim()));
                 return;
             }
         };
@@ -368,9 +366,7 @@ impl Tui {
             Ok(s) if !s.success() => vec![format!("editor exited {s} — nothing reloaded")],
             Ok(_) if unchanged => {
                 let name = pi_core::core::instructions::short(&path, self.core.lane().root());
-                self.ui
-                    .flash(format!("{name} unchanged — the built-in stays"));
-                Vec::new()
+                vec![format!("{name} unchanged — the built-in stays")]
             }
             Ok(_) => match self.core.config_edited() {
                 // The file edited first: what else the reload says follows it.
@@ -386,24 +382,12 @@ impl Tui {
                         "the next turn"
                     };
                     let line = format!("{name} — in force from {when}");
-                    // Nothing else to report: an aside for the bar, not a
-                    // slash page that waits on a keypress.
-                    if notes.is_empty() {
-                        self.ui.flash(line);
-                        Vec::new()
-                    } else {
-                        std::iter::once(line).chain(notes).collect()
-                    }
+                    std::iter::once(line).chain(notes).collect()
                 }
                 Err(why) => vec![why],
             },
         };
-        if said.is_empty() {
-            self.ui
-                .adopt_config(&self.core, front_view(&mut self.views, self.core.lane()));
-        } else {
-            self.land_lines(Listing::say(said));
-        }
+        self.land_notice(pi_core::input::notice(said));
     }
 
     // Hand the terminal to `$EDITOR` on a copy of the line, and take back what
@@ -642,9 +626,9 @@ impl Tui {
             let now = self.core.tokens_now_at(lane);
             // `/compact` answered, and there was nothing to do: the answer to
             // a command, not news about the lane.
-            self.ui.open_slash(Listing::say([format!(
+            self.notice(format!(
                 "nothing to compact — {now} tokens, all inside the {held} kept as working context"
-            )]));
+            ));
         }
         // The pass is over, so the clock stops. What it was driving — the
         // live region — already went with the turn.

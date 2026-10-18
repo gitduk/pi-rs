@@ -926,8 +926,8 @@ fn resuming_an_own_id_with_no_transcript_says_so() {
     let step = tui.core.dispatch(Intent::Builtin(Builtin::Resume(id)));
 
     assert!(
-        matches!(step, pi_core::input::Step::Handled(_)),
-        "the refusal is a listing, not a swap: {step:?}"
+        matches!(step, pi_core::input::Step::Notice(ref why) if !why.is_empty()),
+        "the refusal is a notice, not a swap: {step:?}"
     );
 }
 

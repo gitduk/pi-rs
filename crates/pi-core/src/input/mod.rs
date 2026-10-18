@@ -230,14 +230,14 @@ pub(crate) fn step_for(commands: &[Command], word: &str, args: &str) -> Step {
                 typed: typed(),
             };
         }
-        _ => return Step::Answer(format!("unknown command {word} — /help lists them")),
+        _ => return Step::Notice(format!("unknown command {word}")),
     };
     match expanded(skill, args) {
         Ok(send) => Step::Prompt {
             typed: Some(typed()),
             send,
         },
-        Err(why) => lines(why),
+        Err(why) => Step::Notice(notice(why.lines())),
     }
 }
 
@@ -308,9 +308,9 @@ pub enum Rewound {
 
 #[derive(Debug)]
 pub enum Step {
-    // A one-line answer, filed nowhere — no state moved, so there's
-    // nothing for a rebuild to draw later.
-    Answer(String),
+    // A line for the bar, not an answer asked for: a refusal, a warning,
+    // what a change did that the screen does not show. Empty says nothing.
+    Notice(String),
     // A `!` command to run. The surface runs and records it, because only it
     // can await; `run_bash` does the work and `record_bash` files it.
     Bash(String),
@@ -344,14 +344,14 @@ pub enum Step {
     // than laid out: the surface decides how wide the columns are.
     Handled(Listing),
     // The session was replaced — a `/new` or a `/resume` — so the surface
-    // has to rebuild its view from the new one, not just show the rows.
-    Swap(Listing),
+    // has to rebuild its view from the new one; with a notice.
+    Swap(String),
     // The lane in front now works in another directory, the transcript kept:
-    // whatever the surface keys on its root follows.
-    Moved(Listing),
-    // The set of worktrees changed (a removal): show the rows and drop the
-    // cached list, which would keep naming the checkout that just went.
-    Worktrees(Listing),
+    // whatever the surface keys on its root follows; with a notice.
+    Moved(String),
+    // The set of worktrees changed (a removal): drop the cached list, which
+    // would keep naming the checkout that just went; with a notice.
+    Worktrees(String),
     Quit,
     // Leave as `Quit` does, then run pi again from `root`, on the session
     // `id` if it has been filed, with the flags in force now (`/effort` moves one).
@@ -374,7 +374,7 @@ impl Step {
             Step::Prompt { .. } | Step::Bash(_) => true,
             // Its turn starts only if the server answers; echoed then.
             Step::McpPrompt { .. } => false,
-            Step::Answer(_)
+            Step::Notice(_)
             | Step::Compact(_)
             | Step::Start { .. }
             | Step::Drive(_)
@@ -398,6 +398,11 @@ pub enum Drive {
     Job(String),
 }
 
-pub(crate) fn lines(text: impl Into<String>) -> Step {
-    Step::Handled(Listing::say(text.into().lines()))
+/// Lines of a notice as the one line the bar shows.
+pub fn notice(lines: impl IntoIterator<Item = impl AsRef<str>>) -> String {
+    (lines.into_iter())
+        .map(|l| l.as_ref().trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(pi_store::icons::PART_SEP)
 }

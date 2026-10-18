@@ -310,14 +310,29 @@ impl Tui {
         );
     }
 
-    fn land_swap(&mut self, said: Listing) {
+    // A notice goes to the bar; the slash page is for answers asked for.
+    pub(super) fn notice(&mut self, line: String) {
+        if !line.is_empty() {
+            self.ui.flash(line);
+        }
+    }
+
+    // A notice for a change that may have moved config: applied as
+    // `land_lines` does, without touching the slash page.
+    pub(super) fn land_notice(&mut self, said: String) {
+        let view = front_view(&mut self.views, self.core.lane());
+        self.ui.adopt_config(&self.core, view);
+        self.notice(said);
+    }
+
+    fn land_swap(&mut self, said: String) {
         // Carries its own transcript: the lane it moves to was opened
         // with one, even if the lane being left has a run writing it.
         self.rebuild_front();
         // `at` forgets the lists: a swap that didn't move repeats the root,
         // dropping them either way.
         self.ui.lists.at(self.core.lane_mut().root());
-        self.ui.open_slash(said);
+        self.notice(said);
     }
 
     // Take what every lane's run has posted since the last look into its own
@@ -486,10 +501,9 @@ impl Tui {
                     });
                 Wake::Nothing
             }
-            // A command refused because a run is in flight. It was typed, so
-            // its refusal is that command's answer.
+            // A command refused because a run is in flight.
             Fate::Refused(why) => {
-                self.ui.open_slash(Listing::say([why]));
+                self.notice(why.to_string());
                 Wake::Nothing
             }
         }
@@ -754,9 +768,7 @@ impl Tui {
                     ended = Ended::Restart { root, id, flags };
                     break;
                 }
-                // A refusal is an answer: it was asked for by a line, so it
-                // goes where every other answer does.
-                Step::Answer(line) => self.ui.open_slash(Listing::say([line])),
+                Step::Notice(line) => self.notice(line),
                 Step::Bash(command) => self.start_bash(command, &done_tx),
                 Step::McpPrompt {
                     prompt,
@@ -777,10 +789,10 @@ impl Tui {
                 Step::Swap(said) => self.land_swap(said),
                 Step::Moved(said) => {
                     self.follow_root();
-                    self.land_lines(said);
+                    self.land_notice(said);
                 }
-                Step::Worktrees(lines) => {
-                    self.land_lines(lines);
+                Step::Worktrees(said) => {
+                    self.land_notice(said);
                     // A checkout went; the cached list would go on offering it.
                     self.ui.lists.forget();
                 }
@@ -797,11 +809,10 @@ impl Tui {
                     match self.drivers.command(drive, lane.token(), lane.ctx()) {
                         Said::Nothing => {}
                         Said::Command(lines) => self.ui.open_slash(Listing::say(lines)),
-                        Said::Noted(lines, note) => {
-                            self.ui.open_slash(Listing::say(lines));
-                            let lane = self.core.lane_mut();
-                            let view = front_view(&mut self.views, lane);
-                            self.ui.file_note(lane, view, &note);
+                        Said::Notice(line) => self.notice(line),
+                        Said::Noted(line, note) => {
+                            self.notice(line);
+                            self.core.lane_mut().push_quiet_note(&note);
                         }
                         Said::Transcript(line) => self
                             .ui

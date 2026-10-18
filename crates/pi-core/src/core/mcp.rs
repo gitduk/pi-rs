@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use pi_store::config::Config;
 use pi_store::listing::{Listing, Row};
 
+use crate::input::Step;
+
 static RUNNING: Mutex<Option<Arc<mcp::Servers>>> = Mutex::new(None);
 
 /// The tools of whichever servers are running when asked: a registry holds
@@ -74,9 +76,15 @@ fn running() -> Option<Arc<mcp::Servers>> {
 
 /// `/mcp`: bare, every server with its tools; `restart [name]` connects one,
 /// or all, again.
-pub fn command(arg: &str) -> Listing {
+pub fn command(arg: &str) -> Step {
     let Some(servers) = running() else {
-        return Listing::say(["no MCP servers — add an [mcp.<name>] to ~/.pi/settings.toml"]);
+        // Asked for, it says how to add one; refused, only that there is none.
+        return match arg.trim() {
+            "" => Step::Handled(Listing::say([
+                "no MCP servers — add an [mcp.<name>] to ~/.pi/settings.toml",
+            ])),
+            _ => Step::Notice("no MCP servers".into()),
+        };
     };
     match arg.split_whitespace().collect::<Vec<_>>().as_slice() {
         [] => {
@@ -99,14 +107,18 @@ pub fn command(arg: &str) -> Listing {
                     rows.push(Row::new([format!("  {}", p.word()), first.to_string()]));
                 }
             }
-            Listing::of(rows)
+            Step::Handled(Listing::of(rows))
         }
-        ["restart", rest @ ..] if rest.len() <= 1 => match servers.restart(rest.first().copied()) {
-            Ok(1) if !rest.is_empty() => Listing::say([format!("{} restarting", rest[0])]),
-            Ok(n) => Listing::say([format!("{n} MCP servers restarting")]),
-            Err(e) => Listing::say([e]),
-        },
-        _ => Listing::say(["/mcp lists the servers; /mcp restart [name] reconnects one, or all"]),
+        ["restart", rest @ ..] if rest.len() <= 1 => {
+            Step::Notice(match servers.restart(rest.first().copied()) {
+                Ok(1) if !rest.is_empty() => format!("{} restarting", rest[0]),
+                Ok(n) => format!("{n} MCP servers restarting"),
+                Err(e) => e,
+            })
+        }
+        _ => Step::Handled(Listing::say([
+            "/mcp lists the servers; /mcp restart [name] reconnects one, or all",
+        ])),
     }
 }
 

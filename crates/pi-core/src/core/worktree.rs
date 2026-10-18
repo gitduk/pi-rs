@@ -359,7 +359,7 @@ impl Core {
             .and_then(|ws| ws.with_write_roots(&self.config.writable()))
             .map_err(|e| refused("worktree", anyhow::anyhow!("{}: {e}", tree.path.display())))?;
         if ws.root() == from {
-            return Ok(Step::Answer(format!("already in {}", tree.name)));
+            return Ok(Step::Notice(format!("already in {}", tree.name)));
         }
         // Saved before the move, against the root it belongs to; an empty
         // session has nothing to keep, and a run in flight saves its own.
@@ -376,7 +376,7 @@ impl Core {
             return Ok(Step::Handled(Listing::default()));
         }
         let said = self.open_lane(ws, (!tree.main).then(|| tree.name.clone()))?;
-        Ok(Step::Swap(Listing::say(said)))
+        Ok(Step::Swap(crate::input::notice(said)))
     }
     // Removes the checkout, its branch, and every transcript under it; a
     // dirty checkout's refusal from git is passed on, not forced past.
@@ -405,10 +405,8 @@ impl Core {
         if let Some(jobs) = &self.jobs {
             jobs.drop_under(&removed.path);
         }
-        let mut said = vec![
-            format!("removed {name}"),
-            removed.path.display().to_string(),
-        ];
+        // The checkout leaving the bar says it went; what else went does not.
+        let mut said = Vec::new();
         if let Some(branch) = removed.branch {
             said.push(format!("branch {branch} deleted"));
         }
@@ -418,7 +416,7 @@ impl Core {
         if dropped > 0 {
             said.push(format!("{dropped} session record(s) dropped"));
         }
-        Ok(Step::Worktrees(Listing::say(said)))
+        Ok(Step::Worktrees(crate::input::notice(said)))
     }
     // The checkouts `/worktree` can move to, the repository's own first, the
     // one the session is in marked.

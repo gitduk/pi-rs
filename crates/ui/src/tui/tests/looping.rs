@@ -254,7 +254,7 @@ fn only_a_goal_that_starts_a_turn_is_looped() {
         "bare stops"
     );
     for goal in ["/help", "/loop go", "/nosuchskill"] {
-        assert!(matches!(looped(goal), Step::Answer(_)), "{goal}");
+        assert!(matches!(looped(goal), Step::Notice(_)), "{goal}");
     }
 }
 

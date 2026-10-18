@@ -362,7 +362,8 @@ impl Table {
     }
 
     /// Stop each of `ids` of `root`'s, or every one still running there when
-    /// none are named: a line for each, and those stopped, as `#id (what)`.
+    /// none are named: a line for each not stopped, and those stopped, as
+    /// `#id (what)`.
     pub fn stop_each(&self, root: &Path, ids: &[u64]) -> (Vec<String>, Vec<String>) {
         // A finished one's results only wait for the lane: stopping it
         // would throw them away, not stop anything.
@@ -380,18 +381,14 @@ impl Table {
                 Vec::new(),
             );
         }
-        let mut stopped = Vec::new();
-        let lines = ids
-            .into_iter()
-            .map(|id| match self.stop(root, id) {
-                Ok(what) => {
-                    stopped.push(format!("#{id} ({what})"));
-                    format!("stopped #{id}: {what}")
-                }
-                Err(why) => why,
-            })
-            .collect();
-        (lines, stopped)
+        let (mut failed, mut stopped) = (Vec::new(), Vec::new());
+        for id in ids {
+            match self.stop(root, id) {
+                Ok(what) => stopped.push(format!("#{id} ({what})")),
+                Err(why) => failed.push(why),
+            }
+        }
+        (failed, stopped)
     }
 
     /// Every job of `from` comes back to `to` from now on: the conversation
@@ -625,13 +622,14 @@ impl Tool for Jobs {
         };
         let all = args.get("stop_all").and_then(Value::as_bool) == Some(true);
         if all || !ids.is_empty() {
-            let (lines, stopped) = self.table.stop_each(root, if all { &[] } else { &ids });
-            let said = lines.join("\n");
-            return if !stopped.is_empty() {
-                Ok(ToolOutput::text(said))
-            } else {
-                Err(ToolError::Invalid(said))
-            };
+            let (failed, stopped) = self.table.stop_each(root, if all { &[] } else { &ids });
+            if stopped.is_empty() {
+                return Err(ToolError::Invalid(failed.join("\n")));
+            }
+            let said = std::iter::once(format!("stopped {}", stopped.join(", ")));
+            return Ok(ToolOutput::text(
+                said.chain(failed).collect::<Vec<_>>().join("\n"),
+            ));
         }
         if let Some(v) = args.get("output").filter(|v| !v.is_null()) {
             return (self.table.output(root, id(v)?))

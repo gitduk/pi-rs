@@ -25,7 +25,7 @@ pub mod worktree;
 
 use crate::core::lane::Lane;
 use crate::input::commands::{Command, help, with_prompts};
-use crate::input::{Builtin, Drive, Intent, Step, lines, step_for};
+use crate::input::{Builtin, Drive, Intent, Step, notice, step_for};
 use pi_store::config;
 use pi_store::listing::Listing;
 use pi_store::session::Store;
@@ -256,7 +256,7 @@ impl Core {
                 .iter()
                 .any(|lane| !jobs.jobs(lane.root()).is_empty())
         {
-            return Err("background jobs would be cut off — /job lists them".into());
+            return Err("background jobs would be cut off".into());
         }
         let lane = self.lane();
         // A session nothing was said in is never filed.
@@ -302,7 +302,7 @@ impl Core {
             Intent::Builtin(Builtin::Job(arg)) => Step::Drive(Drive::Job(arg)),
             Intent::Builtin(Builtin::Start { name, args }) => match args {
                 Ok(args) => Step::Start { name, args },
-                Err(why) => Step::Answer(why),
+                Err(why) => Step::Notice(why),
             },
             Intent::Builtin(Builtin::Background(what)) => Step::Prompt {
                 send: format!(
@@ -314,29 +314,33 @@ impl Core {
             Intent::Builtin(Builtin::Loop(goal)) => match goal.trim() {
                 "" => Step::Drive(Drive::Loop(None)),
                 goal if self.starts_turn(goal) => Step::Drive(Drive::Loop(Some(goal.to_string()))),
-                goal => Step::Answer(format!(
+                goal => Step::Notice(format!(
                     "`{goal}` starts no turn — a loop needs one to measure"
                 )),
             },
             Intent::Builtin(Builtin::Quit) => Step::Quit,
-            Intent::Builtin(Builtin::Restart) => self.restart().unwrap_or_else(Step::Answer),
+            Intent::Builtin(Builtin::Restart) => self.restart().unwrap_or_else(Step::Notice),
             Intent::Builtin(Builtin::Help) => Step::Handled(help(&self.commands)),
             Intent::Builtin(Builtin::Keys) => Step::Handled(self.keys.listing()),
             Intent::Builtin(Builtin::Status) => Step::Handled(self.status()),
-            Intent::Builtin(Builtin::Effort(arg)) => Step::Handled(Listing::say(self.effort(&arg))),
-            Intent::Builtin(Builtin::Mcp(arg)) => Step::Handled(crate::core::mcp::command(&arg)),
+            // Bare, it is asked; with a level, a change the bar already shows.
+            Intent::Builtin(Builtin::Effort(arg)) if arg.trim().is_empty() => {
+                Step::Handled(Listing::say(self.effort("")))
+            }
+            Intent::Builtin(Builtin::Effort(arg)) => Step::Notice(notice(self.effort(&arg))),
+            Intent::Builtin(Builtin::Mcp(arg)) => crate::core::mcp::command(&arg),
             Intent::Builtin(Builtin::Content) => Step::Handled(self.content()),
             Intent::Builtin(Builtin::New) => {
                 self.fresh_session();
-                Step::Swap(Listing::default())
+                Step::Swap(String::new())
             }
             Intent::Builtin(Builtin::Resume(name)) => {
                 if name.is_empty() {
                     Step::Handled(Listing::say(self.resume_listing()))
                 } else {
                     match self.resume(&name) {
-                        Ok(said) => Step::Swap(Listing::say(said)),
-                        Err(why) => Step::Handled(Listing::say([why])),
+                        Ok(said) => Step::Swap(notice(said)),
+                        Err(why) => Step::Notice(why),
                     }
                 }
             }
@@ -352,26 +356,20 @@ impl Core {
                 // `/resume` reads its row off the file, so the name has to land
                 // now; a run in flight has the session away and saves it later.
                 match self.save() {
-                    Ok(()) => lines(said),
-                    Err(e) => Step::Handled(Listing::say([said, not_saved(&e)])),
+                    Ok(()) => Step::Notice(said),
+                    Err(e) => Step::Notice(notice([said, not_saved(&e)])),
                 }
             }
             Intent::Builtin(Builtin::Compact(focus)) => {
                 Step::Compact(Some(focus).filter(|f| !f.is_empty()))
             }
-            Intent::Builtin(Builtin::Model(name)) => {
-                let rows = if name.is_empty() {
-                    self.listing()
-                } else {
-                    self.switch(&name)
-                };
-                Step::Handled(Listing::say(rows))
+            Intent::Builtin(Builtin::Model(name)) if name.is_empty() => {
+                Step::Handled(Listing::say(self.listing()))
             }
+            Intent::Builtin(Builtin::Model(name)) => Step::Notice(notice(self.switch(&name))),
             Intent::Builtin(Builtin::Cd(dir)) => match dir.trim() {
-                "" => Step::Answer(self.lane().root().display().to_string()),
-                dir => self
-                    .move_to(dir)
-                    .unwrap_or_else(|why| Step::Handled(Listing::say([why]))),
+                "" => Step::Handled(Listing::say([self.lane().root().display().to_string()])),
+                dir => self.move_to(dir).unwrap_or_else(Step::Notice),
             },
             Intent::Builtin(Builtin::Worktree(name)) => {
                 if name.is_empty() {
@@ -385,10 +383,7 @@ impl Core {
                         }
                         _ => self.enter_worktree(&name),
                     };
-                    match step {
-                        Ok(step) => step,
-                        Err(why) => Step::Handled(Listing::say([why])),
-                    }
+                    step.unwrap_or_else(Step::Notice)
                 }
             }
             Intent::Other { word, args } => step_for(&self.commands, &word, &args),
@@ -398,12 +393,12 @@ impl Core {
                 match pi_store::config::project_target(self.lane().root()) {
                     Some(file) => Step::Edit(file),
                     None => {
-                        Step::Answer("no project here: a .pi.toml in $HOME is never read".into())
+                        Step::Notice("no project here: a .pi.toml in $HOME is never read".into())
                     }
                 }
             }
             Intent::Builtin(Builtin::Settings(_)) => {
-                Step::Answer("bare /settings opens the project's .pi.toml".into())
+                Step::Notice("bare /settings opens the project's .pi.toml".into())
             }
             Intent::Builtin(Builtin::Edit(name)) => self.edit(name.trim()),
         }

@@ -183,11 +183,9 @@ impl Core {
         match files.into_iter().find(|f| f.name == name) {
             Some(file) => match resolve::seed(&file.path) {
                 Ok(()) => Step::Edit(file.path),
-                Err(e) => Step::Answer(format!("cannot start {name} from the built-in: {e}")),
+                Err(e) => Step::Notice(format!("cannot start {name} from the built-in: {e}")),
             },
-            None => Step::Answer(format!(
-                "`{name}` is not a file /edit offers — bare /edit lists them"
-            )),
+            None => Step::Notice(format!("`{name}` is not a file /edit offers")),
         }
     }
 
@@ -290,11 +288,11 @@ impl Core {
         }
         let mut said: Vec<String> = dialled.warning.into_iter().chain(dialled.assumed).collect();
         let spec = &dialled.spec;
-        said.push(format!(
-            "now on {}{}{}",
-            spec.model,
-            icons::PART_SEP,
-            summary(spec.format.name(), spec.context_window, &spec.pricing)
+        // The model's name is on the bar already; what it costs is not.
+        said.push(summary(
+            spec.format.name(),
+            spec.context_window,
+            &spec.pricing,
         ));
         // An absent transcript is one a run has, and it is writing this
         // model's reasoning into it as we speak — so say it either way.
@@ -333,7 +331,6 @@ impl Core {
                 return vec![why];
             }
         };
-        said.push(format!("effort {}", now(self)));
         let spec = self.lane().agent().spec();
         if !spec.accepts_effort {
             said.push(format!(
