@@ -870,7 +870,7 @@ impl Core {
             }
         }
     }
-    /// The checkouts a `/restart` left open, `(root, filed session)` in the
+    /// The checkouts a restart left open, `(root, filed session)` in the
     /// order they were in, opened again around the one in front, each on its
     /// own session and model. What does not come back is said under the
     /// front one's banner, not fatal.

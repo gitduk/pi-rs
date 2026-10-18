@@ -31,6 +31,14 @@ use pi_store::listing::Listing;
 use pi_store::session::Store;
 use pi_store::settings::Settings;
 
+/// What the next pi is started with: every lane as `(root, filed session)`
+/// in order, `front` in front, with the flags in force now (`/effort` moves one).
+pub struct Restart {
+    pub lanes: Vec<(std::path::PathBuf, Option<String>)>,
+    pub front: usize,
+    pub flags: Vec<String>,
+}
+
 /// Ask rtk what it is now, in the background, so `/status` can say before
 /// the first command does.
 pub fn warm_rtk() {
@@ -238,17 +246,17 @@ impl Core {
 }
 
 impl Core {
-    /// `/restart`, refused when the new pi would lose something: it takes up
-    /// every lane's transcript, in order, and nothing else this one holds.
-    pub fn restart(&self) -> Result<Step, String> {
-        if crate::core::update::launcher().is_none() {
-            return Err("cannot tell which pi to start again".into());
-        }
-        if self.lanes.iter().any(|lane| lane.is_running()) {
-            return Err("a turn is running in another checkout — wait, or stop it there".into());
-        }
-        if let Some(why) = self.lanes.iter().find_map(|lane| lane.unsaved()) {
-            return Err(format!("not saved, so nothing to restart on: {why}"));
+    /// What to start the installed pi with, or `None` while it would lose
+    /// something: it takes up every lane's transcript, in order, and nothing
+    /// else this one holds.
+    pub fn restart(&self) -> Option<Restart> {
+        crate::core::update::launcher()?;
+        if self
+            .lanes
+            .iter()
+            .any(|lane| lane.is_running() || lane.unsaved().is_some())
+        {
+            return None;
         }
         if let Some(jobs) = &self.jobs
             && self
@@ -256,7 +264,7 @@ impl Core {
                 .iter()
                 .any(|lane| !jobs.jobs(lane.root()).is_empty())
         {
-            return Err("background jobs would be cut off".into());
+            return None;
         }
         let lanes = (self.lanes.iter())
             .map(|lane| {
@@ -267,7 +275,7 @@ impl Core {
                 )
             })
             .collect();
-        Ok(Step::Restart {
+        Some(Restart {
             lanes,
             front: self.current,
             flags: self.pinned.args(),
@@ -318,7 +326,6 @@ impl Core {
                 )),
             },
             Intent::Builtin(Builtin::Quit) => Step::Quit,
-            Intent::Builtin(Builtin::Restart) => self.restart().unwrap_or_else(Step::Notice),
             Intent::Builtin(Builtin::Help) => Step::Handled(help(&self.commands)),
             Intent::Builtin(Builtin::Keys) => Step::Handled(self.keys.listing()),
             Intent::Builtin(Builtin::Status) => Step::Handled(self.status()),
@@ -570,7 +577,6 @@ mod tests {
             Intent::Builtin(Builtin::New),
             Intent::Builtin(Builtin::Resume("1756240000-1".into())),
             Intent::Builtin(Builtin::Compact(String::new())),
-            Intent::Builtin(Builtin::Restart),
             Intent::Builtin(Builtin::Cd("~/elsewhere".into())),
         ] {
             assert!(

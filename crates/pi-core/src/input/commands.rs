@@ -172,12 +172,6 @@ pub(crate) const BUILTIN: &[Command] = &[
         "edit the project's .pi.toml, then reload",
         |_, rest| Intent::Builtin(Builtin::Settings(rest)),
     ),
-    Command::builtin(
-        "/restart",
-        "",
-        "start pi again on these sessions, the version installed now",
-        |_, _| Intent::Builtin(Builtin::Restart),
-    ),
     Command::builtin("/exit", "", "leave (Ctrl-D does the same)", |_, _| {
         Intent::Builtin(Builtin::Quit)
     }),

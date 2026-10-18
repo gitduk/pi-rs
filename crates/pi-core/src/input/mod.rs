@@ -68,8 +68,6 @@ pub enum Builtin {
     // Leave now — `/exit`, `/quit`, or the keys bound to leaving — one intent,
     // so none can answer differently.
     Quit,
-    // Leave, and start the pi installed now on this same session.
-    Restart,
 }
 
 /// What a line may do while a turn is in flight.
@@ -142,9 +140,6 @@ impl Intent {
             // Both reach for the transcript, and the run is holding it.
             // Leaving is never refused: a hung run must not trap the user.
             Intent::Builtin(Builtin::Quit) => Fate::Now,
-            Intent::Builtin(Builtin::Restart) => {
-                Fate::Refused("/restart would cut this run short — stop the run first")
-            }
         }
     }
 }
@@ -350,13 +345,6 @@ pub enum Step {
     // would keep naming the checkout that just went; with a notice.
     Worktrees(String),
     Quit,
-    // Leave as `Quit` does, then run pi again on every lane, `front` in front,
-    // with the flags in force now (`/effort` moves one).
-    Restart {
-        lanes: Vec<(std::path::PathBuf, Option<String>)>,
-        front: usize,
-        flags: Vec<String>,
-    },
 }
 
 impl Step {
@@ -380,8 +368,7 @@ impl Step {
             | Step::Swap(_)
             | Step::Moved(_)
             | Step::Worktrees(_)
-            | Step::Quit
-            | Step::Restart { .. } => false,
+            | Step::Quit => false,
         }
     }
 }

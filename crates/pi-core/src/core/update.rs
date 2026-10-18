@@ -1,5 +1,5 @@
 //! A different pi installed under the one running, found by watching the
-//! path it was started by — the same path `/restart` runs again.
+//! path it was started by — the same path a restart runs again.
 
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, OnceLock, PoisonError};
@@ -24,7 +24,8 @@ pub fn launcher() -> Option<&'static Path> {
     LAUNCHER.get().map(PathBuf::as_path)
 }
 
-/// The version now installed at [`launcher`], while it is not this one's.
+/// The version now installed at [`launcher`], once it is not the binary
+/// running: a rebuild that keeps the version number counts too.
 pub fn newer() -> Option<String> {
     NEWER.lock().unwrap_or_else(PoisonError::into_inner).clone()
 }
@@ -61,8 +62,7 @@ pub fn watch() {
             };
             seen = now;
             tracing::info!(target: "pi::update", path = %path.display(), version = %version, "installed");
-            let newer = (version != env!("CARGO_PKG_VERSION")).then(|| format!("v{version}"));
-            *NEWER.lock().unwrap_or_else(PoisonError::into_inner) = newer;
+            *NEWER.lock().unwrap_or_else(PoisonError::into_inner) = Some(format!("v{version}"));
             CHANGED.notify_one();
         }
     });

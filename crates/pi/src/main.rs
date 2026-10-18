@@ -59,16 +59,18 @@ fn cancel_on_interrupt() -> tokio_util::sync::CancellationToken {
     token
 }
 
-// `/restart`: this process becomes the pi installed now, on the sessions just
+// A different pi installed: this process becomes it, on the sessions just
 // left, each keeping its own model and name.
 fn restart(
-    lanes: &[(std::path::PathBuf, Option<String>)],
-    front: usize,
-    flags: &[String],
+    core::Restart {
+        lanes,
+        front,
+        flags,
+    }: core::Restart,
 ) -> Result<ExitCode> {
     let launcher = core::update::launcher().context("cannot tell which pi to start again")?;
     let mut cmd = std::process::Command::new(launcher);
-    cmd.args(pi_core::args::restart(lanes, front, flags));
+    cmd.args(pi_core::args::restart(&lanes, front, &flags));
     let id = lanes[front].1.as_deref();
     tracing::info!(target: "pi::session", path = %launcher.display(), session = ?id, lanes = lanes.len(), "restarting");
     #[cfg(unix)]
@@ -284,11 +286,7 @@ async fn main() -> Result<ExitCode> {
         }
         return match out? {
             tui::Ended::Quit => Ok(ExitCode::SUCCESS),
-            tui::Ended::Restart {
-                lanes,
-                front,
-                flags,
-            } => restart(&lanes, front, &flags),
+            tui::Ended::Restart(next) => restart(next),
         };
     };
 

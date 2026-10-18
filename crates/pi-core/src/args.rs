@@ -191,7 +191,7 @@ mod tests {
     use clap::Parser;
     use std::path::{Path, PathBuf};
 
-    // What `/restart` writes is what the next pi reads, `=` in a path and all.
+    // What a restart writes is what the next pi reads, `=` in a path and all.
     #[test]
     fn a_lane_reads_back_as_it_was_written() {
         let filed = lane_arg(Path::new("/w/a=b"), Some("1792332839-3028349-1"));

@@ -18,6 +18,9 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 Prebuilt for Linux x86_64 and aarch64. Anywhere else, `cargo build --release`
 leaves the binary at `target/release/pi`.
 
+A pi installed over the running one, a rebuild of the same version too, takes
+over every open session by itself once nothing on screen is half done.
+
 ## Configure
 
 There is no built-in model list. `~/.pi/settings.toml` names one endpoint and
@@ -115,7 +118,6 @@ refused, and resuming one from another directory moves it here.
 | `/edit [file]`                     | edit a prompt, an `AGENTS.md`, or memory      |
 | `/status`, `/keys`, `/help`        | session paths and spend; bindings; commands   |
 | `/exit`                            | leave; `ctrl+d` does the same                 |
-| `/restart`                         | run the pi installed now on these sessions; done unasked once one is installed and nothing is half done |
 | `/content`                         | everything the model is given before you type |
 | `/<skill> [args]`                  | run a skill (also one-shot: `pi "/commit"`)   |
 | `! <command>`                      | run a shell command and record its output     |

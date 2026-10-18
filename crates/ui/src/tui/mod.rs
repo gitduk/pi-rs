@@ -137,13 +137,8 @@ enum Wake {
 /// How the surface was left.
 pub enum Ended {
     Quit,
-    /// `/restart`, or a different pi installed: run pi again on every lane,
-    /// `(root, filed session)` in order, `front` in front, with `flags`.
-    Restart {
-        lanes: Vec<(std::path::PathBuf, Option<String>)>,
-        front: usize,
-        flags: Vec<String>,
-    },
+    /// A different pi installed: run it on every lane.
+    Restart(core::Restart),
 }
 
 pub struct Tui {
@@ -534,8 +529,8 @@ impl Tui {
         front_view(&mut self.views, self.core.lane()).state.stopping = true;
     }
 
-    // A different pi installed: become it as `/restart` would, once nothing
-    // on screen is half done. Asked every pass; `restart` says when not yet.
+    // A different pi installed: become it once nothing on screen is half
+    // done. Asked every pass; `restart` says when not yet.
     fn restart_into_update(&self) -> Option<Ended> {
         let version = core::update::newer()?;
         let settled = matches!(self.ui.focus, ui::Focus::Editor)
@@ -546,20 +541,9 @@ impl Tui {
         if !settled {
             return None;
         }
-        let Ok(Step::Restart {
-            lanes,
-            front,
-            flags,
-        }) = self.core.restart()
-        else {
-            return None;
-        };
+        let restart = self.core.restart()?;
         tracing::info!(target: "pi::update", version = %version, "restarting into it");
-        Some(Ended::Restart {
-            lanes,
-            front,
-            flags,
-        })
+        Some(Ended::Restart(restart))
     }
 
     /// Drives the terminal until the user leaves. Each lane owns the
@@ -760,18 +744,6 @@ impl Tui {
             let deferred = matches!(step, Step::McpPrompt { .. });
             match step {
                 Step::Quit => break,
-                Step::Restart {
-                    lanes,
-                    front,
-                    flags,
-                } => {
-                    ended = Ended::Restart {
-                        lanes,
-                        front,
-                        flags,
-                    };
-                    break;
-                }
                 Step::Notice(line) => self.notice(line),
                 Step::Bash(command) => self.start_bash(command, &done_tx),
                 Step::McpPrompt {
