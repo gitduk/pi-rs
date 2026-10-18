@@ -59,6 +59,14 @@ impl Ui {
         self.job_row_at(row) == Some(super::call::JobRow::Fold)
     }
 
+    // The open job whose cut-off lines the row at screen row `row` stands for.
+    pub(super) fn earlier_at(&self, row: u16) -> Option<u64> {
+        match self.job_row_at(row)? {
+            super::call::JobRow::Earlier(id) => Some(id),
+            _ => None,
+        }
+    }
+
     // The job whose row of the bar is at screen row `row`.
     pub(super) fn job_at(&self, row: u16) -> Option<u64> {
         let Some(super::call::JobRow::Job(id)) = self.job_row_at(row) else {
@@ -141,6 +149,11 @@ impl Ui {
         }
         if self.fold_at(row) {
             self.jobs_all = !self.jobs_all;
+            return;
+        }
+        if self.earlier_at(row).is_some() {
+            let whole = pi_store::listing::Listing::say(self.job_body.lines().map(str::to_string));
+            self.open_slash(whole);
             return;
         }
         // A cut flash opens whole, as an answer the click asked for.
@@ -236,7 +249,7 @@ impl Ui {
         };
         let job = self.job_at(row);
         // A row that answers a click is clicked, never double-clicked.
-        let single = job.is_some() || self.fold_at(row);
+        let single = job.is_some() || self.fold_at(row) || self.earlier_at(row).is_some();
         let count = match &self.press {
             Some(p) if !single && p.at == at && p.when.elapsed() < MULTI_CLICK => (p.count % 3) + 1,
             _ => 1,

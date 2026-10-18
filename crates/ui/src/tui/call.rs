@@ -156,6 +156,8 @@ const BODY_SHOWN: usize = 8;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum JobRow {
     Job(u64),
+    // Over the tail of what an open job printed: the lines cut above it.
+    Earlier(u64),
     // What an open job printed, under its row.
     Under,
     // The row folding the list past `JOBS_SHOWN`, or unfolding it.
@@ -180,7 +182,7 @@ pub(super) fn job_lines(
     };
     for job in jobs.iter().take(shown) {
         let shine = hovered == Some(JobRow::Job(job.id));
-        let (rows, under) = if open == Some(job.id) {
+        let rows = if open == Some(job.id) {
             let (head, tail) = job_text(job);
             let row = Line::from(paint.span_hovered(shine, &paint.theme.muted, head + &tail));
             let said: Vec<String> = (body.lines())
@@ -189,17 +191,23 @@ pub(super) fn job_lines(
                 .collect();
             let from = said.len().saturating_sub(BODY_SHOWN);
             let mut rows = super::screen::fit(&row, room);
-            let own = rows.len();
+            ids.extend(std::iter::repeat_n(JobRow::Job(job.id), rows.len()));
             if from > 0 {
-                let more = format!("  {from} lines before · /job output {}", job.id);
-                rows.push(Line::from(paint.span(&paint.theme.muted, more)));
+                let more = format!("  {from} lines before · click to read all");
+                let shine = hovered == Some(JobRow::Earlier(job.id));
+                rows.push(Line::from(paint.span_hovered(
+                    shine,
+                    &paint.theme.muted,
+                    pi_store::text::clip(&more, room),
+                )));
+                ids.push(JobRow::Earlier(job.id));
             }
-            rows.extend(
-                (said[from..].iter())
-                    .map(|l| Line::from(pi_store::text::clip(&format!("  {l}"), room))),
-            );
-            let under = rows.len() - own;
-            (rows, under)
+            let tail = (said[from..].iter())
+                .map(|l| Line::from(pi_store::text::clip(&format!("  {l}"), room)));
+            let own = rows.len();
+            rows.extend(tail);
+            ids.extend(std::iter::repeat_n(JobRow::Under, rows.len() - own));
+            rows
         } else {
             let ([head, last, tail], _) = job_row(job, width);
             let muted = |s: String| paint.span_hovered(shine, &paint.theme.muted, s);
@@ -213,10 +221,9 @@ pub(super) fn job_lines(
                 said = said.italic();
             }
             let row = Line::from(vec![muted(head), muted(sep), said, muted(tail)]);
-            (vec![row], 0)
+            ids.push(JobRow::Job(job.id));
+            vec![row]
         };
-        ids.extend(std::iter::repeat_n(JobRow::Job(job.id), rows.len() - under));
-        ids.extend(std::iter::repeat_n(JobRow::Under, under));
         lines.extend(rows);
     }
     if folds {

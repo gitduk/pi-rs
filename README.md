@@ -139,7 +139,7 @@ refused, and resuming one from another directory moves it here.
   `bash` or `subagent` call with `background`, or a script that detaches,
   leaves the turn free; each result comes back as a turn of its own once the
   checkout is in front and idle. Those still out are listed above the bar,
-  `/job output` shows what one printed, and `/job stop` stops one — the
+  a click on one shows what it printed, and `/job stop` stops one — the
   model is told before it next speaks. `/job <text>` asks the model to start
   something in the background; `/tool bash command=… background=true` starts
   one without it. Jobs last while pi runs; past that, use cron.

@@ -32,6 +32,7 @@ impl Ui {
         let text = self.page_lines();
         let hovered_job = self.pointer.and_then(|(_, row)| {
             (self.job_at(row).map(call::JobRow::Job))
+                .or(self.earlier_at(row).map(call::JobRow::Earlier))
                 .or(self.fold_at(row).then_some(call::JobRow::Fold))
         });
         let open = (self.job_open, self.job_body.as_str());
