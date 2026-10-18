@@ -1,6 +1,7 @@
 //! What pi has come to know across sessions, as plain markdown under
 //! `~/.pi/memory/`: `<key>.md`, its name the project's path with `-` for
-//! `/`, is one project's; every other `*.md` there is global. Distillation writes it; anyone may read or edit it by hand.
+//! `/`, is one project's; every other `*.md` there is global. The model writes it
+//! through `plan`; anyone may read or edit it by hand.
 //! What a prompt makes of it is the reader's.
 
 use std::collections::BTreeMap;
@@ -14,8 +15,6 @@ use crate::session::key_of;
 /// The name an edit uses for the project's own file.
 pub const PROJECT: &str = "project";
 
-// Where distillation records how far it has read each session.
-const MARKS: &str = ".distilled.json";
 const LOCK: &str = ".lock";
 // A lock older than this is a run that died holding it.
 const STALE: Duration = Duration::from_secs(600);
@@ -107,7 +106,7 @@ impl Memory {
     }
 
     /// The project's file, then every global one by name: what a
-    /// distillation is shown and what the prompt carries. Empty ones are left out.
+    /// change is weighed against and what the prompt carries. Empty ones are left out.
     pub fn files(&self, project: &Path) -> Vec<File> {
         let mut out = Vec::new();
         if let Some(body) = read(&self.project_path(project)) {
@@ -144,12 +143,17 @@ impl Memory {
         out
     }
 
-    /// Apply `edits` for the project rooted at `project`, returning how many
-    /// changed something; one naming no usable file is skipped.
-    pub fn apply(&self, project: &Path, edits: &[Edit]) -> std::io::Result<usize> {
-        let mut changed: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
-        let mut dirty = std::collections::BTreeSet::new();
-        let mut count = 0;
+    /// What `edits` would do for the project rooted at `project`, nothing
+    /// written yet: each in turn sees the ones before it.
+    pub fn plan(&self, project: &Path, edits: &[Edit]) -> Plan {
+        let before: usize = self.files(project).iter().map(|f| f.body.len()).sum();
+        let mut plan = Plan {
+            done: Vec::new(),
+            missed: Vec::new(),
+            before,
+            after: before,
+            files: BTreeMap::new(),
+        };
         for edit in edits {
             // `project.md` is how a model may well spell it; never a global file.
             let for_project = matches!(edit.file.as_str(), PROJECT | "project.md");
@@ -158,65 +162,65 @@ impl Memory {
             } else if global_name(&edit.file) {
                 self.dir.join(&edit.file)
             } else {
-                tracing::warn!(target: "pi::memory", file = %edit.file, "not a memory file name, skipped");
+                plan.missed.push(format!(
+                    "`{}` is not a memory file: `{PROJECT}`, or a lowercase `<topic>.md`",
+                    edit.file
+                ));
                 continue;
             };
-            let lines = changed.entry(path.clone()).or_insert_with(|| {
-                read(&path)
-                    .map(|b| b.lines().map(str::to_string).collect())
-                    .unwrap_or_else(|| header(for_project, project))
+            let name = if for_project { PROJECT } else { &edit.file };
+            let draft = plan.files.entry(path.clone()).or_insert_with(|| {
+                let body = read(&path);
+                Draft {
+                    changed: false,
+                    was: body.as_ref().map_or(0, String::len),
+                    lines: body
+                        .map(|b| b.lines().map(str::to_string).collect())
+                        .unwrap_or_else(|| header(for_project, project)),
+                }
             });
-            let mut did = false;
-            if let Some(old) = edit.remove.as_deref().map(fact).filter(|o| !o.is_empty())
-                && let Some(at) = lines.iter().position(|l| fact(l) == old)
-            {
-                lines.remove(at);
-                did = true;
-            }
-            if let Some(new) = edit.add.as_deref().map(fact).filter(|n| !n.is_empty())
-                && !lines.iter().any(|l| fact(l) == new)
-            {
-                lines.push(format!("- {new}"));
-                did = true;
-            }
-            if did {
-                count += 1;
-                dirty.insert(path);
-            }
-        }
-        for (path, lines) in changed.into_iter().filter(|(p, _)| dirty.contains(p)) {
-            // Down to its headings, a file remembers nothing; it goes.
-            if lines
-                .iter()
-                .all(|l| l.trim().is_empty() || l.starts_with('#'))
-            {
-                let _ = std::fs::remove_file(&path);
+            let old = edit.remove.as_deref().map(fact).filter(|o| !o.is_empty());
+            let new = edit.add.as_deref().map(fact).filter(|n| !n.is_empty());
+            if old.is_none() && new.is_none() {
+                plan.missed
+                    .push(format!("{name}: nothing to add or remove"));
                 continue;
             }
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
+            if let Some(old) = old {
+                match draft.lines.iter().position(|l| fact(l) == old) {
+                    Some(at) => {
+                        draft.lines.remove(at);
+                        draft.changed = true;
+                        plan.done.push(format!("{name}: - {old}"));
+                    }
+                    None => {
+                        plan.missed.push(format!("{name}: no line reads `{old}`"));
+                        continue;
+                    }
+                }
             }
-            tool::state::write_private(&path, format!("{}\n", lines.join("\n")).as_bytes())?;
+            if let Some(new) = new {
+                if draft.lines.iter().any(|l| fact(l) == new) {
+                    plan.missed.push(format!("{name}: already has `{new}`"));
+                } else {
+                    draft.lines.push(format!("- {new}"));
+                    draft.changed = true;
+                    plan.done.push(format!("{name}: + {new}"));
+                }
+            }
         }
-        Ok(count)
+        plan.after = plan
+            .files
+            .values()
+            .filter(|d| d.changed)
+            .fold(before, |total, d| {
+                total - d.was + d.body().map_or(0, |b| b.len())
+            });
+        plan
     }
 
-    /// How far each session has been read, by session id: the last entry id
-    /// distilled. `None` before the first distillation, or when unreadable:
-    /// either way the archive behind is not read again.
-    pub fn marks(&self) -> Option<BTreeMap<String, u64>> {
-        let body = std::fs::read(self.dir.join(MARKS)).ok()?;
-        serde_json::from_slice(&body).ok()
-    }
-
-    pub fn save_marks(&self, marks: &BTreeMap<String, u64>) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.dir)?;
-        let body = serde_json::to_vec_pretty(marks).unwrap_or_default();
-        tool::state::write_private(&self.dir.join(MARKS), &body)
-    }
-
-    /// Hold memory for one distillation, so two runs started together don't
-    /// both read the same sessions. `None` while another holds it.
+    /// Hold memory for one change, so two pi writing at once don't each
+    /// write over the other's. `None` while another holds it.
     pub fn lock(&self) -> Option<Lock> {
         std::fs::create_dir_all(&self.dir).ok()?;
         let path = self.dir.join(LOCK);
@@ -241,15 +245,52 @@ impl Drop for Lock {
     }
 }
 
-/// Edits out of a model's reply: the JSON array in it, whatever surrounds it.
-pub fn parse(reply: &str) -> Result<Vec<Edit>, String> {
-    let (Some(start), Some(end)) = (reply.find('['), reply.rfind(']')) else {
-        return Err("no JSON array in the reply".into());
-    };
-    if end < start {
-        return Err("no JSON array in the reply".into());
+/// Edits worked out but not yet written; `commit` writes them.
+pub struct Plan {
+    /// Each change made, as `<file>: - line` or `<file>: + line`.
+    pub done: Vec<String>,
+    /// Each edit that changed nothing, and why.
+    pub missed: Vec<String>,
+    /// Bytes across every file `files` reads, before and after.
+    pub before: usize,
+    pub after: usize,
+    files: BTreeMap<PathBuf, Draft>,
+}
+
+struct Draft {
+    // Untouched, a file is left as it stands rather than written back.
+    changed: bool,
+    was: usize,
+    lines: Vec<String>,
+}
+
+impl Draft {
+    // Down to its headings, a file remembers nothing; it goes.
+    fn body(&self) -> Option<String> {
+        let empty = self
+            .lines
+            .iter()
+            .all(|l| l.trim().is_empty() || l.starts_with('#'));
+        (!empty).then(|| format!("{}\n", self.lines.join("\n")))
     }
-    serde_json::from_str(&reply[start..=end]).map_err(|e| e.to_string())
+}
+
+impl Plan {
+    pub fn commit(&self) -> std::io::Result<()> {
+        for (path, draft) in self.files.iter().filter(|(_, d)| d.changed) {
+            match draft.body() {
+                Some(body) => {
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    tool::state::write_private(path, body.as_bytes())?;
+                }
+                None if draft.was > 0 => std::fs::remove_file(path)?,
+                None => {}
+            }
+        }
+        Ok(())
+    }
 }
 
 // A global file's name: lowercase words, `.md`. Anything else could leave
@@ -299,49 +340,59 @@ mod tests {
         }
     }
 
-    // Applied silently, read by nobody until the prompt carries it: a wrong
-    // line here is one the user never sees go in.
+    // What the model is told back is the only check it has that a line went
+    // where it meant, and the sizes are what a budget is weighed by.
     #[test]
     fn edits_add_once_replace_in_place_and_stay_inside_the_directory() {
         let dir = tempfile::tempdir().unwrap();
         let memory = Memory::new(dir.path());
         let project = Path::new("/work/pi");
 
-        let n = memory
-            .apply(
-                project,
-                &[
-                    edit("user.md", None, Some("prefers Rust")),
-                    edit("user.md", None, Some("- prefers Rust")),
-                    edit(PROJECT, None, Some("ships with cargo fmt")),
-                    edit("../escape.md", None, Some("x")),
-                    edit("Notes.md", None, Some("x")),
-                    edit("project.md", None, Some("keeps a CHANGELOG")),
-                ],
-            )
-            .unwrap();
-        assert_eq!(n, 3);
+        let plan = memory.plan(
+            project,
+            &[
+                edit("user.md", None, Some("prefers Rust")),
+                edit("user.md", None, Some("- prefers Rust")),
+                edit(PROJECT, None, Some("ships with cargo fmt")),
+                edit("../escape.md", None, Some("x")),
+                edit("Notes.md", None, Some("x")),
+                edit("project.md", None, Some("keeps a CHANGELOG")),
+                edit("user.md", Some("never said"), Some("y")),
+            ],
+        );
+        assert_eq!(
+            plan.done,
+            [
+                "user.md: + prefers Rust",
+                "project: + ships with cargo fmt",
+                "project: + keeps a CHANGELOG",
+            ]
+        );
+        assert_eq!(plan.missed.len(), 4, "{:?}", plan.missed);
+        assert!(plan.missed[3].contains("never said"), "{:?}", plan.missed);
+        assert_eq!(plan.before, 0);
+        assert!(memory.files(project).is_empty(), "a plan writes nothing");
+        let after = plan.after;
+        plan.commit().unwrap();
+        let files = memory.files(project);
+        assert_eq!(after, files.iter().map(|f| f.body.len()).sum::<usize>());
         assert!(
             !dir.path().join("project.md").exists(),
             "a project line went global"
         );
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("user.md")).unwrap(),
-            "- prefers Rust\n"
-        );
         assert!(!dir.path().join("Notes.md").exists());
         assert!(!dir.path().parent().unwrap().join("escape.md").exists());
 
-        memory
-            .apply(
-                project,
-                &[edit(
-                    "user.md",
-                    Some("prefers Rust"),
-                    Some("prefers Rust, then Python"),
-                )],
-            )
-            .unwrap();
+        let plan = memory.plan(
+            project,
+            &[edit(
+                "user.md",
+                Some("prefers Rust"),
+                Some("prefers Rust, then Python"),
+            )],
+        );
+        assert_eq!(plan.before, after);
+        plan.commit().unwrap();
         let files = memory.files(project);
         assert_eq!(files[0].name, PROJECT);
         assert_eq!(files[1].body, "- prefers Rust, then Python\n");
@@ -351,42 +402,51 @@ mod tests {
             files[0].body
         );
 
-        memory
-            .apply(
-                project,
-                &[
-                    edit(PROJECT, Some("ships with cargo fmt"), None),
-                    edit(PROJECT, Some("keeps a CHANGELOG"), None),
-                ],
-            )
-            .unwrap();
+        let plan = memory.plan(
+            project,
+            &[
+                edit(PROJECT, Some("ships with cargo fmt"), None),
+                edit(PROJECT, Some("keeps a CHANGELOG"), None),
+            ],
+        );
+        assert_eq!(plan.after, files[1].body.len());
+        plan.commit().unwrap();
         assert!(
             !memory.project_path(project).exists(),
             "a heading alone remembers nothing"
         );
     }
 
+    // Rewritten, a file a change only missed would come back reformatted.
     #[test]
-    fn the_edits_are_read_out_of_whatever_wraps_them() {
-        let reply = "Here you go:\n```json\n[{\"file\": \"user.md\", \"add\": \"a\"}]\n```";
-        assert_eq!(
-            parse(reply).unwrap(),
-            vec![edit("user.md", None, Some("a"))]
+    fn a_file_only_missed_is_left_as_it_stands() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::new(dir.path());
+        let project = Path::new("/work/pi");
+        std::fs::write(memory.project_path(project), "- kept as typed").unwrap();
+        let plan = memory.plan(
+            project,
+            &[
+                edit("user.md", None, Some("prefers Rust")),
+                edit(PROJECT, Some("never said"), None),
+            ],
         );
-        assert_eq!(parse("[]").unwrap(), vec![]);
-        assert!(parse("nothing to change").is_err());
+        assert_eq!(plan.after, plan.before + "- prefers Rust\n".len());
+        plan.commit().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(memory.project_path(project)).unwrap(),
+            "- kept as typed"
+        );
     }
 
     #[test]
-    fn a_dash_and_an_underscore_are_two_projects_and_garbled_marks_read_as_none() {
+    fn a_dash_and_an_underscore_are_two_projects() {
         let dir = tempfile::tempdir().unwrap();
         let memory = Memory::new(dir.path());
         assert_ne!(
             memory.project_path(Path::new("/w/my-project")),
             memory.project_path(Path::new("/w/my_project"))
         );
-        std::fs::write(dir.path().join(MARKS), "{\"s1\": 3").unwrap();
-        assert_eq!(memory.marks(), None);
     }
 
     // Side by side in one directory, a project's file is never read as
@@ -407,10 +467,11 @@ mod tests {
         assert_eq!(names, [PROJECT, "user.md"]);
         assert_eq!(memory.files(here)[0].body, "- here\n");
 
-        let skipped = memory
-            .apply(here, &[edit("-w-there.md", None, Some("x"))])
-            .unwrap();
-        assert_eq!(skipped, 0, "another project's file is not a global name");
+        let plan = memory.plan(here, &[edit("-w-there.md", None, Some("x"))]);
+        assert!(
+            plan.done.is_empty(),
+            "another project's file is not a global name"
+        );
     }
 
     #[test]

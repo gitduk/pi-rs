@@ -1,5 +1,5 @@
 use std::io::{IsTerminal as _, Read as _};
-use std::process::{ExitCode, Stdio};
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -59,37 +59,6 @@ fn cancel_on_interrupt() -> tokio_util::sync::CancellationToken {
     token
 }
 
-// Memory is distilled once pi has gone, by a process of its own, so leaving
-// waits for nothing. In its own process group, a closed terminal misses it.
-fn distill_after(args: &Args, ended: &str, model: &str) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        let Ok(exe) = std::env::current_exe() else {
-            return;
-        };
-        let mut child = std::process::Command::new(exe);
-        child
-            .args(["--distill", ended, "--model", model, "--cwd", &args.cwd])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0);
-        if let Some(config) = &args.config {
-            child.args(["--config", config]);
-        }
-        if let Some(url) = &args.base_url {
-            child.args(["--base-url", url]);
-        }
-        if let Some(window) = args.context {
-            child.args(["--context", &window.to_string()]);
-        }
-        if let Err(e) = child.spawn() {
-            tracing::warn!(target: "pi::memory", error = %e, "distiller not started");
-        }
-    }
-}
-
 // `/restart`: this process becomes the pi installed now, on the session just
 // left, which keeps its own model and name.
 fn restart(root: &std::path::Path, id: Option<&str>, flags: &[String]) -> Result<ExitCode> {
@@ -107,25 +76,6 @@ fn restart(root: &std::path::Path, id: Option<&str>, flags: &[String]) -> Result
     let e = std::io::Error::from(std::io::ErrorKind::Unsupported);
     let again = id.map_or("pi".to_string(), |id| format!("pi --resume {id}"));
     Err(e).with_context(|| format!("cannot start {} — run `{again}`", launcher.display()))
-}
-
-// The process `distill_after` starts. Nobody is watching it, so what happens
-// goes to the ended session's journal and nowhere else.
-async fn distill_alone(args: &Args, store: session::Store, ended: &str) -> Result<()> {
-    let workspace = tool::Workspace::new(&args.cwd)?;
-    let settings = Settings::load(args.config.as_deref(), workspace.root())?;
-    let config = settings.config()?;
-    let pinned = args.pinned();
-    let from_project = settings.project_sets("model").is_some();
-    let (named, by) = config
-        .model(args.model.as_deref(), None, from_project)
-        .context("no model to distill with")?;
-    let dialled = dial(&pinned, &config, &named, by)?;
-    let writer = summary_writer(&pinned, &config, &dialled.spec.model)?
-        .unwrap_or((dialled.transport, dialled.spec));
-    let memory = pi_store::memory::Memory::default();
-    core::memory::distill(store, memory, writer, core::retry(&config).idle, ended).await;
-    Ok(())
 }
 
 // Renders a one-shot run's events by printing them. Its own task so a slow
@@ -151,18 +101,6 @@ fn paint(
 #[tokio::main]
 async fn main() -> Result<ExitCode> {
     let args = std::sync::Arc::new(Args::parse());
-    if let Some(ended) = &args.distill {
-        let store = session::Store::default();
-        let root = std::fs::canonicalize(&args.cwd).unwrap_or_else(|_| args.cwd.clone().into());
-        journal::install(&store.journal_path(&root, ended), journal::level_from_env());
-        return Ok(match distill_alone(&args, store, ended).await {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                tracing::error!(target: "pi::memory", error = %format!("{e:#}"), "distiller gave up");
-                ExitCode::FAILURE
-            }
-        });
-    }
     let prompt = read_prompt(&args)?;
     let within = || format!("cannot use {} as a workspace", args.cwd);
     let workspace = tool::Workspace::new(&args.cwd).with_context(within)?;
@@ -309,7 +247,6 @@ async fn main() -> Result<ExitCode> {
         // Before `id` moves into the Core, since `ctx` still needs to borrow it.
         // `commands` is the Core's copy for the front lane; `resolved` keeps its own.
         let commands = resolved.commands.clone();
-        let ended = id.clone();
         let ctx = tool::Ctx::new(workspace).with_session(&id, pi_store::spill_root());
         let mut first = lane::Lane::opened(lane::Opening {
             id,
@@ -344,11 +281,7 @@ async fn main() -> Result<ExitCode> {
             eprintln!("journal stopped recording: {why}");
         }
         return match out? {
-            tui::Ended::Quit => {
-                distill_after(&args, &ended, &model_id);
-                Ok(ExitCode::SUCCESS)
-            }
-            // Not distilled: the session goes on in the pi that replaces this one.
+            tui::Ended::Quit => Ok(ExitCode::SUCCESS),
             tui::Ended::Restart { root, id, flags } => restart(&root, id.as_deref(), &flags),
         };
     };
@@ -420,10 +353,6 @@ async fn main() -> Result<ExitCode> {
     if let Some(why) = journal::failure() {
         eprintln!("journal stopped recording: {why}");
     }
-    if keeps {
-        distill_after(&args, &id, &model_id);
-    }
-
     // A run the user stopped is not a failure of the run; scripts should be
     // able to tell the two apart.
     if matches!(outcome, Err(agent::AgentError::Cancelled)) {

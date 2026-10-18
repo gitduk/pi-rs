@@ -57,6 +57,8 @@ pub struct Resolved {
     pub instructions: Vec<String>,
     /// The memory files folded into the prompt, by path.
     pub memory: Vec<String>,
+    /// Whether the run reads memory, and so may write it.
+    pub remembers: bool,
     /// The file that replaced the built-in system prompt, if one did.
     pub system: Option<PathBuf>,
     /// Where requests go and which source said so, for `/status`: two files
@@ -326,6 +328,7 @@ pub fn resolve(
         notes,
         instructions: instruction_names,
         memory: memory_files,
+        remembers: !pinned.no_context_files,
         system: prompt_files.system_file.clone(),
         prompt_files,
         endpoint: endpoint(pinned, config, settings, root),

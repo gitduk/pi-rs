@@ -7,13 +7,14 @@ use tool::Tier;
 /// Whether the tool `name` changes files. What it changed is the result, so
 /// a surface shows it whole rather than in brief.
 pub fn modifies(name: &str) -> bool {
-    // Built-ins only: no other source offers a tool at the write tier.
+    // Built-ins and memory only: no other source offers a tool at the write tier.
     static WRITERS: LazyLock<Vec<String>> = LazyLock::new(|| {
         let tools = toolbox::builtin();
         tools
             .names()
             .into_iter()
             .filter(|n| tools.get(n).is_some_and(|t| t.tier() == Tier::Write))
+            .chain([super::memory::Remember::NAME.to_string()])
             .collect()
     });
     WRITERS.iter().any(|w| w == name)

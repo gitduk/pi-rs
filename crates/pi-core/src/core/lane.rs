@@ -186,6 +186,15 @@ pub fn arm(
     if subagent.tier().under(resolved.ceiling) {
         Arc::make_mut(&mut brief).registry.offer(Arc::new(subagent));
     }
+    // The lane's copy only: a child never hears the user, whose words are
+    // the only ones memory keeps.
+    if resolved.remembers && tool::Tier::Write.under(resolved.ceiling) {
+        Arc::make_mut(&mut brief)
+            .registry
+            .offer(Arc::new(crate::core::memory::Remember::new(
+                pi_store::memory::Memory::default(),
+            )));
+    }
     // The lane's copy only, as with the subagent: a child cannot reach the
     // lane its prompt would come back to.
     if let Some(jobs) = jobs
@@ -233,6 +242,7 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
         notes: Vec::new(),
         instructions: Vec::new(),
         memory: Vec::new(),
+        remembers: false,
         system: None,
         endpoint: None,
         mcp: Vec::new(),

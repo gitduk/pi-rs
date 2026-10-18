@@ -122,7 +122,7 @@ refused, and resuming one from another directory moves it here.
 
 ## Tools
 
-`read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `subagent`, plus:
+`read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `subagent` `memory`, plus:
 
 - One tool per tool of each MCP server in `[mcp.<name>]`, offered as
   `<name>__<tool>` once the server has listed them. `command` and `args` run
@@ -197,11 +197,14 @@ results first and summarizes whole rounds last, down to half the room it
 has, so the next compaction is many turns away. The saved session keeps
 everything; only the model's view shrinks.
 
-pi remembers without being asked. When pi exits, a process it leaves behind
-reads what sessions said since it last looked and updates `~/.pi/memory/`,
-with `summarize_model` when one is set; the next start carries the result. The
-files are plain markdown, named by `/status`; edit or delete them freely.
-Memory starts with the first session to end and never reads tool output.
+pi remembers without being asked. When you correct it, say what you prefer,
+or settle a decision, the model writes a line to `~/.pi/memory/` with its
+`memory` tool, and you see each line go in as it does; the next session or
+compaction carries it. Memory holds 16 KiB in all: a change that would grow it
+past that is refused until the model folds or removes lines. The files are
+plain markdown, named by `/status`; edit or delete them freely. A subagent
+never writes memory, nor does a run under `--tier read` or `net`, or with
+`--no-context-files`.
 
 ## Files
 
