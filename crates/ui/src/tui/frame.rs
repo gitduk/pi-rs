@@ -44,7 +44,12 @@ impl Ui {
             width,
         );
         self.job_rows = job_rows;
+        let jobs = bar.len();
         bar.extend(self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width));
+        // Counted from the bar region's top, which the job rows lead.
+        if let Some((at, ..)) = &mut self.flash_hit {
+            *at += jobs;
+        }
         let caret_shown =
             matches!(self.focus, Focus::Editor) || self.slash_fits() || self.search_typing();
         // A command's output sits on what was being typed; another reading

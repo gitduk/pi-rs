@@ -57,13 +57,12 @@ const DOUBLE_TAP: std::time::Duration = std::time::Duration::from_millis(500);
 // The shortest a flash or a copy mark stays: long enough to catch a short
 // line, short enough that a second try lands after it.
 const FLASH: std::time::Duration = std::time::Duration::from_secs(1);
-// The longest a flash stays, however much it says: the bar is borrowed.
-const FLASH_MAX: std::time::Duration = std::time::Duration::from_secs(4);
 
-// How long a flash of `line` stays: about 16 characters a second of reading.
+// How long a flash of `line` stays: each character adds less than the last,
+// so a long error stays longer but not in proportion to its length.
 fn flash_for(line: &str) -> std::time::Duration {
-    let reading = std::time::Duration::from_millis(line.chars().count() as u64 * 60);
-    reading.clamp(FLASH, FLASH_MAX)
+    let n = line.chars().count() as f64;
+    std::time::Duration::from_secs_f64(2.0 * (1.0 + n / 20.0).ln()).max(FLASH)
 }
 
 // Shared text for several call sites, so a reword can't drift between them.

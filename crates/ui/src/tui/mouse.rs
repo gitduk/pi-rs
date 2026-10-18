@@ -70,6 +70,16 @@ impl Ui {
         (self.job_open == Some(id) || opens).then_some(id)
     }
 
+    /// The flash under screen cell (`col`, `row`), and whether the bar cut
+    /// it: the side of the bar row that holds it.
+    pub(super) fn flash_at(&self, col: u16, row: u16) -> Option<bool> {
+        let (at, cols, cut) = self.flash_hit.as_ref()?;
+        let bar = self.regions.bar;
+        let r = row.checked_sub(bar.y).filter(|r| *r < bar.height)? as usize;
+        let c = col.checked_sub(bar.x)? as usize;
+        (r == *at && cols.contains(&c)).then_some(*cut)
+    }
+
     pub(super) fn target_at(&self, row: u16) -> Option<Target> {
         self.row_targets
             .get(row.checked_sub(self.regions.history.y)? as usize)
@@ -123,6 +133,14 @@ impl Ui {
         }
         if self.fold_at(row) {
             self.jobs_all = !self.jobs_all;
+            return;
+        }
+        // A cut flash opens whole, as an answer the click asked for.
+        if self.flash_at(col, row) == Some(true)
+            && let Some((line, _)) = &self.flash
+        {
+            let whole = pi_store::listing::Listing::say([line.clone()]);
+            self.open_slash(whole);
             return;
         }
         match self.target_at(row) {

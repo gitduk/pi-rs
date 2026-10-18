@@ -90,6 +90,9 @@ pub(super) struct Ui {
     // A note answering the last keypress, and when it landed. It stands
     // where the layout puts it for `flash_for` and then goes — see `bar_lines`.
     pub(super) flash: Option<(String, Instant)>,
+    // Where the last frame drew the flash: its row in the bar region, its
+    // columns, and whether the bar cut it. A pointer there holds it.
+    pub(super) flash_hit: Option<(usize, std::ops::Range<usize>, bool)>,
     // When a click last copied: the row says so for `FLASH`, and the loop
     // ticks until it is gone.
     pub(super) copied: Option<Instant>,
@@ -246,6 +249,7 @@ impl Ui {
             status: default_parts(),
             tabs: Vec::new(),
             flash: None,
+            flash_hit: None,
             copied: None,
             jobs: Vec::new(),
             tools: None,

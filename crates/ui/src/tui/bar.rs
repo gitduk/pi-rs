@@ -166,36 +166,44 @@ impl Ui {
     }
 
     /// The bar's rows, one per layout line. The only place an expired flash
-    /// is dropped: every frame passes through here.
+    /// is dropped: every frame passes through here. A flash under the
+    /// pointer does not expire; its time starts over once the pointer leaves.
     pub(super) fn bar_lines(
         &mut self,
         facts: &Facts,
         snap: &Snapshot,
         width: usize,
     ) -> Vec<Line<'static>> {
-        if self
-            .flash
-            .as_ref()
-            .is_some_and(|(line, at)| at.elapsed() >= flash_for(line))
-        {
-            self.flash = None;
+        let held = self
+            .pointer
+            .is_some_and(|(col, row)| self.flash_at(col, row).is_some());
+        match &mut self.flash {
+            Some((_, at)) if held => *at = Instant::now(),
+            Some((line, at)) if at.elapsed() >= flash_for(line) => self.flash = None,
+            _ => {}
         }
-        self.layout
-            .lines
-            .iter()
-            .map(|line| self.bar_row(line, facts, snap, width))
-            .collect()
+        self.flash_hit = None;
+        let mut rows = Vec::new();
+        for (i, line) in self.layout.lines.iter().enumerate() {
+            let (row, hit) = self.bar_row(line, facts, snap, width);
+            if let Some((cols, cut)) = hit {
+                self.flash_hit = Some((i, cols, cut));
+            }
+            rows.push(row);
+        }
+        rows
     }
 
     // The right side keeps up to half a row too narrow for both; the left
-    // folds its checkouts, then is cut.
+    // folds its checkouts, then is cut. With the row, the columns of the side
+    // holding a flash shown, and whether that side was cut.
     fn bar_row(
         &self,
         line: &bar::Line,
         facts: &Facts,
         snap: &Snapshot,
         width: usize,
-    ) -> Line<'static> {
+    ) -> (Line<'static>, Option<(std::ops::Range<usize>, bool)>) {
         let left = self.pieces(&line.left, facts, snap);
         let right = self.pieces(&line.right, facts, snap);
         let sep = match &line.sep {
@@ -214,14 +222,20 @@ impl Ui {
             rw.min(width.saturating_sub(lmin + gap).max(width / 2))
         };
         let lroom = width.saturating_sub(rroom + gap);
+        let lcut = self.natural(&left, &sep) > lroom;
         let mut spans = self.join(left, lroom, &sep);
         let right = self.join(right, rroom, &sep);
+        let shown = self.flash.is_some();
+        let mut hit = (shown && holds_flash(&line.left)).then(|| (0..spans_width(&spans), lcut));
         if !right.is_empty() {
             let used = spans_width(&spans) + spans_width(&right);
             spans.push(Span::raw(" ".repeat(width.saturating_sub(used))));
+            if shown && holds_flash(&line.right) {
+                hit = Some((width.saturating_sub(spans_width(&right))..width, rw > rroom));
+            }
             spans.extend(right);
         }
-        Line::from(spans)
+        (Line::from(spans), hit)
     }
 
     fn pieces(&self, items: &[Item], facts: &Facts, snap: &Snapshot) -> Vec<Piece> {
@@ -372,6 +386,16 @@ impl Ui {
         cut.push(ellipsis);
         cut
     }
+}
+
+// Whether a side's items name the flash, in a group or not.
+fn holds_flash(items: &[Item]) -> bool {
+    items.iter().any(|item| match item {
+        Item::Part(part) => *part == Part::Flash,
+        Item::Styled(s) => s.part == Part::Flash,
+        Item::Group(g) => holds_flash(&g.group),
+        Item::Text(_) => false,
+    })
 }
 
 fn spans_width(spans: &[Span<'_>]) -> usize {
