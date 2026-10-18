@@ -291,7 +291,7 @@ impl Ui {
             Part::Effort if facts.effort == Effort::Off => return None,
             Part::Effort => facts.effort.name().to_string(),
             Part::Tier => facts.tier.name(),
-            Part::Update => format!("{} {}", icons::UPDATE_MARK, facts.update.as_ref()?),
+            Part::Update => format!("restart for {}", facts.update.as_ref()?),
             Part::Status(segment) => return crate::status::render(segment, snap),
         })
     }
