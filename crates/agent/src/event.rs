@@ -155,7 +155,8 @@ fn clipped(args: &serde_json::Value) -> serde_json::Value {
     match args {
         Value::String(s) if s.chars().count() > HEAD => {
             let head: String = s.chars().take(HEAD).collect();
-            Value::String(format!("{head}… ({} chars)", s.chars().count()))
+            let more = s.chars().count() - HEAD;
+            Value::String(format!("{head}… {more} more chars"))
         }
         Value::Array(items) => Value::Array(items.iter().map(clipped).collect()),
         Value::Object(map) => {

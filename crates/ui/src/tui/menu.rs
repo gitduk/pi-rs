@@ -12,6 +12,7 @@ use pi_store::session::Store;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::ListItem;
+use unicode_width::UnicodeWidthStr;
 
 impl Ui {
     // What the line could become: a completion while a command word is
@@ -136,12 +137,13 @@ impl Ui {
     // the list itself; everything else sits muted.
     // Every row muted but `picked`, which is bright and wears the mark and the
     // theme's `menu.selected` on its name; its band is the list's to draw.
-    pub(super) fn menu_items(&self, menu: &[MenuEntry], picked: usize) -> Vec<ListItem<'static>> {
-        let head = menu
-            .iter()
-            .map(|c| unicode_width::UnicodeWidthStr::width(c.show()))
-            .max()
-            .unwrap_or(0);
+    pub(super) fn menu_items(
+        &self,
+        menu: &[MenuEntry],
+        picked: usize,
+        width: usize,
+    ) -> Vec<ListItem<'static>> {
+        let head = menu.iter().map(|c| c.show().width()).max().unwrap_or(0);
         let muted = self.rat_style(&self.paint.theme.muted);
         let mark = self.rat_style(&self.paint.theme.prompt.color);
         let chosen = self.rat_style(&self.paint.theme.menu.selected);
@@ -162,8 +164,12 @@ impl Ui {
                 } else {
                     format!(" {args}")
                 };
-                let pad = head.saturating_sub(unicode_width::UnicodeWidthStr::width(show));
-                let rest = format!("{args}{}  {}", " ".repeat(pad), c.help());
+                let pad = head.saturating_sub(show.width());
+                let lead = format!("{args}{}  ", " ".repeat(pad));
+                // Cut where the menu ends, marked, not mid-word at its edge.
+                let used = MENU_MARK.width() + name.width() + lead.width();
+                let help = pi_store::text::clip(c.help(), width.saturating_sub(used));
+                let rest = format!("{lead}{help}");
                 if at != picked {
                     return ListItem::new(Line::from(Span::styled(
                         format!("  {name}{rest}"),

@@ -2,7 +2,6 @@
 //! regions, and the row under the pointer.
 
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::text::Line;
 
 use super::Ui;
 use super::browse::{Page, TextClick};
@@ -81,9 +80,18 @@ impl Ui {
     }
 
     pub(super) fn target_at(&self, row: u16) -> Option<Target> {
+        if self.over_menu(row) {
+            return None;
+        }
         self.row_targets
             .get(row.checked_sub(self.regions.history.y)? as usize)
             .copied()
+    }
+
+    // Whether `row` is under the list, which lies over the history there.
+    fn over_menu(&self, row: u16) -> bool {
+        let menu = self.regions.menu;
+        (menu.y..menu.y + menu.height).contains(&row)
     }
 
     /// The scrollback row and line under the cursor, if the cursor is over
@@ -110,7 +118,7 @@ impl Ui {
         // at, not the line it toggles, which may be narrower.
         let (text, border) = row.line(clicked, &self.paint, width);
         let start = border.map_or(0, |b| b.width());
-        (start..start + text.width())
+        (start..start + pi_store::text::width(&screen::plain(&text)))
             .contains(&(col as usize))
             .then_some((idx, line))
     }
@@ -195,6 +203,9 @@ impl Ui {
     // The cell under the pointer, if it is over the transcript or the bar:
     // the bar's rows count on from the history's full height.
     fn point(&self, col: u16, row: u16) -> Option<Point> {
+        if self.over_menu(row) {
+            return None;
+        }
         let (h, b) = (self.regions.history, self.regions.bar);
         let row = match row.checked_sub(h.y).filter(|r| *r < h.height) {
             Some(r) => r,
@@ -331,16 +342,19 @@ impl Ui {
         if units.is_empty() {
             return None;
         }
-        let lead = border.as_ref().map_or(0, Line::width);
-        let rows: Vec<usize> = (screen::wrap(border.as_ref(), &line, width).iter())
-            .map(|r| r.width().saturating_sub(lead))
+        let lead = border
+            .as_ref()
+            .map_or(0, |b| pi_store::text::width(&screen::plain(b)));
+        // Read off the rows as laid, tabs as spaces and escapes gone, so the
+        // columns counted and the text taken are the same characters.
+        let drawn: Vec<String> = (screen::wrap(border.as_ref(), &line, width).iter())
+            .map(|r| select::cols(&screen::plain(r), lead, usize::MAX))
             .collect();
+        let rows: Vec<usize> = drawn.iter().map(|r| pi_store::text::width(r)).collect();
         let k = *self.row_of.get(at.row)?;
         let col = rows.iter().take(k).sum::<usize>() + at.col.checked_sub(lead)?;
         let unit = crate::unit::at(&units, col)?;
-        // A block's rows break at its `\n`s, which take no cells.
-        let plain = screen::plain(&line).replace('\n', "");
-        let text = select::cols(&plain, unit.start, unit.end);
+        let text = select::cols(&drawn.concat(), unit.start, unit.end);
         // Cell `c` of the line where it is drawn: which of its rows, what column.
         let place = |mut c: usize| {
             let mut j = 0;
@@ -512,27 +526,33 @@ impl Regions {
     /// The rows each part asks for, as many as `area` holds: input last, so
     /// the caret sits on the bottom row and the bar reads as history's edge.
     pub(super) fn layout(area: Rect, menu: usize, bar: usize, editor: usize) -> Self {
-        // A short screen takes from the menu, then the editor, then the bar;
-        // a row of history and a row to type on stay.
+        // A short screen takes from the editor, then the bar; a row of
+        // history and a row to type on stay.
         let mut left = (area.height as usize).saturating_sub(1 + HISTORY_GAP as usize);
         let bar = bar.min(left.saturating_sub(1));
         left -= bar;
         let editor = editor.min(left);
-        let menu = menu.min(left - editor);
+        left -= editor;
         let chunks = Layout::vertical([
             Constraint::Fill(1),
             Constraint::Length(HISTORY_GAP),
-            Constraint::Length(menu as u16),
             Constraint::Length(bar as u16),
             Constraint::Length(editor as u16),
         ])
         .split(area);
+        // The list lies over the rows above the bar, as a command's output
+        // does: nothing under it moves as it grows and shrinks.
+        let menu = menu.min(left) as u16;
         Self {
             history: chunks[0],
             gap: chunks[1],
-            menu: chunks[2],
-            bar: chunks[3],
-            editor: chunks[4],
+            menu: Rect {
+                y: chunks[2].y - menu,
+                height: menu,
+                ..chunks[2]
+            },
+            bar: chunks[2],
+            editor: chunks[3],
         }
     }
 }

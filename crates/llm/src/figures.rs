@@ -5,6 +5,31 @@
 
 use std::time::Duration;
 
+/// `thing` as many of it as `n` says: `1 file`, `2 files`, `3 matches`.
+pub fn count(n: usize, thing: &str) -> String {
+    format!("{n} {}", plural(n, thing))
+}
+
+/// `thing` in the number `n` asks for, for a count told apart from its noun.
+pub fn plural(n: usize, thing: &str) -> String {
+    let es = thing.ends_with(['s', 'x']) || thing.ends_with("ch") || thing.ends_with("sh");
+    let ies = thing
+        .strip_suffix('y')
+        .filter(|stem| !stem.ends_with(['a', 'e', 'i', 'o', 'u']));
+    match (n, ies) {
+        (1, _) => thing.to_string(),
+        (_, Some(stem)) => format!("{stem}ies"),
+        _ if es => format!("{thing}es"),
+        _ => format!("{thing}s"),
+    }
+}
+
+/// How many of `n` items a list shows under `limit`: all of them when only
+/// one is over, since the "N more" line would take that item's row.
+pub fn shown(n: usize, limit: usize) -> usize {
+    if n > limit + 1 { limit } else { n }
+}
+
 /// Thousands, one decimal. Exact counts are noise at this size and the line has
 /// to hold still while they climb.
 pub fn short(n: u64) -> String {

@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use llm::message::{ToolResult, ToolResultContent};
 use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use crate::block;
 use crate::render::named;
@@ -603,7 +603,7 @@ impl Row {
             return h;
         }
         let (line, border) = self.line(i, paint, width);
-        let h = super::screen::wrap(border.as_ref(), &line, width).len();
+        let h = super::screen::wrap_rows(border.as_ref(), &line, width);
         self.1.set(width, i, h);
         h
     }
@@ -779,11 +779,7 @@ fn tool_start_line(name: &str, summary: &str) -> String {
     format!("{} {}", icons::STOPPED_MARK, named(name, summary))
 }
 
-/// "N thing(s)": the counts a line ends with.
-pub(super) fn count(n: usize, thing: &str) -> String {
-    let s = if n == 1 { "" } else { "s" };
-    format!("{n} {thing}{s}")
-}
+pub(super) use llm::figures::count;
 
 // The home directory as `~`: the banner has no workspace to shorten against.
 fn tilde(path: &std::path::Path) -> String {
@@ -795,29 +791,18 @@ fn tilde(path: &std::path::Path) -> String {
     }
 }
 
-fn clip_to(s: &str, max_cols: usize) -> &str {
-    let mut used = 0;
-    for (i, c) in s.char_indices() {
-        let w = UnicodeWidthChar::width(c).unwrap_or(0);
-        if used + w > max_cols {
-            return s[..i].trim_end();
-        }
-        used += w;
-    }
-    s.trim_end()
-}
-
 // `text` in `room` columns, closed by `…` when any of it was cut or `more`
 // follows it: the mark sits on the text, never apart from it.
 fn clipped(text: &str, room: usize, more: bool) -> String {
-    if !more && UnicodeWidthStr::width(text) <= room {
-        return text.to_string();
+    let cut = pi_store::text::clip(text, room);
+    if !more || cut != text {
+        return cut;
     }
-    format!(
-        "{}{}",
-        clip_to(text, room.saturating_sub(1)),
-        icons::ELLIPSIS
-    )
+    // Whole, but `more` still owes its mark a column.
+    match pi_store::text::width(text) < room {
+        true => format!("{}{}", text.trim_end(), icons::ELLIPSIS),
+        false => pi_store::text::clip(text, room.saturating_sub(1)),
+    }
 }
 
 #[cfg(test)]

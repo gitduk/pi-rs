@@ -244,13 +244,17 @@ pub fn compaction_line(r: &agent::Report) -> String {
     } else {
         String::new()
     };
-    format!("compacted {} → {} tokens{detail}{warn}", r.before, r.after)
+    let (before, after) = (
+        llm::figures::short(r.before as u64),
+        llm::figures::short(r.after as u64),
+    );
+    format!("compacted {before} → {after} tokens{detail}{warn}")
 }
 
 // Takes the three pieces rather than a config entry: the running model may
 // never have had one — a passed-through name has no entry to read.
 pub(super) fn summary(format: &str, window: u32, p: &llm::model::Pricing) -> String {
-    let mut parts = vec![format.to_string(), format!("{}k", window / 1000)];
+    let mut parts = vec![format.to_string(), llm::figures::short(u64::from(window))];
     if p.input_per_mtok > 0.0 || p.output_per_mtok > 0.0 {
         parts.push(format!(
             "${:.2}/${:.2} per Mtok",

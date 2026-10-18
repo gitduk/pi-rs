@@ -264,7 +264,7 @@ impl Ui {
             let shine = self
                 .pointer
                 .is_some_and(|(_, row)| (regions.gap.y..regions.gap.bottom()).contains(&row));
-            let more = format!("{} {scroll} more below", icons::ELLIPSIS);
+            let more = format!("{scroll} more below");
             Line::from(
                 self.paint
                     .span_hovered(shine, &self.paint.theme.muted, more),
@@ -281,7 +281,7 @@ impl Ui {
             .picked
             .unwrap_or(menu.len().saturating_sub(1))
             .min(menu.len().saturating_sub(1));
-        let items = self.menu_items(&menu, picked);
+        let items = self.menu_items(&menu, picked, regions.menu.width as usize);
         // The picked row on the input's band, the menu's width: a bar the eye
         // finds at once, where a mark in its text alone was not enough.
         let cursor = self
@@ -314,21 +314,23 @@ impl Ui {
                 };
                 frame.buffer_mut().set_style(transcript, dim);
             }
+            // Under the list, which may lie over the gap row.
+            if let Some(below) = &below {
+                frame.render_widget(below, regions.gap);
+            }
             if !items.is_empty() {
                 // Kept full: ratatui won't pull back an offset that a taller
                 // screen or a changed list left past the end.
                 let mut state = ListState::default()
                     .with_offset(self.menu_top.min(menu.len() - menu_h))
                     .with_selected(Some(picked));
+                frame.render_widget(ratatui::widgets::Clear, regions.menu);
                 frame.render_stateful_widget(
                     List::new(items).highlight_style(cursor),
                     regions.menu,
                     &mut state,
                 );
                 self.menu_top = state.offset();
-            }
-            if let Some(below) = &below {
-                frame.render_widget(below, regions.gap);
             }
             frame.render_widget(Rows(&bar), regions.bar);
             // Before the rows, so a span over the band keeps it: the columns the
@@ -404,7 +406,7 @@ impl Ui {
     fn most(&self, text: &[Line], hist_view: usize, width: usize) -> usize {
         match self.page() {
             Some(Page::Slash(_)) => {
-                let rows: usize = text.iter().map(|l| screen::fit(l, width).len()).sum();
+                let rows: usize = text.iter().map(|l| screen::rows(l, width)).sum();
                 rows.saturating_sub(hist_view)
             }
             _ => usize::MAX,
@@ -522,7 +524,7 @@ impl Ui {
         if !self.browsing() {
             for line in view.queued.iter().filter_map(|q| q.line.as_deref()) {
                 let first = line.lines().next().unwrap_or_default();
-                let more = if line.contains('\n') {
+                let more = if line.trim_end().contains('\n') {
                     icons::ELLIPSIS
                 } else {
                     ""

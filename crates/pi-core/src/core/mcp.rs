@@ -1,6 +1,7 @@
 //! The MCP servers this process runs: one set, kept across reloads, and
 //! started again only when `[mcp]` itself changed.
 
+use crate::input::commands::gist;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -98,13 +99,11 @@ pub fn command(arg: &str) -> Step {
                 rows.push(Row::new([s.name.clone(), s.status]));
                 for (name, description) in s.tools {
                     let name = name.strip_prefix(&prefix).unwrap_or(&name);
-                    let first = description.lines().next().unwrap_or_default();
-                    let first = first.strip_prefix(&tag).unwrap_or(first);
-                    rows.push(Row::new([format!("  {name}"), first.to_string()]));
+                    let first = description.strip_prefix(&tag).unwrap_or(&description);
+                    rows.push(Row::new([format!("  {name}"), gist(first)]));
                 }
                 for p in prompts.iter().filter(|p| p.server == s.name) {
-                    let first = p.description.lines().next().unwrap_or_default();
-                    rows.push(Row::new([format!("  {}", p.word()), first.to_string()]));
+                    rows.push(Row::new([format!("  {}", p.word()), gist(&p.description)]));
                 }
             }
             Step::Handled(Listing::of(rows))

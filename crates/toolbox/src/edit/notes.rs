@@ -57,7 +57,8 @@ fn hunk_help(before: &str, after: &str, landed: &[Landed]) -> String {
     let old: Vec<&str> = before.lines().collect();
     let mut out = String::from("The hunks, against the file as it stands:");
     let mut off = String::new();
-    for l in landed.iter().take(SHOWN) {
+    let shown = llm::figures::shown(landed.len(), SHOWN);
+    for l in landed.iter().take(shown) {
         // The model's own numbering: nothing was written, so `took_at` is the
         // line the anchor sits on, where `start` is where it would have landed.
         let at = l.took_at;
@@ -101,8 +102,8 @@ fn hunk_help(before: &str, after: &str, landed: &[Landed]) -> String {
             off.push_str(&line);
         }
     }
-    if let Some(rest) = landed.len().checked_sub(SHOWN).filter(|n| *n > 0) {
-        out.push_str(&format!("\n  … {rest} more"));
+    if let Some(rest) = landed.len().checked_sub(shown).filter(|n| *n > 0) {
+        out.push_str(&format!("\n  {rest} more"));
     }
     if !off.is_empty() {
         out.push_str("\nBrace balance:");

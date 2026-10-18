@@ -11,6 +11,9 @@
 #[derive(Debug, Default, PartialEq)]
 pub struct Listing {
     pub rows: Vec<Row>,
+    /// A list read by scanning: one screen row per row, cut where it ends,
+    /// rather than wrapped to read whole.
+    pub brief: bool,
 }
 
 /// One row: what it says, and the aside after it.
@@ -30,7 +33,14 @@ impl Listing {
     pub fn of(rows: impl IntoIterator<Item = Row>) -> Self {
         Self {
             rows: rows.into_iter().collect(),
+            brief: false,
         }
+    }
+
+    /// The same rows, each kept to one screen row.
+    pub fn brief(mut self) -> Self {
+        self.brief = true;
+        self
     }
 
     /// A line of prose per string: what an answer says when it is not a table,

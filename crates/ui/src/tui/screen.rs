@@ -4,6 +4,7 @@
 use std::cmp::Ordering;
 use std::io::Stdout;
 use std::io::Write;
+use std::ops::Range;
 
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -17,53 +18,157 @@ use ratatui::layout::Rect;
 use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
-use unicode_width::UnicodeWidthChar;
 
-// Consume the rest of an escape sequence whose `\x1b` was just read.
-fn skip_escape(chars: &mut std::str::Chars<'_>) {
-    let mut esc = pi_store::text::Escape::new();
-    for n in chars.by_ref() {
-        if esc.closed(n) {
-            break;
+/// Wraps a line to rows of at most `width`, ending rows where words do.
+/// Escape sequences (tool output noise) take no columns and are dropped.
+///
+/// Nothing is dropped but what a `\r` overwrote: a selection maps columns
+/// back by row widths.
+pub fn fit(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    lay(line, width, |run, row| out.push(line_of(&run[row])));
+    out
+}
+
+/// How many rows `fit` makes of `line`, without making them.
+pub fn rows(line: &Line<'_>, width: usize) -> usize {
+    let mut n = 0;
+    lay(line, width, |_, _| n += 1);
+    n
+}
+
+/// How many rows `wrap` makes of `line`, without making them.
+pub fn wrap_rows(border: Option<&Line<'_>>, line: &Line<'_>, width: usize) -> usize {
+    rows(line, body_width(border, width).unwrap_or(width))
+}
+
+// Columns a bordered line's body gets beside its rule; `None` for a frame
+// too narrow, where the rule is dropped rather than overflow the count.
+fn body_width(border: Option<&Line<'_>>, width: usize) -> Option<usize> {
+    border.and_then(|b| width.checked_sub(b.width()).filter(|avail| *avail > 0))
+}
+
+/// `line` up to its first `\n`, cut at the column `width` ends on: for a
+/// strip that is clipped, where a word boundary would only waste columns.
+pub fn clip_line(line: &Line<'_>, width: usize) -> Line<'static> {
+    let (run, ends) = cells(line);
+    let first = &run[..ends.first().copied().unwrap_or(run.len())];
+    let kept: Vec<Cell> = (first.iter().copied())
+        .scan(0usize, |used, c| {
+            *used += c.w;
+            (*used <= width || *used == c.w).then_some(c)
+        })
+        .collect();
+    line_of(&kept)
+}
+
+#[derive(Clone, Copy)]
+struct Cell {
+    c: char,
+    style: RStyle,
+    w: usize,
+}
+
+// The line's cells in order, and where each `\n` ends a run of them. An
+// escape the outside world left in the content (tool output) is noise: no
+// cells. A tab is the spaces `text::cols_at` runs it to; after a `\r` the run
+// starts over, as `text::screen_line` reads a progress line.
+fn cells(line: &Line<'_>) -> (Vec<Cell>, Vec<usize>) {
+    let (mut out, mut ends) = (Vec::new(), Vec::new());
+    let (mut col, mut esc) = (0, None);
+    let (mut run_start, mut returned) = (0, false);
+    for span in &line.spans {
+        let style = line.style.patch(span.style);
+        for c in span.content.chars() {
+            if pi_store::text::escaping(&mut esc, c) {
+                continue;
+            }
+            match c {
+                '\n' => {
+                    ends.push(out.len());
+                    (col, run_start, returned) = (0, out.len(), false);
+                    continue;
+                }
+                '\r' => {
+                    returned = true;
+                    continue;
+                }
+                _ if returned => {
+                    out.truncate(run_start);
+                    (col, returned) = (0, false);
+                }
+                _ => {}
+            }
+            let w = pi_store::text::cols_at(c, col);
+            col += w;
+            if c == '\t' {
+                out.extend(std::iter::repeat_n(
+                    Cell {
+                        c: ' ',
+                        style,
+                        w: 1,
+                    },
+                    w,
+                ));
+            } else {
+                out.push(Cell { c, style, w });
+            }
         }
+    }
+    (out, ends)
+}
+
+// Hands `row` each row of `line` as a range of the run it is cut from.
+fn lay(line: &Line<'_>, width: usize, mut row: impl FnMut(&[Cell], Range<usize>)) {
+    let width = width.max(1);
+    let (run, ends) = cells(line);
+    let mut start = 0;
+    for end in ends.into_iter().chain([run.len()]) {
+        rows_of(&run[start..end], width, &mut row);
+        start = end;
     }
 }
 
-/// Wraps a line to rows of exactly `width`. Escape sequences embedded in
-/// the content (tool output noise) take no columns and are dropped.
-pub fn fit(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
-    let width = width.max(1);
-    let mut out: Vec<Line<'static>> = Vec::new();
-    let mut row: Vec<Span<'static>> = Vec::new();
-    let mut used = 0usize;
-    for span in &line.spans {
-        let style = line.style.patch(span.style);
-        let mut chars = span.content.chars();
-        while let Some(c) = chars.next() {
-            if c == '\x1b' {
-                // Outside noise (tool output): no columns, no cells.
-                skip_escape(&mut chars);
-                continue;
-            }
-            if c == '\n' {
-                out.push(Line::from(std::mem::take(&mut row)));
-                used = 0;
-                continue;
-            }
-            let w = c.width().unwrap_or(0);
-            if used + w > width && used > 0 {
-                out.push(Line::from(std::mem::take(&mut row)));
-                used = 0;
-            }
-            match row.last_mut() {
-                Some(s) if s.style == style => s.content.to_mut().push(c),
-                _ => row.push(Span::styled(c.to_string(), style)),
-            }
-            used += w;
+// Closing marks a row must not open with: they belong to what precedes them.
+const NO_LEAD: &[char] = &[
+    '，', '。', '、', '；', '：', '？', '！', '）', '」', '』', '》', '】', '”', '’', '…',
+];
+
+// Whether a row may end between `a` and `b`: after a space, or beside a wide
+// character, whose script needs no spaces between its words.
+fn breaks_between(a: &Cell, b: &Cell) -> bool {
+    (a.c.is_whitespace() || a.w > 1 || b.w > 1) && !NO_LEAD.contains(&b.c)
+}
+
+// The rows of one run with no `\n` in it; at least one, maybe empty. A row
+// ends at the last break that fits, or mid-word when the word alone is wider.
+fn rows_of(run: &[Cell], width: usize, row: &mut impl FnMut(&[Cell], Range<usize>)) {
+    let (mut start, mut used) = (0usize, 0usize);
+    let mut last_break: Option<usize> = None;
+    for k in 0..run.len() {
+        if k > start && breaks_between(&run[k - 1], &run[k]) {
+            last_break = Some(k);
+        }
+        while used + run[k].w > width && k > start {
+            let end = last_break.take().unwrap_or(k);
+            row(run, start..end);
+            used = run[end..k].iter().map(|c| c.w).sum();
+            start = end;
+        }
+        used += run[k].w;
+    }
+    row(run, start..run.len());
+}
+
+fn line_of(cells: &[Cell]) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for cell in cells {
+        match spans.last_mut() {
+            Some(s) if s.style == cell.style => s.content.to_mut().push(cell.c),
+            _ => spans.push(Span::styled(cell.c.to_string(), cell.style)),
         }
     }
-    out.push(Line::from(row));
-    out
+    Line::from(spans)
 }
 
 /// One short of real width: terminals disagree on whether the last
@@ -92,7 +197,7 @@ pub struct Ready<'a> {
 
 impl Piece for Ready<'_> {
     fn height(&self) -> usize {
-        fit(&self.line, self.width).len()
+        rows(&self.line, self.width)
     }
 
     fn pieces(self) -> Vec<Line<'static>> {
@@ -221,13 +326,7 @@ pub fn window<'a>(
 /// Breaks a line into one-row pieces; a bordered line repeats its border
 /// on each piece instead of cutting the rule at the first row.
 pub fn wrap(border: Option<&Line<'_>>, line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
-    let Some(border) = border else {
-        return fit(line, width);
-    };
-    // Rule needs its columns, body needs at least one; a frame too narrow
-    // drops the rule rather than overflow the row count `window` promised.
-    let spare = width.checked_sub(border.width()).filter(|avail| *avail > 0);
-    let Some(avail) = spare else {
+    let (Some(border), Some(avail)) = (border, body_width(border, width)) else {
         return fit(line, width);
     };
     fit(line, avail)
@@ -243,7 +342,7 @@ pub fn wrap(border: Option<&Line<'_>>, line: &Line<'_>, width: usize) -> Vec<Lin
 /// Lays one row in a band: color goes under every span (text keeps its
 /// own foreground) and fills columns past the text into one rectangle.
 pub fn banded(line: Line<'static>, band: RStyle, width: usize) -> Line<'static> {
-    let used = line.width();
+    let used = pi_store::text::width(&plain(&line));
     let mut spans: Vec<Span<'static>> = line
         .spans
         .into_iter()
@@ -258,15 +357,13 @@ pub fn banded(line: Line<'static>, band: RStyle, width: usize) -> Line<'static> 
 // Write one fitted row into the buffer: one cell per character, styled by
 // its span. Wide characters take two cells; combining marks decorate back.
 fn write_line(line: &Line<'_>, x: u16, y: u16, buf: &mut Buffer) {
-    let mut col = x;
+    let (mut col, mut esc) = (x, None);
     for span in &line.spans {
-        let mut chars = span.content.chars();
-        while let Some(c) = chars.next() {
-            if c == '\x1b' {
-                skip_escape(&mut chars);
+        for c in span.content.chars() {
+            if pi_store::text::escaping(&mut esc, c) {
                 continue;
             }
-            let w = c.width().unwrap_or(0) as u16;
+            let w = pi_store::text::cols_at(c, usize::from(col - x)) as u16;
             if w == 0 {
                 if c.is_control() {
                     continue;
@@ -540,7 +637,7 @@ impl Drop for Screen {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit, plain, window};
+    use super::{clip_line, fit, plain, rows as count, window};
     use ratatui::text::Line;
 
     // An escape the outside world left in the content takes no columns and
@@ -551,6 +648,32 @@ mod tests {
         let rows = fit(&line, 10);
         assert_eq!(rows.len(), 1);
         assert_eq!(plain(&rows[0]), "ab");
+    }
+
+    // Rows end where words do, and joined they give the line back whole: a
+    // selection finds its text by summing row widths, so nothing may move.
+    #[test]
+    fn rows_end_at_words_and_keep_every_character() {
+        let rows = |s: &str, w: usize| -> Vec<String> {
+            let line = Line::from(s.to_string());
+            let rows = fit(&line, w);
+            assert_eq!(count(&line, w), rows.len(), "{s:?} at {w}");
+            assert_eq!(rows.iter().map(plain).collect::<String>(), s);
+            assert!(rows.iter().all(|r| r.width() <= w), "{s:?} at {w}");
+            rows.iter().map(plain).collect()
+        };
+        assert_eq!(
+            rows("a misspelled binding", 15),
+            ["a misspelled ", "binding"]
+        );
+        assert_eq!(rows("abcdefghij", 4), ["abcd", "efgh", "ij"]);
+        assert_eq!(rows("见 binding 中文分行", 12), ["见 binding ", "中文分行"]);
+        assert_eq!(rows("中文，标点", 4), ["中", "文，", "标点"]);
+        // A strip is clipped at its column, not pulled back to a word.
+        assert_eq!(
+            plain(&clip_line(&Line::from("a misspelled"), 9)),
+            "a misspel"
+        );
     }
 
     // The window's rows, plain, for a history of `lines` at width `width`.

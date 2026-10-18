@@ -183,16 +183,17 @@ pub(crate) const BUILTIN: &[Command] = &[
     }),
 ];
 
-// How wide a one-line description may be before it is cut.
-const GIST: usize = 60;
-
-// Two cuts: the first sentence is where the summary stops being one, the
-// column is where the terminal stops having room.
-fn gist(description: &str) -> String {
-    let first = description
-        .split_once(". ")
-        .map_or(description, |(head, _)| head);
-    pi_store::text::clip(first.trim().trim_end_matches('.'), GIST)
+// The first sentence, where the summary stops being one. How much of it
+// fits is the surface's to say: it alone knows the width.
+pub(crate) fn gist(description: &str) -> String {
+    let end = (description.match_indices('.'))
+        .find(|(at, _)| description[at + 1..].starts_with(char::is_whitespace))
+        .map_or(description.len(), |(at, _)| at);
+    description[..end]
+        .trim_end_matches('.')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// What a slash answers to: the built-ins, then one command per skill.
@@ -383,6 +384,7 @@ pub(crate) fn tool_listing(tools: &tool::Registry) -> Listing {
             .into_iter()
             .map(|t| Row::new([t.name().to_string(), gist(t.description())])),
     )
+    .brief()
 }
 
 // Split at whitespace, a `"…"` run kept whole, `\"` a quote inside one;
@@ -716,6 +718,18 @@ pub(crate) fn ago(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The first sentence, whatever breaks it, and never its own period.
+    #[test]
+    fn a_gist_is_the_first_sentence_without_its_period() {
+        assert_eq!(gist("Reads a file."), "Reads a file");
+        assert_eq!(gist("Reads a file. And more."), "Reads a file");
+        assert_eq!(
+            gist("Gets its conclusion.\n  The rest"),
+            "Gets its conclusion"
+        );
+        assert_eq!(gist("Version 2.4 is out"), "Version 2.4 is out");
+    }
 
     // A verb with only ids after it manages jobs; any other text, even one
     // starting with a verb, is something to start.

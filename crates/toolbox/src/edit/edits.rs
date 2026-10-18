@@ -523,7 +523,8 @@ fn openings(path: &str, body: &str) -> String {
     if rows.is_empty() {
         return String::new();
     }
-    let shown: Vec<String> = rows.iter().take(5).map(|r| format!("`{r}`")).collect();
+    let take = llm::figures::shown(rows.len(), 5);
+    let shown: Vec<String> = rows.iter().take(take).map(|r| format!("`{r}`")).collect();
     let rest = rows.len().saturating_sub(shown.len());
     if rest > 0 {
         format!(" — the file opens: {}, and {rest} more", shown.join(", "))
@@ -583,10 +584,11 @@ fn candidates(path: &str, body: &str, lines: &[&str], hits: &[Range<usize>]) -> 
     // Spelled out for the first few and counted for the rest: an anchor that
     // names a thousand rows is answered with a prefix, not a thousand lines.
     const SHOWN: usize = 8;
+    let shown = llm::figures::shown(hits.len(), SHOWN);
     let extents = crate::blocks::spans(path, body);
     let mut out: Vec<String> = hits
         .iter()
-        .take(SHOWN)
+        .take(shown)
         .map(|r| {
             let at = line_of(body, r.start);
             let held = covering(at, lines, &extents)
@@ -598,8 +600,8 @@ fn candidates(path: &str, body: &str, lines: &[&str], hits: &[Range<usize>]) -> 
             format!("  line {at}{held}{before}")
         })
         .collect();
-    if let Some(rest) = hits.len().checked_sub(SHOWN).filter(|n| *n > 0) {
-        out.push(format!("  … and {rest} more"));
+    if let Some(rest) = hits.len().checked_sub(shown).filter(|n| *n > 0) {
+        out.push(format!("  {rest} more"));
     }
     out.join("\n")
 }

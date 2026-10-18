@@ -2,7 +2,6 @@
 //! answer: one line naming it, its text under the line once opened.
 
 use ratatui::text::Line;
-use unicode_width::UnicodeWidthStr;
 
 use super::steps::STEP_INDENT;
 use super::{CODE_INDENT, Fold, Opening, count};
@@ -78,7 +77,7 @@ impl Relayed {
         };
         let now = agent::session::now();
         let tail = format!("{lines}{}{}", icons::PART_SEP, render::clock(self.at, now));
-        let room = width.saturating_sub(2 + UnicodeWidthStr::width(tail.as_str()) + 1);
+        let room = width.saturating_sub(2 + pi_store::text::width(&tail) + 1);
         let text = pi_store::text::clip(&self.label, room.max(8));
         Line::from(vec![
             paint.span_hovered(hovered, &paint.theme.prompt.color, icons::RELAYED_MARK),

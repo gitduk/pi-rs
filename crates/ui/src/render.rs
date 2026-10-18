@@ -394,6 +394,11 @@ const SKETCH_LIMIT: usize = 16;
 /// The preview rows a folded result shows: the head plus the sketch limit.
 pub const SKETCHED_ROWS: usize = 1 + SKETCH_LIMIT;
 
+/// Whether `rows` preview rows, head included, fold to `SKETCHED_ROWS`.
+pub fn folds(rows: usize) -> bool {
+    llm::figures::shown(rows, SKETCHED_ROWS) < rows
+}
+
 /// How much of a result its rows show: the sketch, or the whole of it in
 /// place or on a page of its own, where there is nothing to fold back.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -460,7 +465,7 @@ pub fn result_rows(
     // Past the mark, the name and the `…` a cut adds; the place is kept
     // whole, the command gives way to it.
     let placed = placed(call.place);
-    let width_of = unicode_width::UnicodeWidthStr::width;
+    let width_of = pi_store::text::width;
     let fits = room.saturating_sub(width_of(call.name) + 2 + width_of(placed.as_str()));
     let mut out = vec![Line::from(vec![
         p.span(mark_style, mark),
@@ -469,7 +474,8 @@ pub fn result_rows(
     ])];
     let diff_lines: Vec<&str> = rest.lines().collect();
     let footer = |text: &str| Line::from(p.span_hovered(hovered, &p.theme.muted, text));
-    let sketched = diff_lines.len() > SKETCH_LIMIT && shown == Shown::Sketch;
+    let folded = folds(1 + diff_lines.len());
+    let sketched = folded && shown == Shown::Sketch;
     let rows = if sketched {
         &diff_lines[..SKETCH_LIMIT]
     } else {
@@ -478,11 +484,10 @@ pub fn result_rows(
     out.extend(sketch_rows(rows, p, room));
     if sketched {
         out.push(footer(&format!(
-            "  {} {} more",
-            icons::ELLIPSIS,
+            "  {} more",
             diff_lines.len() - SKETCH_LIMIT
         )));
-    } else if diff_lines.len() > SKETCH_LIMIT && shown == Shown::Open {
+    } else if folded && shown == Shown::Open {
         out.push(footer("  click to collapse"));
     }
     out

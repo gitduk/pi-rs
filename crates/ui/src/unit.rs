@@ -8,9 +8,9 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
+use pi_store::text::cols_at;
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthChar;
 
 /// The cell ranges of a line that read as one.
 pub type Units = Vec<Range<usize>>;
@@ -120,7 +120,7 @@ pub fn strip(lines: Vec<Line<'static>>) -> Vec<(Line<'static>, Units)> {
             let spans: Vec<Span<'static>> = (line.spans.into_iter())
                 .filter_map(|span| {
                     if !span.content.contains([OPEN, CLOSE]) {
-                        col += span.width();
+                        col = (span.content.chars()).fold(col, |col, c| col + cols_at(c, col));
                         return Some(span);
                     }
                     let mut kept = String::with_capacity(span.content.len());
@@ -136,7 +136,7 @@ pub fn strip(lines: Vec<Line<'static>>) -> Vec<(Line<'static>, Units)> {
                             }
                             _ => {
                                 kept.push(c);
-                                col += c.width().unwrap_or(0);
+                                col += cols_at(c, col);
                             }
                         }
                     }

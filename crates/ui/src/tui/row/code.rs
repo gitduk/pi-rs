@@ -6,7 +6,6 @@ use std::time::Instant;
 
 use ratatui::style::{Modifier, Style as RStyle};
 use ratatui::text::{Line, Span};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::block::{self, Form};
 use crate::render::{self, Paint};
@@ -102,11 +101,8 @@ impl Block {
     // The cells of `line` that read as one: past the badge row as drawn
     // now, whatever note stands beside it.
     pub(super) fn units(&self, paint: &Paint, width: usize) -> Units {
-        let head: usize = (self.line(paint, width).spans.iter())
-            .flat_map(|s| s.content.chars())
-            .take_while(|c| *c != '\n')
-            .map(|c| c.width().unwrap_or(0))
-            .sum();
+        let line = crate::tui::screen::plain(&self.line(paint, width));
+        let head = pi_store::text::width(line.split('\n').next().unwrap_or_default());
         let units = self.drawn(paint, width).units;
         units
             .into_iter()
@@ -211,14 +207,14 @@ fn table_source(source: &str, paint: &Paint) -> (Vec<Span<'static>>, Units) {
         // Only the second line: a body row of dashes is cells like any other.
         if i == 1 {
             spans.push(muted(row));
-            col += UnicodeWidthStr::width(row);
+            col += pi_store::text::width(row);
             continue;
         }
         let mut from = 0;
         for (k, cell) in block::cells(row).into_iter().enumerate() {
             let gap = &row[from..cell.start];
             spans.push(muted(gap));
-            col += UnicodeWidthStr::width(gap);
+            col += pi_store::text::width(gap);
             let text = &row[cell.clone()];
             let mut style = palette
                 .get(k % palette.len().max(1))
@@ -227,7 +223,7 @@ fn table_source(source: &str, paint: &Paint) -> (Vec<Span<'static>>, Units) {
             if i == 0 {
                 style = style.add_modifier(Modifier::BOLD);
             }
-            let w = UnicodeWidthStr::width(text);
+            let w = pi_store::text::width(text);
             if w > 0 {
                 spans.push(Span::styled(text.to_string(), style));
                 units.push(col..col + w);
@@ -236,7 +232,7 @@ fn table_source(source: &str, paint: &Paint) -> (Vec<Span<'static>>, Units) {
             from = cell.end;
         }
         spans.push(muted(&row[from..]));
-        col += UnicodeWidthStr::width(&row[from..]);
+        col += pi_store::text::width(&row[from..]);
     }
     spans.retain(|s| !s.content.is_empty());
     (spans, units)

@@ -478,7 +478,7 @@ fn found_in(text: &str, query: &str) -> Vec<(usize, usize)> {
     } else {
         (text.to_ascii_lowercase(), query.to_ascii_lowercase())
     };
-    let cells = |b: usize| text[..b].chars().map(select::cell).sum::<usize>();
+    let cells = |b: usize| pi_store::text::width(&text[..b]);
     hay.match_indices(&needle)
         .map(|(b, m)| (cells(b), cells(b + m.len())))
         .collect()

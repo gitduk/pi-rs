@@ -98,32 +98,87 @@ pub fn size(bytes: u64) -> String {
     }
 }
 
-/// One line, cut to `max` display columns, not characters (see module doc).
+/// Columns between tab stops, as terminals set them.
+pub const TAB_STOP: usize = 8;
+
+/// Columns `c` takes when it starts at column `col`: a tab runs to the next
+/// stop, a control takes none. The one rule every surface measures by.
+pub fn cols_at(c: char, col: usize) -> usize {
+    match c {
+        '\t' => TAB_STOP - col % TAB_STOP,
+        c => unicode_width::UnicodeWidthChar::width(c).unwrap_or(0),
+    }
+}
+
+/// Whether `c` belongs to an escape sequence, opening or inside one; `esc`
+/// carries the one open between calls.
+pub fn escaping(esc: &mut Option<Escape>, c: char) -> bool {
+    if let Some(open) = esc {
+        if open.closed(c) {
+            *esc = None;
+        }
+        return true;
+    }
+    if c == '\x1b' {
+        *esc = Some(Escape::new());
+        return true;
+    }
+    false
+}
+
+/// Display columns of one line by `cols_at`, escapes taking none.
+pub fn width(s: &str) -> usize {
+    let mut esc = None;
+    s.chars()
+        .filter(|&c| !escaping(&mut esc, c))
+        .fold(0, |col, c| col + cols_at(c, col))
+}
+
+/// `s` with each tab spelled as the spaces it runs to; a `\n` starts over.
+pub fn expand_tabs(s: &str) -> String {
+    let (mut esc, mut col) = (None, 0);
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if escaping(&mut esc, c) {
+            out.push(c);
+            continue;
+        }
+        let w = cols_at(c, col);
+        match c {
+            '\t' => out.extend(std::iter::repeat_n(' ', w)),
+            '\n' => {
+                out.push(c);
+                col = 0;
+                continue;
+            }
+            c => out.push(c),
+        }
+        col += w;
+    }
+    out
+}
+
+/// One line in at most `max` display columns (see module doc), the `…` that
+/// marks a cut counted among them. A cut inside an escape's reach closes it.
 pub fn clip(s: &str, max: usize) -> String {
     let one = s.replace('\n', " ");
-    let mut used = 0;
-    // An escape is stepped over, not counted: it is a dozen printable
-    // characters and zero columns. A cut inside one's reach closes the style.
-    let mut esc: Option<Escape> = None;
-    let mut styled = false;
+    if width(&one) <= max {
+        return one;
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let (mut esc, mut used, mut styled) = (None, 0, false);
     for (i, c) in one.char_indices() {
-        if let Some(open) = &mut esc {
-            if open.closed(c) {
-                esc = None;
-            }
+        if escaping(&mut esc, c) {
+            styled = true;
             continue;
         }
-        if c == '\x1b' {
-            (esc, styled) = (Some(Escape::new()), true);
-            continue;
-        }
-        used += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if used > max {
+        used += cols_at(c, used);
+        if used >= max {
             let cut = one[..i].trim_end();
-            return match styled {
-                true => format!("{cut}{RESET}{}", icons::ELLIPSIS),
-                false => format!("{cut}{}", icons::ELLIPSIS),
-            };
+            let reset = if styled { RESET } else { "" };
+            return format!("{cut}{reset}{}", icons::ELLIPSIS);
         }
     }
     one
@@ -146,31 +201,44 @@ pub fn screen_line(line: &str) -> String {
     let shown = (line.rsplit('\r'))
         .find(|part| !part.is_empty())
         .unwrap_or_default();
-    bare(&shown.replace('\t', "    "))
+    bare(&expand_tabs(shown))
 }
 
 fn bare(s: &str) -> String {
-    let mut esc: Option<Escape> = None;
+    let mut esc = None;
     (s.chars())
-        .filter(|&c| {
-            if let Some(open) = &mut esc {
-                if open.closed(c) {
-                    esc = None;
-                }
-                return false;
-            }
-            if c == '\x1b' {
-                esc = Some(Escape::new());
-                return false;
-            }
-            !c.is_control()
-        })
+        .filter(|&c| !escaping(&mut esc, c) && !c.is_control())
         .collect()
 }
 
 /// Pad a string to a display width with trailing spaces, so a column of
 /// mixed-width (CJK) text lines up where `{:width$}` would only count chars.
 pub fn pad(s: &str, width: usize) -> String {
-    let w = unicode_width::UnicodeWidthStr::width(s);
-    format!("{s}{}", " ".repeat(width.saturating_sub(w)))
+    format!("{s}{}", " ".repeat(width.saturating_sub(self::width(s))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The mark a cut leaves is counted: callers lay out to `max`, not past it.
+    #[test]
+    fn a_clip_fits_its_columns_mark_and_all() {
+        assert_eq!(clip("abcdef", 6), "abcdef");
+        assert_eq!(clip("abcdefg", 6), "abcde…");
+        assert_eq!(width(&clip("中文中文中文", 5)), 5);
+        assert_eq!(clip("\x1b[31mabcdefg", 6), "\x1b[31mabcde\x1b[0m…");
+    }
+
+    // One tab rule for every surface: to the next stop, from where it starts.
+    #[test]
+    fn a_tab_runs_to_its_stop() {
+        assert_eq!(width("\tx"), TAB_STOP + 1);
+        assert_eq!(width("ab\tx"), TAB_STOP + 1);
+        assert_eq!(
+            expand_tabs("ab\tx\n\ty"),
+            format!("ab{}x\n{}y", " ".repeat(6), " ".repeat(8))
+        );
+        assert_eq!(width("\x1b[31m\tx"), TAB_STOP + 1);
+    }
 }

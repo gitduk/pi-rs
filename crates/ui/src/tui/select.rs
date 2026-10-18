@@ -4,7 +4,6 @@
 
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthChar;
 
 /// A cell of the transcript region: its row there, and its column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -74,7 +73,7 @@ pub(super) fn text(sel: &Selection, rows: &[Drawn], width: usize) -> String {
         // there; a shorter one ended where the line did.
         let wrapped = row.line.is_some()
             && next.is_some_and(|n| n.line == row.line)
-            && row.text.trim_end().chars().map(cell).sum::<usize>() + 1 >= width;
+            && pi_store::text::width(row.text.trim_end()) + 1 >= width;
         if wrapped && at < to.row {
             out.push_str(&piece);
         } else {
@@ -87,8 +86,9 @@ pub(super) fn text(sel: &Selection, rows: &[Drawn], width: usize) -> String {
     out
 }
 
-pub(super) fn cell(c: char) -> usize {
-    c.width().unwrap_or(0)
+// Columns `c` takes from column `at`, by the one rule layout uses.
+fn cell(c: char, at: usize) -> usize {
+    pi_store::text::cols_at(c, at)
 }
 
 /// The characters of `s` whose cells start in `from..to`.
@@ -99,7 +99,7 @@ pub(super) fn cols(s: &str, from: usize, to: usize) -> String {
         if at >= from && at < to {
             out.push(c);
         }
-        at += cell(c);
+        at += cell(c, at);
     }
     out
 }
@@ -112,14 +112,14 @@ pub(super) fn word_at(s: &str, col: usize) -> (usize, usize) {
     let mut at = 0;
     for c in s.chars() {
         cells.push((at, c));
-        at += cell(c);
+        at += cell(c, at);
     }
     let Some(hit) = cells.iter().rposition(|(start, _)| *start <= col) else {
         return (col, col + 1);
     };
     if !word(cells[hit].1) {
         let (start, c) = cells[hit];
-        return (start, start + cell(c).max(1));
+        return (start, start + cell(c, start).max(1));
     }
     let first = cells[..hit]
         .iter()
@@ -130,7 +130,7 @@ pub(super) fn word_at(s: &str, col: usize) -> (usize, usize) {
         .position(|(_, c)| !word(*c))
         .map_or(cells.len(), |i| hit + i);
     let (end_at, end_c) = cells[last - 1];
-    (cells[first].0, end_at + cell(end_c))
+    (cells[first].0, end_at + cell(end_c, end_at))
 }
 
 /// `line` with the cells `from..to` drawn reversed.
@@ -158,7 +158,7 @@ pub(super) fn modified(
                 Some(s) if s.style == style => s.content.to_mut().push(c),
                 _ => spans.push(Span::styled(c.to_string(), style)),
             }
-            at += cell(c);
+            at += cell(c, at);
         }
     }
     Line::from(spans).style(line.style)

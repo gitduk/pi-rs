@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::SearcherBuilder;
 use grep_searcher::sinks::UTF8;
+use llm::figures::{count, plural};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -248,14 +249,20 @@ impl Tool for Grep {
         let total: usize = hits.iter().map(|h| h.lines.len()).sum();
         // The pattern leads, the tallies are ranked under it: a row saying
         // only how much it found names nothing the caller can recognise.
-        let preview = format!("{} [{} files · {total} matches]", args.pattern, hits.len());
+        let preview = format!(
+            "{} [{} · {}]",
+            args.pattern,
+            count(hits.len(), "file"),
+            count(total, "match")
+        );
         // The two lines that close either view: what the limit left out, and
         // what the sweep could not read. Spelt once because both views owe both.
         let over = |left: usize, unit: &str| {
             let mut note = String::new();
             if left > 0 {
                 note.push_str(&format!(
-                    "… {left} more {unit}; narrow the pattern or raise limit\n"
+                    "… {left} more {}; narrow the pattern or raise limit\n",
+                    plural(left, unit)
                 ));
             }
             if skipped > 0 {
@@ -275,10 +282,11 @@ impl Tool for Grep {
                 .take(limit)
                 .map(|h| {
                     let plus = if h.truncated { "+" } else { "" };
-                    format!("{} ({}{plus} matches)\n", h.path, h.lines.len())
+                    let n = h.lines.len();
+                    format!("{} ({n}{plus} {})\n", h.path, plural(n, "match"))
                 })
                 .collect();
-            let notice = over(hits.len() - rows.len(), "files");
+            let notice = over(hits.len() - rows.len(), "file");
             return Ok(
                 ToolOutput::text(spill::fit(ctx, &rows, "files", &notice)?).with_preview(preview)
             );
@@ -309,7 +317,7 @@ impl Tool for Grep {
             }
             sections.push(section);
         }
-        let notice = over(total - shown, "matches");
+        let notice = over(total - shown, "match");
 
         Ok(ToolOutput::text(spill::fit(ctx, &sections, "files", &notice)?).with_preview(preview))
     }

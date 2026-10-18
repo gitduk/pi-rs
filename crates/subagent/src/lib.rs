@@ -576,13 +576,14 @@ fn wrote_line(wrote: &[String]) -> String {
         return "[wrote nothing]".to_string();
     }
     let unit = if n == 1 { "file" } else { "files" };
+    let take = llm::figures::shown(n, NAMED);
     let named = wrote
         .iter()
-        .take(NAMED)
+        .take(take)
         .map(String::as_str)
         .collect::<Vec<_>>()
         .join(", ");
-    match n.saturating_sub(NAMED) {
+    match n - take {
         0 => format!("[wrote {n} {unit}: {named}]"),
         rest => format!("[wrote {n} {unit}: {named}, and {rest} more]"),
     }

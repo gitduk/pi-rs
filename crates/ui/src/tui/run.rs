@@ -252,7 +252,7 @@ impl Tui {
             self.ui.flash(format!("{name} cannot start here"));
             return;
         };
-        self.ui.flash(format!("starting {name} …"));
+        self.ui.flash(format!("starting {name}…"));
         let ctx = self.core.turn_ctx(CancellationToken::new());
         let (token, started) = (self.core.lane().token(), started.clone());
         tokio::spawn(async move {
@@ -297,7 +297,7 @@ impl Tui {
         from: Origin,
         fetched: &UnboundedSender<Fetched>,
     ) {
-        self.ui.flash(format!("asking {} …", prompt.word()));
+        self.ui.flash(format!("asking {}…", prompt.word()));
         let (tx, token) = (fetched.clone(), self.core.lane().token());
         tokio::spawn(async move {
             const WAIT: std::time::Duration = std::time::Duration::from_secs(30);

@@ -1,7 +1,6 @@
 //! The line being typed: a text buffer, a caret, and the history behind it.
 
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthChar;
 
 use crate::render::Paint;
 
@@ -408,17 +407,22 @@ impl Editor {
                 used = 0;
                 continue;
             }
-            let w = ch.width().unwrap_or(0);
+            let mut w = pi_store::text::cols_at(ch, used);
             if used + w > avail && used > 0 {
                 rows.push(std::mem::take(&mut row));
                 used = 0;
+                w = pi_store::text::cols_at(ch, used);
             }
             // After the wrap, so a caret sitting exactly on the break lands at
             // the start of the new row rather than off the end of the old one.
             if i == cursor {
                 caret = Some((rows.len() as u16, (prompt_w + used) as u16));
             }
-            row.push(ch);
+            // A tab is drawn as the spaces it runs to; the text keeps the tab.
+            match ch {
+                '\t' => row.extend(std::iter::repeat_n(' ', w)),
+                ch => row.push(ch),
+            }
             used += w;
         }
         let caret = caret.unwrap_or((rows.len() as u16, (prompt_w + used) as u16));

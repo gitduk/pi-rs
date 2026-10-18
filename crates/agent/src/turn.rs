@@ -147,7 +147,8 @@ impl Agent {
 }
 
 fn wedged(idle: std::time::Duration) -> llm::LlmError {
-    llm::LlmError::Stream(format!("the stream sent nothing for {}s", idle.as_secs()))
+    let idle = llm::figures::elapsed(idle);
+    llm::LlmError::Stream(format!("the stream sent nothing for {idle}"))
 }
 
 // The leash every provider call here keeps: silence past `idle` reads as a

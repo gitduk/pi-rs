@@ -172,7 +172,12 @@ pub(super) fn job_lines(
 ) -> (Vec<Line<'static>>, Vec<JobRow>) {
     let room = width.saturating_sub(1);
     let (mut lines, mut ids) = (Vec::new(), Vec::new());
-    let shown = if all { jobs.len() } else { JOBS_SHOWN };
+    let folds = llm::figures::shown(jobs.len(), JOBS_SHOWN) < jobs.len();
+    let shown = if all || !folds {
+        jobs.len()
+    } else {
+        JOBS_SHOWN
+    };
     for job in jobs.iter().take(shown) {
         let shine = hovered == Some(JobRow::Job(job.id));
         let (rows, under) = if open == Some(job.id) {
@@ -186,15 +191,13 @@ pub(super) fn job_lines(
             let mut rows = super::screen::fit(&row, room);
             let own = rows.len();
             if from > 0 {
-                let more = format!("  … {from} lines before · /job output {}", job.id);
+                let more = format!("  {from} lines before · /job output {}", job.id);
                 rows.push(Line::from(paint.span(&paint.theme.muted, more)));
             }
-            rows.extend((said[from..].iter()).map(|l| {
-                Line::from(pi_store::text::clip(
-                    &format!("  {l}"),
-                    room.saturating_sub(1),
-                ))
-            }));
+            rows.extend(
+                (said[from..].iter())
+                    .map(|l| Line::from(pi_store::text::clip(&format!("  {l}"), room))),
+            );
             let under = rows.len() - own;
             (rows, under)
         } else {
@@ -216,10 +219,10 @@ pub(super) fn job_lines(
         ids.extend(std::iter::repeat_n(JobRow::Under, under));
         lines.extend(rows);
     }
-    if jobs.len() > JOBS_SHOWN {
+    if folds {
         let fold = match all {
             true => "click to collapse".to_string(),
-            false => format!("{} {} more", icons::ELLIPSIS, jobs.len() - JOBS_SHOWN),
+            false => format!("{} more", jobs.len() - JOBS_SHOWN),
         };
         let shine = hovered == Some(JobRow::Fold);
         lines.push(Line::from(paint.span_hovered(
@@ -252,11 +255,7 @@ fn job_row(job: &Job, width: usize) -> ([String; 3], bool) {
 
 // `s` in at most `cols` columns, an ellipsis ending it when cut.
 fn within(s: &str, cols: usize) -> String {
-    match UnicodeWidthStr::width(s) <= cols {
-        true => s.to_string(),
-        // `clip` puts its ellipsis past `max`.
-        false => pi_store::text::clip(s, cols.saturating_sub(1)),
-    }
+    pi_store::text::clip(s, cols)
 }
 
 // Whether a click on a job's row shows more than the row does.

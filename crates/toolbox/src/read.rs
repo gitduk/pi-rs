@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use llm::figures::count;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -122,7 +123,7 @@ impl View {
             let dropped = cut.map_or(String::new(), |(h, t)| {
                 format!(" · {} not shown", self.rows.len() - h - t)
             });
-            return format!("{rel} {lines} lines · outline{dropped}");
+            return format!("{rel} {} · outline{dropped}", count(lines, "line"));
         }
         if cut.is_none() && matches!(self.kind, Kind::Lines { whole: true }) {
             return rel.to_string();
@@ -348,7 +349,7 @@ impl Tool for Read {
                     ctx,
                     &rel,
                     View {
-                        head: format!("{} {} lines · outline", header(&rel), all.len()),
+                        head: format!("{} {} · outline", header(&rel), count(all.len(), "line")),
                         rows,
                         note: "… declarations only, each with the range that replaces it \
                                whole. Read a range with offset and limit.\n"
@@ -365,8 +366,8 @@ impl Tool for Read {
 
         if start >= all.len() {
             return Ok(ToolOutput::text(format!(
-                "{rel} line {offset} is past the end ({} lines)",
-                all.len()
+                "{rel} line {offset} is past the end ({})",
+                count(all.len(), "line")
             )));
         }
 

@@ -162,7 +162,7 @@ impl Ui {
         }
         // A front checkout too long for its share folds itself here rather
         // than eating the parts beside it.
-        screen::fit(&Line::from(spans), strip).remove(0).spans
+        screen::clip_line(&Line::from(spans), strip).spans
     }
 
     /// The bar's rows, one per layout line. The only place an expired flash
@@ -382,7 +382,7 @@ impl Ui {
             1 => return vec![ellipsis],
             _ => {}
         }
-        let mut cut = screen::fit(&Line::from(spans), room - 1).remove(0).spans;
+        let mut cut = screen::clip_line(&Line::from(spans), room - 1).spans;
         cut.push(ellipsis);
         cut
     }

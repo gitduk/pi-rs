@@ -239,7 +239,7 @@ fn a_batch_in_flight_hands_its_remainder_to_the_row_that_opens() {
     let rows = drawn_rows(&view);
     assert_eq!(rows.len(), 1, "one row, not two: {rows:?}");
     assert!(
-        rows[0].ends_with(&format!("read b.rs{}+1 more", icons::PART_SEP)),
+        rows[0].ends_with(&format!("read b.rs{}1 more", icons::PART_SEP)),
         "got: {}",
         rows[0]
     );

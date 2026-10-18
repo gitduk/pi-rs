@@ -173,7 +173,7 @@ fn pruned(notice: &str, text: &str, policy: &Policy) -> String {
     let head = llm::slice::head_chars(text, policy.head_chars);
     let tail = llm::slice::tail_chars(text, policy.tail_chars);
     let dropped = c.saturating_sub(policy.head_chars + policy.tail_chars);
-    format!("{notice}\n\n{head}\n\n[… {dropped} chars omitted …]\n\n{tail}")
+    format!("{notice}\n\n{head}\n\n… {dropped} chars omitted …\n\n{tail}")
 }
 
 // What every rung reads and none of them changes.

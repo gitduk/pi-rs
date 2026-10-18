@@ -53,7 +53,7 @@ pub enum AgentError {
     #[error("cancelled")]
     Cancelled,
 
-    #[error("still running {}s after cancel", STOP_GRACE.as_secs())]
+    #[error("still running {} after cancel", llm::figures::elapsed(STOP_GRACE))]
     Unstopped,
 }
 

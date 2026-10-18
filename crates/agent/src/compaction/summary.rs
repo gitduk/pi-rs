@@ -21,7 +21,7 @@ const MAX_SUMMARY_TOKENS: u32 = 4_000;
 
 fn clip(s: &str, max: usize) -> String {
     match s.char_indices().find(|(i, c)| i + c.len_utf8() > max) {
-        Some((i, _)) => format!("{}… ({} more bytes)", &s[..i], s.len() - i),
+        Some((i, _)) => format!("{}… {} more bytes", &s[..i], s.len() - i),
         None => s.to_string(),
     }
 }
@@ -96,13 +96,19 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
         // Both ends carry more than the middle: the opening says what the task
         // was, the tail says where it got to.
         let half = TOTAL_BYTES / 2;
-        let head = clip(&out, half);
-        let start = out.len().saturating_sub(half);
-        let tail = match out.char_indices().find(|(i, _)| *i >= start) {
-            Some((i, _)) => out[i..].to_string(),
-            None => String::new(),
-        };
-        out = format!("{head}\n… (middle omitted) …\n{tail}");
+        let head = (0..=half)
+            .rev()
+            .find(|&i| out.is_char_boundary(i))
+            .unwrap_or(0);
+        let tail = (out.len() - half..=out.len())
+            .find(|&i| out.is_char_boundary(i))
+            .unwrap_or(out.len());
+        let gone = tail - head;
+        out = format!(
+            "{}\n… {gone} bytes omitted …\n{}",
+            &out[..head],
+            &out[tail..]
+        );
     }
     out
 }
@@ -205,6 +211,6 @@ mod tests {
         assert!(out.len() < TOTAL_BYTES + 200, "{}", out.len());
         assert!(out.contains("the original task"), "the head must survive");
         assert!(out.contains("the final state"), "the tail must survive");
-        assert!(out.contains("middle omitted"), "{}", &out[..80]);
+        assert!(out.contains("bytes omitted"), "{}", &out[..80]);
     }
 }

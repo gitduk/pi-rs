@@ -10,16 +10,17 @@ impl Core {
     pub(super) fn content(&self) -> Listing {
         let brief = &self.lane().agent().brief;
         let tools = brief.registry.defs();
+        let tokens = |n: usize| llm::figures::short(n as u64);
         let mut lines = vec![format!(
             "── system · ~{} tokens",
-            llm::estimate::text(&brief.system)
+            tokens(llm::estimate::text(&brief.system))
         )];
         lines.extend(brief.system.lines().map(str::to_string));
         lines.push(String::new());
         lines.push(format!(
             "── tools · {} · ~{} tokens",
             tools.len(),
-            llm::estimate::tool_defs(&tools)
+            tokens(llm::estimate::tool_defs(&tools))
         ));
         for tool in &tools {
             lines.push(String::new());

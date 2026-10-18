@@ -2,7 +2,6 @@
 //! one line closed, a list open, each step opening on its own.
 
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
 use super::{Fold, Opening, clipped, count};
 use crate::render::{self, Paint};
@@ -240,12 +239,12 @@ impl Head {
     // air before the terminal edge.
     fn room(&self, width: usize) -> usize {
         width
-            .saturating_sub(self.mark.width() + UnicodeWidthStr::width(self.tail.as_str()) + 1)
+            .saturating_sub(self.mark.width() + pi_store::text::width(&self.tail) + 1)
             .max(8)
     }
 
     fn cut(&self, width: usize) -> bool {
-        UnicodeWidthStr::width(self.text.as_str()) > self.room(width)
+        pi_store::text::width(&self.text) > self.room(width)
     }
 
     // Opened, the text is whole and wraps, and what the tail said is below it.
@@ -423,7 +422,7 @@ fn steps_header(
         return Line::from(paint.span_hovered(hovered, &paint.theme.muted, THINKING.to_string()));
     };
     if calls > 1 {
-        tail.push_str(&format!("{}+{} more", icons::PART_SEP, calls - 1));
+        tail.push_str(&format!("{}{} more", icons::PART_SEP, calls - 1));
     }
     if thinking {
         tail.push_str(&format!("{}{THINKING}", icons::PART_SEP));
@@ -778,7 +777,7 @@ mod tests {
 
     // What a header holding `calls` calls ends with.
     fn more_tail(calls: usize) -> String {
-        format!("{}+{} more", icons::PART_SEP, calls - 1)
+        format!("{}{} more", icons::PART_SEP, calls - 1)
     }
 
     // Calls end in whatever order; the row is the only place one in
@@ -930,10 +929,10 @@ mod tests {
         let line = &shown(&row, 80)[0];
         let tail = format!("{}{}", icons::ELLIPSIS, more_tail(2));
         assert!(line.ends_with(&tail), "{line}");
-        assert_eq!(UnicodeWidthStr::width(line.as_str()), 79, "{line}");
+        assert_eq!(pi_store::text::width(line), 79, "{line}");
 
         let one = bundle(vec![tool("bash", &long)]);
-        assert_eq!(UnicodeWidthStr::width(shown(&one, 80)[0].as_str()), 79);
+        assert_eq!(pi_store::text::width(&shown(&one, 80)[0]), 79);
     }
 
     #[test]

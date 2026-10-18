@@ -28,10 +28,14 @@ pub fn shown<'a>(name: &str, output: &'a str) -> impl Iterator<Item = &'a str> {
         .filter(move |l| !(bash && super::bash::is_stream_tag(l)))
 }
 
+// How long a call runs before it is listed as a job. One that answers
+// sooner never shows: no row flickers by, no job number is spent.
+const LISTED_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Run `tool` as the user asked for it by name, with no model in between:
 /// what it answered, or why it did not; `None` once stopped as a job, which
-/// it is for as long as it runs where `ctx` keeps jobs. Free of `Core`, as
-/// `run_bash` is.
+/// it is once it outlasts `LISTED_AFTER` where `ctx` keeps jobs. Free of
+/// `Core`, as `run_bash` is.
 ///
 /// Not a model's call, so `agent`'s journal never sees it; it is kept here.
 pub async fn run_named(
@@ -41,19 +45,23 @@ pub async fn run_named(
 ) -> Option<Result<String, String>> {
     let name = tool.name().to_string();
     tracing::info!(target: "pi::tool", tool = %name, args = %args, "call by the user");
-    let job = ctx.jobs().map(|sink| {
-        let root = ctx.workspace.root();
-        sink.start(
-            root.to_path_buf(),
-            called(&name, &args, root),
-            ctx.cancel.clone(),
-            None,
-        )
-    });
-    let said = tool.execute(args, ctx).await;
-    if let Some(job) = job {
-        job.end();
-    }
+    let label = called(&name, &args, ctx.workspace.root());
+    let call = tool.execute(args, ctx);
+    tokio::pin!(call);
+    let said = tokio::select! {
+        said = &mut call => said,
+        () = tokio::time::sleep(LISTED_AFTER) => {
+            let job = ctx.jobs().map(|sink| {
+                let root = ctx.workspace.root().to_path_buf();
+                sink.start(root, label, ctx.cancel.clone(), None)
+            });
+            let said = call.await;
+            if let Some(job) = job {
+                job.end();
+            }
+            said
+        }
+    };
     // Only a call the stop cut short is silent: one that finished first
     // has done what it did, and says so.
     Some(match said {

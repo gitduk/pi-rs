@@ -3,7 +3,6 @@
 use std::cell::RefCell;
 
 use ratatui::text::Line;
-use unicode_width::UnicodeWidthStr;
 
 use super::{Fold, Opening};
 use crate::render::{self, Paint};
@@ -36,9 +35,8 @@ impl ToolOut {
             name,
             place: None,
             preview_lines: preview.lines().count(),
-            widest: preview
-                .lines()
-                .map(UnicodeWidthStr::width)
+            widest: (preview.lines())
+                .map(pi_store::text::width)
                 .max()
                 .unwrap_or(0),
             preview,
@@ -49,7 +47,7 @@ impl ToolOut {
     }
 
     pub(super) fn len(&self) -> usize {
-        if self.preview_lines <= render::SKETCHED_ROWS {
+        if !render::folds(self.preview_lines) {
             self.preview_lines.max(1)
         } else if self.expanded {
             self.preview_lines + 1
@@ -100,7 +98,7 @@ impl ToolOut {
 
 impl Fold for ToolOut {
     fn expandable(&self) -> bool {
-        self.preview_lines > render::SKETCHED_ROWS
+        render::folds(self.preview_lines)
     }
 
     fn clipped(&self, width: usize) -> bool {
