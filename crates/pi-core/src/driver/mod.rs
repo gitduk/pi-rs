@@ -42,8 +42,7 @@ pub enum Said {
     // A refusal or what did not happen: a line for the bar, not an answer.
     Notice(String),
     // A notice (empty when there is none) and a note the model reads before
-    // it next speaks: something it started was changed under it. The note
-    // restates what the user did and saw, so it is filed out of sight.
+    // it next speaks: something it started was changed under it.
     Noted(String, String),
     // Something that happened to the lane, filed with its transcript.
     Transcript(String),

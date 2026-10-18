@@ -811,7 +811,9 @@ impl Tui {
                         Said::Notice(line) => self.notice(line),
                         Said::Noted(line, note) => {
                             self.notice(line);
-                            self.core.lane_mut().push_quiet_note(&note);
+                            let lane = self.core.lane_mut();
+                            let view = front_view(&mut self.views, lane);
+                            self.ui.file_note(lane, view, &note);
                         }
                         Said::Transcript(line) => self
                             .ui

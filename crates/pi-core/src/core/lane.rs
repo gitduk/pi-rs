@@ -113,7 +113,6 @@ struct Conversation {
 enum Held {
     Screen(String),
     Note(String),
-    QuietNote(String),
 }
 
 impl Conversation {
@@ -576,7 +575,6 @@ impl Lane {
             match held {
                 Held::Screen(text) => session.push_screen(text),
                 Held::Note(text) => session.push_note(text),
-                Held::QuietNote(text) => session.push_quiet_note(text),
             };
         }
         self.talk.session = Some(session);
@@ -600,16 +598,6 @@ impl Lane {
                 self.talk.held.push(Held::Note(note.to_string()));
                 None
             }
-        }
-    }
-
-    /// `push_note` for one the screen leaves out, held the same way.
-    pub fn push_quiet_note(&mut self, note: &str) {
-        match self.talk.session.as_mut() {
-            Some(session) => {
-                session.push_quiet_note(note);
-            }
-            None => self.talk.held.push(Held::QuietNote(note.to_string())),
         }
     }
 

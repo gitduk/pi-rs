@@ -605,7 +605,6 @@ pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
         }
         // Machine prose, not the user's line: muted, under the note mark
         // rather than the prompt sigil.
-        LogEntry::Note { quiet: true, .. } => None,
         LogEntry::Note { note, .. } => Some(Row::note_lines(note, paint)),
         // Screen-only rows — a tally line, a turn warning — as plain notices,
         // so the rebuild reuses the text the surface already worded.
