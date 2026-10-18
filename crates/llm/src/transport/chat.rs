@@ -151,9 +151,12 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
         .unwrap_or(spec.max_output_tokens)
         .min(spec.max_output_tokens);
 
+    // Without it most hosts send no usage at all; DeepSeek's own sends it
+    // either way, on the finishing chunk.
     let mut body = json!({
         "model": spec.model,
         "stream": true,
+        "stream_options": { "include_usage": true },
         "messages": encode(&req.messages),
         "max_tokens": max_output_tokens,
     });
@@ -208,9 +211,12 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
 }
 
 // DeepSeek splits cached/uncached prompt halves (`prompt_tokens` is their
-// sum); a missing usage block bills everything as fresh, the safe default.
+// sum), others count the hit under `prompt_tokens_details`; a missing usage
+// block bills everything as fresh, the safe default.
 fn usage_of(u: &Value) -> Usage {
-    let cache_read = u["prompt_cache_hit_tokens"].as_u64().unwrap_or(0);
+    let cache_read = (u["prompt_cache_hit_tokens"].as_u64())
+        .or_else(|| u["prompt_tokens_details"]["cached_tokens"].as_u64())
+        .unwrap_or(0);
     let miss = u["prompt_cache_miss_tokens"].as_u64().unwrap_or_else(|| {
         u["prompt_tokens"]
             .as_u64()
@@ -248,6 +254,8 @@ struct Decoder {
     // would let a later delta overwrite the id/name the accumulator holds.
     started: std::collections::BTreeSet<usize>,
     next_free: usize,
+    // How the turn finished, for a usage chunk that comes after it.
+    stop: Option<StopReason>,
 }
 
 impl Decoder {
@@ -259,6 +267,7 @@ impl Decoder {
             tools: std::collections::BTreeMap::new(),
             started: std::collections::BTreeSet::new(),
             next_free: 0,
+            stop: None,
         }
     }
 
@@ -269,11 +278,17 @@ impl Decoder {
     }
 
     fn frame(&mut self, data: &Value) -> Vec<StreamEvent> {
-        let Some(choices) = data["choices"].as_array() else {
-            return Vec::new();
-        };
-        let Some(choice) = choices.first() else {
-            return Vec::new();
+        let choice = data["choices"].as_array().and_then(|c| c.first());
+        // A usage-only chunk after the finish: the turn is done already, so
+        // it restates that ending with the counts it lacked.
+        let Some(choice) = choice else {
+            return match self.stop {
+                Some(stop) if data["usage"].is_object() => vec![StreamEvent::Done {
+                    stop,
+                    usage: usage_of(&data["usage"]),
+                }],
+                _ => Vec::new(),
+            };
         };
         let delta = &choice["delta"];
         let mut events = Vec::new();
@@ -350,11 +365,13 @@ impl Decoder {
             }
         }
 
-        // The terminal chunk states `finish_reason` and carries the usage —
-        // no usage-only chunk is ever emitted, per the docs.
+        // The finishing chunk states `finish_reason`, and on DeepSeek's own
+        // host the usage too; others send it in a chunk of its own after.
         if let Some(finish) = choice["finish_reason"].as_str() {
+            let stop = stop_of(finish);
+            self.stop = Some(stop);
             events.push(StreamEvent::Done {
-                stop: stop_of(finish),
+                stop,
                 usage: usage_of(&data["usage"]),
             });
         }
@@ -388,7 +405,7 @@ impl Transport for ChatCompletions {
         let events = super::sse(resp, "chat", move |data| {
             dec.frame(&data).into_iter().map(Ok).collect()
         });
-        Ok(super::terminated("chat", events))
+        Ok(super::terminated("chat", self.gaps.clone(), events))
     }
 }
 #[cfg(test)]
@@ -520,6 +537,41 @@ mod tests {
             c,
             AssistantContent::ToolCall(call) if call.name == "read" && call.args["path"] == "a.rs"
         )));
+    }
+
+    // As Bailian sends it: the finishing chunk's usage is null, and the
+    // counts come after in a chunk with no choices; the ending must survive.
+    #[test]
+    fn usage_in_its_own_chunk_after_the_finish_reaches_the_turn() {
+        let mut acc = Accumulator::new("test-model".into());
+        let mut dec = Decoder::new(Shared::new("chat"));
+        for d in [
+            json!({ "choices": [{ "delta": { "tool_calls": [{
+                "index": 0, "id": "call_1", "type": "function",
+                "function": { "name": "read", "arguments": "{}" },
+            }] } }] }),
+            json!({
+                "choices": [{ "delta": { "content": "" }, "finish_reason": "tool_calls" }],
+                "usage": null,
+            }),
+            json!({
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 32,
+                    "prompt_tokens_details": { "cached_tokens": 30 },
+                    "completion_tokens": 105,
+                },
+            }),
+        ] {
+            for e in dec.frame(&d) {
+                acc.push(e);
+            }
+        }
+        let done = acc.finish();
+        assert_eq!(done.stop, StopReason::ToolUse);
+        assert_eq!(done.usage.input, 2);
+        assert_eq!(done.usage.cache_read, 30);
+        assert_eq!(done.usage.output, 105);
     }
 
     #[test]

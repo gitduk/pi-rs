@@ -515,7 +515,7 @@ impl Transport for OpenAi {
             }
             dec.frame(&data).into_iter().map(Ok).collect()
         });
-        Ok(super::terminated("openai", events))
+        Ok(super::terminated("openai", self.gaps.clone(), events))
     }
 }
 

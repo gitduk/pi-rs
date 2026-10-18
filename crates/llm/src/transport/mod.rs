@@ -128,26 +128,37 @@ pub(crate) fn sse(
 }
 
 /// For a wire whose terminal frame is guaranteed: a stream that closes before
-/// it was cut short, and a cut must not pass for a finished turn.
+/// it was cut short, and a cut must not pass for a finished turn. One that
+/// finished without a count is told to `gaps`, or it reads as a free turn.
 pub(crate) fn terminated(
     format: &'static str,
+    gaps: Shared,
     events: BoxStream<'static, Result<StreamEvent>>,
 ) -> BoxStream<'static, Result<StreamEvent>> {
     events
         .map(Some)
         .chain(futures::stream::once(async { None }))
-        .scan(false, move |done, item| {
+        .scan((false, false), move |(done, counted), item| {
             let out = match item {
                 Some(Ok(ev)) => {
-                    *done |= matches!(ev, StreamEvent::Done { .. });
+                    if let StreamEvent::Done { usage, .. } = &ev {
+                        *done = true;
+                        *counted |= *usage != crate::stream::Usage::default();
+                    }
                     Some(Ok(ev))
                 }
                 // The error is the ending: no cut is reported after it.
                 Some(Err(e)) => {
                     *done = true;
+                    *counted = true;
                     Some(Err(e))
                 }
-                None if *done => None,
+                None if *done => {
+                    if !*counted {
+                        gaps.frame().uncounted();
+                    }
+                    None
+                }
                 None => {
                     tracing::warn!(target: "pi::wire", format, "stream closed before its terminal frame");
                     Some(Err(LlmError::Stream(
@@ -247,6 +258,21 @@ impl Gaps {
         }
     }
 
+    /// The turn finished with no token count at all: what it cost reads as
+    /// nothing, which looks ordinary unless said.
+    pub(crate) fn uncounted(&mut self) {
+        if self.first_time("stream", "usage") {
+            tracing::warn!(
+                target: "pi::wire", format = self.format,
+                "the turn finished without a token count"
+            );
+            self.pending.push(
+                "the endpoint sent no token usage; this session's counts and cost read low"
+                    .to_string(),
+            );
+        }
+    }
+
     /// A shape this build does not know, which cost the turn nothing. Vendors
     /// add bookkeeping events routinely, so this is said quietly — crying wolf
     /// here is what would teach a reader to ignore `lost`.
@@ -305,7 +331,8 @@ mod tests {
     fn a_stream_cut_before_its_terminal_frame_is_an_error_not_a_turn() {
         let run = |events: Vec<StreamEvent>| {
             let events = futures::stream::iter(events.into_iter().map(Ok)).boxed();
-            futures::executor::block_on(terminated("anthropic", events).collect::<Vec<_>>())
+            let gaps = Shared::new("anthropic");
+            futures::executor::block_on(terminated("anthropic", gaps, events).collect::<Vec<_>>())
         };
         let text = || StreamEvent::TextDelta {
             index: 0,
@@ -325,6 +352,32 @@ mod tests {
         ]);
         assert_eq!(whole.len(), 2);
         assert!(whole.iter().all(Result::is_ok));
+    }
+
+    // A host that never counts would show a session as free; said once, not
+    // per turn, and never for one that did count.
+    #[test]
+    fn a_turn_finished_without_a_count_is_said_once() {
+        let run = |gaps: &Shared, output: u64| {
+            let done = StreamEvent::Done {
+                stop: Default::default(),
+                usage: crate::stream::Usage {
+                    output,
+                    ..Default::default()
+                },
+            };
+            let events = futures::stream::iter([Ok(done)]).boxed();
+            futures::executor::block_on(terminated("chat", gaps.clone(), events).count());
+        };
+        let counted = Shared::new("chat");
+        run(&counted, 7);
+        assert!(counted.drain().is_empty());
+
+        let silent = Shared::new("chat");
+        run(&silent, 0);
+        run(&silent, 0);
+        assert_eq!(silent.drain().len(), 1);
+        assert!(silent.drain().is_empty());
     }
 
     #[test]

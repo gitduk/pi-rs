@@ -405,7 +405,11 @@ impl Transport for Anthropic {
             futures::future::ready(out)
         });
 
-        Ok(super::terminated("anthropic", stream.boxed()))
+        Ok(super::terminated(
+            "anthropic",
+            self.gaps.clone(),
+            stream.boxed(),
+        ))
     }
 }
 
