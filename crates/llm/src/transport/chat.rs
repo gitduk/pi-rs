@@ -385,9 +385,10 @@ impl Transport for ChatCompletions {
         let resp = super::exchange("chat", url, spec, req, &body, call).await?;
 
         let mut dec = Decoder::new(self.gaps.clone());
-        Ok(super::sse(resp, "chat", move |data| {
+        let events = super::sse(resp, "chat", move |data| {
             dec.frame(&data).into_iter().map(Ok).collect()
-        }))
+        });
+        Ok(super::terminated("chat", events))
     }
 }
 #[cfg(test)]

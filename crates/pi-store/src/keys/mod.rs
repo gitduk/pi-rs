@@ -917,6 +917,12 @@ impl Keys {
                 }
             }
         }
+        // App keys are meant wherever the keyboard is; a nearer layer's default
+        // on one would leave it dead on the line, so that default yields.
+        let app_claimed: Vec<Chord> = (who.keys())
+            .filter(|(when, _)| *when == When::App)
+            .map(|(_, chord)| *chord)
+            .collect();
         // Defaults fill what the user hasn't claimed; one landing on an
         // explicit key yields, one repeating another default is a table bug.
         for b in BINDINGS {
@@ -925,6 +931,9 @@ impl Keys {
             }
             for spec in b.keys {
                 let chord = chord(spec).map_err(|e| anyhow::anyhow!("{}: {e}", b.id))?;
+                if b.when != When::App && app_claimed.contains(&chord) {
+                    continue;
+                }
                 if let Some(other) = who.get(&(b.when, chord)) {
                     if overrides.contains_key(*other) {
                         continue;
@@ -1198,6 +1207,23 @@ mod tests {
         assert_eq!(
             k.action(press("home"), Layers::default()),
             Some(Action::MoveLineStart)
+        );
+    }
+
+    // An app key the editor's default sat on would be accepted and never
+    // fire on the line; the default yields, and keeps its other keys.
+    #[test]
+    fn an_explicit_app_key_is_not_shadowed_by_a_nearer_default() {
+        let mut o = BTreeMap::new();
+        o.insert("app.quit".to_string(), vec!["ctrl+j".to_string()]);
+        let k = Keys::resolve(&o).unwrap();
+        assert_eq!(
+            k.action(press("ctrl+j"), Layers::default()),
+            Some(Action::AppQuit)
+        );
+        assert_eq!(
+            k.action(press("alt+enter"), Layers::default()),
+            Some(Action::InsertNewline)
         );
     }
 

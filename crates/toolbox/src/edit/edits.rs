@@ -249,6 +249,10 @@ pub fn apply(path: &str, content: &str, edits: &[Edit]) -> Result<Applied, Refus
         }
     }
 
+    // Looked up per landing; rescanning the body each time made a wide
+    // `replace_all` quadratic in the file.
+    let starts = line_starts(body);
+    let line_at = |at: usize| starts.partition_point(|&s| s <= at);
     let mut out = String::with_capacity(body.len());
     let mut cursor = 0usize;
     let mut line = 1usize;
@@ -278,15 +282,15 @@ pub fn apply(path: &str, content: &str, edits: &[Edit]) -> Result<Applied, Refus
         } else {
             line
         };
-        let took_at = line_of(body, p.span.start);
+        let took_at = line_at(p.span.start);
         let took = if point(p) {
             Vec::new()
         } else {
-            let last = line_of(body, p.span.end - 1);
-            body.lines()
-                .skip(took_at - 1)
-                .take(last - took_at + 1)
-                .map(str::to_string)
+            let last = line_at(p.span.end - 1);
+            let rows = lines.get(took_at - 1..last.min(lines.len()));
+            rows.unwrap_or_default()
+                .iter()
+                .map(|r| r.to_string())
                 .collect()
         };
         landed.push(Landed {

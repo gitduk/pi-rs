@@ -308,8 +308,8 @@ impl Tool for Edit {
             return Err(ToolError::Invalid(why));
         }
 
-        ctx.note_write(&real);
         crate::write::atomic_write(&real, applied.content.as_bytes()).await?;
+        ctx.note_write(&real);
         // The model just saw this change; the note is for outside drift.
         ctx.note_view(&real, &view_hash(&applied.content));
         // What the tool is being asked to do, by shape: the one number that
