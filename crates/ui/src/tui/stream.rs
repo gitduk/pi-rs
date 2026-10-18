@@ -261,19 +261,17 @@ impl Ui {
     // thing; moves the tail cursor here so a later adopt won't redraw it.
     pub(super) fn file_screen(&self, lane: &mut Lane, view: &mut View, line: &str) {
         let filed = lane.push_screen(line);
-        self.draw_filed(view, line, filed);
+        self.draw_filed(view, Row::notice_lines(line, &self.paint), filed);
     }
 
     // `file_screen` for a note the model reads as well.
     pub(super) fn file_note(&self, lane: &mut Lane, view: &mut View, line: &str) {
         let filed = lane.push_note(line);
-        self.draw_filed(view, line, filed);
+        self.draw_filed(view, Row::note_lines(line, &self.paint), filed);
     }
 
-    fn draw_filed(&self, view: &mut View, line: &str, filed: Option<agent::session::EntryId>) {
-        view.surface
-            .scrollback
-            .extend(Row::notice_lines(line, &self.paint));
+    fn draw_filed(&self, view: &mut View, rows: Vec<Row>, filed: Option<agent::session::EntryId>) {
+        view.surface.scrollback.extend(rows);
         if let Some(id) = filed {
             view.surface.tail = Some(id);
         }

@@ -101,6 +101,12 @@ enum Kind {
         text: Line<'static>,
         times: usize,
     },
+    // A line of a note: the mark (first line) or its blank width as the
+    // lead, so a wrap hangs under the text, not the mark.
+    NoteLine {
+        lead: Line<'static>,
+        body: Line<'static>,
+    },
     // Painted lines that come and go together: the banner, or none at all
     // where a row was that is gone.
     Lines(Vec<Line<'static>>),
@@ -215,6 +221,27 @@ impl Row {
     pub fn notice_lines(text: &str, paint: &Paint) -> Vec<Self> {
         text.lines()
             .map(|l| Self::notice(Line::from(paint.span(&paint.theme.muted, l))))
+            .collect()
+    }
+
+    /// A note — what the model is told, shown as it reads it — one row per
+    /// line, under a mark of its own so it never reads as reasoning.
+    pub fn note_lines(text: &str, paint: &Paint) -> Vec<Self> {
+        let mark = icons::bar(icons::NOTE_MARK);
+        let indent = " ".repeat(mark.width());
+        text.lines()
+            .enumerate()
+            .map(|(i, l)| {
+                let lead = if i == 0 {
+                    paint.span(&paint.theme.prompt.color, mark.clone())
+                } else {
+                    Span::raw(indent.clone())
+                };
+                Self::new(Kind::NoteLine {
+                    lead: Line::from(lead),
+                    body: Line::from(paint.span(&paint.theme.muted, l)),
+                })
+            })
             .collect()
     }
 
@@ -560,6 +587,7 @@ impl Row {
             | Kind::Code(_)
             | Kind::Block(_)
             | Kind::Notice { .. }
+            | Kind::NoteLine { .. }
             | Kind::Said { .. } => 1,
             Kind::Lines(lines) => lines.len(),
             Kind::Result(r) => r.len(),
@@ -593,6 +621,7 @@ impl Row {
             Kind::Answer(text, _) => (text.clone(), None),
             Kind::Lines(lines) => (lines[i].clone(), None),
             Kind::CodeLine(line) => (line.clone(), Some(Line::from(CODE_INDENT))),
+            Kind::NoteLine { lead, body } => (body.clone(), Some(lead.clone())),
             Kind::Code(c) => (c.line(paint), None),
             Kind::Block(b) => (b.line(paint, width), None),
             Kind::Notice { text, times } if *times == 1 => (text.clone(), None),
@@ -607,6 +636,12 @@ impl Row {
             Kind::Relayed(r) => r.line(i, paint, width),
             Kind::Steps(g) => g.line(i, paint, width),
         }
+    }
+
+    /// Whether a wrap of this row shows its border on the first piece only,
+    /// blanking it on the rest; the columns it takes stay the same.
+    pub fn hangs(&self) -> bool {
+        matches!(self.0, Kind::NoteLine { .. })
     }
 
     /// What in line `i` reads as one — a stretch of code, a link, a table's

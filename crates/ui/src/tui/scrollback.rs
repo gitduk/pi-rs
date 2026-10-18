@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use agent::session::Entry as LogEntry;
 use llm::message::{AssistantContent, ReasoningContent};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 
 use super::call::push_tool_row;
 use super::row::{Row, Step};
@@ -287,7 +287,13 @@ impl screen::Piece for Piece<'_> {
                 width,
             } => {
                 let (line, border) = row.line(line, paint, width);
-                let pieces = screen::wrap(border.as_ref(), &line, width);
+                let mut pieces = screen::wrap(border.as_ref(), &line, width);
+                if let Some(border) = border.as_ref().filter(|b| row.hangs() && width > b.width()) {
+                    let (lead, blank) = (border.spans.len(), " ".repeat(border.width()));
+                    for piece in pieces.iter_mut().skip(1) {
+                        piece.spans.splice(..lead, [Span::raw(blank.clone())]);
+                    }
+                }
                 // After the wrap, so every screen row a said line spans gets
                 // the band whole and the padding never wraps a row of its own.
                 match row.band() {
@@ -597,10 +603,10 @@ pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
             );
             Some(rows)
         }
-        // Machine prose, not the user's line: rebuilt in the muted voice of
-        // a screen notice rather than under the prompt sigil.
-        LogEntry::Note { note, .. } => Some(Row::notice_lines(note, paint)),
-        // Same voice for screen-only rows — a tally line, a turn warning —
+        // Machine prose, not the user's line: muted, under the note mark
+        // rather than the prompt sigil.
+        LogEntry::Note { note, .. } => Some(Row::note_lines(note, paint)),
+        // Screen-only rows — a tally line, a turn warning — as plain notices,
         // so the rebuild reuses the text the surface already worded.
         LogEntry::Screen { text, .. } => Some(Row::notice_lines(text, paint)),
         LogEntry::Tool {
