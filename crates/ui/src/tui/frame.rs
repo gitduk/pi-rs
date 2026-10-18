@@ -260,11 +260,11 @@ impl Ui {
                 .pointer
                 .is_some_and(|(_, row)| (regions.gap.y..regions.gap.bottom()).contains(&row));
             let more = format!("{} {scroll} more below", icons::ELLIPSIS);
-            vec![Line::from(self.paint.span_hovered(
-                shine,
-                &self.paint.theme.muted,
-                more,
-            ))]
+            Line::from(
+                self.paint
+                    .span_hovered(shine, &self.paint.theme.muted, more),
+            )
+            .centered()
         });
         self.below = scroll;
 
@@ -323,7 +323,7 @@ impl Ui {
                 self.menu_top = state.offset();
             }
             if let Some(below) = &below {
-                frame.render_widget(Rows(below), regions.gap);
+                frame.render_widget(below, regions.gap);
             }
             frame.render_widget(Rows(&bar), regions.bar);
             // Before the rows, so a span over the band keeps it: the columns the
