@@ -13,6 +13,7 @@ futures.workspace = true
 agent.workspace = true
 llm.workspace = true
 tool.workspace = true
+mcp.workspace = true
 anyhow.workspace = true
 tokio-util.workspace = true
 libc = "0.2"

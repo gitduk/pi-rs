@@ -293,7 +293,7 @@ impl Core {
             ),
             Intent::Builtin(Builtin::Tool(line)) => {
                 match crate::input::commands::call_of(&line, &self.lane().agent().brief.registry) {
-                    Ok((name, args)) => Step::Start { name, args },
+                    Ok((name, args)) => Step::Tool { name, args },
                     Err(why) => Step::Notice(why),
                 }
             }

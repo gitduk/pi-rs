@@ -1,5 +1,7 @@
 //! One run's life, armed to closed: starting a turn, a `!` line, or a
 //! `/compact` off the loop, and putting the transcript back when it returns.
+//! Beside them, what is asked off the loop without lending the transcript:
+//! a tool `/tool` names, and an MCP prompt's text.
 
 use agent::session::{Entry as LogEntry, Session};
 use agent::{AgentError, Event};
@@ -13,13 +15,27 @@ use super::term::{Deafened, EXIT_GRACE, external_editor, scratch_file};
 use super::view::{front_view, tail_of, view_at};
 use super::{NO_TRANSCRIPT, Tui};
 use pi_core::core;
-use pi_core::driver::Ended;
+use pi_core::driver::{Ended, Origin};
 
-// A tool `/tool` started, back from its call: the lane, its name, and what it
-// said or why it failed; nothing once it was stopped.
-pub(super) type Started = (u64, String, Option<Result<String, String>>);
+// A tool `/tool` started, back from its call.
+pub(super) struct Started {
+    token: u64,
+    name: String,
+    // What it said or why it failed; None once it was stopped.
+    said: Option<Result<String, String>>,
+}
 
-// What kind of job a finished `Done` was, carrying what only that kind
+// An MCP prompt's text, back from its server.
+pub(super) struct Fetched {
+    // The lane it was asked on, and who asked.
+    token: u64,
+    from: Origin,
+    // The line as typed, to show and to name it by.
+    typed: String,
+    text: Result<String, String>,
+}
+
+// What kind of run a finished `Done` was, carrying what only that kind
 // leaves behind — so no arm can be built holding another's.
 pub(super) enum Kind {
     // A turn: the agent loop ran, and `ran` says how it went. Its output
@@ -37,23 +53,23 @@ pub(super) enum Kind {
     Compact(Option<(agent::Report, llm::stream::Usage)>),
 }
 
-// A job that ran off the loop, reporting back via one channel (not a
+// A run off the loop, reporting back via one channel (not a
 // `JoinHandle`) so nothing polls a growing list of lanes.
 pub(super) struct Done {
     pub(super) token: u64,
     pub(super) kind: Kind,
-    // The transcript back, and how the job went. None only if it
+    // The transcript back, and how the run went. None only if it
     // panicked — the two are never separately absent.
     pub(super) ran: Option<(Session, Result<llm::stream::Usage, AgentError>)>,
 }
 
-// Runs `job` off the loop, turning a panic into `None` — without this
-// a job that never reports leaves its lane looking "working" forever.
-pub(super) async fn guard<F, T>(job: F) -> Option<T>
+// Runs `run` off the loop, turning a panic into `None` — without this
+// a run that never reports leaves its lane looking "working" forever.
+pub(super) async fn guard<F, T>(run: F) -> Option<T>
 where
     F: std::future::Future<Output = T>,
 {
-    std::panic::AssertUnwindSafe(job).catch_unwind().await.ok()
+    std::panic::AssertUnwindSafe(run).catch_unwind().await.ok()
 }
 
 /// A line pi sends on the model's behalf: what the screen names it by, and
@@ -76,7 +92,7 @@ enum Ask {
 }
 
 impl Tui {
-    // The front lane's transcript, for a job about to run on it.
+    // The front lane's transcript, for a run about to start on it.
     fn take_carried(&mut self) -> Option<Session> {
         let carried = self.core.lane_mut().take_session();
         if carried.is_none() {
@@ -85,7 +101,7 @@ impl Tui {
         carried
     }
 
-    // Hands the view to a job about to start: clock running, run figures
+    // Hands the view to a run about to start: clock running, run figures
     // at zero. `committed` says whether the prompt can still be taken back.
     pub(super) fn arm_view(&mut self, committed: bool) {
         let view = front_view(&mut self.views, self.core.lane());
@@ -243,19 +259,15 @@ impl Tui {
             let said = guard(core::tools::run_named(tool, args, &ctx))
                 .await
                 .unwrap_or_else(|| Some(Err("it panicked".into())));
-            let _ = started.send((token, name, said));
+            let _ = started.send(Started { token, name, said });
         });
     }
 
     // What a started tool said lands on its lane as a note, so the model
     // knows of it too; a failure is only the user's to read, and a stop was
     // already answered by whoever stopped it.
-    pub(super) fn land_started(
-        &mut self,
-        token: u64,
-        name: &str,
-        said: Option<Result<String, String>>,
-    ) {
+    pub(super) fn land_started(&mut self, started: Started) {
+        let Started { token, name, said } = started;
         let note = match said {
             None => return,
             Some(Ok(text)) => format!("The user ran `{name}` directly, and it answered:\n\n{text}"),
@@ -273,6 +285,74 @@ impl Tui {
         let lane = &mut self.core.lanes[at];
         let view = super::view::opened(&mut self.views, lane, &self.ui.paint);
         self.ui.file_note(lane, view, &note);
+    }
+
+    // Asks an MCP server for a prompt's text off the loop: a slow server
+    // must not hold the screen.
+    pub(super) fn start_fetch(
+        &mut self,
+        prompt: mcp::Prompt,
+        args: String,
+        typed: String,
+        from: Origin,
+        fetched: &UnboundedSender<Fetched>,
+    ) {
+        self.ui.flash(format!("asking {} …", prompt.word()));
+        let (tx, token) = (fetched.clone(), self.core.lane().token());
+        tokio::spawn(async move {
+            const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+            let text = tokio::time::timeout(WAIT, prompt.text(&args))
+                .await
+                .unwrap_or_else(|_| Err(format!("{} did not answer", prompt.word())));
+            let _ = tx.send(Fetched {
+                token,
+                from,
+                typed,
+                text,
+            });
+        });
+    }
+
+    // A fetched prompt starts its turn only on the lane it was asked on,
+    // still in front and idle; otherwise it is dropped, and said so.
+    pub(super) fn land_fetched(&mut self, fetched: Fetched, done: &UnboundedSender<Done>) {
+        let Fetched {
+            token,
+            from,
+            typed,
+            text,
+        } = fetched;
+        let front = self.core.lane().token() == token;
+        let started = match text {
+            Err(why) => {
+                self.ui.flash(why);
+                false
+            }
+            Ok(send) if front && !self.core.lane().is_running() => {
+                self.echo(&typed);
+                self.start_turn(send, Some(typed), done);
+                true
+            }
+            Ok(_) if !front => {
+                self.ui.flash(format!(
+                    "{typed} came back after its lane left the front; run it again"
+                ));
+                false
+            }
+            Ok(_) => {
+                self.ui.flash(format!(
+                    "{typed} came back while another turn ran; run it again"
+                ));
+                false
+            }
+        };
+        // A driver hears of the turn only now that it began.
+        if from != Origin::Typed
+            && let Some(at) = self.core.position_of(token)
+            && let Some(said) = self.drivers.dispatched(from, token, started, true)
+        {
+            self.say_of(at, said);
+        }
     }
 
     // Runs `/compact` off the loop — summarizing what it drops is a model
@@ -462,7 +542,7 @@ impl Tui {
         }
     }
 
-    // A job came home. Every kind settles on the lane that lent it the
+    // A run came home. Every kind settles on the lane that lent it the
     // transcript, whichever lane is on screen by the time it lands.
     pub(super) async fn settle(&mut self, done: Done) {
         // Events arrive before the end that follows them, so both race;
@@ -647,7 +727,7 @@ impl Tui {
             .started = None;
     }
 
-    // Puts back the archive when a job never returned the borrowed
+    // Puts back the archive when a run never returned the borrowed
     // transcript, naming it `verb`. Says if it's safe to save over.
     fn recover_session(&mut self, lane: usize, verb: &str) -> bool {
         let on = &self.core.lanes[lane];

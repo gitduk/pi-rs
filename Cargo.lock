@@ -3591,6 +3591,7 @@ dependencies = [
  "imagesize",
  "libc",
  "llm",
+ "mcp",
  "mermaid-text",
  "pi-core",
  "pi-store",

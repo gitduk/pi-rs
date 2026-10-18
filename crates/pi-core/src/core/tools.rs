@@ -42,8 +42,13 @@ pub async fn run_named(
     let name = tool.name().to_string();
     tracing::info!(target: "pi::tool", tool = %name, args = %args, "call by the user");
     let job = ctx.jobs().map(|sink| {
-        let root = ctx.workspace.root().to_path_buf();
-        sink.start(root, called(&name, &args), ctx.cancel.clone(), None)
+        let root = ctx.workspace.root();
+        sink.start(
+            root.to_path_buf(),
+            called(&name, &args, root),
+            ctx.cancel.clone(),
+            None,
+        )
     });
     let said = tool.execute(args, ctx).await;
     if let Some(job) = job {
@@ -67,11 +72,13 @@ pub async fn run_named(
     })
 }
 
-// A call as `/tool` takes it: the name, then `key=value` for each argument.
-fn called(name: &str, args: &serde_json::Value) -> String {
-    let pairs = (args.as_object().into_iter().flatten()).map(|(key, value)| match value {
-        serde_json::Value::String(s) => format!(" {key}={s}"),
-        other => format!(" {key}={other}"),
+// A call as `/tool` takes it: the name, then `key=value` for each argument
+// but a path that is just the checkout the job is listed under.
+fn called(name: &str, args: &serde_json::Value, root: &std::path::Path) -> String {
+    let pairs = (args.as_object().into_iter().flatten()).filter_map(|(key, value)| match value {
+        serde_json::Value::String(s) if std::path::Path::new(s) == root => None,
+        serde_json::Value::String(s) => Some(format!(" {key}={s}")),
+        other => Some(format!(" {key}={other}")),
     });
     std::iter::once(name.to_string()).chain(pairs).collect()
 }

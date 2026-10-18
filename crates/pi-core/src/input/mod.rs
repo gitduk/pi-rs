@@ -320,7 +320,7 @@ pub enum Step {
     // Needs the network, so the surface runs it and reports.
     Compact(Option<String>),
     // A tool to run off the loop by name, as `/tool` asked.
-    Start {
+    Tool {
         name: String,
         args: serde_json::Value,
     },
@@ -373,7 +373,7 @@ impl Step {
             Step::McpPrompt { .. } => false,
             Step::Notice(_)
             | Step::Compact(_)
-            | Step::Start { .. }
+            | Step::Tool { .. }
             | Step::Drive(_)
             | Step::Edit(_)
             | Step::Handled(_)

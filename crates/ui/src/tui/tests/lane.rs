@@ -122,17 +122,17 @@ async fn every_kind_of_job_leaves_its_lane_idle() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let kinds = || {
         vec![
-            ("turn", crate::tui::job::Kind::Turn),
+            ("turn", crate::tui::run::Kind::Turn),
             (
                 "bash",
-                crate::tui::job::Kind::Bash {
+                crate::tui::run::Kind::Bash {
                     lines: vec!["out".into()],
                 },
             ),
-            ("compact", crate::tui::job::Kind::Compact(None)),
+            ("compact", crate::tui::run::Kind::Compact(None)),
             (
                 "compact with a report",
-                crate::tui::job::Kind::Compact(Some((
+                crate::tui::run::Kind::Compact(Some((
                     agent::Report::default(),
                     llm::stream::Usage::default(),
                 ))),
@@ -141,7 +141,7 @@ async fn every_kind_of_job_leaves_its_lane_idle() {
     };
     for (what, kind) in kinds() {
         let mut tui = surface(dir.path());
-        tui.settle(crate::tui::job::Done {
+        tui.settle(crate::tui::run::Done {
             token: tui.core.lanes[0].token(),
             kind,
             ran: Some((
@@ -158,7 +158,7 @@ async fn every_kind_of_job_leaves_its_lane_idle() {
     // And the same when the job panicked and brought no transcript home.
     for (what, kind) in kinds() {
         let mut tui = surface(dir.path());
-        tui.settle(crate::tui::job::Done {
+        tui.settle(crate::tui::run::Done {
             token: tui.core.lanes[0].token(),
             kind,
             ran: None,
@@ -203,9 +203,9 @@ async fn a_panicked_bang_does_not_lay_its_transcript_down_again() {
     let _ = tui.core.lane_mut().take_session();
 
     // The job panicked: no lines, and no transcript came home.
-    tui.settle(crate::tui::job::Done {
+    tui.settle(crate::tui::run::Done {
         token,
-        kind: crate::tui::job::Kind::Bash { lines: Vec::new() },
+        kind: crate::tui::run::Kind::Bash { lines: Vec::new() },
         ran: None,
     })
     .await;
@@ -224,13 +224,13 @@ async fn a_panicked_bang_does_not_lay_its_transcript_down_again() {
 #[tokio::test]
 async fn a_stopped_run_does_not_tell_the_model_a_request_was_cancelled() {
     let dir = tempfile::tempdir().expect("a temp dir");
-    let stopped = |kind: crate::tui::job::Kind| {
+    let stopped = |kind: crate::tui::run::Kind| {
         let dir = dir.path().to_path_buf();
         async move {
             let mut tui = surface(&dir);
             let mut session = agent::session::Session::new();
             session.prompt("the task the user actually asked for");
-            tui.settle(crate::tui::job::Done {
+            tui.settle(crate::tui::run::Done {
                 token: tui.core.lanes[0].token(),
                 kind,
                 ran: Some((session, Err(agent::AgentError::Cancelled))),
@@ -244,7 +244,7 @@ async fn a_stopped_run_does_not_tell_the_model_a_request_was_cancelled() {
         }
     };
 
-    let after_bash = stopped(crate::tui::job::Kind::Bash {
+    let after_bash = stopped(crate::tui::run::Kind::Bash {
         lines: vec!["some output".into()],
     })
     .await;
@@ -253,7 +253,7 @@ async fn a_stopped_run_does_not_tell_the_model_a_request_was_cancelled() {
         "a stopped `!` adds no note: {after_bash}"
     );
 
-    let after_turn = stopped(crate::tui::job::Kind::Turn).await;
+    let after_turn = stopped(crate::tui::run::Kind::Turn).await;
     assert!(
         !after_turn.contains("stopped the previous run"),
         "a stopped turn adds no note: {after_turn}"
@@ -276,9 +276,9 @@ async fn an_interrupted_turn_keeps_its_spend_in_the_session_totals() {
         ..Default::default()
     }));
 
-    tui.settle(crate::tui::job::Done {
+    tui.settle(crate::tui::run::Done {
         token: tui.core.lanes[0].token(),
-        kind: crate::tui::job::Kind::Turn,
+        kind: crate::tui::run::Kind::Turn,
         ran: Some((session, Err(agent::AgentError::Cancelled))),
     })
     .await;
@@ -310,9 +310,9 @@ async fn an_interrupted_turn_out_of_sight_keeps_its_spend_too() {
     ] {
         sent.send(event).expect("the lane is listening");
     }
-    tui.settle(crate::tui::job::Done {
+    tui.settle(crate::tui::run::Done {
         token,
-        kind: crate::tui::job::Kind::Turn,
+        kind: crate::tui::run::Kind::Turn,
         ran: Some((session, Err(agent::AgentError::Cancelled))),
     })
     .await;
@@ -879,9 +879,9 @@ async fn leaving_with_a_run_in_flight_takes_the_transcript_back() {
     let mut carried = Session::new();
     carried.prompt("go");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    tx.send(crate::tui::job::Done {
+    tx.send(crate::tui::run::Done {
         token,
-        kind: crate::tui::job::Kind::Turn,
+        kind: crate::tui::run::Kind::Turn,
         ran: Some((carried, Ok(llm::stream::Usage::default()))),
     })
     .expect("the job reports");

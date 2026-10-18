@@ -42,9 +42,9 @@ async fn an_idle_lane_opens_the_rewind_selector() {
     session.prompt("the first question");
     tui.ui.flash = None;
     let token = tui.core.lanes[0].token();
-    tui.settle(crate::tui::job::Done {
+    tui.settle(crate::tui::run::Done {
         token,
-        kind: crate::tui::job::Kind::Turn,
+        kind: crate::tui::run::Kind::Turn,
         ran: Some((session, Ok(llm::stream::Usage::default()))),
     })
     .await;
@@ -96,9 +96,9 @@ async fn the_rewind_of_a_lane_with_no_transcript_says_so() {
 
     // Nothing came home, and nothing was saved to read back: the session has
     // never been written.
-    tui.settle(crate::tui::job::Done {
+    tui.settle(crate::tui::run::Done {
         token: tui.core.lanes[0].token(),
-        kind: crate::tui::job::Kind::Turn,
+        kind: crate::tui::run::Kind::Turn,
         ran: None,
     })
     .await;
