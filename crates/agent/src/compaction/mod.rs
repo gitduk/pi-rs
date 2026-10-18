@@ -6,7 +6,7 @@ mod oneshot;
 mod summary;
 
 pub use oneshot::ask;
-pub use summary::render;
+pub use summary::{PROMPT as SUMMARIZE, render};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -93,7 +93,7 @@ impl Summarizing {
         };
         let history = summary::render(&session.summaries(), &session.entries_for(&record.dropped));
 
-        match summary::run(transport, spec, history, focus, self.idle).await {
+        match summary::run(transport, spec, run.summarize, history, focus, self.idle).await {
             Ok((text, used)) => {
                 record.summary = Some(text);
                 // The new summary covers what the old one did, so the entry

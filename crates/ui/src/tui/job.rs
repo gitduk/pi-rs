@@ -356,6 +356,7 @@ impl Tui {
     // count. A non-zero exit (`:cq`) is "forget it": nothing is reloaded.
     pub(super) async fn edit_file(&mut self, path: std::path::PathBuf) {
         let (ran, resumed) = self.in_editor(&path).await;
+        let unchanged = pi_core::core::resolve::unseed(&path);
         if let Err(e) = resumed {
             self.say_of(
                 self.core.current,
@@ -365,6 +366,12 @@ impl Tui {
         let said = match ran {
             Err(why) => vec![why],
             Ok(s) if !s.success() => vec![format!("editor exited {s} — nothing reloaded")],
+            Ok(_) if unchanged => {
+                let name = pi_core::core::instructions::short(&path, self.core.lane().root());
+                self.ui
+                    .flash(format!("{name} unchanged — the built-in stays"));
+                Vec::new()
+            }
             Ok(_) => match self.core.config_edited() {
                 // The file edited first: what else the reload says follows it.
                 Ok(notes) => {

@@ -114,6 +114,7 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
 pub async fn run(
     transport: &dyn Transport,
     spec: &ModelSpec,
+    prompt: &str,
     history: String,
     focus: Option<&str>,
     idle: std::time::Duration,
@@ -123,7 +124,7 @@ pub async fn run(
         None => history,
     };
     let (text, usage, stop) =
-        super::oneshot::ask(transport, spec, PROMPT, body, MAX_SUMMARY_TOKENS, idle).await?;
+        super::oneshot::ask(transport, spec, prompt, body, MAX_SUMMARY_TOKENS, idle).await?;
     // Cut short, it would replace the earlier summary with one missing its
     // tail; failing keeps that one in view instead.
     if stop != StopReason::EndTurn {

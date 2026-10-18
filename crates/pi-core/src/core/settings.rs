@@ -181,7 +181,10 @@ impl Core {
             return Step::Handled(pi_store::listing::Listing::say(lines));
         }
         match files.into_iter().find(|f| f.name == name) {
-            Some(file) => Step::Edit(file.path),
+            Some(file) => match resolve::seed(&file.path) {
+                Ok(()) => Step::Edit(file.path),
+                Err(e) => Step::Answer(format!("cannot start {name} from the built-in: {e}")),
+            },
             None => Step::Answer(format!(
                 "`{name}` is not a file /edit offers — bare /edit lists them"
             )),

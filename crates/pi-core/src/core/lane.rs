@@ -166,10 +166,11 @@ pub fn arm(
     retry: agent::Retry,
     jobs: Option<Arc<crate::driver::jobs::Table>>,
 ) -> Arc<Resolved> {
-    let mut subagent = Subagent::new(
+    let mut subagent = Subagent::prompted(
         agent,
         resolved.brief.clone(),
         archive,
+        resolved.prompt_files.prompt("subagent"),
         &resolved.standing,
         retry,
     );
@@ -226,6 +227,7 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
         brief: Arc::new(agent::Briefing {
             registry: toolbox::builtin(),
             system: String::new(),
+            summarize: agent::compaction::SUMMARIZE.to_string(),
             effort: llm::request::Effort::Off,
             approver: Arc::new(agent::Ceiling(tool::Tier::Exec)),
             hooks: Arc::new(agent::NoHooks),
@@ -244,6 +246,7 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
         memory: Vec::new(),
         remembers: false,
         system: None,
+        prompts: Vec::new(),
         endpoint: None,
         mcp: Vec::new(),
         project: Vec::new(),

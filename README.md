@@ -60,9 +60,12 @@ before running pi there.
 
 Nothing needs a restart. Within a second of a save to the settings, the lane
 in front is rebuilt from them; a file that does not parse is named once and the
-old config stays. A system prompt file, an `AGENTS.md` or memory is read again
-at the next session or compaction instead: changed mid-session, the prompt would
-contradict what the model already read, and its cached prefix would be lost.
+old config stays. A system prompt file, another prompt replaced under
+`~/.pi/prompts/`, an `AGENTS.md` or memory is read again at the next session or
+compaction instead: changed mid-session, the prompt would contradict what the
+model already read, and its cached prefix would be lost. `/edit` opens a prompt
+not yet replaced on the built-in's text; saved unchanged, the file is removed,
+so the built-in goes on following pi's updates.
 
 ## Run
 
@@ -108,7 +111,7 @@ refused, and resuming one from another directory moves it here.
 | `/job [text]`, `stop <id>`, `output <id>` | background jobs; have the model start one; stop one; what one printed |
 | `/mcp`, `/mcp restart [name]`      | MCP servers and their tools; reconnect        |
 | `/settings`                        | edit the project's config                     |
-| `/edit [file]`                     | edit `SYSTEM.md`, an `AGENTS.md`, or memory   |
+| `/edit [file]`                     | edit a prompt, an `AGENTS.md`, or memory      |
 | `/status`, `/keys`, `/help`        | session paths and spend; bindings; commands   |
 | `/exit`                            | leave; `ctrl+d` does the same                 |
 | `/restart`                         | run the pi installed now on this session      |
@@ -214,6 +217,8 @@ never writes memory, nor does a run under `--tier read` or `net`, or with
 | ---------------------------------------- | ------------------------------------------ |
 | `~/.pi/settings.toml`                    | endpoint, models, `[keys]`, `[theme]`      |
 | `~/.pi/SYSTEM.md`                        | replaces the built-in system prompt        |
+| `~/.pi/prompts/summarize.md`             | replaces the compaction summary prompt     |
+| `~/.pi/prompts/subagent.md`              | replaces a subagent's own prompt           |
 | `~/.pi/AGENTS.md`, `AGENTS.md`           | instructions: yours, a project's           |
 | `~/.pi/skills/`                          | skills: a directory with a `SKILL.md`      |
 | `~/.pi/memory/*.md`                      | memory: global, and one file per project   |

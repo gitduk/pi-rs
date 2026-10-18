@@ -58,6 +58,8 @@ pub struct Fitted {
 pub struct Working<'a> {
     pub transport: &'a dyn Transport,
     pub spec: &'a ModelSpec,
+    /// The prompt the run's brief writes summaries under.
+    pub summarize: &'a str,
 }
 
 /// What a transcript is shrunk by when it outgrows the window.

@@ -61,6 +61,8 @@ pub struct Resolved {
     pub remembers: bool,
     /// The file that replaced the built-in system prompt, if one did.
     pub system: Option<PathBuf>,
+    /// The files that replaced other built-in prompts.
+    pub prompts: Vec<PathBuf>,
     /// Where requests go and which source said so, for `/status`: two files
     /// can each name one now.
     pub endpoint: Option<String>,
@@ -79,6 +81,7 @@ pub struct Resolved {
 pub struct PromptFiles {
     system_file: Option<PathBuf>,
     system: String,
+    prompts: Vec<(PathBuf, String)>,
     instructions: Vec<(PathBuf, String)>,
     memory: Vec<(String, String)>,
     day: String,
@@ -95,6 +98,15 @@ impl PromptFiles {
                 .with_context(|| format!("cannot read system prompt {}", path.display()))?,
             None => crate::core::prompt::DEFAULT_SYSTEM.to_string(),
         };
+        let prompts = replacements()
+            .map(|(path, _)| path)
+            .filter(|path| path.is_file())
+            .map(|path| {
+                let text = std::fs::read_to_string(&path)
+                    .with_context(|| format!("cannot read prompt {}", path.display()))?;
+                Ok((path, text))
+            })
+            .collect::<Result<_>>()?;
         let (instructions, memory) = if pinned.no_context_files {
             (Vec::new(), Vec::new())
         } else {
@@ -108,10 +120,28 @@ impl PromptFiles {
         Ok(Self {
             system_file,
             system,
+            prompts,
             instructions,
             memory,
             day: day.to_string(),
         })
+    }
+
+    /// The text the built-in prompt `name` runs under: its replacement's, or
+    /// its own.
+    pub fn prompt(&self, name: &str) -> &str {
+        let path = config::prompt_file(name);
+        self.prompts
+            .iter()
+            .find(|(p, _)| Some(p) == path.as_ref())
+            .map(|(_, text)| text.as_str())
+            .or_else(|| {
+                crate::core::prompt::REPLACEABLE
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, text)| *text)
+            })
+            .unwrap_or_default()
     }
 
     /// The files that read differently in `now`, named as a person would.
@@ -122,7 +152,9 @@ impl PromptFiles {
             moved.push(path.map_or("system prompt".into(), |p| instructions::short(p, root)));
         }
         moved.extend(
-            changed(&self.instructions, &now.instructions).map(|p| instructions::short(p, root)),
+            changed(&self.prompts, &now.prompts)
+                .chain(changed(&self.instructions, &now.instructions))
+                .map(|p| instructions::short(p, root)),
         );
         let memory_dir = pi_store::memory::Memory::default();
         let main = crate::core::worktree::main_root(root);
@@ -311,6 +343,7 @@ pub fn resolve(
         brief: std::sync::Arc::new(agent::Briefing {
             registry: registry.within(tier),
             system,
+            summarize: prompt_files.prompt("summarize").to_string(),
             effort,
             approver: std::sync::Arc::new(agent::Ceiling(tier)),
             hooks: crate::core::hooks::of(&config.hooks),
@@ -330,6 +363,11 @@ pub fn resolve(
         memory: memory_files,
         remembers: !pinned.no_context_files,
         system: prompt_files.system_file.clone(),
+        prompts: prompt_files
+            .prompts
+            .iter()
+            .map(|(p, _)| p.clone())
+            .collect(),
         prompt_files,
         endpoint: endpoint(pinned, config, settings, root),
         mcp: mcp_names(config, settings),
@@ -443,12 +481,16 @@ pub fn editable(pinned: &Pinned, root: &Path) -> Vec<Editable> {
         }
     }
     shared.extend(system_file(pinned).map(|p| (p, "replaces the system prompt")));
+    shared.extend(replacements().map(|(p, _)| (p, "replaces a built-in prompt")));
     files.extend(shared);
     files
         .into_iter()
         .map(|(path, what)| {
             let note = match std::fs::metadata(&path) {
                 Ok(meta) => format!("{what} · {}", pi_store::text::size(meta.len())),
+                Err(_) if builtin_of(&path).is_some() => {
+                    format!("{what} · new, opens on the built-in")
+                }
                 Err(_) => format!("{what} · new, saving creates it"),
             };
             Editable {
@@ -458,6 +500,47 @@ pub fn editable(pinned: &Pinned, root: &Path) -> Vec<Editable> {
             }
         })
         .collect()
+}
+
+// Where each replaceable prompt's file would be, with the text it replaces.
+fn replacements() -> impl Iterator<Item = (PathBuf, &'static str)> {
+    crate::core::prompt::REPLACEABLE
+        .iter()
+        .filter_map(|(name, text)| Some((config::prompt_file(name)?, *text)))
+}
+
+// The built-in text the file at `path` replaces, when it replaces one. A
+// `--system` file is not one: the flag needs it there, so it is never removed.
+fn builtin_of(path: &Path) -> Option<&'static str> {
+    std::iter::once((config::system_file(), crate::core::prompt::DEFAULT_SYSTEM))
+        .filter_map(|(p, text)| Some((p?, text)))
+        .chain(replacements())
+        .find(|(p, _)| p == path)
+        .map(|(_, text)| text)
+}
+
+/// Before `/edit` opens a replacement not written yet: start it as the
+/// built-in reads, so the change is made to that rather than to nothing.
+pub fn seed(path: &Path) -> std::io::Result<()> {
+    match builtin_of(path) {
+        Some(text) if !path.exists() => {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(path, text)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// After the editor: a replacement still reading as the built-in replaces
+/// nothing, and kept, it would hold the built-in back at this version.
+/// True when it went.
+pub fn unseed(path: &Path) -> bool {
+    builtin_of(path).is_some_and(|text| {
+        std::fs::read_to_string(path).is_ok_and(|now| now == text)
+            && std::fs::remove_file(path).is_ok()
+    })
 }
 
 // The servers in force the project file does not name: those it does are
@@ -505,6 +588,17 @@ fn endpoint(
 
 #[cfg(test)]
 mod tests {
+    // A name the table and a lookup spell apart would run that part of pi
+    // on an empty prompt, and nothing on screen would say so.
+    #[test]
+    fn every_replaceable_prompt_falls_back_to_its_built_in() {
+        let files = super::PromptFiles::default();
+        for (name, text) in crate::core::prompt::REPLACEABLE {
+            assert!(!text.trim().is_empty(), "{name}");
+            assert_eq!(files.prompt(name), text, "{name}");
+        }
+    }
+
     // A built-in skill is dropped without a word when its header does not parse.
     #[test]
     fn pi_extend_is_a_builtin_skill_and_its_skill_example_parses() {

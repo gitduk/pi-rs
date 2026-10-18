@@ -10,6 +10,13 @@ use std::path::PathBuf;
 /// The assistant's own prompt, when no file replaces it.
 pub const DEFAULT_SYSTEM: &str = include_str!("../../prompts/system.md");
 
+/// The built-in prompts a file of the same name under pi's `prompts/`
+/// replaces whole, each with its built-in text.
+pub const REPLACEABLE: [(&str, &str); 2] = [
+    ("summarize", agent::compaction::SUMMARIZE),
+    ("subagent", subagent::PROMPT),
+];
+
 /// The facts a run's blocks are drawn from. Empty fields leave their block out.
 #[derive(Debug, Clone)]
 pub struct Standing {

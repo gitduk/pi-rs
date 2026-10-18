@@ -87,6 +87,8 @@ pub struct Model {
 pub struct Briefing {
     pub registry: Registry,
     pub system: String,
+    /// The system prompt a summary of dropped history is written under.
+    pub summarize: String,
     pub effort: Effort,
     pub approver: Arc<dyn Approver>,
     /// What runs around each call the approver let through.
@@ -111,6 +113,7 @@ impl Agent {
             brief: Arc::new(Briefing {
                 registry: Registry::new(),
                 system: String::new(),
+                summarize: compaction::SUMMARIZE.to_string(),
                 effort: Effort::Off,
                 approver: Arc::new(Ceiling(tool::Tier::Exec)),
                 hooks: Arc::new(NoHooks),
@@ -431,6 +434,7 @@ impl Agent {
         Working {
             transport: &*self.model.transport,
             spec: &self.model.spec,
+            summarize: &self.brief.summarize,
         }
     }
 

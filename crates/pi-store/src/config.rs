@@ -616,6 +616,11 @@ pub fn system_file() -> Option<PathBuf> {
     super::dir().map(|root| root.join("SYSTEM.md"))
 }
 
+/// The file that, where it exists, replaces the built-in prompt `name`.
+pub fn prompt_file(name: &str) -> Option<PathBuf> {
+    super::dir().map(|root| root.join("prompts").join(format!("{name}.md")))
+}
+
 /// The nearest project file at or above `start`, stopping at the repo root.
 /// `home` is never searched: a `.pi.toml` there applies outside any repo.
 fn project_path(start: &Path, home: Option<&Path>) -> Option<PathBuf> {

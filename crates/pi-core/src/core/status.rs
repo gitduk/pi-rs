@@ -112,6 +112,10 @@ impl Core {
         if let Some(system) = &resolved.system {
             rows.push(Row::new(["system prompt".into(), short(system, root)]));
         }
+        if !resolved.prompts.is_empty() {
+            let prompts: Vec<_> = resolved.prompts.iter().map(|p| short(p, root)).collect();
+            rows.push(Row::new(["prompts".into(), prompts.join(", ")]));
+        }
         if !resolved.instructions.is_empty() {
             rows.push(Row::new([
                 "instructions".into(),

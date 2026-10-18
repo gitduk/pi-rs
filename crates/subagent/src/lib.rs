@@ -12,7 +12,8 @@ use agent::session::Session;
 use agent::{Agent, AgentError, Archive, Briefing, Event, Retry};
 use tracing::Instrument as _;
 
-const PROMPT: &str = include_str!("../prompts/subagent.md");
+/// The built-in prompt a subagent runs under, ahead of the checkout's own.
+pub const PROMPT: &str = include_str!("../prompts/subagent.md");
 
 // Ids only have to be distinct inside one process; the parent's own namespace
 // makes them distinct across runs.
@@ -94,10 +95,22 @@ impl Subagent {
         standing: &str,
         retry: Retry,
     ) -> Self {
+        Self::prompted(parent, brief, archive, PROMPT, standing, retry)
+    }
+
+    /// The same, under `prompt` in place of the built-in one.
+    pub fn prompted(
+        parent: &Agent,
+        brief: Arc<Briefing>,
+        archive: Arc<dyn Archive>,
+        prompt: &str,
+        standing: &str,
+        retry: Retry,
+    ) -> Self {
         let mut child = brief;
         let patch = Arc::make_mut(&mut child);
         patch.registry = std::mem::take(&mut patch.registry).without(Self::NAME);
-        patch.system = format!("{PROMPT}{standing}");
+        patch.system = format!("{prompt}{standing}");
         let agent = Agent {
             model: parent.model.clone(),
             brief: child,
