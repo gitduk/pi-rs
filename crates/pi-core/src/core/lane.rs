@@ -788,7 +788,7 @@ impl Core {
         // The record follows under the same id: one rename takes the
         // transcript, its journal and its subagents along.
         self.lane_mut().talk.reclaim(None);
-        let claim = if self.store.path_of(&from, &id).is_file() {
+        let claim = if self.store.filed(&from, &id) {
             match self.store.relocate(&to, &id) {
                 Ok(claim) => Some(claim),
                 Err(e) => {
@@ -816,13 +816,14 @@ impl Core {
         said.insert(0, format!("now in {}", to.display()));
         Ok(Step::Moved(crate::input::notice(said)))
     }
-    // Open a checkout as a new lane, in front; whole or not at all — a tree
-    // whose skills won't resolve leaves the run where it was.
+    // Open a checkout as a new lane in front, on lane `like`'s agent; whole
+    // or not at all. Which session it takes up is the caller's.
     pub(super) fn open_lane(
         &mut self,
         ws: tool::Workspace,
         worktree: Option<String>,
-    ) -> Result<Vec<String>, String> {
+        like: usize,
+    ) -> Result<(), String> {
         let root = ws.root().to_path_buf();
         let failed = |e| format!("nothing opened — {}", refused("worktree", e));
         let resolved =
@@ -831,11 +832,9 @@ impl Core {
 
         // The model travels; what the root decides does not. A switch changes
         // trees, and which model is answering was a decision made elsewhere.
-        let archive = self.archive(
-            root.clone(),
-            self.lane().checkout.agent.spec().model.clone(),
-        );
-        let mut ag = (*self.lane().checkout.agent).clone();
+        let agent = &self.lanes[like].checkout.agent;
+        let archive = self.archive(root, agent.spec().model.clone());
+        let mut ag = (**agent).clone();
         let resolved = arm(
             &mut ag,
             Arc::new(resolved),
@@ -853,12 +852,14 @@ impl Core {
         }));
         self.current = self.lanes.len() - 1;
         self.in_force();
-
+        Ok(())
+    }
+    // The newest session filed for the checkout in front, or a fresh one.
+    pub(super) fn take_up_latest(&mut self) -> Vec<String> {
         // Asked with the root the next save will file under, so a tree is found
         // by the same key it was stored by.
         // One open in another pi stays there; this lane starts its own.
-        let found = self.store.take_latest(&root);
-        Ok(match found {
+        match self.store.take_latest(self.lane().root()) {
             Ok((stored, claim)) => self.adopt_session(stored, claim),
             Err(e) => {
                 // Nothing recorded for this tree is the ordinary case; an
@@ -867,7 +868,85 @@ impl Core {
                 self.fresh_session();
                 Vec::new()
             }
-        })
+        }
+    }
+    /// The checkouts a `/restart` left open, `(root, filed session)` in the
+    /// order they were in, opened again around the one in front, each on its
+    /// own session and model. What does not come back is said under the
+    /// front one's banner, not fatal.
+    pub fn reopen(&mut self, lanes: &[(std::path::PathBuf, Option<String>)]) {
+        let front = self.current;
+        let mut order = Vec::new();
+        let mut said = Vec::new();
+        for (root, id) in lanes {
+            let ws = match tool::Workspace::new(root)
+                .and_then(|ws| ws.with_write_roots(&self.config.writable()))
+            {
+                Ok(ws) => ws,
+                Err(e) => {
+                    said.push(format!("{}: not reopened — {e}", root.display()));
+                    continue;
+                }
+            };
+            order.push(ws.root().to_path_buf());
+            if self.lane_at(ws.root()).is_some() {
+                continue;
+            }
+            let worktree = crate::core::worktree::current(ws.root());
+            if let Err(why) = self.open_lane(ws, worktree, front) {
+                said.push(format!("{}: {why}", root.display()));
+                continue;
+            }
+            let Some(id) = id else {
+                self.fresh_session();
+                continue;
+            };
+            // Carried over, not chosen: nothing to say about which one it is.
+            match self.store.take(self.lane().root(), id) {
+                Ok((stored, claim)) => {
+                    let model = stored.model.clone();
+                    self.adopt_session(stored, claim);
+                    said.extend(self.rejoin(&model));
+                }
+                Err(e) => {
+                    self.fresh_session();
+                    said.push(format!("{}: started afresh — {e:#}", root.display()));
+                }
+            }
+        }
+        let front = self.lanes[front].token();
+        self.lanes.sort_by_key(|lane| {
+            order
+                .iter()
+                .position(|root| root == lane.root())
+                .unwrap_or(usize::MAX)
+        });
+        self.current = self.position_of(front).unwrap_or(0);
+        self.in_force();
+        for line in &said {
+            tracing::warn!(target: "pi::session", said = %line, "reopen");
+        }
+        if !said.is_empty() {
+            let lane = self.lane_mut();
+            Arc::make_mut(&mut lane.checkout.resolved)
+                .notes
+                .extend(said);
+        }
+    }
+    // Back on the model the session last ran, as a `--resume` start is; says
+    // only what that start would.
+    fn rejoin(&mut self, model: &str) -> Vec<String> {
+        let root = self.lane().root().display().to_string();
+        match self.dial_for(model, pi_store::config::ModelOrigin::Resumed) {
+            Ok(None) => Vec::new(),
+            Ok(Some(dialled)) => {
+                let said = dialled.warning.iter().chain(&dialled.assumed);
+                let said = said.map(|line| format!("{root}: {line}")).collect();
+                self.retarget(dialled.transport, dialled.spec);
+                said
+            }
+            Err(why) => vec![format!("{root}: {why}")],
+        }
     }
     // The sessions `/resume` can switch to, newest first, the one running
     // now marked.

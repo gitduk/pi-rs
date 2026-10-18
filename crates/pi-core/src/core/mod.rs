@@ -238,9 +238,9 @@ impl Core {
 }
 
 impl Core {
-    // `/restart`, refused when the new pi would lose something: it takes up
-    // the front lane's transcript and nothing else this one holds.
-    fn restart(&self) -> Result<Step, String> {
+    /// `/restart`, refused when the new pi would lose something: it takes up
+    /// every lane's transcript, in order, and nothing else this one holds.
+    pub fn restart(&self) -> Result<Step, String> {
         if crate::core::update::launcher().is_none() {
             return Err("cannot tell which pi to start again".into());
         }
@@ -258,12 +258,18 @@ impl Core {
         {
             return Err("background jobs would be cut off".into());
         }
-        let lane = self.lane();
-        // A session nothing was said in is never filed.
-        let filed = self.store.path_of(lane.root(), lane.id()).is_file();
+        let lanes = (self.lanes.iter())
+            .map(|lane| {
+                let filed = self.store.filed(lane.root(), lane.id());
+                (
+                    lane.root().to_path_buf(),
+                    filed.then(|| lane.id().to_string()),
+                )
+            })
+            .collect();
         Ok(Step::Restart {
-            root: lane.root().to_path_buf(),
-            id: filed.then(|| lane.id().to_string()),
+            lanes,
+            front: self.current,
             flags: self.pinned.args(),
         })
     }

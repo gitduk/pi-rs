@@ -59,17 +59,18 @@ fn cancel_on_interrupt() -> tokio_util::sync::CancellationToken {
     token
 }
 
-// `/restart`: this process becomes the pi installed now, on the session just
-// left, which keeps its own model and name.
-fn restart(root: &std::path::Path, id: Option<&str>, flags: &[String]) -> Result<ExitCode> {
+// `/restart`: this process becomes the pi installed now, on the sessions just
+// left, each keeping its own model and name.
+fn restart(
+    lanes: &[(std::path::PathBuf, Option<String>)],
+    front: usize,
+    flags: &[String],
+) -> Result<ExitCode> {
     let launcher = core::update::launcher().context("cannot tell which pi to start again")?;
     let mut cmd = std::process::Command::new(launcher);
-    cmd.arg("-C").arg(root);
-    if let Some(id) = id {
-        cmd.args(["--resume", id]);
-    }
-    cmd.args(flags);
-    tracing::info!(target: "pi::session", path = %launcher.display(), session = ?id, "restarting");
+    cmd.args(pi_core::args::restart(lanes, front, flags));
+    let id = lanes[front].1.as_deref();
+    tracing::info!(target: "pi::session", path = %launcher.display(), session = ?id, lanes = lanes.len(), "restarting");
     #[cfg(unix)]
     let e = std::os::unix::process::CommandExt::exec(&mut cmd);
     #[cfg(not(unix))]
@@ -272,6 +273,7 @@ async fn main() -> Result<ExitCode> {
         };
         let drivers = pi_core::driver::Drivers::default();
         core.enable_jobs(drivers.jobs());
+        core.reopen(&args.lanes());
         core::update::watch();
         let out = tui::Tui::new(core, key_map, drivers)?.run().await;
         // Subagents handed their transcripts to a background save; wait
@@ -282,7 +284,11 @@ async fn main() -> Result<ExitCode> {
         }
         return match out? {
             tui::Ended::Quit => Ok(ExitCode::SUCCESS),
-            tui::Ended::Restart { root, id, flags } => restart(&root, id.as_deref(), &flags),
+            tui::Ended::Restart {
+                lanes,
+                front,
+                flags,
+            } => restart(&lanes, front, &flags),
         };
     };
 

@@ -175,7 +175,7 @@ pub(crate) const BUILTIN: &[Command] = &[
     Command::builtin(
         "/restart",
         "",
-        "start pi again on this session, the version installed now",
+        "start pi again on these sessions, the version installed now",
         |_, _| Intent::Builtin(Builtin::Restart),
     ),
     Command::builtin("/exit", "", "leave (Ctrl-D does the same)", |_, _| {

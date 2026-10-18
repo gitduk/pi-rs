@@ -78,6 +78,38 @@ pub struct Args {
     /// Answer only; no progress, no usage line.
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// A checkout to open again beside `--cwd`, as `ID=ROOT` (ID empty when
+    /// nothing was filed there); repeated, in the order they were open.
+    #[arg(long, value_name = "ID=ROOT", hide = true)]
+    pub lane: Vec<String>,
+}
+
+/// One `--lane` value.
+pub fn lane_arg(root: &std::path::Path, id: Option<&str>) -> String {
+    format!("{}={}", id.unwrap_or_default(), root.display())
+}
+
+/// The command line a restart starts pi with: in `lanes[front]`, on its
+/// session, every other lane carried as a `--lane`, then `flags`.
+pub fn restart(
+    lanes: &[(std::path::PathBuf, Option<String>)],
+    front: usize,
+    flags: &[String],
+) -> Vec<std::ffi::OsString> {
+    let (root, id) = &lanes[front];
+    let mut out = vec!["-C".into(), root.into()];
+    if let Some(id) = id {
+        out.extend(["--resume".into(), id.into()]);
+    }
+    // Alone, the lane in front is all there is to carry.
+    if lanes.len() > 1 {
+        for (root, id) in lanes {
+            out.extend(["--lane".into(), lane_arg(root, id.as_deref()).into()]);
+        }
+    }
+    out.extend(flags.iter().map(Into::into));
+    out
 }
 
 /// The flags that outrank the config for the whole run, and so are applied
@@ -130,6 +162,15 @@ impl Pinned {
 }
 
 impl Args {
+    /// The `--lane`s, as [`Core::reopen`](crate::core::Core::reopen) takes them.
+    pub fn lanes(&self) -> Vec<(std::path::PathBuf, Option<String>)> {
+        // An id never holds `=`, so the first one ends it.
+        (self.lane.iter())
+            .filter_map(|arg| arg.split_once('='))
+            .map(|(id, root)| (root.into(), (!id.is_empty()).then(|| id.to_string())))
+            .collect()
+    }
+
     pub fn pinned(&self) -> Pinned {
         Pinned {
             config: self.config.clone(),
@@ -141,5 +182,27 @@ impl Args {
             effort: self.effort,
             tier: self.tier,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Args, lane_arg};
+    use clap::Parser;
+    use std::path::{Path, PathBuf};
+
+    // What `/restart` writes is what the next pi reads, `=` in a path and all.
+    #[test]
+    fn a_lane_reads_back_as_it_was_written() {
+        let filed = lane_arg(Path::new("/w/a=b"), Some("1792332839-3028349-1"));
+        let fresh = lane_arg(Path::new("/w/c"), None);
+        let args = Args::parse_from(["pi", "--lane", &filed, "--lane", &fresh]);
+        assert_eq!(
+            args.lanes(),
+            [
+                (PathBuf::from("/w/a=b"), Some("1792332839-3028349-1".into())),
+                (PathBuf::from("/w/c"), None),
+            ]
+        );
     }
 }

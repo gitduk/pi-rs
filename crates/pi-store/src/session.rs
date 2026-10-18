@@ -430,6 +430,12 @@ impl Store {
             .join(TRANSCRIPT)
     }
 
+    /// Whether `id` has been filed under `workspace`: a session nothing was
+    /// said in never is.
+    pub fn filed(&self, workspace: &Path, id: &str) -> bool {
+        self.path_of(workspace, id).is_file()
+    }
+
     /// Hold the session `id` saved under `workspace` for this process, so no
     /// other pi saves over it meanwhile; refused while one already holds it.
     pub fn claim(&self, workspace: &Path, id: &str) -> Result<Claim> {

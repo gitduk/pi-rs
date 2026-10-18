@@ -350,11 +350,11 @@ pub enum Step {
     // would keep naming the checkout that just went; with a notice.
     Worktrees(String),
     Quit,
-    // Leave as `Quit` does, then run pi again from `root`, on the session
-    // `id` if it has been filed, with the flags in force now (`/effort` moves one).
+    // Leave as `Quit` does, then run pi again on every lane, `front` in front,
+    // with the flags in force now (`/effort` moves one).
     Restart {
-        root: std::path::PathBuf,
-        id: Option<String>,
+        lanes: Vec<(std::path::PathBuf, Option<String>)>,
+        front: usize,
         flags: Vec<String>,
     },
 }

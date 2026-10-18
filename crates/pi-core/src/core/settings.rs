@@ -238,6 +238,20 @@ impl Core {
             })
             .collect()
     }
+    // The model `name` for the lane in front, unless it is on it already;
+    // the refusal is worded for the user.
+    pub(super) fn dial_for(
+        &self,
+        name: &str,
+        origin: config::ModelOrigin,
+    ) -> Result<Option<crate::core::dial::Dialled>, String> {
+        let held = self.lane().model();
+        let dialled = crate::core::dial::dial(&self.pinned, &self.config, name, origin)
+            .map_err(|e| format!("still on {held} — {}", refused("switch", e)))?;
+        // Compared after resolving: `find` also accepts a `wire_id`, so the
+        // typed name may differ from the id it resolves to.
+        Ok((dialled.spec.model != held).then_some(dialled))
+    }
     // Rebuilds the subagent too: it snapshots the agent it was built from,
     // so stopping at the lane would leave it on the old provider/key.
     pub(super) fn retarget(
@@ -266,26 +280,11 @@ impl Core {
     /// Past spend stays priced at the spec each turn ran under; a switch
     /// does not reprice turns already spent.
     pub fn switch(&mut self, name: &str) -> Vec<String> {
-        let dialled = match crate::core::dial::dial(
-            &self.pinned,
-            &self.config,
-            name,
-            config::ModelOrigin::Command,
-        ) {
-            Ok(d) => d,
-            Err(e) => {
-                let held = self.lane_mut().agent().spec().model.clone();
-                return vec![format!("still on {held} — {}", refused("switch", e))];
-            }
+        let dialled = match self.dial_for(name, config::ModelOrigin::Command) {
+            Ok(Some(d)) => d,
+            Ok(None) => return vec![format!("already on {}", self.lane().model())],
+            Err(why) => return vec![why],
         };
-        // Compared after resolving: `find` also accepts a `wire_id`, so the
-        // typed name may differ from the id it resolves to.
-        if dialled.spec.model == self.lane_mut().agent().spec().model {
-            return vec![format!(
-                "already on {}",
-                self.lane_mut().agent().spec().model
-            )];
-        }
         let mut said: Vec<String> = dialled.warning.into_iter().chain(dialled.assumed).collect();
         let spec = &dialled.spec;
         // The model's name is on the bar already; what it costs is not.

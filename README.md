@@ -108,14 +108,14 @@ refused, and resuming one from another directory moves it here.
 | `/cd <dir>`                        | carry this conversation on in another directory; its jobs follow |
 | `/compact [focus]`                 | summarize everything but the working tail     |
 | `/loop <line>`                     | resubmit a line until a round edits no file   |
-| `/job [text]`, `stop <id>`, `output <id>` | background jobs; have the model start one; stop one; what one printed |
+| `/job [text]`, `stop <id>`         | background jobs; have the model start one; stop one |
 | `/tool [name] [key=value…]`        | list the tools, or run one yourself beside any turn, as a job `/job stop` ends; the model is told what it said |
 | `/mcp`, `/mcp restart [name]`      | MCP servers and their tools; reconnect        |
 | `/settings`                        | edit the project's config                     |
 | `/edit [file]`                     | edit a prompt, an `AGENTS.md`, or memory      |
 | `/status`, `/keys`, `/help`        | session paths and spend; bindings; commands   |
 | `/exit`                            | leave; `ctrl+d` does the same                 |
-| `/restart`                         | run the pi installed now on this session      |
+| `/restart`                         | run the pi installed now on these sessions; done unasked once one is installed and nothing is half done |
 | `/content`                         | everything the model is given before you type |
 | `/<skill> [args]`                  | run a skill (also one-shot: `pi "/commit"`)   |
 | `! <command>`                      | run a shell command and record its output     |

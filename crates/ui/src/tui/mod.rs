@@ -137,10 +137,11 @@ enum Wake {
 /// How the surface was left.
 pub enum Ended {
     Quit,
-    /// `/restart`: run pi again from `root` with `flags`, on the session `id` if it has one.
+    /// `/restart`, or a different pi installed: run pi again on every lane,
+    /// `(root, filed session)` in order, `front` in front, with `flags`.
     Restart {
-        root: std::path::PathBuf,
-        id: Option<String>,
+        lanes: Vec<(std::path::PathBuf, Option<String>)>,
+        front: usize,
         flags: Vec<String>,
     },
 }
@@ -184,20 +185,21 @@ impl Tui {
         ui.at_root = core.lane().root().to_path_buf();
         ui.status = core.config.status.to_vec();
         ui.set_vim(&core.config.vim);
-        let mut opening = View::opening(core.lane().resolved(), &ui.paint);
-        opening.model = core.lane().model().to_string();
-        let mut views = Views::new();
-        views.insert(core.lane().token(), opening);
         drop_shared_history();
         {
             let lines = history_of(&core.store, core.lane().root());
             ui.editor.seed_history(lines);
         }
-        // A resumed session shows its transcript from the start: the whole
-        // screen is rebuildable now, so there is no reason to hide it.
-        let token = core.lane().token();
-        if let Some(session) = core.lane().session().filter(|s| !s.is_empty()) {
-            ui.rebuild(view_at(&mut views, token), session, core.lane().root());
+        // Every lane, not just the front: a restart carries them all over.
+        let mut views = Views::new();
+        for lane in &core.lanes {
+            let view = view::opened(&mut views, lane, &ui.paint);
+            view.model = lane.model().to_string();
+            // A resumed session shows its transcript from the start: the whole
+            // screen is rebuildable now, so there is no reason to hide it.
+            if let Some(session) = lane.session().filter(|s| !s.is_empty()) {
+                ui.rebuild(view, session, lane.root());
+            }
         }
         let (events, hold) = reader();
         Ok(Self {
@@ -532,6 +534,34 @@ impl Tui {
         front_view(&mut self.views, self.core.lane()).state.stopping = true;
     }
 
+    // A different pi installed: become it as `/restart` would, once nothing
+    // on screen is half done. Asked every pass; `restart` says when not yet.
+    fn restart_into_update(&self) -> Option<Ended> {
+        let version = core::update::newer()?;
+        let settled = matches!(self.ui.focus, ui::Focus::Editor)
+            && self.ui.editor.is_empty()
+            && self.ui.job_open.is_none()
+            && (self.views.values()).all(|v| v.draft.is_empty() && v.queued.is_empty())
+            && !(self.core.lanes.iter()).any(|lane| self.drivers.holds(lane.token()));
+        if !settled {
+            return None;
+        }
+        let Ok(Step::Restart {
+            lanes,
+            front,
+            flags,
+        }) = self.core.restart()
+        else {
+            return None;
+        };
+        tracing::info!(target: "pi::update", version = %version, "restarting into it");
+        Some(Ended::Restart {
+            lanes,
+            front,
+            flags,
+        })
+    }
+
     /// Drives the terminal until the user leaves. Each lane owns the
     /// channel its runs post to, so a lane left behind keeps working.
     pub async fn run(mut self) -> Result<Ended> {
@@ -619,6 +649,13 @@ impl Tui {
             // is waiting: what the user says comes first.
             let free = !running && !waiting;
             let driven = free.then(|| self.driver_line()).flatten();
+            if free
+                && driven.is_none()
+                && let Some(restart) = self.restart_into_update()
+            {
+                ended = restart;
+                break;
+            }
             let lane = self.core.lane();
             let woke = if let Some((from, wake)) = driven {
                 origin = from;
@@ -723,8 +760,16 @@ impl Tui {
             let deferred = matches!(step, Step::McpPrompt { .. });
             match step {
                 Step::Quit => break,
-                Step::Restart { root, id, flags } => {
-                    ended = Ended::Restart { root, id, flags };
+                Step::Restart {
+                    lanes,
+                    front,
+                    flags,
+                } => {
+                    ended = Ended::Restart {
+                        lanes,
+                        front,
+                        flags,
+                    };
                     break;
                 }
                 Step::Notice(line) => self.notice(line),

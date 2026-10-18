@@ -375,7 +375,8 @@ impl Core {
             self.in_force();
             return Ok(Step::Handled(Listing::default()));
         }
-        let said = self.open_lane(ws, (!tree.main).then(|| tree.name.clone()))?;
+        self.open_lane(ws, (!tree.main).then(|| tree.name.clone()), self.current)?;
+        let said = self.take_up_latest();
         Ok(Step::Swap(crate::input::notice(said)))
     }
     // Removes the checkout, its branch, and every transcript under it; a
