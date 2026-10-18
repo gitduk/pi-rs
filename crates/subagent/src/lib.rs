@@ -295,8 +295,7 @@ impl Subagent {
         });
         let preview = format!("{} [background #{id}]", description.trim());
         Ok(ToolOutput::text(format!(
-            "started in the background as #{id}; its answer comes back as a turn \
-             of its own, so keep working or end this turn."
+            "started in the background as #{id}; its answer comes back on its own later."
         ))
         .with_preview(preview))
     }

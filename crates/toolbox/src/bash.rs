@@ -214,8 +214,8 @@ impl Tool for WithBackground {
             job.end();
         });
         Ok(ToolOutput::text(format!(
-            "running in the background as job #{id}; its exit status and output come back as \
-             a turn of its own, so keep working or end this turn."
+            "running in the background as job #{id}; its exit status and output come back on \
+             their own later."
         ))
         .with_preview(format!("{preview} [background #{id}]")))
     }
