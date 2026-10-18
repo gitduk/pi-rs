@@ -24,6 +24,8 @@ pub enum Event {
         id: String,
         name: String,
         is_error: bool,
+        // Ran to the end, but asks for a look: see `ToolOutput::warned`.
+        warned: bool,
         preview: String,
     },
     ToolDenied {
@@ -106,12 +108,13 @@ fn note(event: &Event) {
             id,
             name,
             is_error,
+            warned,
             preview,
         } => {
             if *is_error {
                 tracing::warn!(target: "pi::tool", call = %id, tool = %name, detail = %preview, "failed")
             } else {
-                tracing::info!(target: "pi::tool", call = %id, tool = %name, preview = %preview, "ok")
+                tracing::info!(target: "pi::tool", call = %id, tool = %name, preview = %preview, warned, "ok")
             }
         }
         Event::ToolDenied { id, name, reason } => {

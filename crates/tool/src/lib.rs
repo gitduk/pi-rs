@@ -170,6 +170,9 @@ pub struct ToolOutput {
     /// What the call spent, for a tool that runs a model of its own. Tokens
     /// only: what they are worth is the surface's arithmetic, not ours.
     pub spent: llm::stream::Usage,
+    /// The call ran to the end, but what came back deserves a look — a
+    /// command's nonzero exit. Not a failure: the result is still the answer.
+    pub warned: bool,
 }
 
 impl ToolOutput {
@@ -180,7 +183,14 @@ impl ToolOutput {
             })],
             preview: None,
             spent: llm::stream::Usage::default(),
+            warned: false,
         }
+    }
+
+    /// Mark the result as one worth a look; see `warned`.
+    pub fn warned(mut self) -> Self {
+        self.warned = true;
+        self
     }
 
     pub fn with_preview(mut self, line: impl Into<String>) -> Self {

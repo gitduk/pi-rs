@@ -145,6 +145,14 @@ pub enum Author {
     Agent,
 }
 
+/// What the screen drew for a result, kept beside it so a rebuild draws the
+/// same row: its preview line, and whether the result asked for a look.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Drawn {
+    pub preview: Option<String>,
+    pub warned: bool,
+}
+
 /// The session's atom. Append only, or truncated by a rollback; the content of
 /// an entry is never rewritten.
 ///
@@ -182,6 +190,8 @@ pub enum Entry {
         result: ToolResult,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         preview: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        warned: bool,
     },
     // Machine prose in the user's voice — a stopped run's cause, a round
     // note. The model reads it; the screen shows it muted. Omittable.
@@ -491,7 +501,7 @@ impl Session {
                             },
                             UserContent::ToolResult(r) => {
                                 flush(&mut log, &mut pending);
-                                log.push_previewed(vec![(r, None)]);
+                                log.push_previewed(vec![(r, Drawn::default())]);
                             }
                         }
                     }
@@ -567,21 +577,23 @@ impl Session {
     /// Each result becomes its own entry; joining them into one wire message is
     /// the encoder's business.
     pub fn push_results(&mut self, results: Vec<ToolResult>) -> Vec<EntryId> {
-        self.push_previewed(results.into_iter().map(|r| (r, None)).collect())
+        let results = results.into_iter().map(|r| (r, Drawn::default()));
+        self.push_previewed(results.collect())
     }
 
-    /// The same, carrying the copy the screen drew for each — an edit's diff
+    /// The same, carrying what the screen drew for each — an edit's diff
     /// rows, which the rebuild must draw rather than read back from the result.
-    pub fn push_previewed(&mut self, results: Vec<(ToolResult, Option<String>)>) -> Vec<EntryId> {
+    pub fn push_previewed(&mut self, results: Vec<(ToolResult, Drawn)>) -> Vec<EntryId> {
         results
             .into_iter()
-            .map(|(result, preview)| {
+            .map(|(result, drawn)| {
                 let (id, at) = self.mint();
                 self.entries.push(Entry::Tool {
                     id,
                     at,
                     result,
-                    preview,
+                    preview: drawn.preview,
+                    warned: drawn.warned,
                 });
                 id
             })
@@ -662,7 +674,7 @@ impl Session {
     fn close(&mut self, open: Vec<(String, String)>, closing: &str) {
         self.push_previewed(
             open.into_iter()
-                .map(|(id, name)| (ToolResult::text(id, name, closing), None))
+                .map(|(id, name)| (ToolResult::text(id, name, closing), Drawn::default()))
                 .collect(),
         );
     }
@@ -1097,6 +1109,33 @@ mod tests {
         let none: Prompt = serde_json::from_str(r#"{"text":"look"}"#).unwrap();
         assert!(none.images.is_empty());
         assert!(!serde_json::to_string(&none).unwrap().contains("image"));
+    }
+
+    // A session saved before `warned` existed still opens, and a result that
+    // never asked for a look writes nothing new.
+    #[test]
+    fn a_tool_entry_without_warned_reads_back_unwarned() {
+        let old = r#"{"kind":"tool","id":2,"at":1,"preview":"ls",
+            "result":{"call":"c","name":"bash","content":[{"type":"text","text":"x"}]}}"#;
+        let entry: Entry = serde_json::from_str(old).unwrap();
+        assert!(
+            matches!(entry, Entry::Tool { warned: false, .. }),
+            "{entry:?}"
+        );
+        assert!(!serde_json::to_string(&entry).unwrap().contains("warned"));
+
+        let mut s = Session::with_prompt("go");
+        let drawn = Drawn {
+            preview: Some("false".into()),
+            warned: true,
+        };
+        s.push_previewed(vec![(ToolResult::text("c", "bash", "exit 1"), drawn)]);
+        let back: Session = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(
+            back.entries()
+                .iter()
+                .any(|e| matches!(e, Entry::Tool { warned: true, .. })),
+        );
     }
 
     #[test]

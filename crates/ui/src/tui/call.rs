@@ -21,6 +21,8 @@ pub(super) struct RunTool {
     pub(super) id: String,
     pub(super) name: String,
     pub(super) summary: String,
+    // Where it runs, when not the workspace root.
+    pub(super) place: Option<String>,
     pub(super) started: Instant,
     // What the call last said of its progress, if it says any.
     pub(super) progress: Option<String>,
@@ -47,7 +49,7 @@ pub(super) fn pending_line(now: Instant, tick: usize, t: &RunTool, paint: &Paint
         t.done.as_ref().and_then(Row::ok)
     };
     let muted = |s: String| paint.span(&paint.theme.muted, s);
-    let named = named(&t.name, &t.summary);
+    let named = named(&t.name, &t.summary) + &crate::render::placed(t.place.as_deref());
     match ended {
         // Mark leads, matching the row this call lands as once folded.
         Some(ok) => {
@@ -83,6 +85,8 @@ pub(super) fn held(tools: &[RunTool], now: Instant) -> Vec<PendingTool> {
             landed: t.done.is_some(),
             progress: t.progress.clone(),
             secs: out_secs(t, now),
+            place: t.place.clone(),
+            warned: t.done.as_ref().is_some_and(Row::warned),
         })
         .collect()
 }
@@ -94,22 +98,25 @@ pub(super) fn drawn(tools: &[RunTool], row_holds: bool) -> Vec<&RunTool> {
 
 // Where a tool's row goes: a call that landed well and is not a write is a
 // step of the group; anything else is a line of its own that ends it.
+// `asked` is what the call asked for, as `Folds::take_asked` keeps it.
 pub(super) fn push_tool_row(
     scrollback: &mut Scrollback,
     folds: &mut Folds,
     row: Row,
+    asked: &str,
     result: &ToolResult,
 ) {
-    let asked = folds.take_asked(&result.call);
     if let Some(name) = row.tool_name().filter(|&n| !modifies(n))
         && row.ok() == Some(true)
     {
         let tool = row::FoldedTool::new(
             name,
             row.tool_preview().unwrap_or_default(),
-            &asked,
+            asked,
             &row::result_text(result),
-        );
+        )
+        .at(row.place().map(str::to_string))
+        .warned(row.warned());
         folds.join(scrollback, row::Step::Tool(tool));
         return;
     }

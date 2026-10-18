@@ -157,6 +157,7 @@ mod tests {
             at: 0,
             result: ToolResult::text(call, name, body),
             preview: None,
+            warned: false,
         }
     }
 

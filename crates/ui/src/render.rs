@@ -408,28 +408,64 @@ pub fn result_room(width: usize) -> usize {
     width.saturating_sub(2).max(20)
 }
 
+/// How a finished call came out, which its mark says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Done,
+    // Ran to the end, but what came back deserves a look.
+    Warned,
+    Failed,
+}
+
+impl Outcome {
+    pub fn of(is_error: bool, warned: bool) -> Self {
+        match (is_error, warned) {
+            (true, _) => Self::Failed,
+            (false, true) => Self::Warned,
+            (false, false) => Self::Done,
+        }
+    }
+
+    /// The mark and the style it is drawn in.
+    pub fn mark(self, theme: &Theme) -> (&Style, &'static str) {
+        match self {
+            Self::Done => (&theme.status.ok, icons::DONE_MARK),
+            Self::Warned => (&theme.status.warn, icons::DONE_MARK),
+            Self::Failed => (&theme.status.err, icons::FAIL_MARK),
+        }
+    }
+}
+
+/// A finished call, as its result row draws it.
+pub struct Finished<'a> {
+    pub outcome: Outcome,
+    pub name: &'a str,
+    pub preview: &'a str,
+    /// Where it ran, when not the workspace root.
+    pub place: Option<&'a str>,
+}
+
 /// The rows a finished tool result takes on screen: its head, clipped to fit,
 /// and under it whatever a tool sketched — an edit's diff rows.
 pub fn result_rows(
-    is_error: bool,
-    name: &str,
-    preview: &str,
+    call: &Finished,
     shown: Shown,
     hovered: bool,
     p: &Paint,
     width: usize,
 ) -> Vec<ratatui::text::Line<'static>> {
     let room = result_room(width);
-    let (mark_style, mark) = if is_error {
-        (&p.theme.status.err, icons::FAIL_MARK)
-    } else {
-        (&p.theme.status.ok, icons::DONE_MARK)
-    };
-    let (head, rest) = preview.split_once('\n').unwrap_or((preview, ""));
+    let (mark_style, mark) = call.outcome.mark(&p.theme);
+    let (head, rest) = call.preview.split_once('\n').unwrap_or((call.preview, ""));
+    // Past the mark, the name and the `…` a cut adds; the place is kept
+    // whole, the command gives way to it.
+    let placed = placed(call.place);
+    let width_of = unicode_width::UnicodeWidthStr::width;
+    let fits = room.saturating_sub(width_of(call.name) + 2 + width_of(placed.as_str()));
     let mut out = vec![Line::from(vec![
         p.span(mark_style, mark),
-        Span::raw(format!(" {name} ")),
-        p.span_hovered(hovered, &p.theme.muted, clip(head, room)),
+        Span::raw(format!(" {} ", call.name)),
+        p.span_hovered(hovered, &p.theme.muted, clip(head, fits) + &placed),
     ])];
     let diff_lines: Vec<&str> = rest.lines().collect();
     let footer = |text: &str| Line::from(p.span_hovered(hovered, &p.theme.muted, text));
@@ -599,18 +635,17 @@ pub fn describe(
         Event::ToolEnd {
             name,
             is_error,
+            warned,
             preview,
             ..
         } => {
-            return Some(result_rows(
-                *is_error,
+            let call = Finished {
+                outcome: Outcome::of(*is_error, *warned),
                 name,
                 preview,
-                Shown::Sketch,
-                false,
-                p,
-                width,
-            ));
+                place: None,
+            };
+            return Some(result_rows(&call, Shown::Sketch, false, p, width));
         }
         Event::ToolDenied { name, reason, .. } => Line::from(vec![
             p.span(&p.theme.status.err, icons::FAIL_MARK),
@@ -802,6 +837,30 @@ pub fn asked(args: &serde_json::Value) -> &str {
     .unwrap_or_default()
 }
 
+/// Where a call ran, when that is not the workspace `root`: the `cwd` it
+/// named, relative to `root` when it lies inside.
+pub fn place(args: &serde_json::Value, root: &std::path::Path) -> Option<String> {
+    let cwd = args.get("cwd")?.as_str()?.trim();
+    let cwd = std::path::Path::new(cwd)
+        .strip_prefix(root)
+        .ok()
+        .and_then(|p| p.to_str())
+        .unwrap_or(cwd);
+    let cwd = cwd.strip_prefix("./").unwrap_or(cwd);
+    // `/` alone is a place, not a root spelled with a trailing slash.
+    let cwd = match cwd.trim_end_matches('/') {
+        "" => cwd,
+        trimmed => trimmed,
+    };
+    (!cwd.is_empty() && cwd != ".").then(|| cwd.to_string())
+}
+
+/// `place` as the tail of the call's own line, ` · in crates/ui`; a row
+/// speaking for many calls leaves it off.
+pub fn placed(place: Option<&str>) -> String {
+    place.map_or_else(String::new, |p| format!("{}in {p}", icons::PART_SEP))
+}
+
 /// The one argument worth showing in a progress line: its first line, `…`
 /// saying there is more of it.
 pub fn summarize(args: &serde_json::Value) -> String {
@@ -856,5 +915,17 @@ mod tests {
             .filter(|r| r.coded == super::Coded::Code)
             .count();
         assert_eq!(set_off, code.lines().count());
+    }
+
+    // The root's own path, or a sibling sharing its prefix, would read wrong.
+    #[test]
+    fn an_absolute_cwd_reads_relative_to_the_root() {
+        let root = std::path::Path::new("/w/pi");
+        let at = |cwd: &str| super::place(&serde_json::json!({ "cwd": cwd }), root);
+        assert_eq!(at("/w/pi"), None);
+        assert_eq!(at("/w/pi/"), None);
+        assert_eq!(at("/w/pi/crates/ui"), Some("crates/ui".into()));
+        assert_eq!(at("/w/pix"), Some("/w/pix".into()));
+        assert_eq!(at("crates"), Some("crates".into()));
     }
 }

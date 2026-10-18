@@ -13,9 +13,11 @@ struct Args {
     command: String,
     #[serde(default)]
     timeout_ms: Option<u64>,
-    #[serde(default)]
-    cwd: Option<String>,
+    cwd: String,
 }
+
+// Said when `cwd` is missing: the refusal is how a call learns it is required.
+const ARGS_HINT: &str = "bash takes `command` and `cwd`; `cwd` is \".\" for the workspace root";
 
 pub struct Bash;
 
@@ -30,12 +32,12 @@ impl Tool for Bash {
     }
 
     fn description(&self) -> &str {
-        "Run a shell command in the workspace. Each call is a fresh shell: cd and \
-         environment changes do not carry over — pass cwd rather than prefixing \
-         cd. Prefer read and write over cat and heredocs, and edit over sed \
-         when the lines are picked by what they say: those report failures you \
-         can act on. A substitution picked by pattern or position belongs here \
-         (sed, perl, awk), and so do moves and deletions (mv, rm)."
+        "Run a shell command where cwd says, in a fresh shell each call: cd and \
+         environment changes do not carry over. Prefer read and write over cat \
+         and heredocs, and edit over sed when the lines are picked by what they \
+         say: those report failures you can act on. A substitution picked by \
+         pattern or position belongs here (sed, perl, awk), and so do moves and \
+         deletions (mv, rm)."
     }
 
     fn schema(&self) -> Value {
@@ -44,9 +46,9 @@ impl Tool for Bash {
             "properties": {
                 "command": { "type": "string" },
                 "timeout_ms": { "type": "integer", "description": "Default 120000, max 600000." },
-                "cwd": { "type": "string", "description": "Workspace-relative. Default the workspace root." },
+                "cwd": { "type": "string", "description": "Where the command runs: \".\" for the workspace root, else a workspace-relative or absolute directory." },
             },
-            "required": ["command"],
+            "required": ["command", "cwd"],
             "additionalProperties": false,
         })
     }
@@ -56,13 +58,16 @@ impl Tool for Bash {
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let args: Args = tool::parse_args(args)?;
+        let args: Args = tool::parse_args_hinted(args, ARGS_HINT)?;
         // A zero would otherwise kill the command before it started.
         let timeout = std::time::Duration::from_millis(
             args.timeout_ms
                 .filter(|ms| *ms > 0)
                 .unwrap_or(DEFAULT_TIMEOUT_MS),
         );
+        // The preview names the command as asked: rtk's rewrite is how it
+        // ran, which the journal keeps, not what the call said.
+        let preview = first_line(&args.command).to_string();
         let (command, cwd) = prepare(args, self.tier(), ctx).await?;
 
         let ran = run(&command, &cwd, timeout, ctx).await?;
@@ -70,16 +75,20 @@ impl Tool for Bash {
         if ran.code != 0 {
             body.push_str(&format!("exit {}\n", ran.code));
         }
-        // One line: whoever reads the preview, and the log, treat further
-        // newlines as structure, not text.
-        let preview = command.split('\n').next().unwrap_or_default();
         if body.is_empty() {
             // Preview stays set: without it the row falls back to body, hiding
             // what a silent command was asked to do.
             return Ok(ToolOutput::text("exit 0, no output").with_preview(preview));
         }
-        Ok(ToolOutput::text(body).with_preview(preview))
+        let out = ToolOutput::text(body).with_preview(preview);
+        Ok(if ran.code != 0 { out.warned() } else { out })
     }
+}
+
+// One line: whoever reads the preview, and the log, treat further newlines
+// as structure, not text.
+fn first_line(command: &str) -> &str {
+    command.split('\n').next().unwrap_or_default()
 }
 
 // The command as it will run, and where: rtk rewrites it in its own
@@ -89,10 +98,7 @@ async fn prepare(
     tier: Tier,
     ctx: &Ctx,
 ) -> Result<(String, std::path::PathBuf), ToolError> {
-    let cwd = match &args.cwd {
-        Some(p) => ctx.workspace.resolve(p, tier)?,
-        None => ctx.workspace.root().to_path_buf(),
-    };
+    let cwd = ctx.workspace.resolve(&args.cwd, tier)?;
     let rewritten = tokio::select! {
         r = crate::rtk::rewrite(&args.command, &cwd) => r,
         _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
@@ -146,7 +152,9 @@ impl Tool for WithBackground {
                     .into(),
             ));
         };
-        let (command, cwd) = prepare(tool::parse_args(args)?, self.tier(), ctx).await?;
+        let args: Args = tool::parse_args_hinted(args, ARGS_HINT)?;
+        let preview = first_line(&args.command).to_string();
+        let (command, cwd) = prepare(args, self.tier(), ctx).await?;
         let mut cmd = Command::new("sh");
         cmd.arg("-c")
             .arg(&command)
@@ -165,7 +173,6 @@ impl Tool for WithBackground {
         let mut stdout = crate::process::drain(out_pipe, ctx);
         let mut stderr = crate::process::drain(err_pipe, ctx);
 
-        let preview = command.split('\n').next().unwrap_or_default().to_string();
         let stop = tokio_util::sync::CancellationToken::new();
         let job = sink.start(
             ctx.workspace.root().to_path_buf(),
@@ -310,7 +317,7 @@ mod background_tests {
         let ended = sink.ended.notified();
         let out = WithBackground
             .execute(
-                json!({"command": "sleep 0.2; echo imported 40 rows; exit 3", "background": true}),
+                json!({"cwd": ".", "command": "sleep 0.2; echo imported 40 rows; exit 3", "background": true}),
                 &ctx,
             )
             .await
@@ -336,7 +343,7 @@ mod background_tests {
         let ctx = ctx(dir.path()).with_jobs(sink.clone());
         WithBackground
             .execute(
-                json!({"command": "echo listening on 8080; echo warn >&2; sleep 30", "background": true}),
+                json!({"cwd": ".", "command": "echo listening on 8080; echo warn >&2; sleep 30", "background": true}),
                 &ctx,
             )
             .await
@@ -358,7 +365,7 @@ mod background_tests {
         let dir = tempfile::tempdir().unwrap();
         let out = WithBackground
             .execute(
-                json!({"command": "echo hi", "background": false}),
+                json!({"cwd": ".", "command": "echo hi", "background": false}),
                 &ctx(dir.path()),
             )
             .await
@@ -371,7 +378,7 @@ mod background_tests {
         let dir = tempfile::tempdir().unwrap();
         let err = WithBackground
             .execute(
-                json!({"command": "true", "background": true}),
+                json!({"cwd": ".", "command": "true", "background": true}),
                 &ctx(dir.path()),
             )
             .await
@@ -386,7 +393,7 @@ mod background_tests {
         let ctx = ctx(dir.path()).with_jobs(sink.clone());
         WithBackground
             .execute(
-                json!({"command": "echo $$ > pid; sleep 30", "background": true}),
+                json!({"cwd": ".", "command": "echo $$ > pid; sleep 30", "background": true}),
                 &ctx,
             )
             .await

@@ -30,7 +30,12 @@ fn rebuilt_reasoning_blocks_get_ids_of_their_own() {
     }
 
     let mut folds = Folds::default();
-    let rows = scrollback_from(&s, &Paint::new(false), &mut folds);
+    let rows = scrollback_from(
+        &s,
+        &Paint::new(false),
+        &mut folds,
+        std::path::Path::new("/w/pi"),
+    );
     // Nothing between them, so the three are one group.
     let groups: Vec<&Row> = rows.iter().filter(|r| r.is_steps()).collect();
     assert_eq!(groups.len(), 1, "{} rows", rows.len());
@@ -58,7 +63,12 @@ fn rebuilt_empty_reasoning_blocks_are_ignored() {
     })]);
 
     let mut folds = Folds::default();
-    let rows = scrollback_from(&s, &Paint::new(false), &mut folds);
+    let rows = scrollback_from(
+        &s,
+        &Paint::new(false),
+        &mut folds,
+        std::path::Path::new("/w/pi"),
+    );
     assert!(!rows.iter().any(Row::is_steps));
 }
 
@@ -89,6 +99,7 @@ fn an_errored_tool_adopts_its_full_body() {
             id: "c1".into(),
             name: "edit".into(),
             is_error: true,
+            warned: false,
             preview: body.into(),
         },
     );
@@ -103,6 +114,7 @@ fn an_errored_tool_adopts_its_full_body() {
                 at: 0,
                 result: llm::message::ToolResult::error("c1", "edit", body),
                 preview: Some(body.into()),
+                warned: false,
             }],
         },
     );
@@ -227,7 +239,7 @@ fn a_batch_in_flight_hands_its_remainder_to_the_row_that_opens() {
     let rows = drawn_rows(&view);
     assert_eq!(rows.len(), 1, "one row, not two: {rows:?}");
     assert!(
-        rows[0].ends_with(&format!("read b.rs{}2 calls", icons::PART_SEP)),
+        rows[0].ends_with(&format!("read b.rs{}+1 more", icons::PART_SEP)),
         "got: {}",
         rows[0]
     );
@@ -287,6 +299,7 @@ fn a_failing_call_never_joins_the_row() {
             id: "b".into(),
             name: "read".into(),
             is_error: true,
+            warned: false,
             preview: "Error: no such file".into(),
         },
     );
@@ -324,6 +337,51 @@ fn a_failing_call_never_joins_the_row() {
         rows[1].contains(&format!("{} read Error: no such file", icons::FAIL_MARK)),
         "got: {}",
         rows[1]
+    );
+}
+
+// Where a call ran is the call's, not its result's: a failure filed live
+// keeps it, as the rebuild does.
+#[test]
+fn a_failing_call_keeps_where_it_ran() {
+    // One column wider than the rows are read at: the screen's usable width,
+    // so the drift check paints the row at the width it is read back at.
+    let mut ui = test_ui(81, 24);
+    let (_dir, mut lane) = a_running_lane();
+    let mut view = View::default();
+    ui.on_event(
+        &mut lane,
+        &mut view,
+        agent::Event::ToolStart {
+            id: "b".into(),
+            name: "bash".into(),
+            args: serde_json::json!({"command": "ls", "cwd": "sub"}),
+        },
+    );
+    ui.on_event(
+        &mut lane,
+        &mut view,
+        agent::Event::ToolEnd {
+            id: "b".into(),
+            name: "bash".into(),
+            is_error: true,
+            warned: false,
+            preview: "no such dir".into(),
+        },
+    );
+    ui.on_event(
+        &mut lane,
+        &mut view,
+        agent::Event::Committed {
+            entries: vec![failed_entry(8, "b", "bash", "no such dir")],
+        },
+    );
+    ui.flush(&lane, &mut view);
+    let rows = drawn_rows(&view);
+    assert!(
+        rows.iter()
+            .any(|r| r.ends_with(&format!("no such dir{}in sub", icons::PART_SEP))),
+        "got: {rows:?}"
     );
 }
 
@@ -410,6 +468,7 @@ fn read_landed(
             id: call.into(),
             name: "read".into(),
             is_error: false,
+            warned: false,
             preview: path.into(),
         },
     );
@@ -429,6 +488,7 @@ fn tool_entry(id: u64, call: &str, name: &str, preview: &str) -> agent::session:
         at: 0,
         result: llm::message::ToolResult::text(call, name, format!("the body of {call}")),
         preview: Some(preview.into()),
+        warned: false,
     }
 }
 
@@ -439,6 +499,7 @@ fn failed_entry(id: u64, call: &str, name: &str, body: &str) -> agent::session::
         at: 0,
         result: llm::message::ToolResult::error(call, name, body),
         preview: Some(body.into()),
+        warned: false,
     }
 }
 

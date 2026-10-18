@@ -44,6 +44,7 @@ fn image(rel: &str, media_type: &str, bytes: &[u8]) -> ToolOutput {
         ],
         preview: None,
         spent: Default::default(),
+        warned: false,
     }
 }
 

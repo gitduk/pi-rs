@@ -157,14 +157,19 @@ impl Surface {
 
     // The screen a session rebuilds to: the transcript as rows, the fold
     // switch where the user left it, and nothing streaming yet.
-    pub(super) fn from(session: &agent::session::Session, paint: &Paint, folded: bool) -> Self {
+    pub(super) fn from(
+        session: &agent::session::Session,
+        paint: &Paint,
+        folded: bool,
+        root: &std::path::Path,
+    ) -> Self {
         let mut folds = Folds {
             folded,
             last: folded,
             ..Default::default()
         };
         Self {
-            scrollback: scrollback_from(session, paint, &mut folds),
+            scrollback: scrollback_from(session, paint, &mut folds, root),
             folds,
             tail: tail_of(session),
             ..Default::default()

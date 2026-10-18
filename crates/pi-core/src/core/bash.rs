@@ -28,7 +28,7 @@ pub async fn run_bash(ctx: &tool::Ctx, command: &str) -> Bashed {
         why_not: Some(why),
     };
     let out = match toolbox::bash::Bash
-        .execute(serde_json::json!({ "command": command }), ctx)
+        .execute(serde_json::json!({ "command": command, "cwd": "." }), ctx)
         .await
     {
         Ok(out) => out,
@@ -37,8 +37,8 @@ pub async fn run_bash(ctx: &tool::Ctx, command: &str) -> Bashed {
     };
     let body = out.flatten();
     Bashed {
-        // The command that ran, which rtk may have rewritten: the head the
-        // model reads back is about what happened, not what was typed.
+        // The command as typed: rtk's rewrite is a transparent proxy, and the
+        // journal keeps how it actually ran.
         text: format!(
             "Ran `{}`\n{}",
             out.preview(),

@@ -13,7 +13,11 @@ use super::harness::*;
 fn every_row_of_a_result_is_repainted_when_the_window_changes() {
     let paint = Paint::new(false);
     let long = "x".repeat(200);
-    let rows = [Row::result(true, "edit", format!("head\n+12 {long}"))];
+    let rows = [Row::result(
+        crate::render::Outcome::Done,
+        "edit",
+        format!("head\n+12 {long}"),
+    )];
 
     let narrow: Vec<String> = ScrollbackRows::new(&rows, &paint, 40, |_| true)
         .map(text)

@@ -71,9 +71,9 @@ pub(super) struct Folds {
     // How the last group — the one `ctrl+t` names — is folded; survives
     // the group itself until the key flips it again.
     pub(super) last: bool,
-    // Each call's whole leading argument, by call id, from the answer that
-    // made it until its result lands: the result does not carry it.
-    pub(super) asked: HashMap<String, String>,
+    // Each call's leading argument and non-root place, by call id, until its
+    // result lands: the result does not carry them.
+    pub(super) asked: HashMap<String, (String, Option<String>)>,
 }
 
 // Default is folded=true: results are rarely worth the scrollback space.
@@ -115,14 +115,22 @@ impl Folds {
         }
     }
 
-    // Keep what call `id` asked for, for the step it lands as.
-    pub(super) fn ask(&mut self, id: &str, args: &serde_json::Value) {
-        self.asked
-            .insert(id.to_string(), render::asked(args).to_string());
+    // Keep what call `id` asked for, for the step it lands as; where it
+    // runs comes back too, for the live line.
+    pub(super) fn ask(
+        &mut self,
+        id: &str,
+        args: &serde_json::Value,
+        root: &std::path::Path,
+    ) -> Option<String> {
+        let place = render::place(args, root);
+        let asked = (render::asked(args).to_string(), place.clone());
+        self.asked.insert(id.to_string(), asked);
+        place
     }
 
-    // What call `id` asked for, once: its result has landed.
-    pub(super) fn take_asked(&mut self, id: &str) -> String {
+    // What call `id` asked for and where, once: its result has landed.
+    pub(super) fn take_asked(&mut self, id: &str) -> (String, Option<String>) {
         self.asked.remove(id).unwrap_or_default()
     }
 
@@ -456,6 +464,7 @@ pub(super) fn scrollback_from(
     session: &agent::session::Session,
     paint: &Paint,
     folds: &mut Folds,
+    root: &std::path::Path,
 ) -> Scrollback {
     // A call with a session result shows only its result row; an
     // interrupted one shows the start line, as `abandon_tools` leaves it.
@@ -498,7 +507,7 @@ pub(super) fn scrollback_from(
                         }
                         AssistantContent::ToolCall(c) => {
                             if answered.contains(&c.id) {
-                                folds.ask(&c.id, &c.args);
+                                folds.ask(&c.id, &c.args, root);
                                 continue;
                             }
                             out.push(Row::tool_start(
@@ -546,8 +555,9 @@ pub(super) fn scrollback_from(
             other => {
                 if let Some(rows) = f_entry(other, paint) {
                     if let LogEntry::Tool { result, .. } = other {
+                        let (asked, place) = folds.take_asked(&result.call);
                         for r in rows {
-                            push_tool_row(&mut out, folds, r, result);
+                            push_tool_row(&mut out, folds, r.at(place.clone()), &asked, result);
                         }
                     } else {
                         if matches!(other, LogEntry::Ask { .. } | LogEntry::Bash { .. }) {
@@ -594,9 +604,12 @@ pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
         // so the rebuild reuses the text the surface already worded.
         LogEntry::Screen { text, .. } => Some(Row::notice_lines(text, paint)),
         LogEntry::Tool {
-            result: r, preview, ..
+            result: r,
+            preview,
+            warned,
+            ..
         } => (!agent::session::is_stopped_call(r))
-            .then(|| vec![Row::stored_result(r, preview.as_deref())]),
+            .then(|| vec![Row::stored_result(r, preview.as_deref(), *warned)]),
         _ => None,
     }
 }

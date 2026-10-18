@@ -190,7 +190,11 @@ async fn a_panicked_bang_does_not_lay_its_transcript_down_again() {
     // The rows as the screen has them, and the archive as it was saved.
     {
         let session = tui.core.lane().session().expect("the transcript");
-        tui.ui.rebuild(view_at(&mut tui.views, token), session);
+        tui.ui.rebuild(
+            view_at(&mut tui.views, token),
+            session,
+            tui.core.lane().root(),
+        );
     }
     tui.core.save_lane(0).expect("saved");
 

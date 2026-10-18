@@ -19,6 +19,8 @@ pub struct FoldedTool {
     body: Vec<String>,
     asked: usize,
     open: bool,
+    place: Option<String>,
+    warned: bool,
 }
 
 impl FoldedTool {
@@ -39,11 +41,29 @@ impl FoldedTool {
             body,
             asked,
             open: false,
+            place: None,
+            warned: false,
         }
+    }
+
+    /// Where the call ran, as `render::place` reads it off its arguments.
+    pub fn at(mut self, place: Option<String>) -> Self {
+        self.place = place;
+        self
+    }
+
+    /// Whether the call ran to the end but asks for a look.
+    pub fn warned(mut self, warned: bool) -> Self {
+        self.warned = warned;
+        self
     }
 
     fn desc(&self) -> String {
         desc_of(&self.name, &self.preview)
+    }
+
+    fn placed(&self) -> String {
+        render::placed(self.place.as_deref())
     }
 
     // The lines the call printed, the count its line ends with.
@@ -68,6 +88,10 @@ pub struct PendingTool {
     /// Whole seconds it has been out, once there are enough to be worth
     /// saying; `None` before that and once it has landed.
     pub secs: Option<u64>,
+    /// Where it runs, as `render::place` reads it off its arguments.
+    pub place: Option<String>,
+    /// Landed, but asks for a look.
+    pub warned: bool,
 }
 
 impl PendingTool {
@@ -114,17 +138,6 @@ fn thinking_now(steps: &[Step]) -> Option<usize> {
 // what decides whether it has a body to unfold.
 fn calls(steps: &[Step], pending: &[PendingTool]) -> usize {
     steps.iter().filter(|s| matches!(s, Step::Tool(_))).count() + pending.len()
-}
-
-// The reasoning lines the row holds, or `None` when it holds no block.
-fn thought(steps: &[Step]) -> Option<usize> {
-    steps
-        .iter()
-        .filter_map(|s| match s {
-            Step::Thinking { lines, .. } => Some(lines.len()),
-            Step::Tool(_) => None,
-        })
-        .reduce(|a, b| a + b)
 }
 
 // The one step of a group that holds nothing else. Such a group has no list
@@ -181,7 +194,8 @@ pub enum Step {
 // The mark a line naming a step or a call leads with.
 #[derive(Clone, Copy)]
 enum Mark {
-    Done,
+    // Landed; `true` when it asks for a look.
+    Done(bool),
     // Out, turning at this spinner tick.
     Out(usize),
     // Reasoning wears none: a call is the thing that gets a mark.
@@ -192,7 +206,8 @@ impl Mark {
     // The mark and the space after it, or nothing.
     fn spans(self, hovered: bool, paint: &Paint) -> Vec<Span<'static>> {
         let (glyph, style) = match self {
-            Mark::Done => (icons::DONE_MARK, &paint.theme.status.ok),
+            Mark::Done(false) => (icons::DONE_MARK, &paint.theme.status.ok),
+            Mark::Done(true) => (icons::DONE_MARK, &paint.theme.status.warn),
             Mark::Out(tick) => (call_frame(tick), &paint.theme.muted),
             Mark::Thought => return Vec::new(),
         };
@@ -260,12 +275,12 @@ fn lines_tail(n: usize) -> String {
 fn pending_head(p: &PendingTool, tick: usize) -> Head {
     Head {
         mark: if p.landed {
-            Mark::Done
+            Mark::Done(p.warned)
         } else {
             Mark::Out(tick)
         },
         text: p.desc(),
-        tail: out_for(p.progress.as_deref(), p.secs),
+        tail: render::placed(p.place.as_deref()) + &out_for(p.progress.as_deref(), p.secs),
         more: false,
     }
 }
@@ -301,9 +316,9 @@ impl Step {
     fn head(&self) -> Head {
         match self {
             Step::Tool(t) => Head {
-                mark: Mark::Done,
+                mark: Mark::Done(t.warned),
                 text: t.desc(),
-                tail: lines_tail(t.printed()),
+                tail: t.placed() + &lines_tail(t.printed()),
                 more: t.asked > 0,
             },
             Step::Thinking { lines, .. } => Head {
@@ -367,8 +382,8 @@ fn step_index(steps: &[Step], i: usize) -> Option<usize> {
     }
 }
 
-// A group's own line: lists its steps, or (folded) names its newest
-// call so the line holds still when the result lands.
+// A group's own line, the same folded or open: its newest call as that
+// call's own line reads it, then how many more the group holds.
 fn steps_header(
     steps: &[Step],
     pending: &[PendingTool],
@@ -378,82 +393,60 @@ fn steps_header(
     paint: &Paint,
     width: usize,
 ) -> Line<'static> {
-    let thought = thought(steps);
     let calls = calls(steps, pending);
-    let muted = |text: String| paint.span_hovered(hovered, &paint.theme.muted, text);
     // The group's mark, not its newest call's: a block still streaming
     // after the last call landed means the group is not done.
-    let live = thinking_now(steps).filter(|_| !running(pending));
-    let mark = if running(pending) || live.is_some() {
+    let thinking = thinking_now(steps).is_some() && !running(pending);
+    let mark = if running(pending) || thinking {
         Mark::Out(tick)
     } else {
-        Mark::Done
+        Mark::Done(warned(steps, pending))
     };
-    let thinking = |n: usize| match n {
-        0 => THINKING.to_string(),
-        n => format!("thinking {}", count(n, "line")),
+    // The newest call's line, less its line count: that is the call's alone.
+    let newest = match pending.last() {
+        Some(p) => Some(pending_head(p, tick)),
+        None => steps.iter().rev().find_map(|s| match s {
+            Step::Tool(t) => Some(Head {
+                tail: t.placed(),
+                ..s.head()
+            }),
+            Step::Thinking { .. } => None,
+        }),
     };
-    if open && lone(steps, pending).is_none() {
-        let mut parts: Vec<String> = Vec::new();
-        if calls > 0 {
-            parts.push(count(calls, "call"));
-        }
-        parts.extend(thought.map(thinking));
-        let text = parts.join(icons::PART_SEP);
-        if calls == 0 {
-            return Line::from(muted(text));
-        }
-        let head = Head {
-            mark,
-            text,
-            tail: String::new(),
-            more: false,
-        };
-        return head.line(true, hovered, paint, width);
-    }
-    if let Some(n) = live
-        && calls > 0
-    {
-        let mut tail = lines_tail(n);
-        tail.push_str(&format!("{}{}", icons::PART_SEP, count(calls, "call")));
-        let head = Head {
-            mark,
-            text: THINKING.to_string(),
-            tail,
-            more: false,
-        };
-        return head.line(open, hovered, paint, width);
-    }
-    let newest = pending.last().map(|p| pending_head(p, tick)).or_else(|| {
-        steps
-            .iter()
-            .rev()
-            .find(|s| matches!(s, Step::Tool(_)))
-            .map(Step::head)
-    });
-    let Some(newest) = newest else {
-        let text = match thought {
-            Some(n) if n > 0 => format!("thinking{}{}", icons::PART_SEP, count(n, "line")),
-            _ => THINKING.to_string(),
-        };
-        return Line::from(muted(text));
+    let Some(Head {
+        text,
+        mut tail,
+        more,
+        ..
+    }) = newest
+    else {
+        return Line::from(paint.span_hovered(hovered, &paint.theme.muted, THINKING.to_string()));
     };
-    let mut tail = pending
-        .last()
-        .map(|p| out_for(p.progress.as_deref(), p.secs))
-        .unwrap_or_default();
     if calls > 1 {
-        tail.push_str(&format!("{}{}", icons::PART_SEP, count(calls, "call")));
+        tail.push_str(&format!("{}+{} more", icons::PART_SEP, calls - 1));
     }
-    if let Some(n) = thought {
-        tail.push_str(&format!("{}{}", icons::PART_SEP, thinking(n)));
+    if thinking {
+        tail.push_str(&format!("{}{THINKING}", icons::PART_SEP));
     }
     let head = Head {
         mark,
+        text,
         tail,
-        ..newest
+        more,
     };
-    head.line(open, hovered, paint, width)
+    // Opened, a lone step is that step opened; a list's header stays as folded.
+    head.line(
+        open && lone(steps, pending).is_some(),
+        hovered,
+        paint,
+        width,
+    )
+}
+
+// Whether any call the group holds asks for a look.
+fn warned(steps: &[Step], pending: &[PendingTool]) -> bool {
+    steps.iter().any(|s| matches!(s, Step::Tool(t) if t.warned))
+        || pending.iter().any(|p| p.landed && p.warned)
 }
 
 // A line of what an opened call shows: the argument's own lines in the
@@ -778,11 +771,14 @@ mod tests {
             landed,
             progress: None,
             secs: None,
+            place: None,
+            warned: false,
         }
     }
 
-    fn calls_tail(n: usize) -> String {
-        format!("{}{n} calls", icons::PART_SEP)
+    // What a header holding `calls` calls ends with.
+    fn more_tail(calls: usize) -> String {
+        format!("{}+{} more", icons::PART_SEP, calls - 1)
     }
 
     // Calls end in whatever order; the row is the only place one in
@@ -806,7 +802,7 @@ mod tests {
 
         assert_eq!(
             line,
-            format!("{} read b.rs{}", call_frame(0), calls_tail(3)),
+            format!("{} read b.rs{}", call_frame(0), more_tail(3)),
             "it names the newest, and stays pending for the one still out"
         );
     }
@@ -855,8 +851,8 @@ mod tests {
             .collect()
     }
 
-    // Folded is one line; unfolded, a line per step under a counting
-    // line — each step opens alone, named by the click's line.
+    // Folded is one line; unfolded, a line per step under that same line —
+    // each step opens alone, named by the click's line.
     #[test]
     fn a_group_unfolds_to_its_steps_and_each_step_opens_alone() {
         let ran = FoldedTool::new("bash", "cat <<EOF", "cat <<EOF\nhi\nEOF", "hi\n");
@@ -864,16 +860,11 @@ mod tests {
         assert!(row.join(think(1, 3)).is_ok());
         assert!(row.join(Step::Tool(ran)).is_ok());
         let (done, dots, sep) = (icons::DONE_MARK, icons::ELLIPSIS, icons::PART_SEP);
-        assert_eq!(
-            shown(&row, 80),
-            [format!(
-                "{done} bash cat <<EOF{dots}{}{sep}thinking 3 lines",
-                calls_tail(2)
-            )]
-        );
+        let header = format!("{done} bash cat <<EOF{dots}{}", more_tail(2));
+        assert_eq!(shown(&row, 80), std::slice::from_ref(&header));
         assert!(row.toggle_expand());
         let unfolded = [
-            format!("{done} 2 calls{sep}thinking 3 lines"),
+            header,
             format!("  {done} read a.rs"),
             format!("  line 1{dots}{sep}3 lines"),
             format!("  {done} bash cat <<EOF{dots}{sep}1 line"),
@@ -905,10 +896,7 @@ mod tests {
     #[test]
     fn a_group_of_one_opens_its_step() {
         let mut row = Row::steps(think(1, 2), true);
-        assert_eq!(
-            shown(&row, 80),
-            [format!("thinking{}2 lines", icons::PART_SEP)]
-        );
+        assert_eq!(shown(&row, 80), [THINKING]);
         assert!(row.toggle_expand());
         assert_eq!(shown(&row, 80), ["line 1", "line 2"]);
 
@@ -940,12 +928,7 @@ mod tests {
         let mut row = bundle(vec![tool("bash", &long), tool("bash", &long)]);
         assert!(row.join(think(1, 1)).is_ok());
         let line = &shown(&row, 80)[0];
-        let tail = format!(
-            "{}{}{}thinking 1 line",
-            icons::ELLIPSIS,
-            calls_tail(2),
-            icons::PART_SEP
-        );
+        let tail = format!("{}{}", icons::ELLIPSIS, more_tail(2));
         assert!(line.ends_with(&tail), "{line}");
         assert_eq!(UnicodeWidthStr::width(line.as_str()), 79, "{line}");
 
@@ -959,7 +942,7 @@ mod tests {
         for i in 1..=30 {
             preview.push_str(&format!("\n  {i} + line {i}"));
         }
-        let mut row = Row::result(true, "edit", preview);
+        let mut row = Row::result(crate::render::Outcome::Done, "edit", preview);
         assert_eq!(row.len(), render::SKETCHED_ROWS + 1);
 
         assert!(row.toggle_expand());

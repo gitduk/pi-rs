@@ -81,7 +81,10 @@ async fn read_huge_limit_stays_inside_the_file() {
 async fn bash_times_out_without_hanging_the_turn() {
     let (_d, c) = ctx();
     let err = toolbox::bash::Bash
-        .execute(json!({ "command": "sleep 5", "timeout_ms": 150 }), &c)
+        .execute(
+            json!({ "cwd": ".", "command": "sleep 5", "timeout_ms": 150 }),
+            &c,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, ToolError::Timeout { ms: 150 }), "{err}");
@@ -95,11 +98,27 @@ async fn a_zero_timeout_is_not_an_instant_kill() {
     // before it starts.
     let out = run(
         &toolbox::bash::Bash,
-        json!({ "command": "sleep 0.3; echo hi", "timeout_ms": 0 }),
+        json!({ "cwd": ".", "command": "sleep 0.3; echo hi", "timeout_ms": 0 }),
         &c,
     )
     .await;
     assert!(out.contains("hi"), "{out}");
+}
+
+// Required so every call says where it runs; a silent default would let a
+// call drift back to prefixing `cd`.
+#[tokio::test]
+async fn bash_without_cwd_is_refused_with_what_to_pass() {
+    let (_d, c) = ctx();
+    let err = toolbox::bash::Bash
+        .execute(json!({ "command": "true" }), &c)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ToolError::Invalid(_)), "{err}");
+    assert!(
+        err.to_string().contains("\".\" for the workspace root"),
+        "{err}"
+    );
 }
 
 // The gate the loop checks before a call is made.
@@ -134,7 +153,7 @@ async fn multibyte_output_respects_the_byte_budget_and_stays_valid_utf8() {
     // 60k CJK chars = 180k bytes.
     let out = run(
         &toolbox::bash::Bash,
-        json!({ "command": "printf '中%.0s' $(seq 1 60000)" }),
+        json!({ "cwd": ".", "command": "printf '中%.0s' $(seq 1 60000)" }),
         &c,
     )
     .await;
@@ -398,7 +417,7 @@ async fn an_over_long_output_is_kept_somewhere_the_model_can_reach() {
     let (dir, c) = common::spilling();
     let out = run(
         &toolbox::bash::Bash,
-        json!({ "command": "printf 'z%.0s' $(seq 1 40000); echo; echo MIDDLE_MARKER; printf 'z%.0s' $(seq 1 40000)" }),
+        json!({ "cwd": ".", "command": "printf 'z%.0s' $(seq 1 40000); echo; echo MIDDLE_MARKER; printf 'z%.0s' $(seq 1 40000)" }),
         &c,
     )
     .await;
@@ -422,7 +441,12 @@ async fn an_over_long_output_is_kept_somewhere_the_model_can_reach() {
     };
     assert_eq!(logs(&dir.path().join("spill")), 0, "the spill was removed");
 
-    let out = run(&toolbox::bash::Bash, json!({ "command": "echo hi" }), &c).await;
+    let out = run(
+        &toolbox::bash::Bash,
+        json!({ "cwd": ".", "command": "echo hi" }),
+        &c,
+    )
+    .await;
     assert!(!out.contains("full output:"), "{out}");
     assert_eq!(
         logs(&dir.path().join("spill")),
@@ -463,7 +487,10 @@ async fn a_spill_that_cannot_be_written_fails_loudly() {
     // A file where the session directory would go: create_dir_all cannot.
     std::fs::write(dir.path().join("spill"), "in the way").unwrap();
     let err = toolbox::bash::Bash
-        .execute(json!({ "command": "printf 'z%.0s' $(seq 1 40000)" }), &c)
+        .execute(
+            json!({ "cwd": ".", "command": "printf 'z%.0s' $(seq 1 40000)" }),
+            &c,
+        )
         .await
         .unwrap_err();
     assert_eq!(err.code(), Some("SPILL_FAILED"));
@@ -476,7 +503,10 @@ async fn a_failed_spill_still_drains_the_child() {
     let (dir, c) = common::spilling();
     std::fs::write(dir.path().join("spill"), "in the way").unwrap();
     let err = toolbox::bash::Bash
-        .execute(json!({ "command": "seq 1 200000", "timeout_ms": 5000 }), &c)
+        .execute(
+            json!({ "cwd": ".", "command": "seq 1 200000", "timeout_ms": 5000 }),
+            &c,
+        )
         .await
         .unwrap_err();
     assert_eq!(err.code(), Some("SPILL_FAILED"));

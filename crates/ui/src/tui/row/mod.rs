@@ -395,13 +395,38 @@ impl Row {
 
     /// A tool result the screen already has in parts — the live path, which
     /// never holds a `ToolResult`.
-    pub fn result(ok: bool, name: impl Into<String>, preview: impl Into<String>) -> Self {
-        Self::new(Kind::Result(ToolOut::new(ok, name.into(), preview.into())))
+    pub fn result(
+        outcome: crate::render::Outcome,
+        name: impl Into<String>,
+        preview: impl Into<String>,
+    ) -> Self {
+        Self::new(Kind::Result(ToolOut::new(
+            outcome,
+            name.into(),
+            preview.into(),
+        )))
+    }
+
+    /// Where the call behind this result ran, when not the workspace root.
+    pub fn at(mut self, place: Option<String>) -> Self {
+        if let Kind::Result(r) = &mut self.0 {
+            r.place = place;
+        }
+        self
+    }
+
+    /// Where the call behind this result ran, if it said and it was not the
+    /// workspace root.
+    pub fn place(&self) -> Option<&str> {
+        match &self.0 {
+            Kind::Result(r) => r.place.as_deref(),
+            _ => None,
+        }
     }
 
     /// The row for a stored result: the tool's own sketch if it made one
     /// (`ToolResult` lacks it), else the content's first line.
-    pub fn stored_result(r: &ToolResult, preview: Option<&str>) -> Self {
+    pub fn stored_result(r: &ToolResult, preview: Option<&str>, warned: bool) -> Self {
         let preview = preview.map(str::to_string).unwrap_or_else(|| {
             let body = result_text(r);
             match body.split_once('\n') {
@@ -409,7 +434,8 @@ impl Row {
                 None => body,
             }
         });
-        Self::result(!r.is_error, r.name.clone(), preview)
+        let outcome = crate::render::Outcome::of(r.is_error, warned);
+        Self::result(outcome, r.name.clone(), preview)
     }
 
     /// Say `said` beside this row's first line, until `FLASH` has passed.
@@ -458,9 +484,14 @@ impl Row {
     /// Whether this tool result succeeded.
     pub fn ok(&self) -> Option<bool> {
         match &self.0 {
-            Kind::Result(r) => Some(r.ok),
+            Kind::Result(r) => Some(r.outcome != crate::render::Outcome::Failed),
             _ => None,
         }
+    }
+
+    /// Whether this tool result ran to the end but asks for a look.
+    pub fn warned(&self) -> bool {
+        matches!(&self.0, Kind::Result(r) if r.outcome == crate::render::Outcome::Warned)
     }
 
     /// The line a call that was never answered keeps: stopped before it landed.
@@ -773,7 +804,7 @@ mod conversation_tests {
         for row in [
             Row::notice("a command printed this"),
             Row::thinking(1, vec![Line::from("thinking")], false),
-            Row::result(true, "read", "src/main.rs"),
+            Row::result(crate::render::Outcome::Done, "read", "src/main.rs"),
             Row::steps(tool, true),
         ] {
             assert!(!row.is_conversation());

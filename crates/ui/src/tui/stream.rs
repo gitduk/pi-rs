@@ -174,11 +174,12 @@ impl Ui {
             // the group or live region; end settles it, matched back by id.
             Event::ToolStart { id, name, args, .. } => {
                 self.close(view);
-                view.surface.folds.ask(id, args);
+                let place = view.surface.folds.ask(id, args, lane.root());
                 view.state.tools.push(RunTool {
                     id: id.clone(),
                     name: name.clone(),
                     summary: crate::render::summarize(args),
+                    place,
                     started: std::time::Instant::now(),
                     progress: None,
                     done: None,
@@ -193,13 +194,16 @@ impl Ui {
                 id,
                 name,
                 is_error,
+                warned,
                 preview,
             } => {
                 self.close(view);
                 // Parked until the entry commits; adoption checks it against
                 // what the entry derives to.
                 if let Some(t) = view.state.tools.iter_mut().find(|t| t.id == *id) {
-                    t.done = Some(Row::result(!*is_error, name.clone(), preview.clone()));
+                    let outcome = crate::render::Outcome::of(*is_error, *warned);
+                    let row = Row::result(outcome, name.clone(), preview.clone());
+                    t.done = Some(row.at(t.place.clone()));
                     t.progress = None;
                 }
             }
@@ -297,12 +301,17 @@ impl Ui {
             }
             if let Some(rows) = f_entry(entry, &self.paint) {
                 if let LogEntry::Tool { result, .. } = entry {
+                    // Placed before the drift check paints them: a row is
+                    // never drawn without where its call ran.
+                    let (asked, place) = view.surface.folds.take_asked(&result.call);
+                    let rows: Vec<Row> = rows.into_iter().map(|r| r.at(place.clone())).collect();
                     self.check_pending(view, &result.call, rows.last(), width);
                     for r in rows {
                         push_tool_row(
                             &mut view.surface.scrollback,
                             &mut view.surface.folds,
                             r,
+                            &asked,
                             result,
                         );
                     }
@@ -332,9 +341,14 @@ impl Ui {
 
     // Rebuilds from the transcript, discarding the old drawing — a rewind
     // changes the conversation, not just adds a note to the old one.
-    pub(super) fn rebuild(&mut self, view: &mut View, session: &agent::session::Session) {
+    pub(super) fn rebuild(
+        &mut self,
+        view: &mut View,
+        session: &agent::session::Session,
+        root: &std::path::Path,
+    ) {
         let folded = view.surface.folds.folded;
-        view.surface = Surface::from(session, &self.paint, folded);
+        view.surface = Surface::from(session, &self.paint, folded, root);
         view.drawn = true;
         // A page held to a transcript row: those rows are new ones now.
         if let Focus::Read(read) = &mut self.focus

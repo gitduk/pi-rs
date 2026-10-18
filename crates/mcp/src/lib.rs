@@ -562,6 +562,7 @@ impl Tool for Remote {
             content: out,
             preview: None,
             spent: Default::default(),
+            warned: false,
         })
     }
 }

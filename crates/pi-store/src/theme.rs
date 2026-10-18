@@ -331,6 +331,7 @@ pub struct Theme {
 
 const GREEN: Color = Color::Rgb(137, 210, 129);
 const RED: Color = Color::Rgb(252, 58, 75);
+const YELLOW: Color = Color::Rgb(229, 192, 123);
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -357,6 +358,9 @@ pub struct Status {
     pub ok: Style,
     #[serde(default = "default_err")]
     pub err: Style,
+    /// Ran to the end, but what came back deserves a look: a nonzero exit.
+    #[serde(default = "default_warn")]
+    pub warn: Style,
 }
 
 impl Default for Status {
@@ -364,6 +368,7 @@ impl Default for Status {
         Self {
             ok: default_ok(),
             err: default_err(),
+            warn: default_warn(),
         }
     }
 }
@@ -471,6 +476,9 @@ fn default_ok() -> Style {
 }
 fn default_err() -> Style {
     Style::color(RED)
+}
+fn default_warn() -> Style {
+    Style::color(YELLOW)
 }
 fn default_selected() -> Style {
     Style::attrs(&[Attr::Bold])

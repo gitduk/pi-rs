@@ -526,7 +526,7 @@ mod budget {
             })]);
             s.push_previewed(vec![(
                 ToolResult::text(format!("c{i}"), "read", big(4_000)),
-                None,
+                Default::default(),
             )]);
         }
         s

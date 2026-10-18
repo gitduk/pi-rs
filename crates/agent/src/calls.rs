@@ -11,6 +11,7 @@ use tool::{Concurrency, Ctx, ToolError, ToolOutput};
 use tracing::Instrument as _;
 
 use crate::event::say;
+use crate::session::Drawn;
 use crate::{Agent, Decision, Event};
 
 // How much of a failed argument blob rides back to the model and log; past
@@ -34,7 +35,7 @@ impl Agent {
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
         spent: &mut Usage,
-    ) -> (Vec<(ToolResult, Option<String>)>, bool) {
+    ) -> (Vec<(ToolResult, Drawn)>, bool) {
         let mut actions: Vec<Action> = calls
             .iter()
             .map(|c| {
@@ -122,7 +123,7 @@ impl Agent {
                     match action {
                         Action::Reject(why) => Landed::Answered(
                             ToolResult::error(call.id.clone(), &call.name, why.clone()),
-                            None,
+                            Drawn::default(),
                         ),
                         Action::Run(t) => {
                             let ctx = &with_progress(ctx, call, tx);
@@ -167,12 +168,12 @@ impl Agent {
                 // Left unanswered: its siblings may have acted, so theirs are
                 // kept, and the run's end closes this one as stopped.
                 Landed::Stopped => stopped = true,
-                Landed::Answered(result, preview) => results.push((result, preview)),
-                Landed::Ran(result, preview, used) => {
+                Landed::Answered(result, drawn) => results.push((result, drawn)),
+                Landed::Ran(result, drawn, used) => {
                     // A nested run's spend belongs to the run that called it:
                     // folded in here, it reaches `Event::Done` and the return.
                     spent.add(&used);
-                    results.push((result, preview));
+                    results.push((result, drawn));
                 }
             }
         }
@@ -181,12 +182,12 @@ impl Agent {
     }
 }
 
-// What one call came to. The preview is what the screen drew for it, sent
-// along so a rebuild redraws those bytes instead of re-reading the content.
+// What one call came to, with what the screen drew for it: sent along so a
+// rebuild redraws those bytes instead of re-reading the content.
 enum Landed {
     Stopped,
-    Answered(ToolResult, Option<String>),
-    Ran(ToolResult, Option<String>, Usage),
+    Answered(ToolResult, Drawn),
+    Ran(ToolResult, Drawn, Usage),
 }
 
 // The call's own context, its progress said as events under its id.
@@ -226,12 +227,16 @@ fn landed(
                     id: call.id.clone(),
                     name: call.name.clone(),
                     is_error: true,
+                    warned: false,
                     preview: body.clone(),
                 },
             );
             Landed::Answered(
                 ToolResult::error(call.id.clone(), &call.name, body.clone()),
-                Some(body),
+                Drawn {
+                    preview: Some(body),
+                    warned: false,
+                },
             )
         }
         Ok(out) => {
@@ -241,6 +246,7 @@ fn landed(
                     id: call.id.clone(),
                     name: call.name.clone(),
                     is_error: false,
+                    warned: out.warned,
                     preview: out.preview(),
                 },
             );
@@ -250,7 +256,11 @@ fn landed(
                 content: out.content,
                 is_error: false,
             };
-            Landed::Ran(result, out.preview, out.spent)
+            let drawn = Drawn {
+                preview: out.preview,
+                warned: out.warned,
+            };
+            Landed::Ran(result, drawn, out.spent)
         }
     }
 }

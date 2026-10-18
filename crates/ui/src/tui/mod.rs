@@ -198,7 +198,7 @@ impl Tui {
         // screen is rebuildable now, so there is no reason to hide it.
         let token = core.lane().token();
         if let Some(session) = core.lane().session().filter(|s| !s.is_empty()) {
-            ui.rebuild(view_at(&mut views, token), session);
+            ui.rebuild(view_at(&mut views, token), session, core.lane().root());
         }
         let (events, hold) = reader();
         Ok(Self {
@@ -416,8 +416,11 @@ impl Tui {
         let Some(session) = self.core.lane().session() else {
             return;
         };
-        self.ui
-            .rebuild(front_view(&mut self.views, self.core.lane()), session);
+        self.ui.rebuild(
+            front_view(&mut self.views, self.core.lane()),
+            session,
+            self.core.lane().root(),
+        );
     }
 
     // A lane's news goes to its own screen, never the one in front; a

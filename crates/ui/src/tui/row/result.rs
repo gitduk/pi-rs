@@ -12,9 +12,11 @@ use crate::tui::browse::PageLine;
 // Kept as its parts; clipped only when a frame needs it, since a row
 // clipped to its landing width could never regrow.
 pub(super) struct ToolOut {
-    pub(super) ok: bool,
+    pub(super) outcome: render::Outcome,
     pub(super) name: String,
     pub(super) preview: String,
+    // Where the call ran, when not the workspace root.
+    pub(super) place: Option<String>,
     // The row count, so expandability and toggle don't re-walk the
     // preview string on every mouse move.
     preview_lines: usize,
@@ -28,10 +30,11 @@ pub(super) struct ToolOut {
 }
 
 impl ToolOut {
-    pub(super) fn new(ok: bool, name: String, preview: String) -> Self {
+    pub(super) fn new(outcome: render::Outcome, name: String, preview: String) -> Self {
         Self {
-            ok,
+            outcome,
             name,
+            place: None,
             preview_lines: preview.lines().count(),
             widest: preview
                 .lines()
@@ -61,9 +64,7 @@ impl ToolOut {
             Some((w, rows)) if *w == width => rows,
             slot => {
                 let rows = render::result_rows(
-                    !self.ok,
-                    &self.name,
-                    &self.preview,
+                    &self.finished(),
                     if self.expanded {
                         render::Shown::Open
                     } else {
@@ -77,6 +78,15 @@ impl ToolOut {
             }
         };
         rows.get(i).cloned().unwrap_or_default()
+    }
+
+    fn finished(&self) -> render::Finished<'_> {
+        render::Finished {
+            outcome: self.outcome,
+            name: &self.name,
+            preview: &self.preview,
+            place: self.place.as_deref(),
+        }
     }
 
     // The pointer is only ever over a result that opens.
@@ -114,9 +124,7 @@ impl Fold for ToolOut {
             return None;
         }
         let mut rows = render::result_rows(
-            !self.ok,
-            &self.name,
-            &self.preview,
+            &self.finished(),
             render::Shown::Page,
             false,
             paint,
