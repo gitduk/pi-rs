@@ -2,7 +2,7 @@ use llm::message::AssistantContent;
 use llm::model::ModelSpec;
 
 use crate::session::Entry;
-use llm::stream::Usage;
+use llm::stream::{StopReason, Usage};
 use llm::transport::Transport;
 
 pub const PROMPT: &str = include_str!("../../prompts/summarize.md");
@@ -15,7 +15,9 @@ const BLOCK_BYTES: usize = 1_500;
 // definition, so the request that summarizes it has to be bounded too.
 const TOTAL_BYTES: usize = 60_000;
 
-const MAX_SUMMARY_TOKENS: u32 = 2_000;
+// A ceiling, not the length: the prompt asks for far less, and a reply that
+// reaches it has lost its last sections.
+const MAX_SUMMARY_TOKENS: u32 = 4_000;
 
 fn clip(s: &str, max: usize) -> String {
     match s.char_indices().find(|(i, c)| i + c.len_utf8() > max) {
@@ -120,8 +122,15 @@ pub async fn run(
         Some(f) => format!("Focus the summary on: {f}\n\n{history}"),
         None => history,
     };
-    let (text, usage) =
+    let (text, usage, stop) =
         super::oneshot::ask(transport, spec, PROMPT, body, MAX_SUMMARY_TOKENS, idle).await?;
+    // Cut short, it would replace the earlier summary with one missing its
+    // tail; failing keeps that one in view instead.
+    if stop != StopReason::EndTurn {
+        return Err(llm::LlmError::Summarizer(format!(
+            "the summarizer stopped early ({stop:?})"
+        )));
+    }
     // Nothing to say is a failure here: the span goes either way, and it goes
     // unsummarized.
     if text.trim().is_empty() {

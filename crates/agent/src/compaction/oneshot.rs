@@ -7,10 +7,11 @@ use futures::StreamExt;
 use llm::message::Message;
 use llm::model::ModelSpec;
 use llm::request::{Effort, Request, ToolChoice};
-use llm::stream::{Accumulator, Usage};
+use llm::stream::{Accumulator, StopReason, Usage};
 use llm::transport::Transport;
 
-/// Ask `transport` one question under `system` and read back the text.
+/// Ask `transport` one question under `system` and read back the text, and
+/// why it stopped.
 pub async fn ask(
     transport: &dyn Transport,
     spec: &ModelSpec,
@@ -20,7 +21,7 @@ pub async fn ask(
     // The same leash `attempt` keeps: a provider that stops sending holds a
     // compaction open exactly as it would hold a turn.
     idle: std::time::Duration,
-) -> llm::Result<(String, Usage)> {
+) -> llm::Result<(String, Usage, StopReason)> {
     let req = Request {
         system: Some(system.to_string()),
         messages: vec![Message::user(body)],
@@ -41,5 +42,5 @@ pub async fn ask(
         acc.push(ev?);
     }
     let done = acc.finish();
-    Ok((done.message.text(), done.usage))
+    Ok((done.message.text(), done.usage, done.stop))
 }

@@ -201,7 +201,7 @@ async fn once(
 
     let reply =
         agent::compaction::ask(&**transport, spec, PROMPT, body, MAX_REPLY_TOKENS, idle).await;
-    let (text, usage) = match reply {
+    let (text, usage, _) = match reply {
         Ok(got) => got,
         Err(e) => {
             tracing::warn!(target: "pi::memory", session = %stored.id, error = %e, "distilling failed");

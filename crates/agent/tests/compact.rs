@@ -632,6 +632,48 @@ mod budget {
         );
     }
 
+    // A summary that runs to its token cap, or one that ends as it should.
+    struct Summary(llm::stream::StopReason);
+
+    #[async_trait]
+    impl Transport for Summary {
+        async fn stream(
+            &self,
+            _: &ModelSpec,
+            _: &Request,
+        ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
+            let events = vec![
+                Ok(StreamEvent::BlockStart {
+                    index: 0,
+                    kind: llm::stream::BlockKind::Text,
+                }),
+                Ok(StreamEvent::TextDelta {
+                    index: 0,
+                    delta: "## Objective\n\nship it".into(),
+                }),
+                Ok(StreamEvent::Done {
+                    stop: self.0,
+                    usage: Default::default(),
+                }),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    // A cut-short summary would stand in for the earlier one minus its last
+    // sections, and nothing in the transcript would show it.
+    #[tokio::test]
+    async fn a_summary_cut_short_is_not_kept() {
+        use llm::stream::StopReason;
+        for (stop, kept) in [(StopReason::EndTurn, true), (StopReason::MaxTokens, false)] {
+            let mut a = agent_with(1_000_000, 32_000);
+            crate::common::compacting(&mut a, Some((Arc::new(Summary(stop)), spec())));
+            let mut s = bulky_session();
+            let (report, _) = a.compact_now(&mut s, None).await.expect("something to do");
+            assert_eq!(report.summarized, kept, "{stop:?}");
+        }
+    }
+
     // A flat 16k tail against a 9k budget protects more than the budget holds,
     // so every tier that reaches only what precedes the tail reaches nothing.
     #[test]
