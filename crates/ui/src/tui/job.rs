@@ -396,15 +396,12 @@ impl Tui {
         let path = match scratch_file(self.ui.editor.text()) {
             Ok(path) => path,
             Err(e) => {
-                self.say_of(self.core.current, format!("no scratch file: {e}"));
+                self.notice(format!("no scratch file: {e}"));
                 return;
             }
         };
         let (ran, resumed) = self.in_editor(&path).await;
 
-        // Judged on its own: a save that succeeded is still a save when the
-        // screen comes back badly, and reading the two together threw it away.
-        let quit = matches!(&ran, Ok(s) if !s.success());
         let (mut keep, mut said) = match ran {
             Err(why) => (false, Some(why)),
             // `:cq` is how vim says "forget it". Git reads a non-zero exit the
@@ -441,13 +438,13 @@ impl Tui {
         if !keep {
             let _ = std::fs::remove_file(&path);
         }
-        // Only a plain `:cq` is a press's own answer; the rest carry an error
-        // or name the file left behind, and belong where they can be re-read.
+        // A file left behind is the only copy of the line: its name stays
+        // in the scrollback, where a flash's going cannot take it.
         if let Some(line) = said {
-            if keep || !quit {
+            if keep {
                 self.say_of(self.core.current, line);
             } else {
-                self.ui.flash(line);
+                self.notice(line);
             }
         }
     }
