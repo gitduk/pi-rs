@@ -15,6 +15,10 @@ use super::{NO_TRANSCRIPT, Tui};
 use pi_core::core;
 use pi_core::driver::Ended;
 
+// A tool `/tool` started, back from its call: the lane, its name, and what it
+// said or why it failed; nothing once it was stopped.
+pub(super) type Started = (u64, String, Option<Result<String, String>>);
+
 // What kind of job a finished `Done` was, carrying what only that kind
 // leaves behind — so no arm can be built holding another's.
 pub(super) enum Kind {
@@ -221,12 +225,12 @@ impl Tui {
         self.core.lane_mut().begin(cancel);
     }
 
-    // Runs the tool `/job` named off the loop, beside whatever turn is going.
+    // Runs the tool `/tool` named off the loop, beside whatever turn is going.
     pub(super) fn start_tool(
         &mut self,
         name: String,
         args: serde_json::Value,
-        started: &UnboundedSender<(u64, String, Result<String, String>)>,
+        started: &UnboundedSender<Started>,
     ) {
         let Some(tool) = self.core.lane().agent().brief.registry.get(&name) else {
             self.ui.flash(format!("{name} cannot start here"));
@@ -236,20 +240,29 @@ impl Tui {
         let ctx = self.core.turn_ctx(CancellationToken::new());
         let (token, started) = (self.core.lane().token(), started.clone());
         tokio::spawn(async move {
-            let said = core::tools::run_named(tool, args, &ctx).await;
+            let said = guard(core::tools::run_named(tool, args, &ctx))
+                .await
+                .unwrap_or_else(|| Some(Err("it panicked".into())));
             let _ = started.send((token, name, said));
         });
     }
 
     // What a started tool said lands on its lane as a note, so the model
-    // knows of the job too; a failure is only the user's to read.
-    pub(super) fn land_started(&mut self, token: u64, name: &str, said: Result<String, String>) {
+    // knows of it too; a failure is only the user's to read, and a stop was
+    // already answered by whoever stopped it.
+    pub(super) fn land_started(
+        &mut self,
+        token: u64,
+        name: &str,
+        said: Option<Result<String, String>>,
+    ) {
         let note = match said {
-            Ok(text) => format!("The user ran `{name}` directly, and it answered:\n\n{text}"),
+            None => return,
+            Some(Ok(text)) => format!("The user ran `{name}` directly, and it answered:\n\n{text}"),
             // The bar holds a line; the rest is in the journal.
-            Err(why) => {
+            Some(Err(why)) => {
                 let first = why.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-                self.notice(format!("{name} did not start: {}", first.trim()));
+                self.notice(format!("{name} failed: {}", first.trim()));
                 return;
             }
         };

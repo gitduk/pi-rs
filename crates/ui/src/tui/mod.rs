@@ -466,10 +466,6 @@ impl Tui {
     // The one gate every input passes, so two ways of asking the same
     // thing can't get different answers. `fate` decides only mid-run.
     fn admit(&mut self, asked: Asked, origin: Origin, line: Option<String>) -> Wake {
-        let asked = match asked {
-            Asked::Core(intent) => Asked::Core(self.core.direct(intent)),
-            own => own,
-        };
         if !self.core.lane().is_running() {
             return Wake::Do(asked, line);
         }
@@ -547,10 +543,7 @@ impl Tui {
         // on, who asked, the line as typed, and the text or why there is none.
         let (fetched_tx, mut fetched_rx) =
             tokio::sync::mpsc::unbounded_channel::<(u64, Origin, String, Result<String, String>)>();
-        // A tool `/job` started, back from its call: the lane, its name, and
-        // what it said or why it failed.
-        let (started_tx, mut started_rx) =
-            tokio::sync::mpsc::unbounded_channel::<(u64, String, Result<String, String>)>();
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel::<job::Started>();
         let mut tick = tokio::time::interval(status::SPIN);
         let mut looked = std::time::Instant::now();
         // Off while nothing runs, so the interval falls behind; one

@@ -278,18 +278,6 @@ impl Core {
         }
     }
 
-    /// `/job <tool> [key=value…]` naming a tool of the front lane, as a start
-    /// of it: `read` has the command table, not the lane's tools.
-    pub fn direct(&self, intent: Intent) -> Intent {
-        let Intent::Builtin(Builtin::Background(what)) = &intent else {
-            return intent;
-        };
-        match crate::input::commands::start_of(what, &self.lane().agent().brief.registry) {
-            Some((name, args)) => Intent::Builtin(Builtin::Start { name, args }),
-            None => intent,
-        }
-    }
-
     /// Carry out an intent, or say what the surface must do to carry it out.
     ///
     /// Exhaustive with no catch-all, like `Intent::fate`: the arms a surface
@@ -300,10 +288,15 @@ impl Core {
             Intent::Bash(command) => Step::Bash(command),
             Intent::Prompt(send) => Step::Prompt { send, typed: None },
             Intent::Builtin(Builtin::Job(arg)) => Step::Drive(Drive::Job(arg)),
-            Intent::Builtin(Builtin::Start { name, args }) => match args {
-                Ok(args) => Step::Start { name, args },
-                Err(why) => Step::Notice(why),
-            },
+            Intent::Builtin(Builtin::Tool(line)) if line.trim().is_empty() => Step::Handled(
+                crate::input::commands::tool_listing(&self.lane().agent().brief.registry),
+            ),
+            Intent::Builtin(Builtin::Tool(line)) => {
+                match crate::input::commands::call_of(&line, &self.lane().agent().brief.registry) {
+                    Ok((name, args)) => Step::Start { name, args },
+                    Err(why) => Step::Notice(why),
+                }
+            }
             Intent::Builtin(Builtin::Background(what)) => Step::Prompt {
                 send: format!(
                     "Start this in the background, apart from this turn, then end the \
@@ -591,10 +584,7 @@ mod tests {
             Intent::Builtin(Builtin::Worktree("tree".into())),
             Intent::Builtin(Builtin::Settings(String::new())),
             Intent::Builtin(Builtin::Edit("AGENTS.md".into())),
-            Intent::Builtin(Builtin::Start {
-                name: "wechat".into(),
-                args: Ok(serde_json::json!({})),
-            }),
+            Intent::Builtin(Builtin::Tool("wechat".into())),
         ] {
             assert!(
                 matches!(intent.fate(), Fate::Now),

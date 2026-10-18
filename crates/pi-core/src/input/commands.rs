@@ -110,11 +110,16 @@ pub(crate) const BUILTIN: &[Command] = &[
     ),
     Command::builtin(
         "/job",
-        "[stop [id…] | output id | tool [key=value…] | text]",
+        "[stop [id…] | output id | text]",
         "what runs in the background here; stop ends them, bare every running one; \
-         output shows what one printed; a tool by name starts at once; \
-         anything else has the model start it there",
+         output shows what one printed; anything else has the model start it there",
         |_, rest| job(rest),
+    ),
+    Command::builtin(
+        "/tool",
+        "[name [key=value…]]",
+        "run one of the model's tools yourself, beside any turn; bare, list them",
+        |_, rest| Intent::Builtin(Builtin::Tool(rest)),
     ),
     Command::builtin(
         "/loop",
@@ -333,41 +338,51 @@ fn job(rest: String) -> Intent {
     }
 }
 
-/// `/job` text read as a tool to start with no model in between: `None` when
-/// it is not one, which leaves it prose; else the tool, and its arguments or
-/// why they do not read. A tool's name, then only `key=value` for its keys.
-pub(crate) fn start_of(
+/// `/tool` text read as a call: a tool's name, then only `key=value` for its
+/// keys. The tool and its arguments, or why the line does not read as one.
+pub(crate) fn call_of(
     text: &str,
     tools: &tool::Registry,
-) -> Option<(String, Result<serde_json::Value, String>)> {
-    let mut words = words(text)?.into_iter();
-    let name = words.next()?;
-    let schema = tools.get(&name)?.schema();
+) -> Result<(String, serde_json::Value), String> {
+    let mut words = words(text).ok_or("a quote is left open")?.into_iter();
+    let name = words.next().unwrap_or_default();
+    let schema = tools
+        .get(&name)
+        .ok_or_else(|| format!("no tool `{name}` here"))?
+        .schema();
     let mut args = serde_json::Map::new();
-    // Any word without `=` makes it prose; past that, a wrong key is a typo.
-    let pairs: Vec<(String, String)> = (words
-        .map(|w| w.split_once('=').map(|(k, v)| (k.into(), v.into()))))
-    .collect::<Option<_>>()?;
-    for (key, value) in pairs {
-        let Some(about) = schema["properties"].get(&key) else {
+    for word in words {
+        let Some((key, value)) = word.split_once('=') else {
+            return Err(format!("`{word}` is not key=value"));
+        };
+        let Some(about) = schema["properties"].get(key) else {
             let keys: Vec<&str> = params(&schema).map(|p| p.name).collect();
-            let why = format!("{name} has no `{key}`; it takes {}", keys.join(", "));
-            return Some((name, Err(why)));
+            return Err(format!(
+                "{name} has no `{key}`; it takes {}",
+                keys.join(", ")
+            ));
         };
-        match typed(about["type"].as_str(), &value) {
-            Ok(value) => args.insert(key, value),
-            Err(why) => return Some((name, Err(format!("{key}: {why}")))),
-        };
+        let value = typed(about["type"].as_str(), value).map_err(|why| format!("{key}: {why}"))?;
+        args.insert(key.to_string(), value);
     }
     let missing: Vec<&str> = params(&schema)
         .filter(|p| p.required && !args.contains_key(p.name))
         .map(|p| p.name)
         .collect();
-    let args = match missing.as_slice() {
-        [] => Ok(serde_json::Value::Object(args)),
+    match missing.as_slice() {
+        [] => Ok((name, serde_json::Value::Object(args))),
         _ => Err(format!("{name} needs {}", missing.join(", "))),
-    };
-    Some((name, args))
+    }
+}
+
+/// What `/tool` bare answers: each tool by name, and the gist of it.
+pub(crate) fn tool_listing(tools: &tool::Registry) -> Listing {
+    Listing::of(
+        tools
+            .listed()
+            .into_iter()
+            .map(|t| Row::new([t.name().to_string(), gist(t.description())])),
+    )
 }
 
 // Split at whitespace, a `"…"` run kept whole, `\"` a quote inside one;
@@ -448,7 +463,7 @@ fn params(schema: &serde_json::Value) -> impl Iterator<Item = Param<'_>> {
     out.into_iter()
 }
 
-// After `/job <tool> `: the keys not given yet, while no `=` is typed.
+// After `/tool <name> `: the keys not given yet, while no `=` is typed.
 fn tool_args(tool: &dyn tool::Tool, head: &str, typed: &str) -> Vec<Candidate> {
     let schema = tool.schema();
     let given: Vec<&str> = (head.split_whitespace().skip(1))
@@ -461,7 +476,7 @@ fn tool_args(tool: &dyn tool::Tool, head: &str, typed: &str) -> Vec<Candidate> {
         .filter(|p| p.name.starts_with(typed) && !given.contains(&p.name))
         .map(|p| Candidate {
             show: format!("{}=", p.name),
-            line: format!("/job {head}{}=", p.name),
+            line: format!("/tool {head}{}=", p.name),
             help: match p.required {
                 true => format!("required · {}", p.help),
                 false => p.help.to_string(),
@@ -500,10 +515,10 @@ fn job_ids(verb: &str, jobs: &[Choice], args: &str) -> Vec<Candidate> {
         .collect()
 }
 
-/// What `/job` completes against: the jobs running, by id, and the tools it
-/// can start, which only a lane has.
+/// What the front lane gives completion: the jobs running, by id, for `/job`,
+/// and its tools, for `/tool`.
 #[derive(Clone, Copy, Default)]
-pub struct Job<'a> {
+pub struct Front<'a> {
     pub jobs: &'a [Choice],
     pub tools: Option<&'a tool::Registry>,
 }
@@ -512,7 +527,7 @@ pub struct Job<'a> {
 /// then that command's own argument once the word is settled.
 ///
 /// Only args with a known name set are completed (`/model`, `/resume`,
-/// `/worktree`, `/edit`, `/job`); a prompt or focus phrase is prose, not guessed.
+/// `/worktree`, `/edit`, `/job`, `/tool`); a prompt or focus phrase is prose, not guessed.
 ///
 /// Sessions, worktrees and files are asked for lazily: walking transcripts,
 /// running `git worktree list` or reading directories is paid only by the
@@ -521,12 +536,12 @@ pub fn complete<'a>(
     line: &str,
     commands: &[Command],
     models: &[Choice],
-    job: Job<'_>,
+    front: Front<'_>,
     sessions: impl Fn() -> &'a [ResumeChoice],
     worktrees: impl Fn() -> &'a [Choice],
     editable: impl Fn() -> &'a [Choice],
 ) -> Vec<Candidate> {
-    let Job { jobs, tools } = job;
+    let Front { jobs, tools } = front;
     if !line.starts_with('/') {
         return Vec::new();
     }
@@ -573,14 +588,8 @@ pub fn complete<'a>(
                 job_ids("output", jobs, arg)
             }
         }
-        "/job" if typed.contains(char::is_whitespace) => {
-            let (head, last) = typed.rsplit_once(char::is_whitespace).unwrap_or_default();
-            let named = head.split_whitespace().next().unwrap_or_default();
-            match tools.and_then(|t| t.get(named)) {
-                Some(tool) => tool_args(tool.as_ref(), &typed[..typed.len() - last.len()], last),
-                None => Vec::new(),
-            }
-        }
+        // Past its first word `/job` is prose for the model; nothing to offer.
+        "/job" if typed.contains(char::is_whitespace) => Vec::new(),
         // Submitting a bare `/job ` still lists them, not stops them all.
         "/job" => {
             let verbs = [
@@ -597,18 +606,30 @@ pub fn complete<'a>(
                 // A prefix of a verb may be the first word of something to start.
                 picked_only: true,
             });
+            verbs.collect()
+        }
+        "/tool" if typed.contains(char::is_whitespace) => {
+            let (head, last) = typed.rsplit_once(char::is_whitespace).unwrap_or_default();
+            let named = head.split_whitespace().next().unwrap_or_default();
+            match tools.and_then(|t| t.get(named)) {
+                Some(tool) => tool_args(tool.as_ref(), &typed[..typed.len() - last.len()], last),
+                None => Vec::new(),
+            }
+        }
+        "/tool" => {
             let listed = tools.map(tool::Registry::listed).unwrap_or_default();
-            let started = listed
+            listed
                 .into_iter()
                 .filter(|t| t.name().starts_with(typed) && t.name() != typed)
                 .map(|t| Candidate {
                     show: t.name().to_string(),
-                    line: format!("/job {}", t.name()),
+                    line: format!("/tool {}", t.name()),
                     help: gist(t.description()),
                     more: params(&t.schema()).next().is_some(),
+                    // Enter on a prefix must not run a tool nobody chose.
                     picked_only: true,
-                });
-            verbs.chain(started).collect()
+                })
+                .collect()
         }
         // `rm` marks what follows it for removal; a bare `rm` still means the
         // name of a worktree, so nothing is offered until the space says.

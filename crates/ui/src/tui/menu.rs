@@ -82,7 +82,7 @@ impl Ui {
             self.editor.text(),
             &self.commands,
             &self.choices,
-            pi_core::input::commands::Job {
+            pi_core::input::commands::Front {
                 jobs: &jobs,
                 tools: self.tools.as_ref().map(|brief| &brief.registry),
             },
