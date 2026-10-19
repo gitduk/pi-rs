@@ -42,10 +42,14 @@ grep-regex = "0.1"
 grep-searcher = "0.1"
 clap = { version = "4", features = ["derive", "env"] }
 
+[profile.release]
+strip = true
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
-lto = "thin"
+lto = "fat"
+codegen-units = 1
 
 # Lockstep releases: every crate shares one version and one vX.Y.Z tag
 [workspace.metadata.release]
