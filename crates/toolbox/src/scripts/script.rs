@@ -17,6 +17,9 @@ pub(super) fn is_identifier(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+// An argument whose description starts with this may be left out.
+const OPTIONAL: &str = "optional:";
+
 /// One discovered script: the frontmatter is the contract the schema shows the
 /// model, the file is the code a run executes.
 pub struct Script {
@@ -131,11 +134,17 @@ impl Tool for Script {
         let mut properties = serde_json::Map::new();
         let mut required = Vec::new();
         for (name, what) in &self.args {
+            let (what, optional) = match what.strip_prefix(OPTIONAL) {
+                Some(rest) => (rest.trim_start(), true),
+                None => (what.as_str(), false),
+            };
             properties.insert(
                 name.clone(),
                 json!({ "type": "string", "description": what }),
             );
-            required.push(json!(name));
+            if !optional {
+                required.push(json!(name));
+            }
         }
         json!({
             "type": "object",
@@ -218,6 +227,23 @@ mod tests {
         // Nor is a name the `.env` file sets: the model cannot swap a key.
         let set = [("file".to_string(), "from .env".to_string())];
         assert_eq!(script.env(&args, &set).count(), 0);
+    }
+
+    #[test]
+    fn an_optional_argument_is_left_out_of_required() {
+        let script = Script {
+            name: "later".into(),
+            description: "Come back".into(),
+            args: vec![
+                ("prompt".into(), "what to do".into()),
+                ("after".into(), "optional: a delay".into()),
+            ],
+            path: PathBuf::from("later"),
+            runner: Runner::Cargo,
+        };
+        let schema = script.schema();
+        assert_eq!(schema["required"], json!(["prompt"]));
+        assert_eq!(schema["properties"]["after"]["description"], "a delay");
     }
 
     #[test]

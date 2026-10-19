@@ -475,7 +475,7 @@ fn tool_args(tool: &dyn tool::Tool, head: &str, typed: &str) -> Vec<Candidate> {
             line: format!("/tool {head}{}=", p.name),
             help: match p.required {
                 true => format!("required · {}", p.help),
-                false => p.help.to_string(),
+                false => format!("optional · {}", p.help),
             },
             more: false,
             picked_only: true,

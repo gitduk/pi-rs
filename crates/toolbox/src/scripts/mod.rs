@@ -2,7 +2,8 @@
 //! default `~/.pi/tools/`) is a tool.
 //! Its cargo frontmatter is its interface: `[package] description` says what
 //! it does, and each `name = "what it is"` under `[package.metadata.pi.args]`
-//! declares one argument, however many. Arguments also arrive as environment
+//! declares one argument, however many, required unless its description
+//! starts with `optional:`. Arguments also arrive as environment
 //! variables `name`: absent when not passed, never shadowing an inherited
 //! name, and capped in size — while the call's full JSON stays on stdin and
 //! stdout is the result; stderr, compile errors included, only surfaces when

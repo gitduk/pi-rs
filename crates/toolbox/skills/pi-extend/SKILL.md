@@ -69,7 +69,8 @@ fn main() {
 - The description is all a caller ever reads of the tool. Say what it does and
   what the answer looks like.
 - Each `name = "what it is"` under `[args]` (Rust: `[package.metadata.pi.args]`)
-  declares one argument. Every argument is a required string.
+  declares one argument, a string. It is required unless its description
+  starts with `optional:`; then the caller may leave it out.
 - Input: the call's full JSON on stdin, always. Each argument is also an
   environment variable of the same name, except when the name is not a valid
   identifier, an inherited variable or `.env` already has it (`PATH` stays
