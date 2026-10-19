@@ -19,7 +19,9 @@ Prebuilt for Linux x86_64 and aarch64. Anywhere else, `cargo build --release`
 leaves the binary at `target/release/pi`.
 
 A pi installed over the running one, a rebuild of the same version too, takes
-over every open session by itself once nothing on screen is half done.
+over every open session by itself once nothing on screen is half done. At
+startup pi also asks GitHub once for the latest release; a newer one shows on
+the bar as `vX.Y.Z available`.
 
 ## Configure
 

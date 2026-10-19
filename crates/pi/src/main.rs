@@ -277,6 +277,7 @@ async fn main() -> Result<ExitCode> {
         core.enable_jobs(drivers.jobs());
         core.reopen(&args.lanes());
         core::update::watch();
+        core::update::check(env!("CARGO_PKG_REPOSITORY"));
         let out = tui::Tui::new(core, key_map, drivers)?.run().await;
         // Subagents handed their transcripts to a background save; wait
         // for those to land before the runtime goes with them.

@@ -15,6 +15,7 @@ fn facts(model: &str) -> crate::tui::bar::Facts {
         spent: 0.0,
         alerts: Vec::new(),
         update: None,
+        released: None,
     }
 }
 

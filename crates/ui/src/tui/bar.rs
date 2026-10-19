@@ -43,6 +43,8 @@ pub(super) struct Facts {
     pub alerts: Vec<String>,
     /// The version installed under this pi, while it is a different one.
     pub update: Option<String>,
+    /// The latest release, while it is ahead of this pi.
+    pub released: Option<String>,
 }
 
 impl Facts {
@@ -69,6 +71,7 @@ impl Facts {
             .map(str::to_string)
             .collect(),
             update: pi_core::core::update::newer(),
+            released: pi_core::core::update::released(),
         }
     }
 }
@@ -305,7 +308,11 @@ impl Ui {
             Part::Effort if facts.effort == Effort::Off => return None,
             Part::Effort => facts.effort.name().to_string(),
             Part::Tier => facts.tier.name(),
-            Part::Update => format!("restart for {}", facts.update.as_ref()?),
+            Part::Update => match (&facts.update, &facts.released) {
+                (Some(installed), _) => format!("restart for {installed}"),
+                (None, Some(released)) => format!("{released} available"),
+                (None, None) => return None,
+            },
             Part::Status(segment) => return crate::status::render(segment, snap),
         })
     }

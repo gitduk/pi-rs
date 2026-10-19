@@ -156,6 +156,8 @@ impl Core {
         });
         if let Some(version) = crate::core::update::newer() {
             rows.push(Row::new(["update".into(), format!("{version} installed")]));
+        } else if let Some(version) = crate::core::update::released() {
+            rows.push(Row::new(["update".into(), format!("{version} available")]));
         }
         Listing::of(rows)
     }

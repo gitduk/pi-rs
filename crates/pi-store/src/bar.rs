@@ -86,7 +86,8 @@ pub enum Part {
     /// Absent while thinking is off.
     Effort,
     Tier,
-    /// The version installed under the running pi, absent while they match.
+    /// The version installed under the running pi, absent while they match;
+    /// else a later release, once one is found.
     Update,
     /// A status line part — `ctx`, `cost`, `elapsed` … — drawn as the status
     /// line draws it, from the run in flight or the one that last ended.
