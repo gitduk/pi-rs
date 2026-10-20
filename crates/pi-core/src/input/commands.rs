@@ -633,17 +633,14 @@ pub fn complete<'a>(
         // settled by the first word — only whitespace after it settles it.
         "/worktree" if typed.contains(char::is_whitespace) => Vec::new(),
         "/worktree" => offer(worktrees(), "/worktree ", typed),
-        // A first question is a whole sentence, and a session answers to the
-        // name it was given as well, and to its id.
         // A message is remembered by any word in it; an accepted row's id
         // names that row alone. Newest first, so nearest the line.
         "/rewind" => {
-            let lower = typed.to_lowercase();
             let named = said.iter().any(|s| s.name == typed);
             (said.iter().rev())
                 .filter(|s| match named {
                     true => s.name == typed,
-                    false => s.note.to_lowercase().contains(&lower),
+                    false => pi_store::text::matches(&s.note, typed),
                 })
                 .map(|s| Candidate {
                     show: s.note.clone(),
@@ -654,13 +651,16 @@ pub fn complete<'a>(
                 })
                 .collect()
         }
+        // A session answers to a word of its first question, its name or id.
         "/resume" => {
             let offered: Vec<&ResumeChoice> = sessions()
                 .iter()
                 .filter(|s| {
-                    let named = s.name.as_deref().is_some_and(|n| n.starts_with(typed));
+                    let holds = |text: &str| pi_store::text::matches(text, typed);
                     (s.name.is_some() || !s.prompt.is_empty())
-                        && (named || s.prompt.starts_with(typed) || s.id.starts_with(typed))
+                        && (s.name.as_deref().is_some_and(holds)
+                            || holds(&s.prompt)
+                            || holds(&s.id))
                 })
                 .collect();
             let facts = session_facts(&offered);

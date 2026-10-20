@@ -184,6 +184,30 @@ pub fn clip(s: &str, max: usize) -> String {
     one
 }
 
+/// Where `query` is in `text`, as byte ranges: the one way a typed query is
+/// looked for. Smart case: a capital in the query asks for an exact match;
+/// otherwise ASCII is folded, which keeps the byte offsets. Empty finds none.
+pub fn found(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let exact = query.chars().any(char::is_uppercase);
+    let (hay, needle) = if exact {
+        (text.to_string(), query.to_string())
+    } else {
+        (text.to_ascii_lowercase(), query.to_ascii_lowercase())
+    };
+    (hay.match_indices(&needle))
+        .map(|(b, m)| b..b + m.len())
+        .collect()
+}
+
+/// Whether a list filtered by `query` keeps `text`: all of it while nothing
+/// is typed, then what [`found`] finds.
+pub fn matches(text: &str, query: &str) -> bool {
+    query.is_empty() || !found(text, query).is_empty()
+}
+
 /// The last line of `s` with anything on it, as a terminal leaves it: what
 /// follows its last `\r`, escapes and other controls dropped.
 pub fn last_line(s: &str) -> String {
@@ -220,6 +244,14 @@ pub fn pad(s: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn found_folds_case_unless_a_capital_asks() {
+        assert_eq!(found("中文 Foo foo", "foo"), vec![7..10, 11..14]);
+        assert_eq!(found("中文 Foo foo", "Foo"), vec![7..10]);
+        assert!(found("Foo", "").is_empty());
+        assert!(matches("Foo", ""));
+    }
 
     // The mark a cut leaves is counted: callers lay out to `max`, not past it.
     #[test]

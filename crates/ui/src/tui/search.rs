@@ -466,21 +466,11 @@ pub(super) fn marked(line: Line<'static>, query: &str, current: Option<usize>) -
         })
 }
 
-// Where `query` is in `text`, as cell ranges. Smart case: a capital in the
-// query asks for an exact match. ASCII folding keeps the byte offsets.
+// Where `query` is in `text`, as cell ranges.
 fn found_in(text: &str, query: &str) -> Vec<(usize, usize)> {
-    if query.is_empty() {
-        return Vec::new();
-    }
-    let exact = query.chars().any(char::is_uppercase);
-    let (hay, needle) = if exact {
-        (text.to_string(), query.to_string())
-    } else {
-        (text.to_ascii_lowercase(), query.to_ascii_lowercase())
-    };
     let cells = |b: usize| pi_store::text::width(&text[..b]);
-    hay.match_indices(&needle)
-        .map(|(b, m)| (cells(b), cells(b + m.len())))
+    (pi_store::text::found(text, query).into_iter())
+        .map(|r| (cells(r.start), cells(r.end)))
         .collect()
 }
 
@@ -489,10 +479,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn found_counts_cells_and_folds_case_unless_a_capital_asks() {
-        let text = "中文 Foo foo";
-        assert_eq!(found_in(text, "foo"), vec![(5, 8), (9, 12)]);
-        assert_eq!(found_in(text, "Foo"), vec![(5, 8)]);
-        assert_eq!(found_in(text, ""), vec![]);
+    fn found_counts_cells() {
+        assert_eq!(found_in("中文 Foo foo", "foo"), vec![(5, 8), (9, 12)]);
     }
 }

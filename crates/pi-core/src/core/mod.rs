@@ -521,7 +521,11 @@ mod tests {
             .collect()
         };
         assert_eq!(offered("/rewind 12"), ["/rewind 12"]);
-        assert_eq!(offered("/rewind ISSUE"), ["/rewind 40"]);
+        assert_eq!(offered("/rewind issue"), ["/rewind 40"]);
+        assert!(
+            offered("/rewind ISSUE").is_empty(),
+            "a capital asks for exact case"
+        );
         assert_eq!(
             offered("/rewind "),
             ["/rewind 40", "/rewind 12"],
