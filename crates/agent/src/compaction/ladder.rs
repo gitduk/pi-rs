@@ -45,6 +45,8 @@ impl Default for Policy {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Report {
+    /// The transcript alone from [`plan`]; the whole request, as the window
+    /// counts it, once a compactor has recorded the pass.
     pub before: usize,
     pub after: usize,
     pub superseded: usize,

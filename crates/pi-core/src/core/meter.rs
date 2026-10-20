@@ -112,6 +112,11 @@ impl Tally {
             agent::Event::Compacted(report) => {
                 self.compactions += 1;
                 self.compacted = Some(*report);
+                // A `/compact` sends no request, so nothing else would say
+                // the window shrank until the next turn.
+                if let Some((_, window)) = self.ctx {
+                    self.ctx = Some((report.after, window));
+                }
             }
             agent::Event::Refit(why) => self.refits.push(why.clone()),
             agent::Event::Warning(gap) => self.gaps.push(gap.clone()),

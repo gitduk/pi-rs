@@ -212,10 +212,7 @@ impl Agent {
                     .instrument(span.clone())
                     .await;
                 totals.add(&fitted.spent);
-                sent = fitted.context;
-                if !self.model.spec.vision {
-                    llm::message::blind(&mut sent, &self.model.spec.model);
-                }
+                sent = as_sent(fitted.context, &self.model.spec);
                 if fitted.changed {
                     compactions += 1;
                 }
@@ -435,16 +432,22 @@ impl Agent {
             transport: &*self.model.transport,
             spec: &self.model.spec,
             summarize: &self.brief.summarize,
+            overhead: self.overhead(),
         }
+    }
+
+    // What rides every request besides the transcript: the system prompt and
+    // the tool schemas.
+    fn overhead(&self) -> usize {
+        llm::estimate::text(&self.brief.system)
+            + llm::estimate::tool_defs(&self.brief.registry.defs())
     }
 
     /// What a request carrying `transcript` tokens of it occupies, against
     /// `window`: the system prompt and tool schemas ride every request, so
     /// they count with the transcript — the same measure the window is in.
     pub fn occupancy(&self, transcript: usize, window: usize) -> (usize, usize) {
-        let fixed = llm::estimate::text(&self.brief.system)
-            + llm::estimate::tool_defs(&self.brief.registry.defs());
-        (fixed + transcript, window)
+        (self.overhead() + transcript, window)
     }
 
     /// The window the spec claims, before any provider has named another.
@@ -462,10 +465,7 @@ impl Agent {
     // The same accounting against a window the provider named instead of the
     // one the spec claims.
     fn budget_within(&self, window: usize) -> usize {
-        let fixed = llm::estimate::text(&self.brief.system)
-            + llm::estimate::tool_defs(&self.brief.registry.defs())
-            + self.reply_within(window)
-            + SAFETY_MARGIN;
+        let fixed = self.overhead() + self.reply_within(window) + SAFETY_MARGIN;
         // Even an unworkable configuration leaves a floor: stripping the
         // transcript to nothing helps no one.
         window.saturating_sub(fixed).max(window / 4)
@@ -476,6 +476,15 @@ impl Agent {
     fn reply_within(&self, window: usize) -> usize {
         (self.model.spec.max_output_tokens as usize).min(window / 4)
     }
+}
+
+// The context as the wire carries it: what a model without vision is sent
+// in place of its images. Measured here, so every reported size agrees.
+pub(crate) fn as_sent(mut context: Vec<Message>, spec: &ModelSpec) -> Vec<Message> {
+    if !spec.vision {
+        llm::message::blind(&mut context, &spec.model);
+    }
+    context
 }
 
 #[cfg(test)]

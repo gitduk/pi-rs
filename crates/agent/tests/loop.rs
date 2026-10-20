@@ -1001,10 +1001,14 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
                         .any(|e| matches!(e, Event::Refit(w) if w.contains("2000-token window"))),
                     "{events:?}"
                 );
+                // Reported in the window's own measure: what it left is what
+                // the request that follows occupies.
                 assert!(
-                    events
-                        .iter()
-                        .any(|e| matches!(e, Event::Compacted(r) if r.after < 1_000)),
+                    events.windows(2).any(|w| matches!(
+                        w,
+                        [Event::Compacted(r), Event::Context { used, .. }]
+                            if r.after == *used && r.after < r.before
+                    )),
                     "{events:?}"
                 );
             }

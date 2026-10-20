@@ -49,17 +49,23 @@ impl Summarizing {
         self.policy.protect_tail.min(budget / 4)
     }
 
-    /// One pass: plan against `budget`, have the span on its way out summarized,
+    /// One pass: plan against `target`, have the span on its way out summarized,
     /// and record what went. `None` when there was nothing worth reclaiming.
+    /// `budget` is what the transcript may occupy, which `still_over` is against.
     async fn pass(
         &self,
         session: &mut session::Session,
         run: Working<'_>,
+        target: usize,
         budget: usize,
         policy: &Policy,
         focus: Option<&str>,
     ) -> Option<(Report, Usage)> {
-        let (mut record, mut report) = ladder::plan(session, run.spec, budget, policy);
+        let on_wire = |s: &session::Session| {
+            llm::estimate::tokens(&crate::as_sent(s.context(), run.spec), run.spec)
+        };
+        let before = on_wire(session);
+        let (mut record, mut report) = ladder::plan(session, run.spec, target, policy);
         let mut spent = Usage::default();
         if !record.dropped.is_empty() {
             let used = self
@@ -75,6 +81,12 @@ impl Summarizing {
             return None;
         }
         session.record(record);
+        // Measured as the sender will, the new summary included, so the
+        // report reads in the same tokens as the window it is shown beside.
+        report.before = run.overhead + before;
+        report.after = run.overhead + on_wire(session);
+        // Against what the plan fitted, which the images still count in.
+        report.still_over = llm::estimate::tokens(&session.context(), run.spec) > budget;
         Some((report, spent))
     }
 
@@ -135,9 +147,11 @@ impl Compactor for Summarizing {
         };
         // Settle at half: stopping just under the budget would compact again on
         // nearly every request after, each a summary call and a cold cache.
-        match self.pass(session, run, budget / 2, &policy, None).await {
-            Some((mut report, spent)) => {
-                report.still_over = report.after > budget;
+        match self
+            .pass(session, run, budget / 2, budget, &policy, None)
+            .await
+        {
+            Some((report, spent)) => {
                 say(tx, Event::Compacted(report));
                 Fitted {
                     context: session.context(),
@@ -165,7 +179,7 @@ impl Compactor for Summarizing {
             protect_tail: tail,
             ..self.policy
         };
-        self.pass(session, run, tail, &policy, focus).await
+        self.pass(session, run, tail, budget, &policy, focus).await
     }
 
     fn kept_tokens(&self, budget: usize) -> usize {

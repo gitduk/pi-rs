@@ -618,6 +618,7 @@ mod budget {
             transport: &Never,
             spec: &spec(),
             summarize: agent::compaction::SUMMARIZE,
+            overhead: 0,
         };
         let fitted = compactor.compact(&mut s, run, budget, false, &tx).await;
 
