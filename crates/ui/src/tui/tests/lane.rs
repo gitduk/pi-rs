@@ -1049,3 +1049,31 @@ async fn a_persons_line_through_a_job_is_always_a_prompt() {
         );
     }
 }
+
+// A note filed while idle waits for the next turn's save; quitting or a
+// restart into an update must not take it with them unsaved.
+#[tokio::test]
+async fn leaving_saves_what_an_idle_lane_filed() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    tui.core.lane_mut().finish();
+    tui.core
+        .lane_mut()
+        .return_session(agent::session::Session::new());
+    let path = tui.core.store.path_of(dir.path(), tui.core.lane().id());
+    let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+    // Nothing said: leaving writes no empty session to be offered back.
+    tui.settle_all(&mut rx).await;
+    assert!(!path.exists());
+
+    tui.core
+        .lane_mut()
+        .push_note("The user stopped background job #2.");
+    tui.settle_all(&mut rx).await;
+    let stored = pi_store::session::Store::read(&path).expect("saved on the way out");
+    assert!(stored.session.entries().iter().any(|e| matches!(
+        e,
+        agent::session::Entry::Note { note, .. } if note.contains("job #2")
+    )));
+}

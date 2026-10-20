@@ -108,6 +108,9 @@ struct Conversation {
     held: Vec<Held>,
     // Why the last save failed; cleared by the next one that lands.
     unsaved: Option<String>,
+    // Rows and notes filed since the last save: turns save themselves, but
+    // what lands between them waits for the next turn, or for leaving.
+    filed: bool,
 }
 
 enum Held {
@@ -138,6 +141,7 @@ impl Conversation {
             tally: Tally::default(),
             held: Vec::new(),
             unsaved: None,
+            filed: false,
         }
     }
 }
@@ -572,6 +576,7 @@ impl Lane {
             "a lane holds one transcript: a second would drop the first"
         );
         for held in self.talk.held.drain(..) {
+            self.talk.filed = true;
             match held {
                 Held::Screen(text) => session.push_screen(text),
                 Held::Note(text) => session.push_note(text),
@@ -593,7 +598,10 @@ impl Lane {
     /// Returns the id as `push_screen` does; `None` for a held note.
     pub fn push_note(&mut self, note: &str) -> Option<EntryId> {
         match self.talk.session.as_mut() {
-            Some(session) => Some(session.push_note(note)),
+            Some(session) => {
+                self.talk.filed = true;
+                Some(session.push_note(note))
+            }
             None => {
                 self.talk.held.push(Held::Note(note.to_string()));
                 None
@@ -608,7 +616,10 @@ impl Lane {
     /// `None` for a held row, filed later.
     pub fn push_screen(&mut self, text: &str) -> Option<EntryId> {
         match self.talk.session.as_mut() {
-            Some(session) => Some(session.push_screen(text)),
+            Some(session) => {
+                self.talk.filed = true;
+                Some(session.push_screen(text))
+            }
             None => {
                 self.talk.held.push(Held::Screen(text.to_string()));
                 None
@@ -666,7 +677,18 @@ impl Core {
         );
         lane.talk.unsaved = saved.as_ref().err().map(|e| format!("{e:#}"));
         saved?;
+        lane.talk.filed = false;
         Ok(())
+    }
+
+    /// Save every lane holding rows filed since its last save; one nothing
+    /// was filed in stays as it is on disk, or off it.
+    pub fn save_filed(&mut self) {
+        for at in 0..self.lanes.len() {
+            if self.lanes[at].talk.filed {
+                let _ = self.save_lane(at);
+            }
+        }
     }
     /// Rewind the conversation to an entry and write the shorter transcript
     /// back.

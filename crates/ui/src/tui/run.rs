@@ -781,6 +781,8 @@ impl Tui {
     // Stops every working lane and settles it, so leaving can't drop a
     // transcript living in a task. Cancels rather than waits for it to finish.
     pub(super) async fn settle_all(&mut self, done: &mut UnboundedReceiver<Done>) {
+        // A note filed while idle would otherwise wait for a turn that never comes.
+        self.core.save_filed();
         let mut left = 0;
         for lane in &self.core.lanes {
             if lane.is_running() {
