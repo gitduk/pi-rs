@@ -71,6 +71,8 @@ pub(super) struct Ui {
     // The page up over the transcript, if any. The line keeps the keys
     // under it; the page only decides what the history region shows.
     pub(super) read: Option<Read>,
+    // What the page up is searched for, or the transcript with none, `/` on.
+    pub(super) search: Option<Box<super::search::Search>>,
     // The press before this one, for the pairs the key table binds.
     pub(super) last_press: Option<LastPress>,
     // How long a bare character waits for the second of its pair.
@@ -235,6 +237,7 @@ impl Ui {
             seeded: None,
             said: Vec::new(),
             read: None,
+            search: None,
             last_press: None,
             pair_window: std::time::Duration::ZERO,
             at_menu: None,

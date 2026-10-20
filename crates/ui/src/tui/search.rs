@@ -1,4 +1,5 @@
-//! A string found on a page: `/` types it on the bottom row, each key
+//! A string found on a page, or on the transcript with no page up: `/`
+//! types it on the bottom row, each key
 //! bringing up the first match from where the view stood, and `n` / `N`
 //! step through the matches once it is in. The keys only ask; the frame
 //! answers, the one place that holds every row a page shows. Matches are
@@ -10,11 +11,12 @@ use ratatui::style::Modifier;
 use ratatui::text::Line;
 
 use super::Ui;
-use super::browse::{Page, Read};
+use super::browse::Page;
 use super::menu::MenuEntry;
 use super::mouse::Target;
 use super::screen;
 use super::select;
+use super::view::View;
 
 /// A line of what a page shows, by where it comes from, so it is the same
 /// line from one frame to the next. Ordered as a page lays them out.
@@ -92,13 +94,13 @@ pub(super) struct Search {
     last: (usize, usize),
     // Which hit that is, from 1, of how many: 0 for none.
     count: (usize, usize),
-    // The top row at `/`: the search starts there, and esc goes back. The
-    // first frame fills it when the page opened with the search.
+    // The top row at `/`: the search starts there, and esc goes back.
     from: Option<Place>,
+    // The view was on the newest rows at `/`: esc goes back to them, not
+    // to the row that was on top then.
+    newest: bool,
     // What the next frame is asked to find.
     want: Option<Want>,
-    // The page came up with the search, so it goes with a search let go.
-    brought: bool,
     // The top row the view showed after the last jump: a view moved off
     // it since steps from where it is now, not from the hit.
     shown: Option<Place>,
@@ -126,6 +128,14 @@ impl Search {
         self.last = (line, hit.at.row);
         self.count.0 = first + 1;
         self.placed = true;
+    }
+
+    // Where esc takes the view: the newest rows, or the top row at `/`.
+    fn back(&self) -> Option<Anchor> {
+        match self.newest {
+            true => None,
+            false => self.from.map(Anchor::from),
+        }
     }
 
     // The query let go of as typed: the view stays on the hit it was brought
@@ -176,65 +186,66 @@ impl Ui {
         })
     }
 
-    // A search on the page that is up, its prompt on the bottom row.
-    pub(super) fn search_open(&mut self) {
+    // A search on what is up, its prompt on the bottom row.
+    pub(super) fn search_open(&mut self, view: &mut View) {
         let top = self.top_place();
-        if let Some(read) = &mut self.read {
-            // Once entered, `/` takes the query up again to be edited; esc
-            // then puts the view back where this `/` found it.
-            if let Some(search) = read.search.as_mut() {
+        // Held on a hit at the bottom is not following the newest rows.
+        let newest = matches!(self.window_mut(view), (0, None));
+        // Once entered, `/` takes the query up again to be edited; esc
+        // then puts the view back where this `/` found it.
+        match self.search.as_mut() {
+            Some(search) => {
                 search.typing = true;
                 search.from = top;
-                read.top = top.map(Anchor::from);
-                return;
+                search.newest = newest;
             }
-            read.search = Some(Box::new(Search {
-                query: String::new(),
-                typing: true,
-                at: None,
-                last: (0, 0),
-                count: (0, 0),
-                from: top,
-                want: None,
-                brought: false,
-                shown: None,
-                placed: false,
-                lines: Vec::new(),
-            }));
-            // The prompt takes a row off the bottom: the top line stays put.
-            read.top = top.map(Anchor::from);
+            None => {
+                self.search = Some(Box::new(Search {
+                    query: String::new(),
+                    typing: true,
+                    at: None,
+                    last: (0, 0),
+                    count: (0, 0),
+                    from: top,
+                    newest,
+                    want: None,
+                    shown: None,
+                    placed: false,
+                    lines: Vec::new(),
+                }))
+            }
+        }
+        // The prompt may take rows off the bottom: a scrolled-up view keeps
+        // its top line where it is.
+        if !newest {
+            *self.window_mut(view).1 = top.map(Anchor::from);
         }
     }
 
-    // The conversation alone, searched: `/` from the line in Normal.
-    pub(super) fn search_conversation(&mut self) {
-        // A page up is what is searched.
-        if self.read.is_some() {
-            self.search_open();
-            return;
-        }
-        self.browse();
-        self.search_open();
-        // The last frame was the line's, its rows not the page's.
-        if let Some(Read {
-            search: Some(search),
-            top,
-            ..
-        }) = &mut self.read
-        {
-            search.from = None;
-            search.brought = true;
-            *top = None;
+    // The search let go: the view back where `/` found it. False when
+    // there was none.
+    pub(super) fn search_close(&mut self, view: &mut View) -> bool {
+        let Some(search) = self.search.take() else {
+            return false;
+        };
+        self.search_place(view, search.back(), search.newest);
+        true
+    }
+
+    // The view to `top`; to the newest rows with none, when `/` found it there.
+    fn search_place(&mut self, view: &mut View, top: Option<Anchor>, newest: bool) {
+        let (scroll, at) = self.window_mut(view);
+        *at = top;
+        if top.is_none() && newest {
+            *scroll = 0;
         }
     }
 
     // The search's row while there is one: `/` and the query, and which
     // hit of how many the view is on.
     pub(super) fn search_prompt(&self) -> Option<(String, String)> {
-        match &self.read {
-            Some(Read {
-                search: Some(s), ..
-            }) => {
+        match self.search.as_deref() {
+            Some(s) => {
                 let count = match s.count {
                     _ if s.query.is_empty() => String::new(),
                     (at, of) => format!("  {at}/{of}"),
@@ -247,23 +258,21 @@ impl Ui {
 
     // Whether the query is still being typed: the caret is on its row.
     pub(super) fn search_typing(&self) -> bool {
-        matches!(&self.read, Some(Read { search: Some(s), .. }) if s.typing)
+        self.search.as_ref().is_some_and(|s| s.typing)
     }
 
-    // What is searched for on the page that is up, for the frame to mark,
+    // What is searched for on what is up, for the frame to mark,
     // and the hit the view is on.
     pub(super) fn search_query(&self) -> Option<(&str, Option<Hit>)> {
-        match &self.read {
-            Some(Read {
-                search: Some(s), ..
-            }) if !s.query.is_empty() => Some((&s.query, s.at)),
+        match self.search.as_deref() {
+            Some(s) if !s.query.is_empty() => Some((&s.query, s.at)),
             _ => None,
         }
     }
 
     // A key while the query is typed; false leaves it to the key table, so
-    // the stop still closes the page.
-    pub(super) fn search_key(&mut self, key: &KeyEvent) -> bool {
+    // the stop still closes what is up.
+    pub(super) fn search_key(&mut self, view: &mut View, key: &KeyEvent) -> bool {
         // The line's own editing keys, as the user bound them, edit the query.
         let edit = self.keys.action(
             super::keys::press_of(key),
@@ -272,10 +281,7 @@ impl Ui {
                 ..Layers::default()
             },
         );
-        let Some(read) = &mut self.read else {
-            return false;
-        };
-        let Some(search) = read.search.as_mut().filter(|s| s.typing) else {
+        let Some(search) = self.search.as_mut().filter(|s| s.typing) else {
             return false;
         };
         let typed = Some(Want::Typed { entered: false });
@@ -313,12 +319,7 @@ impl Ui {
         }
         let listed = search.typing && !dropped;
         if dropped {
-            if search.brought {
-                self.close_page();
-            } else {
-                read.top = search.from.map(Anchor::from);
-                read.search = None;
-            }
+            self.search_close(view);
         }
         // The list went with the typing: a fresh one starts at its pick.
         if !listed {
@@ -331,10 +332,8 @@ impl Ui {
 
     // The lines holding the query, while it is typed: the list over it.
     pub(super) fn search_menu(&self) -> Vec<MenuEntry> {
-        match &self.read {
-            Some(Read {
-                search: Some(s), ..
-            }) if s.typing => (s.lines.iter())
+        match self.search.as_deref() {
+            Some(s) if s.typing => (s.lines.iter())
                 .map(|f| MenuEntry::Hit {
                     show: f.show.clone(),
                     note: match f.count {
@@ -349,23 +348,16 @@ impl Ui {
 
     // The list's pick taken, as Enter takes it.
     pub(super) fn search_accept(&mut self) {
-        if let Some(Read {
-            search: Some(search),
-            ..
-        }) = &mut self.read
-        {
+        if let Some(search) = self.search.as_mut() {
             search.enter();
         }
         self.picked = None;
     }
 
     // The list moved: the view goes to the line it is on now.
-    pub(super) fn search_follow(&mut self) {
+    pub(super) fn search_follow(&mut self, view: &mut View) {
         let picked = self.picked;
-        let Some(read) = &mut self.read else {
-            return;
-        };
-        let Some(search) = read.search.as_mut().filter(|s| s.typing) else {
+        let Some(search) = self.search.as_mut().filter(|s| s.typing) else {
             return;
         };
         let Some(found) = picked.and_then(|p| search.lines.get(p)) else {
@@ -373,16 +365,13 @@ impl Ui {
         };
         let (hit, line, first) = (found.hit, found.line, found.first);
         search.bring(hit, line, first);
-        read.top = Some(Anchor::from(hit.at));
+        *self.window_mut(view).1 = Some(Anchor::from(hit.at));
     }
 
     // A paste while the query is typed: its first line goes on the query,
     // since no match spans rows.
     pub(super) fn search_paste(&mut self, text: &str) {
-        if let Some(Read {
-            search: Some(search),
-            ..
-        }) = &mut self.read
+        if let Some(search) = self.search.as_mut()
             && search.typing
         {
             let line = text.lines().next().unwrap_or_default();
@@ -396,10 +385,7 @@ impl Ui {
     // `n` or `N`: the next line holding the query, or the one before,
     // round past either end.
     pub(super) fn search_step(&mut self, forward: bool) {
-        if let Some(Read {
-            search: Some(search),
-            ..
-        }) = &mut self.read
+        if let Some(search) = self.search.as_mut()
             && !search.query.is_empty()
         {
             search.want = Some(Want::Step { forward });
@@ -408,27 +394,22 @@ impl Ui {
 
     // Whether the frame must lay every line out for the search.
     pub(super) fn search_due(&self) -> bool {
-        match &self.read {
-            Some(read) => read.search.as_ref().is_some_and(|s| s.want.is_some()),
-            _ => false,
-        }
+        self.search.as_ref().is_some_and(|s| s.want.is_some())
     }
 
     // What the keys asked, answered over every line the page lays out: the
     // line the window then opens on.
-    pub(super) fn search_answer(&mut self, laid: &[Laid]) {
+    pub(super) fn search_answer(&mut self, window: &mut View, laid: &[Laid]) {
         let view = self.view_places();
-        let Some(read) = &mut self.read else {
-            return;
-        };
+        let slash = matches!(self.page(), Some(Page::Slash(_)));
         let mut missed = None;
         let mut listed = None;
-        if let Some(search) = &mut read.search
+        let mut top = None;
+        if let Some(search) = self.search.as_mut()
             && let Some(want) = search.want.take()
         {
             // A slash page's own lines only, not the transcript over it.
-            let own =
-                |spot: Spot| !matches!(read.page, Page::Slash(_)) || matches!(spot, Spot::Text(_));
+            let own = |spot: Spot| !slash || matches!(spot, Spot::Text(_));
             // Every match, row by row: a line's index, its row, which of the row's.
             let query = &search.query;
             let hits: Vec<(usize, usize, usize)> = laid
@@ -515,11 +496,17 @@ impl Ui {
                         .unwrap_or(0)
                 }));
             }
-            read.top = search.at.map(|h| h.at).or(search.from).map(Anchor::from);
+            top = Some((
+                search.at.map(|h| Anchor::from(h.at)).or(search.back()),
+                search.newest,
+            ));
             let entered = matches!(want, Want::Typed { entered: true } | Want::Step { .. });
             if search.at.is_none() && entered {
                 missed = Some(search.query.clone());
             }
+        }
+        if let Some((top, newest)) = top {
+            self.search_place(window, top, newest);
         }
         if let Some(query) = missed {
             self.flash(format!("not found: {query}"));
@@ -534,15 +521,11 @@ impl Ui {
         }
     }
 
-    // After the frame: the search's start, when the page opened with it,
+    // After the frame: the search's start, when nothing was drawn at `/`,
     // and the top row a jump left the view on.
     pub(super) fn search_settle(&mut self) {
         let top = self.top_place();
-        if let Some(Read {
-            search: Some(search),
-            ..
-        }) = &mut self.read
-        {
+        if let Some(search) = self.search.as_mut() {
             if search.from.is_none() {
                 search.from = top;
             }

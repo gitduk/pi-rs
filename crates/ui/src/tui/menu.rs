@@ -2,6 +2,7 @@
 //! `/rewind`: what they offer and how they read. `keys` drives them.
 use super::Ui;
 use super::mouse::at_row_name;
+use super::view::View;
 use pi_core::core;
 use pi_core::input::commands::{Candidate, Choice};
 use pi_store::keys::Action;
@@ -184,7 +185,7 @@ impl Ui {
             .collect()
     }
 
-    pub(super) fn step_menu(&mut self, action: Action) {
+    pub(super) fn step_menu(&mut self, view: &mut View, action: Action) {
         let n = self.menu().len().saturating_sub(1);
         let at = self.picked.unwrap_or(n).min(n);
         self.picked = Some(if action == Action::MenuNext {
@@ -193,7 +194,7 @@ impl Ui {
             at.saturating_sub(1)
         });
         // A search's list moves the view with it.
-        self.search_follow();
+        self.search_follow(view);
     }
 }
 

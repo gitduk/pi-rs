@@ -26,7 +26,6 @@ impl Ui {
         let width = self.screen.usable();
         let alone = matches!(self.page(), Some(Page::Preview(_)));
         let slash = matches!(self.page(), Some(Page::Slash(_)));
-        let keep = self.keeps();
         let text = self.page_lines();
         let hovered_job = self.pointer.and_then(|(_, row)| {
             (self.job_at(row).map(call::JobRow::Job))
@@ -97,28 +96,27 @@ impl Ui {
         };
 
         if self.search_due() {
-            let laid: Vec<Laid> =
-                ScrollbackRows::new(&view.surface.scrollback, &self.paint, width, keep)
-                    .indexed()
-                    .map(|(piece, idx)| {
-                        let line = match &piece {
-                            Piece::Row { line, .. } => *line,
-                            Piece::Live(_) => 0,
-                        };
-                        Laid::of(Spot::Row(idx, line), screen::Piece::pieces(piece))
-                    })
-                    .chain(
-                        live.iter()
-                            .enumerate()
-                            .map(|(i, l)| Laid::of(Spot::Live(i), screen::fit(l, width))),
-                    )
-                    .chain(
-                        text.iter()
-                            .enumerate()
-                            .map(|(n, l)| Laid::of(Spot::Text(n), screen::fit(l, width))),
-                    )
-                    .collect();
-            self.search_answer(&laid);
+            let laid: Vec<Laid> = ScrollbackRows::new(transcript(view, alone), &self.paint, width)
+                .indexed()
+                .map(|(piece, idx)| {
+                    let line = match &piece {
+                        Piece::Row { line, .. } => *line,
+                        Piece::Live(_) => 0,
+                    };
+                    Laid::of(Spot::Row(idx, line), screen::Piece::pieces(piece))
+                })
+                .chain(
+                    live.iter()
+                        .enumerate()
+                        .map(|(i, l)| Laid::of(Spot::Live(i), screen::fit(l, width))),
+                )
+                .chain(
+                    text.iter()
+                        .enumerate()
+                        .map(|(n, l)| Laid::of(Spot::Text(n), screen::fit(l, width))),
+                )
+                .collect();
+            self.search_answer(view, &laid);
             // The count the answer moved, on the row laid out before it: one
             // row either way, so only what it says changes.
             if let Some((line, _)) = self.search_line()
@@ -144,7 +142,7 @@ impl Ui {
             }
             (Piece::Live(screen::Ready { line, width }), Target::Text(at))
         });
-        let scrollback = ScrollbackRows::new(&view.surface.scrollback, &self.paint, width, keep)
+        let scrollback = ScrollbackRows::new(transcript(view, alone), &self.paint, width)
             .indexed()
             .map(|(item, idx)| {
                 let line = match &item {
@@ -269,8 +267,12 @@ impl Ui {
         });
         self.below = scroll;
 
-        // Scrolled up, the next frame opens on this one's top row.
-        let top = (scroll > 0).then(|| self.anchor_here(view)).flatten();
+        // Scrolled up, or on a hit, the next frame opens on this one's top
+        // row: a hit stays where it was found as the rows under it grow.
+        let on_hit = self.search_query().is_some_and(|(_, at)| at.is_some());
+        let top = (scroll > 0 || on_hit)
+            .then(|| self.anchor_here(view))
+            .flatten();
         let (was, top_was) = self.window_mut(view);
         (*was, *top_was) = (scroll, top);
         let picked = self
@@ -403,14 +405,6 @@ impl Ui {
         }
     }
 
-    // The scrollback rows the window reads: browsing, the conversation alone
-    // (no thinking, calls, notices); a preview, none of the transcript.
-    pub(super) fn keeps(&self) -> impl Fn(&Row) -> bool + Copy + use<> {
-        let browse = self.browsing();
-        let alone = matches!(self.page(), Some(Page::Preview(_)));
-        move |row: &Row| !alone && (!browse || row.is_conversation())
-    }
-
     // Where the top row last drawn opens the next window. A live row is drawn
     // anew and lands as another, so the last settled line holds it instead.
     pub(super) fn anchor_here(&self, view: &View) -> Option<Anchor> {
@@ -418,10 +412,9 @@ impl Ui {
         let Spot::Live(i) = place.spot else {
             return Some(place.into());
         };
-        let keep = self.keeps();
         let (idx, row) = (view.surface.scrollback.iter().enumerate())
             .rev()
-            .find(|(_, r)| keep(r) && r.len() > 0)?;
+            .find(|(_, r)| r.len() > 0)?;
         let line = row.len() - 1;
         let height = row.line_height(line, &self.paint, self.screen.usable());
         Some(Anchor {
@@ -441,33 +434,29 @@ impl Ui {
     ) -> (Vec<Line<'static>>, usize) {
         let width = self.screen.usable();
         let mut rows: Vec<Line<'static>> = Vec::new();
-        // Browse mode shows the conversation and nothing that happened on the
-        // way to it: the calls in flight, the thinking and the spinner all go.
         let thinking = view.surface.stream.kind == StreamKind::Reasoning;
 
         // Calls kept here: a foldable one doesn't show while the group
         // above holds it. Collapsed: newest named with a count for the rest.
         let shown = drawn(&view.state.tools, row_holds);
         let mut pending = Vec::new();
-        if !self.browsing() {
-            if self.live_tools_shown {
-                pending.extend(
-                    shown
-                        .iter()
-                        .copied()
-                        .map(|t| pending_line(now, self.spinner, t, &self.paint)),
-                );
-            } else if let Some(t) = shown.last() {
-                let extra = if shown.len() > 1 {
-                    format!("{}{}", icons::PART_SEP, count(shown.len(), "call"))
-                } else {
-                    String::new()
-                };
-                let mut line = pending_line(now, self.spinner, t, &self.paint);
-                line.spans
-                    .push(self.paint.span(&self.paint.theme.muted, extra));
-                pending.push(line);
-            }
+        if self.live_tools_shown {
+            pending.extend(
+                shown
+                    .iter()
+                    .copied()
+                    .map(|t| pending_line(now, self.spinner, t, &self.paint)),
+            );
+        } else if let Some(t) = shown.last() {
+            let extra = if shown.len() > 1 {
+                format!("{}{}", icons::PART_SEP, count(shown.len(), "call"))
+            } else {
+                String::new()
+            };
+            let mut line = pending_line(now, self.spinner, t, &self.paint);
+            line.spans
+                .push(self.paint.span(&self.paint.theme.muted, extra));
+            pending.push(line);
         }
         rows.extend(
             pending
@@ -478,20 +467,16 @@ impl Ui {
         // count the rows the block takes, not the lines before they did.
         let pending_rows = rows.len();
 
-        rows.extend(if thinking && self.browsing() {
-            Vec::new()
-        } else {
-            body(
-                &view.surface.folds,
-                &view.surface.scrollback,
-                thinking,
-                &view.surface.stream.text,
-                width,
-                &self.paint,
-            )
-        });
+        rows.extend(body(
+            &view.surface.folds,
+            &view.surface.scrollback,
+            thinking,
+            &view.surface.stream.text,
+            width,
+            &self.paint,
+        ));
 
-        if lane.is_running() && !self.browsing() {
+        if lane.is_running() {
             let mut parts = status::parts(&self.status, &snapshot(lane, view));
             if view.state.compacting {
                 parts.insert(0, format!("compacting{}", icons::ELLIPSIS));
@@ -511,20 +496,23 @@ impl Ui {
         }
         // Typed lines waiting their turn, muted under the said rule: off the
         // transcript until they start, and up takes them back.
-        if !self.browsing() {
-            for line in view.queued.iter().filter_map(|q| q.line.as_deref()) {
-                let first = line.lines().next().unwrap_or_default();
-                let more = if line.trim_end().contains('\n') {
-                    icons::ELLIPSIS
-                } else {
-                    ""
-                };
-                let text = format!("{} {first}{more}", icons::SAID_RULE);
-                let muted = Line::from(self.paint.span(&self.paint.theme.muted, text));
-                rows.extend(screen::fit(&muted, width));
-            }
+        for line in view.queued.iter().filter_map(|q| q.line.as_deref()) {
+            let first = line.lines().next().unwrap_or_default();
+            let more = if line.trim_end().contains('\n') {
+                icons::ELLIPSIS
+            } else {
+                ""
+            };
+            let text = format!("{} {first}{more}", icons::SAID_RULE);
+            let muted = Line::from(self.paint.span(&self.paint.theme.muted, text));
+            rows.extend(screen::fit(&muted, width));
         }
 
         (rows, pending_rows)
     }
+}
+
+// The transcript rows the window reads: none under a preview.
+fn transcript(view: &View, alone: bool) -> &[Row] {
+    if alone { &[] } else { &view.surface.scrollback }
 }

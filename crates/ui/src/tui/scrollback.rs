@@ -326,19 +326,10 @@ impl<'a> DoubleEndedIterator for IndexedScrollbackRows<'a> {
 }
 
 impl<'a> ScrollbackRows<'a> {
-    /// The window's rows; `keep` filters for the conversation page
-    /// (conversation only). A dropped row counts as zero lines for the window.
-    pub(super) fn new(
-        rows: &'a [Row],
-        paint: &'a Paint,
-        width: usize,
-        keep: impl Fn(&Row) -> bool,
-    ) -> Self {
+    /// The window's rows.
+    pub(super) fn new(rows: &'a [Row], paint: &'a Paint, width: usize) -> Self {
         let back = rows.len().saturating_sub(1);
-        let lens: Vec<usize> = rows
-            .iter()
-            .map(|r| if keep(r) { r.len() } else { 0 })
-            .collect();
+        let lens: Vec<usize> = rows.iter().map(Row::len).collect();
         let back_row = lens.get(back).copied().unwrap_or(0);
         Self {
             rows,

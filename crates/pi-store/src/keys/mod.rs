@@ -30,8 +30,8 @@ pub enum Mode {
 /// the menu claims never reaches the editor underneath it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum When {
-    // A page is up over the transcript: `esc` closes it before it can reach
-    // the run.
+    // Something is being read — a page up over the transcript, or a search
+    // on it: `esc` lets it go before it can reach the run.
     Page,
     // A list's movement and dismissal keys, over the line while completing.
     Menu,
@@ -39,12 +39,9 @@ pub enum When {
     Run,
     // Only in that mode, and only while vim keys are on at all.
     Mode(Mode),
-    // Normal with nothing on the line and a page up: the line has nothing
-    // to move through, so its movement keys move the page.
+    // Normal with nothing on the line and something read: the line has
+    // nothing to move through, so its movement keys move what is read.
     NormalPage,
-    // Normal with nothing on the line. Tried before `Mode`, so a key naming
-    // the empty line wins over the layer that holds either way.
-    NormalEmpty,
     // Always — in both modes, so bindings older than the vim layer keep
     // working under it.
     Editor,
@@ -76,7 +73,8 @@ pub struct Layers {
     /// Whether the line has anything on it. Read only in Normal, by the keys
     /// that command the history instead when there is nothing to command.
     pub line_empty: bool,
-    /// Whether a page is up over the transcript.
+    /// Whether something is being read: a page up over the transcript, or a
+    /// search on it.
     pub page: bool,
 }
 
@@ -116,11 +114,9 @@ pub enum Action {
     MenuDismiss,
     RunInterrupt,
     Rewind,
-    // The conversation alone: the thinking, the calls and the editor itself
-    // out of the way. `v` with nothing on the line.
-    Browse,
-    // The same, searched: the query typed at once.
-    BrowseSearch,
+    // The page up searched, or the transcript with none: the query typed
+    // at once.
+    Search,
     ScrollPageUp,
     ScrollPageDown,
     ScrollHalfUp,
@@ -357,10 +353,10 @@ const BINDINGS: &[Binding] = &[
     },
     Binding {
         id: "view.search",
-        action: A::BrowseSearch,
+        action: A::Search,
         when: W::Editor,
         keys: &["ctrl+s"],
-        note: "the page up, or the conversation alone",
+        note: "the page up, or the transcript",
     },
     Binding {
         id: "app.exit",
@@ -429,18 +425,11 @@ const BINDINGS: &[Binding] = &[
         note: "half a window on, as ctrl+f does",
     },
     Binding {
-        id: "normal.browse",
-        action: A::Browse,
-        when: W::NormalEmpty,
-        keys: &["v"],
-        note: "the conversation alone, with nothing on the line",
-    },
-    Binding {
         id: "normal.search",
-        action: A::BrowseSearch,
+        action: A::Search,
         when: W::Mode(Mode::Normal),
         keys: &["/"],
-        note: "the page up, or the conversation alone",
+        note: "the page up, or the transcript",
     },
     Binding {
         id: "normal.move.char.left",
@@ -643,7 +632,7 @@ const BINDINGS: &[Binding] = &[
         action: A::PageClose,
         when: W::Page,
         keys: &["esc"],
-        note: "a command's output, a preview, or the conversation view",
+        note: "a command's output, a preview, or a search on the transcript",
     },
     Binding {
         id: "page.down",
@@ -905,11 +894,8 @@ fn live(layers: Layers) -> Vec<When> {
     if let Some(mode) = layers.mode {
         // The line's own layer first: a key that names the empty line wins
         // over the layer that holds whether or not there is one.
-        if mode == Mode::Normal && layers.line_empty {
-            if layers.page {
-                live.push(When::NormalPage);
-            }
-            live.push(When::NormalEmpty);
+        if mode == Mode::Normal && layers.line_empty && layers.page {
+            live.push(When::NormalPage);
         }
         live.push(When::Mode(mode));
     }
@@ -1158,10 +1144,7 @@ mod tests {
         for b in BINDINGS {
             // Both halves of Normal: about what it does to pre-vim bindings,
             // not the modal keys themselves.
-            if matches!(
-                b.when,
-                W::Mode(_) | W::NormalEmpty | W::NormalPage | W::Page
-            ) {
+            if matches!(b.when, W::Mode(_) | W::NormalPage | W::Page) {
                 continue;
             }
             for spec in b.keys {
@@ -1261,31 +1244,6 @@ mod tests {
             assert_eq!(k.action(press("ctrl+l"), layers), Some(Action::LineClear));
             assert_eq!(k.action(press("ctrl+c"), layers), Some(Action::AppCancel));
         }
-    }
-
-    // `v` names the state of the line, not the mode: empty shows the whole
-    // conversation, otherwise it's just the character vim made it.
-    #[test]
-    fn browse_is_the_empty_lines_v() {
-        let k = Keys::default();
-        let normal = |line_empty| Layers {
-            mode: Some(Mode::Normal),
-            line_empty,
-            ..Layers::default()
-        };
-        assert_eq!(k.action(press("v"), normal(true)), Some(Action::Browse));
-        assert_eq!(k.action(press("v"), normal(false)), None);
-        // And not with the keys off, where `v` is a letter.
-        assert_eq!(
-            k.action(
-                press("v"),
-                Layers {
-                    line_empty: true,
-                    ..Layers::default()
-                }
-            ),
-            None
-        );
     }
 
     #[test]

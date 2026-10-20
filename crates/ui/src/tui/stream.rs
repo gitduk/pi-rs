@@ -353,5 +353,9 @@ impl Ui {
         {
             read.top = None;
         }
+        // And a search on them, which holds them too.
+        if self.read.is_none() {
+            self.search = None;
+        }
     }
 }

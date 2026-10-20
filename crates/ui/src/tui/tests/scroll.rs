@@ -19,16 +19,10 @@ fn every_row_of_a_result_is_repainted_when_the_window_changes() {
         format!("head\n+12 {long}"),
     )];
 
-    let narrow: Vec<String> = ScrollbackRows::new(&rows, &paint, 40, |_| true)
-        .map(text)
-        .collect();
-    let wide: Vec<String> = ScrollbackRows::new(&rows, &paint, 160, |_| true)
-        .map(text)
-        .collect();
+    let narrow: Vec<String> = ScrollbackRows::new(&rows, &paint, 40).map(text).collect();
+    let wide: Vec<String> = ScrollbackRows::new(&rows, &paint, 160).map(text).collect();
     // And back again: widening must not be the only direction that repaints.
-    let again: Vec<String> = ScrollbackRows::new(&rows, &paint, 40, |_| true)
-        .map(text)
-        .collect();
+    let again: Vec<String> = ScrollbackRows::new(&rows, &paint, 40).map(text).collect();
 
     assert_eq!(narrow.len(), 2, "head plus the one diff row");
     assert!(
@@ -60,33 +54,23 @@ fn a_configured_band_outlives_the_terminals() {
     assert_ne!(mixed.prompt.panel.input, theme.prompt.panel.input);
 }
 
-// A skipped row costs only its count; both walks must agree on where kept
-// rows are — the back walk especially, which starts inside the last row.
+// A row with no lines costs nothing; both walks must agree on where the
+// others are — the back walk especially, which starts inside the last row.
 #[test]
-fn a_filtered_window_reads_the_rows_it_keeps_and_skips_the_rest() {
+fn a_window_steps_over_rows_without_lines() {
     let paint = Paint::new(false);
-    let mut rows = vec![Row::notice("a command printed this")];
+    let mut rows = vec![Row::lines(Vec::new())];
     rows.extend(Row::answer("the answer", &paint));
-    rows.push(Row::notice("and then a warning"));
+    rows.push(Row::lines(Vec::new()));
 
-    let keep = |row: &Row| row.is_conversation();
-    let forwards: Vec<String> = ScrollbackRows::new(&rows, &paint, 80, keep)
-        .map(text)
-        .collect();
+    let forwards: Vec<String> = ScrollbackRows::new(&rows, &paint, 80).map(text).collect();
     assert_eq!(forwards, ["the answer"]);
 
-    let backwards: Vec<String> = ScrollbackRows::new(&rows, &paint, 80, keep)
+    let backwards: Vec<String> = ScrollbackRows::new(&rows, &paint, 80)
         .rev()
         .map(text)
         .collect();
     assert_eq!(backwards, ["the answer"], "the back walk too");
-
-    // Nothing kept at all leaves both walks with nothing, which is how a
-    // browse of a screen holding no conversation looks.
-    let none: Vec<String> = ScrollbackRows::new(&rows, &paint, 80, |_| false)
-        .map(text)
-        .collect();
-    assert!(none.is_empty());
 }
 
 #[test]
@@ -94,11 +78,9 @@ fn an_empty_scrollback_iterates_to_nothing() {
     // Both walks index `rows[0]` before comparing pointers; an empty
     // scrollback panics there if either forgets to guard it.
     let paint = Paint::new(false);
-    let rows: Vec<String> = ScrollbackRows::new(&[], &paint, 80, |_| true)
-        .map(text)
-        .collect();
+    let rows: Vec<String> = ScrollbackRows::new(&[], &paint, 80).map(text).collect();
     assert!(rows.is_empty());
-    let back: Vec<String> = ScrollbackRows::new(&[], &paint, 80, |_| true)
+    let back: Vec<String> = ScrollbackRows::new(&[], &paint, 80)
         .rev()
         .map(text)
         .collect();
@@ -113,7 +95,7 @@ fn scrollback_rows_walk_from_both_ends() {
         Row::notice("d".to_string()),
     ];
     let paint = Paint::new(false);
-    let rows = ScrollbackRows::new(&rows, &paint, 80, |_| true);
+    let rows = ScrollbackRows::new(&rows, &paint, 80);
     let (front, back): (Vec<_>, Vec<_>) = {
         let mut f = Vec::new();
         let mut b = Vec::new();
@@ -240,7 +222,7 @@ fn a_block_that_ends_without_a_line_leaves_nothing() {
     assert!(t.folded, "the switch itself is not touched");
     assert_eq!(scrollback[0].folded(), Some(false));
     t.close_block(&mut scrollback);
-    let drawn = ScrollbackRows::new(&scrollback, &Paint::new(false), 80, |_| true).count();
+    let drawn = ScrollbackRows::new(&scrollback, &Paint::new(false), 80).count();
     assert_eq!(drawn, 0, "nothing drawn");
     assert!(!scrollback.iter().any(Row::is_steps), "no group left");
     assert!(!t.birth_fold());
@@ -757,6 +739,63 @@ fn a_top_row_in_the_stream_holds_as_it_grows_and_lands() {
     view.surface.scrollback.push(Row::notice("next"));
     ui.flush(&lane, &mut view);
     assert_eq!(ui.drawn[0], top, "as it landed");
+}
+
+// A hit in the answer still streaming comes up top, and stays there as
+// the answer grows under it; esc then goes back to the newest rows.
+#[test]
+fn a_search_hit_in_the_stream_holds_as_it_grows() {
+    let mut ui = test_ui(30, 12);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    view.surface.scrollback = (1..=5).map(|n| Row::notice(format!("row {n}"))).collect();
+    view.surface.stream.text = (1..=20).map(|n| format!("said {n}\n\n")).collect();
+    ui.flush(&lane, &mut view);
+    ui.key(&lane, &mut view, ctrl('s'), false);
+    for c in "said 3".chars() {
+        ui.key(&lane, &mut view, typed(c), false);
+    }
+    ui.flush(&lane, &mut view);
+    assert_eq!(ui.drawn[0].trim(), "said 3", "the hit came up");
+    view.surface.stream.text.push_str("said 21\n\nsaid 22\n\n");
+    ui.flush(&lane, &mut view);
+    assert_eq!(ui.drawn[0].trim(), "said 3", "and stayed as it grew");
+    // `/` found the view on the newest rows: esc goes back to them, grown.
+    let esc = crate::tui::TermEvent::Key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    ui.key(&lane, &mut view, esc, false);
+    ui.flush(&lane, &mut view);
+    assert!(
+        ui.drawn.iter().any(|r| r.trim() == "said 22"),
+        "the newest rows"
+    );
+}
+
+// A hit already on screen at the newest rows holds there too, rather than
+// following the bottom off the screen.
+#[test]
+fn a_search_hit_on_the_newest_rows_holds_as_the_stream_grows() {
+    let mut ui = test_ui(30, 12);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    view.surface.scrollback = (1..=5).map(|n| Row::notice(format!("row {n}"))).collect();
+    view.surface.stream.text = (1..=3).map(|n| format!("said {n}\n\n")).collect();
+    ui.flush(&lane, &mut view);
+    ui.key(&lane, &mut view, ctrl('s'), false);
+    for c in "said 2".chars() {
+        ui.key(&lane, &mut view, typed(c), false);
+    }
+    ui.flush(&lane, &mut view);
+    let at = |ui: &crate::tui::Ui| ui.drawn.iter().position(|r| r.trim() == "said 2");
+    let found = at(&ui);
+    assert!(found.is_some(), "on screen");
+    view.surface.stream.text += &(4..=20)
+        .map(|n| format!("said {n}\n\n"))
+        .collect::<String>();
+    ui.flush(&lane, &mut view);
+    assert_eq!(at(&ui), found, "where it was found");
 }
 
 // Code wrapped over rows is taken whole from any of them: as the line holds

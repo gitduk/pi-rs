@@ -1,6 +1,6 @@
 //! The reading page: what the history region shows in the transcript's
-//! place, the line still under it with the keys. It reads the conversation,
-//! or lines of their own — what a command answered, or what a step opens.
+//! place, the line still under it with the keys. It reads lines of its own:
+//! what a command answered, or what a step opens.
 //!
 //! The page keeps its own scroll, so the transcript's is where it was when
 //! the page closes.
@@ -43,16 +43,12 @@ pub(super) struct Read {
     pub(super) scroll: usize,
     // The row the page opens on, as the transcript's `top`.
     pub(super) top: Option<Anchor>,
-    // What the page is searched for, `/` on.
-    pub(super) search: Option<Box<super::search::Search>>,
     // The mode the line goes back to when the page closes, if opening it
     // moved the line to Normal.
     back: Option<Mode>,
 }
 
 pub(super) enum Page {
-    // The conversation alone: no thinking, calls or notices.
-    Conversation,
     // A slash command's output, lying over the bottom of the transcript it was
     // typed over.
     Slash(Vec<Line<'static>>),
@@ -62,20 +58,11 @@ pub(super) enum Page {
 }
 
 impl Ui {
-    pub(super) fn browsing(&self) -> bool {
-        matches!(self.page(), Some(Page::Conversation))
-    }
-
     pub(super) fn page(&self) -> Option<&Page> {
         match &self.read {
             Some(read) => Some(&read.page),
             _ => None,
         }
-    }
-
-    /// Take the conversation view up, on the newest rows.
-    pub(super) fn browse(&mut self) {
-        self.open_page(Page::Conversation, 0);
     }
 
     // What a click on line `n` of a preview does: copy the block it is the
@@ -118,11 +105,12 @@ impl Ui {
             }
             None => None,
         };
+        // A search goes with what it was searching.
+        self.search = None;
         self.read = Some(Read {
             page,
             scroll,
             top: None,
-            search: None,
             back,
         });
     }
@@ -132,6 +120,7 @@ impl Ui {
         let Some(read) = self.read.take() else {
             return false;
         };
+        self.search = None;
         if let Some(mode) = read.back {
             self.set_mode(mode);
         }

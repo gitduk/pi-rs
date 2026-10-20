@@ -53,7 +53,7 @@ impl Ui {
             }
             _ => return Asked::Own(Deed::Nothing),
         };
-        if self.search_key(&key) {
+        if self.search_key(view, &key) {
             return Asked::Own(Deed::Nothing);
         }
 
@@ -84,7 +84,7 @@ impl Ui {
         let action = hit.map(|h| h.action);
 
         match action {
-            Some(Action::AppCancel) => return self.cancel(running),
+            Some(Action::AppCancel) => return self.cancel(view, running),
             Some(Action::AppQuit) => return Asked::Core(Intent::Builtin(Builtin::Quit)),
             _ => {}
         }
@@ -105,7 +105,9 @@ impl Ui {
             // Whether the line has anything on it, which the keys bound
             // to an empty one read. Only Normal asks.
             line_empty: self.editor.is_empty(),
-            page: self.read.is_some(),
+            // A search reads the transcript as a page is read: `n` steps,
+            // esc lets go.
+            page: self.read.is_some() || self.search.is_some(),
         }
     }
 
@@ -121,8 +123,8 @@ impl Ui {
 
     // The stop: whatever is over the editor closes, and a run stops. With
     // neither, it says the next one leaves.
-    fn cancel(&mut self, running: bool) -> Asked {
-        let closed = self.close_overlay();
+    fn cancel(&mut self, view: &mut View, running: bool) -> Asked {
+        let closed = self.close_overlay(view);
         if running {
             return Asked::Own(Deed::Interrupt);
         }
@@ -133,10 +135,11 @@ impl Ui {
         Asked::Own(Deed::Nothing)
     }
 
-    // The page over the transcript closed; false when none was up. The
-    // press that closed it is not the first of a pair.
-    fn close_overlay(&mut self) -> bool {
-        if !self.close_page() {
+    // The page over the transcript closed, or the search on it let go;
+    // false when neither was up. The press that closed it is not the first
+    // of a pair.
+    fn close_overlay(&mut self, view: &mut View) -> bool {
+        if !self.close_page() && !self.search_close(view) {
             return false;
         }
         self.disarm();
@@ -161,7 +164,7 @@ impl Ui {
             Some(Action::LineSubmit) => {
                 self.seeded = None;
                 // What is sent is answered on the transcript, not the page.
-                self.close_overlay();
+                self.close_overlay(view);
                 // Enter with a menu open runs what's highlighted, the typed
                 // text a mere prefix. Pick before draining the editor.
                 return match self.highlighted() {
@@ -305,19 +308,15 @@ impl Ui {
             Some(Action::ScrollPageDown) => self.scroll_view(view, false, self.page_scroll_step()),
             Some(Action::ScrollHalfUp) => self.scroll_view(view, true, self.half_scroll_step()),
             Some(Action::ScrollHalfDown) => self.scroll_view(view, false, self.half_scroll_step()),
-            Some(Action::Browse) if self.browsing() => {
-                self.close_overlay();
-            }
-            Some(Action::Browse) => self.browse(),
             Some(Action::ScrollLineDown) => self.scroll_view(view, false, 1),
             Some(Action::ScrollLineUp) => self.scroll_view(view, true, 1),
             Some(Action::PageClose) => {
-                self.close_overlay();
+                self.close_overlay(view);
             }
             Some(action @ (Action::PageSearchNext | Action::PageSearchPrev)) => {
                 self.search_step(action == Action::PageSearchNext);
             }
-            Some(Action::BrowseSearch) => self.search_conversation(),
+            Some(Action::Search) => self.search_open(view),
             Some(Action::ThinkFold) => {
                 // The last group only. The switch is left alone, so the
                 // groups no one is touching keep what they had.
@@ -349,7 +348,9 @@ impl Ui {
                 Some(MenuEntry::Hit { .. }) => self.search_accept(),
                 None => {}
             },
-            Some(action @ (Action::MenuNext | Action::MenuPrevious)) => self.step_menu(action),
+            Some(action @ (Action::MenuNext | Action::MenuPrevious)) => {
+                self.step_menu(view, action)
+            }
             Some(Action::MenuDismiss) => {
                 if self.seeded.take().as_deref() == Some(self.editor.text()) {
                     self.editor.clear();
@@ -486,8 +487,8 @@ pub(super) fn press_of(key: &KeyEvent) -> Press {
 
 /// The character a key types, when it types one on its own: a letter with
 /// `ctrl` or `alt` on it is the menu's key rather than the surface's own, which
-/// is the same rule every screen with a letter vocabulary reads — browse, a
-/// slash page, a preview's search — so it is written down once, here.
+/// is the same rule every screen with a letter vocabulary reads — a page, a
+/// search — so it is written down once, here.
 pub(super) fn bare_letter(key: &KeyEvent) -> Option<char> {
     match key.code {
         KeyCode::Char(c) if press_of(key).is_bare() => Some(c),

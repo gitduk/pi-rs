@@ -10,7 +10,7 @@ use pi_store::session::Store;
 use ratatui::text::Line;
 
 pub(super) fn drawn_rows(view: &View) -> Vec<String> {
-    ScrollbackRows::new(&view.surface.scrollback, &Paint::new(false), 80, |_| true)
+    ScrollbackRows::new(&view.surface.scrollback, &Paint::new(false), 80)
         .map(text)
         .collect()
 }

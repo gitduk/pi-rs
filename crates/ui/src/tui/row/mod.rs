@@ -171,20 +171,6 @@ impl Row {
         }
     }
 
-    /// Whether this row is part of the conversation: what was said and what
-    /// was answered, which is what browse mode is for.
-    pub fn is_conversation(&self) -> bool {
-        matches!(
-            &self.0,
-            Kind::Said { .. }
-                | Kind::Answer(..)
-                | Kind::CodeLine(_)
-                | Kind::Code(_)
-                | Kind::Block(_)
-                | Kind::Relayed(_)
-        )
-    }
-
     /// Something only the screen ever knew (a tally line, a lane's
     /// answer, a warning), in the surface's own muted voice.
     pub fn notice(line: impl Into<Line<'static>>) -> Self {
@@ -808,49 +794,6 @@ fn clipped(text: &str, room: usize, more: bool) -> String {
     }
 }
 
-#[cfg(test)]
-mod conversation_tests {
-    use super::*;
-
-    // Browse mode is the whole reason the answer has a kind of its own:
-    // it shows said/answered, nothing the conversation passed through.
-    #[test]
-    fn only_what_was_said_and_what_was_answered_is_the_conversation() {
-        let paint = Paint::new(false);
-        for row in Row::prompt("what is this", &paint)
-            .into_iter()
-            .chain(Row::answer("# it is this\nand that", &paint))
-        {
-            assert!(row.is_conversation());
-        }
-        let tool = Step::Tool(FoldedTool::new("read", "src/main.rs", "", ""));
-        for row in [
-            Row::notice("a command printed this"),
-            Row::thinking(1, vec![Line::from("thinking")], false),
-            Row::result(crate::render::Outcome::Done, "read", "src/main.rs"),
-            Row::steps(tool, true),
-        ] {
-            assert!(!row.is_conversation());
-        }
-    }
-}
-
-#[cfg(test)]
-mod height_tests {
-    use super::*;
-
-    // The window counts a line by its height, wraps included, without
-    // building the rows it skips.
-    #[test]
-    fn a_lines_height_counts_its_wraps() {
-        let paint = Paint::new(false);
-        let row = Row::thinking(1, vec![Line::from("abcdef"), Line::from("gh")], false);
-        assert_eq!(row.line_height(0, &paint, 2), 3, "abcdef wraps to three");
-        assert_eq!(row.line_height(1, &paint, 2), 1);
-        assert_eq!(row.line_height(0, &paint, 80), 1);
-    }
-}
-
 // A badge copies its block, as an answer's does; a block's line is
 // indented as an answer's is, standing on its own.
 impl From<crate::render::Rendered> for PageLine {
@@ -873,5 +816,21 @@ impl From<crate::render::Rendered> for PageLine {
                 units: r.units,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod height_tests {
+    use super::*;
+
+    // The window counts a line by its height, wraps included, without
+    // building the rows it skips.
+    #[test]
+    fn a_lines_height_counts_its_wraps() {
+        let paint = Paint::new(false);
+        let row = Row::thinking(1, vec![Line::from("abcdef"), Line::from("gh")], false);
+        assert_eq!(row.line_height(0, &paint, 2), 3, "abcdef wraps to three");
+        assert_eq!(row.line_height(1, &paint, 2), 1);
+        assert_eq!(row.line_height(0, &paint, 80), 1);
     }
 }
