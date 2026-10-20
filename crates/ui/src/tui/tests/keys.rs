@@ -1,4 +1,3 @@
-use crate::tui::ui::Focus;
 use crate::tui::{Asked, Deed, Intent, View, view_at};
 use pi_core::input::commands::{Command, Source};
 use pi_core::input::{Builtin, Fate};
@@ -155,7 +154,7 @@ async fn an_empty_command_page_is_not_opened() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     tui.ui.open_slash(Listing::default());
-    assert!(!matches!(tui.ui.focus, Focus::Read(_)));
+    assert!(tui.ui.read.is_none());
 }
 
 // Esc goes to the slash page, not past it: reaching the run would stop a turn
@@ -173,7 +172,7 @@ async fn esc_closes_the_command_page_rather_than_reaching_the_run() {
         .ui
         .key(tui.core.lane(), view_at(&mut tui.views, token), esc, false);
     assert!(matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
-    assert!(!matches!(tui.ui.focus, Focus::Read(_)), "the esc closed it");
+    assert!(tui.ui.read.is_none(), "the esc closed it");
 }
 
 // A command's output and a typo's refusal are dismissed pages, so echoing
@@ -211,10 +210,10 @@ async fn only_an_answer_under_the_line_echoes_it() {
     }
 }
 
-// A slash page has the keyboard: one place takes keys at a time, so a
-// stray letter neither types into the hidden line nor takes the page down.
+// The line keeps the keys under a slash page: a letter types on it and the
+// page stays up to be read beside it, until `esc` takes it down.
 #[tokio::test]
-async fn a_command_page_has_the_keyboard_until_closed() {
+async fn the_line_keeps_the_keys_under_a_command_page() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
@@ -222,37 +221,35 @@ async fn a_command_page_has_the_keyboard_until_closed() {
     let token = tui.core.lane().token();
     let press = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
 
-    for code in [KeyCode::Down, KeyCode::Char('j'), KeyCode::Char('x')] {
-        let lane = tui.core.lane_mut();
-        let asked = tui
-            .ui
-            .key(lane, view_at(&mut tui.views, token), press(code), false);
-        assert!(
-            matches!(tui.ui.focus, Focus::Read(_)),
-            "{code:?} is the page's"
-        );
-        assert!(matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
-    }
-    assert!(tui.ui.editor.is_empty(), "nothing typed behind it");
+    let lane = tui.core.lane_mut();
+    tui.ui.key(
+        lane,
+        view_at(&mut tui.views, token),
+        press(KeyCode::Char('x')),
+        false,
+    );
+    assert_eq!(tui.ui.editor.text(), "x");
+    assert!(tui.ui.read.is_some(), "the page stays up");
 
     let lane = tui.core.lane_mut();
     tui.ui.key(
         lane,
         view_at(&mut tui.views, token),
-        press(KeyCode::Char('q')),
+        press(KeyCode::Esc),
         false,
     );
-    assert!(!matches!(tui.ui.focus, Focus::Read(_)), "`q` closes it");
+    assert!(tui.ui.read.is_none(), "esc takes it down");
+    assert_eq!(tui.ui.editor.text(), "x", "and leaves the line be");
 }
 
-// Enter closes a slash page without sending the line behind it; `ctrl+c` closes
-// it and, with a run in flight, still stops the run.
+// Enter sends the line and takes the page down, its answer coming on the
+// transcript; `ctrl+c` closes it and, with a run in flight, still stops the run.
 #[tokio::test]
 async fn enter_and_the_stop_close_a_command_page() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    tui.ui.editor.set_line("/help");
+    tui.ui.editor.set_line("what changed?");
     tui.ui.open_slash(Listing::say(["/status answered this"]));
 
     let token = tui.core.lane().token();
@@ -260,9 +257,8 @@ async fn enter_and_the_stop_close_a_command_page() {
     let lane = tui.core.lane_mut();
     tui.ui
         .key(lane, view_at(&mut tui.views, token), enter, false);
-    assert!(!matches!(tui.ui.focus, Focus::Read(_)), "Enter closed it");
-    assert!(tui.ui.took_submit().is_none(), "and sent nothing");
-    assert_eq!(tui.ui.editor.text(), "/help", "the line waits");
+    assert!(tui.ui.read.is_none(), "Enter closed it");
+    assert_eq!(tui.ui.took_submit().as_deref(), Some("what changed?"));
 
     tui.ui.open_slash(Listing::say(["/status answered this"]));
     let ctrl_c =
@@ -271,10 +267,7 @@ async fn enter_and_the_stop_close_a_command_page() {
     let asked = tui
         .ui
         .key(lane, view_at(&mut tui.views, token), ctrl_c, true);
-    assert!(
-        !matches!(tui.ui.focus, Focus::Read(_)),
-        "`ctrl+c` took it down too"
-    );
+    assert!(tui.ui.read.is_none(), "`ctrl+c` took it down too");
     assert!(!matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
 }
 
@@ -374,7 +367,7 @@ async fn the_stop_that_closed_a_command_page_is_not_half_a_quit() {
     let lane = tui.core.lane_mut();
     tui.ui
         .key(lane, view_at(&mut tui.views, token), ctrl_c(), false);
-    assert!(matches!(tui.ui.focus, Focus::Editor), "the first closed it");
+    assert!(tui.ui.read.is_none(), "the first closed it");
     let lane = tui.core.lane_mut();
     let asked = tui
         .ui

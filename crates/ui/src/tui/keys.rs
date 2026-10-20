@@ -1,11 +1,10 @@
-//! Where a press goes: the key table read against who has the keyboard —
-//! the line or the reading page — and the mouse.
-use super::browse::Page;
+//! Where a press goes: the key table read against the line, a list or a
+//! page over it — and the mouse.
+use super::DOUBLE_TAP;
 use super::menu::MenuEntry;
-use super::ui::{Focus, LastPress};
+use super::ui::LastPress;
 use super::view::View;
 use super::{Asked, Deed, Ui};
-use super::{DOUBLE_TAP, screen};
 use crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
@@ -38,10 +37,10 @@ impl Ui {
                 self.last_press = None;
                 // Only the line or a query being typed takes text: anywhere
                 // else the paste would land where nobody can see it.
-                if matches!(self.focus, Focus::Editor) {
-                    self.editor.insert_str(&text.replace('\r', "\n"));
-                } else {
+                if self.search_typing() {
                     self.search_paste(&text);
+                } else {
+                    self.editor.insert_str(&text.replace('\r', "\n"));
                 }
                 return Asked::Own(Deed::Nothing);
             }
@@ -64,16 +63,8 @@ impl Ui {
         let prev = last
             .filter(|l| now.duration_since(l.at) < self.pair_window_after(l.press))
             .map(|l| l.press);
-        let mut layers = self.layers(running);
-        let mut hit = self.keys.hit(prev, press, layers);
-        // Output with nothing to page through is gone at the next key, which
-        // goes to the line; only the page's own close keys stop there.
-        let stays = |a| matches!(a, Action::PagerClose | Action::AppCancel | Action::AppQuit);
-        if self.slash_fits() && !hit.is_some_and(|h| stays(h.action)) {
-            self.close_overlay();
-            layers = self.layers(running);
-            hit = self.keys.hit(None, press, layers);
-        }
+        let layers = self.layers(running);
+        let hit = self.keys.hit(prev, press, layers);
         if let Some(h) = hit
             && h.pair
         {
@@ -97,29 +88,15 @@ impl Ui {
             Some(Action::AppQuit) => return Asked::Core(Intent::Builtin(Builtin::Quit)),
             _ => {}
         }
-        match self.focus {
-            Focus::Read(_) => self.pager_key(view, action),
-            Focus::Editor => self.editor_key(lane, view, key, action),
-        }
+        self.editor_key(lane, view, key, action)
     }
 
-    // A command's output that fits its region whole.
-    pub(super) fn slash_fits(&self) -> bool {
-        matches!(self.page(), Some(Page::Slash(lines))
-            if lines.len() <= self.regions.history.height as usize)
-    }
-
-    // The layers the key table reads, from who has the keyboard.
+    // The layers the key table reads: the line's, a list or a page over it.
     fn layers(&mut self, running: bool) -> Layers {
-        let surface = match self.focus {
-            Focus::Read(_) => Surface::Pager,
-            Focus::Editor => {
-                if self.menu().is_empty() {
-                    Surface::Editor
-                } else {
-                    Surface::Completion
-                }
-            }
+        let surface = if self.menu().is_empty() {
+            Surface::Editor
+        } else {
+            Surface::Completion
         };
         Layers {
             surface,
@@ -128,6 +105,7 @@ impl Ui {
             // Whether the line has anything on it, which the keys bound
             // to an empty one read. Only Normal asks.
             line_empty: self.editor.is_empty(),
+            page: self.read.is_some(),
         }
     }
 
@@ -155,12 +133,11 @@ impl Ui {
         Asked::Own(Deed::Nothing)
     }
 
-    // Back to the line, from whatever has the keyboard; false when the line
-    // had it already. The press that closed is not the first of a pair.
+    // The page over the transcript closed; false when none was up. The
+    // press that closed it is not the first of a pair.
     fn close_overlay(&mut self) -> bool {
-        match self.focus {
-            Focus::Editor => return false,
-            Focus::Read(_) => self.focus = Focus::Editor,
+        if !self.close_page() {
+            return false;
         }
         self.disarm();
         true
@@ -170,42 +147,6 @@ impl Ui {
     // pairs by key alone (dismissing `esc`, clearing `ctrl+l`).
     fn disarm(&mut self) {
         self.last_press = None;
-    }
-
-    // The reading page: the pager keys move it, and everything else is
-    // swallowed.
-    fn pager_key(&mut self, view: &mut View, action: Option<Action>) -> Asked {
-        let (up, step) = match action {
-            Some(Action::PagerDown) => (false, Stride::Line),
-            Some(Action::PagerUp) => (true, Stride::Line),
-            Some(Action::PagerHalfDown) => (false, Stride::Half),
-            Some(Action::PagerHalfUp) => (true, Stride::Half),
-            Some(Action::PagerPageDown) => (false, Stride::Page),
-            Some(Action::PagerPageUp) => (true, Stride::Page),
-            Some(Action::PagerBottom) => (false, Stride::End),
-            Some(Action::PagerTop) => (true, Stride::End),
-            Some(Action::PagerClose) => {
-                self.close_overlay();
-                return Asked::Own(Deed::Nothing);
-            }
-            Some(Action::PagerSearch) => {
-                self.search_open();
-                return Asked::Own(Deed::Nothing);
-            }
-            Some(action @ (Action::PagerSearchNext | Action::PagerSearchPrev)) => {
-                self.search_step(action == Action::PagerSearchNext);
-                return Asked::Own(Deed::Nothing);
-            }
-            _ => return Asked::Own(Deed::Nothing),
-        };
-        let rows = match step {
-            Stride::Line => 1,
-            Stride::Half => self.half_scroll_step(),
-            Stride::Page => self.page_scroll_step(),
-            Stride::End => screen::TOP,
-        };
-        self.scroll_view(view, up, rows);
-        Asked::Own(Deed::Nothing)
     }
 
     // The line has the keys, a completion list perhaps over it.
@@ -219,6 +160,8 @@ impl Ui {
         match action {
             Some(Action::LineSubmit) => {
                 self.seeded = None;
+                // What is sent is answered on the transcript, not the page.
+                self.close_overlay();
                 // Enter with a menu open runs what's highlighted, the typed
                 // text a mere prefix. Pick before draining the editor.
                 return match self.highlighted() {
@@ -359,7 +302,18 @@ impl Ui {
             Some(Action::ScrollPageDown) => self.scroll_view(view, false, self.page_scroll_step()),
             Some(Action::ScrollHalfUp) => self.scroll_view(view, true, self.half_scroll_step()),
             Some(Action::ScrollHalfDown) => self.scroll_view(view, false, self.half_scroll_step()),
+            Some(Action::Browse) if self.browsing() => {
+                self.close_overlay();
+            }
             Some(Action::Browse) => self.browse(),
+            Some(Action::ScrollLineDown) => self.scroll_view(view, false, 1),
+            Some(Action::ScrollLineUp) => self.scroll_view(view, true, 1),
+            Some(Action::PageClose) => {
+                self.close_overlay();
+            }
+            Some(action @ (Action::PageSearchNext | Action::PageSearchPrev)) => {
+                self.search_step(action == Action::PageSearchNext);
+            }
             Some(Action::BrowseSearch) => self.search_conversation(),
             Some(Action::ThinkFold) => {
                 // The last group only. The switch is left alone, so the
@@ -420,8 +374,8 @@ impl Ui {
         Asked::Own(Deed::Nothing)
     }
 
-    // The wheel scrolls what has the keyboard: the reading page while one
-    // is up, else the transcript.
+    // The wheel scrolls what is shown: the reading page while one is up,
+    // else the transcript.
     fn mouse(&mut self, view: &mut View, mouse: crossterm::event::MouseEvent) -> Asked {
         match mouse.kind {
             MouseEventKind::ScrollUp => {
@@ -483,15 +437,6 @@ impl Ui {
         self.submitted = Some(line);
         Asked::Core(intent)
     }
-}
-
-// How far a pager key moves what it reads.
-enum Stride {
-    Line,
-    Half,
-    Page,
-    // As far as there is.
-    End,
 }
 
 /// The press a terminal key is, as the key table reads it. No catch-all: a key

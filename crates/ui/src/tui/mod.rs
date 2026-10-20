@@ -69,6 +69,8 @@ fn flash_for(line: &str) -> std::time::Duration {
 // Shared text for several call sites, so a reword can't drift between them.
 const NO_TRANSCRIPT: &str = "this checkout has no transcript — /new or /resume first";
 const NOTHING_TO_REWIND: &str = "nothing to rewind to";
+// The line `esc esc` starts, whose completions are what the user said.
+const REWIND: &str = "/rewind ";
 
 // What a `Step::Handled` leaves behind: its lines as the slash page, config
 // changes applied. A free fn since a run in flight calls it mid-borrow.
@@ -529,7 +531,7 @@ impl Tui {
     // done. Asked every pass; `restart` says when not yet.
     fn restart_into_update(&self) -> Option<Ended> {
         let version = core::update::newer()?;
-        let settled = matches!(self.ui.focus, ui::Focus::Editor)
+        let settled = self.ui.read.is_none()
             && self.ui.editor.is_empty()
             && self.ui.job_open.is_none()
             && (self.views.values()).all(|v| v.draft.is_empty() && v.queued.is_empty())
@@ -606,7 +608,11 @@ impl Tui {
             let root = self.core.lane().root();
             self.ui.jobs = jobs.jobs(root);
             self.ui.tools = Some(self.core.lane().agent().brief.clone());
-            self.ui.said = said_of(self.core.lane());
+            // Read only by a line completing it: walking the transcript on
+            // every pass would cost a long session each redraw.
+            if self.ui.editor.text().starts_with(REWIND) {
+                self.ui.said = said_of(self.core.lane());
+            }
             let body = self.ui.job_open.and_then(|id| jobs.body(root, id));
             self.ui.job_open = self.ui.job_open.filter(|_| body.is_some());
             self.ui.job_body = body.unwrap_or_default();
@@ -898,7 +904,7 @@ impl Tui {
             self.ui.flash(NOTHING_TO_REWIND);
             return;
         }
-        self.ui.seed("/rewind ");
+        self.ui.seed(REWIND);
     }
 }
 

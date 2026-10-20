@@ -15,7 +15,6 @@ use super::row::{PendingTool, Row, count};
 use super::screen::{self, Rows};
 use super::scrollback::{Piece, ScrollbackRows, body};
 use super::search::{self, Anchor, Laid, Spot};
-use super::ui::Focus;
 use super::view::{StreamKind, View, snapshot};
 use crate::render;
 use crate::status;
@@ -25,7 +24,6 @@ impl Ui {
     pub(super) fn flush(&mut self, lane: &Lane, view: &mut View) {
         let menu = self.menu();
         let width = self.screen.usable();
-        let reading = self.reading();
         let alone = matches!(self.page(), Some(Page::Preview(_)));
         let slash = matches!(self.page(), Some(Page::Slash(_)));
         let keep = self.keeps();
@@ -51,14 +49,11 @@ impl Ui {
         if let Some((at, ..)) = &mut self.flash_hit {
             *at += jobs;
         }
-        let caret_shown =
-            matches!(self.focus, Focus::Editor) || self.slash_fits() || self.search_typing();
-        // A command's output sits on what was being typed; another reading
-        // page gives the editor's rows to the history, a search's row aside.
-        let (input, caret) = match self.search_line() {
-            Some((line, col)) if reading => (vec![line], (0, col)),
-            _ if reading && !slash => (Vec::new(), (0, 0)),
-            _ => self.editor.view(&self.paint, width),
+        // A query being typed has the line's row; otherwise the line keeps it,
+        // a page up or not.
+        let (input, caret) = match self.search_line().filter(|_| self.search_typing()) {
+            Some((line, col)) => (vec![line], (0, col)),
+            None => self.editor.view(&self.paint, width),
         };
         let area = self.screen.area();
         let regions = Regions::layout(area, menu.len(), bar.len(), input.len());
@@ -344,12 +339,8 @@ impl Ui {
                 );
             }
             frame.render_widget(Rows(&input_view), regions.editor);
-            // The caret marks where keys land: nowhere in the line while
-            // something else has them.
-            if caret_shown {
-                let caret_row = regions.editor.y + caret_in_view as u16;
-                frame.set_cursor_position((caret.1, caret_row));
-            }
+            let caret_row = regions.editor.y + caret_in_view as u16;
+            frame.set_cursor_position((caret.1, caret_row));
         });
         // Bold doesn't move a row, so a second frame settles it.
         let over = self
@@ -385,14 +376,14 @@ impl Ui {
     // The page's own lines: a command's, set off from the transcript above it
     // by a blank row, or a preview's without what a click on one copies.
     fn page_lines(&self) -> Vec<Line<'static>> {
-        match &self.focus {
-            Focus::Read(Read {
+        match &self.read {
+            Some(Read {
                 page: Page::Slash(lines),
                 ..
             }) => std::iter::once(Line::default())
                 .chain(lines.iter().cloned())
                 .collect(),
-            Focus::Read(Read {
+            Some(Read {
                 page: Page::Preview(lines),
                 ..
             }) => lines.iter().map(|l| l.line.clone()).collect(),

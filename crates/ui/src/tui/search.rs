@@ -14,7 +14,6 @@ use super::browse::{Page, Read};
 use super::mouse::Target;
 use super::screen;
 use super::select;
-use super::ui::Focus;
 
 /// A line of what a page shows, by where it comes from, so it is the same
 /// line from one frame to the next. Ordered as a page lays them out.
@@ -83,7 +82,7 @@ impl Laid {
 
 pub(super) struct Search {
     pub(super) query: String,
-    // Still being typed: the keys are the query's, not the pager's.
+    // Still being typed: the keys are the query's, not the line's.
     pub(super) typing: bool,
     // The hit the view was last brought to.
     at: Option<Hit>,
@@ -147,7 +146,7 @@ impl Ui {
     // A search on the page that is up, its prompt on the bottom row.
     pub(super) fn search_open(&mut self) {
         let top = self.top_place();
-        if let Focus::Read(read) = &mut self.focus {
+        if let Some(read) = &mut self.read {
             // Once entered, `/` takes the query up again to be edited; esc
             // then puts the view back where this `/` found it.
             if let Some(search) = read.search.as_mut() {
@@ -175,14 +174,19 @@ impl Ui {
 
     // The conversation alone, searched: `/` from the line in Normal.
     pub(super) fn search_conversation(&mut self) {
+        // A page up is what is searched.
+        if self.read.is_some() {
+            self.search_open();
+            return;
+        }
         self.browse();
         self.search_open();
         // The last frame was the line's, its rows not the page's.
-        if let Focus::Read(Read {
+        if let Some(Read {
             search: Some(search),
             top,
             ..
-        }) = &mut self.focus
+        }) = &mut self.read
         {
             search.from = None;
             search.brought = true;
@@ -193,8 +197,8 @@ impl Ui {
     // The search's row while there is one: `/` and the query, and which
     // hit of how many the view is on.
     pub(super) fn search_prompt(&self) -> Option<(String, String)> {
-        match &self.focus {
-            Focus::Read(Read {
+        match &self.read {
+            Some(Read {
                 search: Some(s), ..
             }) => {
                 let count = match s.count {
@@ -209,14 +213,14 @@ impl Ui {
 
     // Whether the query is still being typed: the caret is on its row.
     pub(super) fn search_typing(&self) -> bool {
-        matches!(&self.focus, Focus::Read(Read { search: Some(s), .. }) if s.typing)
+        matches!(&self.read, Some(Read { search: Some(s), .. }) if s.typing)
     }
 
     // What is searched for on the page that is up, for the frame to mark,
     // and the hit the view is on.
     pub(super) fn search_query(&self) -> Option<(&str, Option<Hit>)> {
-        match &self.focus {
-            Focus::Read(Read {
+        match &self.read {
+            Some(Read {
                 search: Some(s), ..
             }) if !s.query.is_empty() => Some((&s.query, s.at)),
             _ => None,
@@ -234,7 +238,7 @@ impl Ui {
                 ..Layers::default()
             },
         );
-        let Focus::Read(read) = &mut self.focus else {
+        let Some(read) = &mut self.read else {
             return false;
         };
         let Some(search) = read.search.as_mut().filter(|s| s.typing) else {
@@ -278,7 +282,7 @@ impl Ui {
         }
         if dropped {
             if search.brought {
-                self.focus = Focus::Editor;
+                self.close_page();
             } else {
                 read.top = search.from.map(Anchor::from);
                 read.search = None;
@@ -292,10 +296,10 @@ impl Ui {
     // A paste while the query is typed: its first line goes on the query,
     // since no match spans rows.
     pub(super) fn search_paste(&mut self, text: &str) {
-        if let Focus::Read(Read {
+        if let Some(Read {
             search: Some(search),
             ..
-        }) = &mut self.focus
+        }) = &mut self.read
             && search.typing
         {
             let line = text.lines().next().unwrap_or_default();
@@ -309,10 +313,10 @@ impl Ui {
     // `n` or `N`: the next line holding the query, or the one before,
     // round past either end.
     pub(super) fn search_step(&mut self, forward: bool) {
-        if let Focus::Read(Read {
+        if let Some(Read {
             search: Some(search),
             ..
-        }) = &mut self.focus
+        }) = &mut self.read
             && !search.query.is_empty()
         {
             search.want = Some(Want::Step { forward });
@@ -321,8 +325,8 @@ impl Ui {
 
     // Whether the frame must lay every line out for the search.
     pub(super) fn search_due(&self) -> bool {
-        match &self.focus {
-            Focus::Read(read) => read.search.as_ref().is_some_and(|s| s.want.is_some()),
+        match &self.read {
+            Some(read) => read.search.as_ref().is_some_and(|s| s.want.is_some()),
             _ => false,
         }
     }
@@ -331,7 +335,7 @@ impl Ui {
     // line the window then opens on.
     pub(super) fn search_answer(&mut self, laid: &[Laid]) {
         let view = self.view_places();
-        let Focus::Read(read) = &mut self.focus else {
+        let Some(read) = &mut self.read else {
             return;
         };
         let mut missed = None;
@@ -435,10 +439,10 @@ impl Ui {
     // and the top row a jump left the view on.
     pub(super) fn search_settle(&mut self) {
         let top = self.top_place();
-        if let Focus::Read(Read {
+        if let Some(Read {
             search: Some(search),
             ..
-        }) = &mut self.focus
+        }) = &mut self.read
         {
             if search.from.is_none() {
                 search.from = top;

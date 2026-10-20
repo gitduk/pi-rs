@@ -30,15 +30,18 @@ pub enum Mode {
 /// the menu claims never reaches the editor underneath it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum When {
-    // A page read, not typed into. It has the keyboard: the editor's
-    // layers are not consulted under it.
-    Pager,
+    // A page is up over the transcript: `esc` closes it before it can reach
+    // the run.
+    Page,
     // A list's movement and dismissal keys, over the line while completing.
     Menu,
     // A turn is in flight.
     Run,
     // Only in that mode, and only while vim keys are on at all.
     Mode(Mode),
+    // Normal with nothing on the line and a page up: the line has nothing
+    // to move through, so its movement keys move the page.
+    NormalPage,
     // Normal with nothing on the line. Tried before `Mode`, so a key naming
     // the empty line wins over the layer that holds either way.
     NormalEmpty,
@@ -49,8 +52,8 @@ pub enum When {
     App,
 }
 
-/// Who has the keyboard, which picks the set of keys read. Only the line's
-/// two stack the editor's layers; the others shut them out.
+/// What is over the line, which picks the set of keys read: the line's own
+/// layers, under a completion list's when one is up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Surface {
     #[default]
@@ -58,8 +61,6 @@ pub enum Surface {
     // The line, a completion list over it: the list's keys first, and
     // letters still type, to narrow it.
     Completion,
-    // A command's output, a preview or the conversation view.
-    Pager,
 }
 
 /// Which layers are up when a key is pressed. One value rather than three
@@ -75,6 +76,8 @@ pub struct Layers {
     /// Whether the line has anything on it. Read only in Normal, by the keys
     /// that command the history instead when there is nothing to command.
     pub line_empty: bool,
+    /// Whether a page is up over the transcript.
+    pub page: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -152,19 +155,13 @@ pub enum Action {
     EditExternally,
     // A clipboard image, saved to a file whose path goes on the line.
     PasteImage,
-    PagerDown,
-    PagerUp,
-    PagerHalfDown,
-    PagerHalfUp,
-    PagerPageDown,
-    PagerPageUp,
-    PagerTop,
-    PagerBottom,
-    PagerClose,
-    // A string to find on a page: typed on the bottom row, then stepped.
-    PagerSearch,
-    PagerSearchNext,
-    PagerSearchPrev,
+    // A page up over the transcript, a row at a time.
+    ScrollLineDown,
+    ScrollLineUp,
+    PageClose,
+    // The next and previous match of what the page was searched for.
+    PageSearchNext,
+    PageSearchPrev,
 }
 
 struct Binding {
@@ -348,29 +345,22 @@ const BINDINGS: &[Binding] = &[
         id: "view.scroll-up",
         action: A::ScrollPageUp,
         when: W::Editor,
-        keys: &["pageup"],
+        keys: &["pageup", "ctrl+b"],
         note: "",
     },
     Binding {
         id: "view.scroll-down",
         action: A::ScrollPageDown,
         when: W::Editor,
-        keys: &["pagedown"],
+        keys: &["pagedown", "ctrl+f"],
         note: "",
     },
     Binding {
-        id: "view.scroll-half-up",
-        action: A::ScrollHalfUp,
+        id: "view.search",
+        action: A::BrowseSearch,
         when: W::Editor,
-        keys: &["ctrl+b"],
-        note: "",
-    },
-    Binding {
-        id: "view.scroll-half-down",
-        action: A::ScrollHalfDown,
-        when: W::Editor,
-        keys: &["ctrl+f"],
-        note: "",
+        keys: &["ctrl+s"],
+        note: "the page up, or the conversation alone",
     },
     Binding {
         id: "app.exit",
@@ -450,7 +440,7 @@ const BINDINGS: &[Binding] = &[
         action: A::BrowseSearch,
         when: W::Mode(Mode::Normal),
         keys: &["/"],
-        note: "the conversation alone, searched",
+        note: "the page up, or the conversation alone",
     },
     Binding {
         id: "normal.move.char.left",
@@ -649,86 +639,44 @@ const BINDINGS: &[Binding] = &[
         note: "",
     },
     Binding {
-        id: "pager.down",
-        action: A::PagerDown,
-        when: W::Pager,
-        keys: &["j", "down"],
-        note: "",
-    },
-    Binding {
-        id: "pager.up",
-        action: A::PagerUp,
-        when: W::Pager,
-        keys: &["k", "up"],
-        note: "",
-    },
-    Binding {
-        id: "pager.half-down",
-        action: A::PagerHalfDown,
-        when: W::Pager,
-        keys: &["ctrl+d", "J"],
-        note: "",
-    },
-    Binding {
-        id: "pager.half-up",
-        action: A::PagerHalfUp,
-        when: W::Pager,
-        keys: &["ctrl+u", "K"],
-        note: "",
-    },
-    Binding {
-        id: "pager.page-down",
-        action: A::PagerPageDown,
-        when: W::Pager,
-        keys: &["ctrl+f", "pagedown"],
-        note: "",
-    },
-    Binding {
-        id: "pager.page-up",
-        action: A::PagerPageUp,
-        when: W::Pager,
-        keys: &["ctrl+b", "pageup"],
-        note: "",
-    },
-    Binding {
-        id: "pager.top",
-        action: A::PagerTop,
-        when: W::Pager,
-        keys: &["g g"],
-        note: "",
-    },
-    Binding {
-        id: "pager.bottom",
-        action: A::PagerBottom,
-        when: W::Pager,
-        keys: &["G"],
-        note: "",
-    },
-    Binding {
-        id: "pager.close",
-        action: A::PagerClose,
-        when: W::Pager,
-        keys: &["q", "esc", "enter", "v"],
+        id: "page.close",
+        action: A::PageClose,
+        when: W::Page,
+        keys: &["esc"],
         note: "a command's output, a preview, or the conversation view",
     },
     Binding {
-        id: "pager.search",
-        action: A::PagerSearch,
-        when: W::Pager,
-        keys: &["/"],
+        id: "page.down",
+        action: A::ScrollLineDown,
+        when: W::NormalPage,
+        keys: &["j"],
         note: "",
     },
     Binding {
-        id: "pager.search-next",
-        action: A::PagerSearchNext,
-        when: W::Pager,
+        id: "page.up",
+        action: A::ScrollLineUp,
+        when: W::NormalPage,
+        keys: &["k"],
+        note: "",
+    },
+    Binding {
+        id: "page.quit",
+        action: A::PageClose,
+        when: W::NormalPage,
+        keys: &["q"],
+        note: "",
+    },
+    Binding {
+        id: "page.search-next",
+        action: A::PageSearchNext,
+        when: W::NormalPage,
         keys: &["n"],
         note: "",
     },
     Binding {
-        id: "pager.search-prev",
-        action: A::PagerSearchPrev,
-        when: W::Pager,
+        id: "page.search-prev",
+        action: A::PageSearchPrev,
+        when: W::NormalPage,
         keys: &["N"],
         note: "",
     },
@@ -943,12 +891,14 @@ impl Keys {
 // The layers consulted for `layers`, innermost first.
 fn live(layers: Layers) -> Vec<When> {
     let mut live = match layers.surface {
-        Surface::Pager => return vec![When::Pager, When::App],
-        // `menu.dismiss` and `run.interrupt` both claim `esc`; dismissing
-        // clears the menu so the next press reaches the run.
         Surface::Completion => vec![When::Menu],
-        Surface::Editor => Vec::with_capacity(6),
+        Surface::Editor => Vec::with_capacity(8),
     };
+    // `menu.dismiss`, `page.close` and `run.interrupt` all claim `esc`:
+    // each press takes away the nearest, the next reaches the one under.
+    if layers.page {
+        live.push(When::Page);
+    }
     if layers.run {
         live.push(When::Run);
     }
@@ -956,6 +906,9 @@ fn live(layers: Layers) -> Vec<When> {
         // The line's own layer first: a key that names the empty line wins
         // over the layer that holds whether or not there is one.
         if mode == Mode::Normal && layers.line_empty {
+            if layers.page {
+                live.push(When::NormalPage);
+            }
             live.push(When::NormalEmpty);
         }
         live.push(When::Mode(mode));
@@ -1003,31 +956,32 @@ mod tests {
         ..Mods::NONE
     };
 
-    // A page reads its own keys and the app's,
-    // never the editor's: one place has the keyboard.
+    // A page takes no keys from the line: `esc` closes it, and in Normal
+    // with nothing typed the line's movement keys move it.
     #[test]
-    fn a_pager_has_the_keyboard() {
+    fn a_page_borrows_only_what_the_empty_line_does_not_need() {
         let k = Keys::default();
-        let pager = Layers {
-            surface: Surface::Pager,
+        let page = Layers {
+            surface: Surface::Editor,
             run: true,
             mode: Some(Mode::Normal),
             line_empty: true,
+            page: true,
         };
-        assert_eq!(k.action(press("j"), pager), Some(Action::PagerDown));
-        assert_eq!(
-            k.action(press("ctrl+d"), pager),
-            Some(Action::PagerHalfDown)
-        );
-        assert_eq!(k.action(press("ctrl+w"), pager), None, "the editor's");
-        assert_eq!(k.action(press("ctrl+c"), pager), Some(Action::AppCancel));
-        assert_eq!(
-            k.hit(Some(press("g")), press("g"), pager),
-            Some(Hit {
-                action: Action::PagerTop,
-                pair: true
-            })
-        );
+        assert_eq!(k.action(press("esc"), page), Some(Action::PageClose));
+        assert_eq!(k.action(press("j"), page), Some(Action::ScrollLineDown));
+        assert_eq!(k.action(press("J"), page), Some(Action::ScrollHalfDown));
+        let typed = Layers {
+            line_empty: false,
+            ..page
+        };
+        assert_eq!(k.action(press("j"), typed), Some(Action::HistoryNewer));
+        let insert = Layers {
+            mode: Some(Mode::Insert),
+            ..page
+        };
+        assert_eq!(k.action(press("j"), insert), None, "typed, not bound");
+        assert_eq!(k.action(press("esc"), insert), Some(Action::PageClose));
     }
 
     // `esc esc` is a rewind only where nothing nearer claims `esc`: with a
@@ -1100,6 +1054,7 @@ mod tests {
                     run: true,
                     mode: None,
                     line_empty: false,
+                    page: false,
                 }
             ),
             Some(Action::MenuDismiss)
@@ -1133,6 +1088,7 @@ mod tests {
                             run: true,
                             mode,
                             line_empty: false,
+                            page: false,
                         }
                     ),
                     Some(Action::RunInterrupt),
@@ -1202,7 +1158,10 @@ mod tests {
         for b in BINDINGS {
             // Both halves of Normal: about what it does to pre-vim bindings,
             // not the modal keys themselves.
-            if matches!(b.when, W::Mode(_) | W::NormalEmpty | W::Pager) {
+            if matches!(
+                b.when,
+                W::Mode(_) | W::NormalEmpty | W::NormalPage | W::Page
+            ) {
                 continue;
             }
             for spec in b.keys {
@@ -1219,6 +1178,7 @@ mod tests {
                     run: b.when == W::Run,
                     mode: None,
                     line_empty: false,
+                    page: false,
                 };
                 assert_eq!(
                     k.hit(prev, press, insert),

@@ -172,7 +172,9 @@ impl Ui {
                     let said = copy_out(&code);
                     self.flash(said);
                 }
-                Some(TextClick::Close) => self.focus = super::ui::Focus::Editor,
+                Some(TextClick::Close) => {
+                    self.close_page();
+                }
                 None => {}
             },
             _ => {
@@ -194,7 +196,7 @@ impl Ui {
                 {
                     // Too long or too wide to read in place: read on a page of
                     // its own, the line clicked heading it, left folded here.
-                    if matches!(self.focus, super::ui::Focus::Editor)
+                    if self.read.is_none()
                         && let Some((head, body)) = row.opening(line, &self.paint, width)
                         && (body.len() > self.regions.history.height as usize / 2
                             || row.clipped(width))
@@ -502,7 +504,7 @@ pub(super) struct Regions {
     pub(super) history: Rect,
     // The blank row under it, which says what is below once scrolled up.
     pub(super) gap: Rect,
-    // The completion list or the rewind selector.
+    // The completion list.
     pub(super) menu: Rect,
     // The bar: the checkouts, or the flash that took its row.
     pub(super) bar: Rect,

@@ -5,7 +5,6 @@ use super::call::{RunTool, push_tool_row};
 use super::row::Row;
 use super::scrollback::f_entry;
 use super::search::Spot;
-use super::ui::Focus;
 use super::view::{StreamKind, Surface, View, snapshot};
 use crate::render;
 use crate::status;
@@ -349,7 +348,7 @@ impl Ui {
         view.surface = Surface::from(session, &self.paint, folded, root);
         view.drawn = true;
         // A page held to a transcript row: those rows are new ones now.
-        if let Focus::Read(read) = &mut self.focus
+        if let Some(read) = &mut self.read
             && read.top.is_some_and(|a| !matches!(a.spot, Spot::Text(_)))
         {
             read.top = None;

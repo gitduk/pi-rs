@@ -125,7 +125,11 @@ pub(super) fn switch_to(tui: &mut crate::tui::Tui, lane: Lane) {
 }
 
 pub(super) fn vim_ui() -> crate::tui::Ui {
-    let mut ui = test_ui(80, 24);
+    vim_ui_at(80, 24)
+}
+
+pub(super) fn vim_ui_at(width: u16, height: u16) -> crate::tui::Ui {
+    let mut ui = test_ui(width, height);
     ui.set_vim(&pi_store::config::Vim {
         enabled: true,
         ..Default::default()

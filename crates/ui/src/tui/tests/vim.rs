@@ -424,8 +424,8 @@ fn v_opens_the_conversation_view_on_an_empty_line() {
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     // The page's own scroll; the transcript's stays where it was.
-    let page = |ui: &crate::tui::Ui| match &ui.focus {
-        crate::tui::ui::Focus::Read(read) => read.scroll,
+    let page = |ui: &crate::tui::Ui| match &ui.read {
+        Some(read) => read.scroll,
         _ => usize::MAX,
     };
     ui.vim = Some(Mode::Normal);
@@ -443,10 +443,10 @@ fn v_opens_the_conversation_view_on_an_empty_line() {
     ui.key(&lane, &mut view, typed('v'), false);
     assert!(ui.browsing());
 
-    // The keys in here are its own: `x` would delete a character in
-    // Normal, and `k` scrolls back rather than reaching for history.
+    // The line is still Normal's: `x` deletes nothing from an empty line,
+    // and `k` there scrolls the page back rather than reaching for history.
     ui.key(&lane, &mut view, typed('x'), false);
-    assert_eq!(ui.editor.text(), "", "nothing types into a hidden line");
+    assert_eq!(ui.editor.text(), "");
     ui.key(&lane, &mut view, typed('k'), false);
     assert!(page(&ui) > 0, "k walked the conversation back");
 
@@ -538,11 +538,35 @@ fn slash_in_normal_searches_the_conversation() {
     assert_eq!(ui.drawn[0].trim(), "answer 1");
     // The page came with the search, and goes with it.
     press(&mut ui, &mut view, esc);
-    assert!(!ui.reading(), "esc is back on the line");
+    assert!(ui.read.is_none(), "esc is back on the line");
     // So does backing out of an empty `/`.
     let backspace =
         crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
     press(&mut ui, &mut view, typed('/'));
     press(&mut ui, &mut view, backspace);
-    assert!(!ui.reading(), "backspace is back on the line");
+    assert!(ui.read.is_none(), "backspace is back on the line");
+}
+
+// A page opened over an empty line in Insert puts it in Normal, so its letters
+// move the page; closing the page puts the line back in Insert.
+#[test]
+fn a_page_borrows_normal_and_gives_it_back() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut ui = vim_ui();
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    assert_eq!(ui.vim, Some(Mode::Insert));
+    let long = (0..100).map(|n| format!("row {n}"));
+    ui.open_slash(pi_store::listing::Listing::say(long));
+    ui.flush(&lane, &mut view);
+    assert_eq!(ui.vim, Some(Mode::Normal));
+    let scroll = |ui: &crate::tui::Ui| ui.read.as_ref().map(|r| r.scroll);
+    let before = scroll(&ui);
+    ui.key(&lane, &mut view, typed('j'), false);
+    ui.flush(&lane, &mut view);
+    assert_ne!(scroll(&ui), before, "j moved the page");
+    let esc = crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    ui.key(&lane, &mut view, esc, false);
+    assert!(ui.read.is_none());
+    assert_eq!(ui.vim, Some(Mode::Insert));
 }

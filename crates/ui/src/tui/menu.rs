@@ -2,7 +2,6 @@
 //! `/rewind`: what they offer and how they read. `keys` drives them.
 use super::Ui;
 use super::mouse::at_row_name;
-use super::ui::Focus;
 use pi_core::core;
 use pi_core::input::commands::{Candidate, Choice};
 use pi_store::keys::Action;
@@ -16,7 +15,8 @@ use unicode_width::UnicodeWidthStr;
 impl Ui {
     // What the line could become: a completion while a command word is typed.
     pub(super) fn menu(&mut self) -> Vec<MenuEntry> {
-        if matches!(self.focus, Focus::Read(_)) {
+        // The line's row is the query's while one is typed.
+        if self.search_typing() {
             return Vec::new();
         }
         if self.picked_for.as_deref() != Some(self.editor.text()) {

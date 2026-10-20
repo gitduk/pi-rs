@@ -1,6 +1,6 @@
-//! The reading page: the transcript region alone, the editor hidden, read
-//! with the pager keys. It reads the conversation, or lines of their own —
-//! what a command answered, or what a step opens.
+//! The reading page: what the history region shows in the transcript's
+//! place, the line still under it with the keys. It reads the conversation,
+//! or lines of their own — what a command answered, or what a step opens.
 //!
 //! The page keeps its own scroll, so the transcript's is where it was when
 //! the page closes.
@@ -9,8 +9,8 @@ use ratatui::text::Line;
 
 use super::Ui;
 use super::search::Anchor;
-use super::ui::Focus;
 use super::view::View;
+use pi_store::keys::Mode;
 use pi_store::listing::Listing;
 
 // A line of a text page: the code block a click on it copies when it is
@@ -45,6 +45,9 @@ pub(super) struct Read {
     pub(super) top: Option<Anchor>,
     // What the page is searched for, `/` on.
     pub(super) search: Option<Box<super::search::Search>>,
+    // The mode the line goes back to when the page closes, if opening it
+    // moved the line to Normal.
+    back: Option<Mode>,
 }
 
 pub(super) enum Page {
@@ -59,17 +62,13 @@ pub(super) enum Page {
 }
 
 impl Ui {
-    pub(super) fn reading(&self) -> bool {
-        matches!(self.focus, Focus::Read(_))
-    }
-
     pub(super) fn browsing(&self) -> bool {
         matches!(self.page(), Some(Page::Conversation))
     }
 
     pub(super) fn page(&self) -> Option<&Page> {
-        match &self.focus {
-            Focus::Read(read) => Some(&read.page),
+        match &self.read {
+            Some(read) => Some(&read.page),
             _ => None,
         }
     }
@@ -104,17 +103,39 @@ impl Ui {
             // From its first line: the draw stops `TOP` at the output's head.
             self.open_page(Page::Slash(lines), super::screen::TOP);
         } else if matches!(self.page(), Some(Page::Slash(_))) {
-            self.focus = Focus::Editor;
+            self.close_page();
         }
     }
 
     fn open_page(&mut self, page: Page, scroll: usize) {
-        self.focus = Focus::Read(Read {
+        // Over an empty line in Insert, Normal: its letters move the page.
+        // A page replacing a page keeps the mode the first came from.
+        let back = match self.read.take() {
+            Some(read) => read.back,
+            None if self.editor.is_empty() && self.vim == Some(Mode::Insert) => {
+                self.set_mode(Mode::Normal);
+                Some(Mode::Insert)
+            }
+            None => None,
+        };
+        self.read = Some(Read {
             page,
             scroll,
             top: None,
             search: None,
+            back,
         });
+    }
+
+    // The transcript back in the history region; false when no page was up.
+    pub(super) fn close_page(&mut self) -> bool {
+        let Some(read) = self.read.take() else {
+            return false;
+        };
+        if let Some(mode) = read.back {
+            self.set_mode(mode);
+        }
+        true
     }
 
     // The scroll and top row of what is up: the page's, else the transcript's.
@@ -122,8 +143,8 @@ impl Ui {
         &'a mut self,
         view: &'a mut View,
     ) -> (&'a mut usize, &'a mut Option<Anchor>) {
-        match &mut self.focus {
-            Focus::Read(read) => (&mut read.scroll, &mut read.top),
+        match &mut self.read {
+            Some(read) => (&mut read.scroll, &mut read.top),
             _ => (&mut view.surface.scroll, &mut view.surface.top),
         }
     }

@@ -68,9 +68,9 @@ pub(super) struct Ui {
     pub(super) lists: Lists,
     // The same copy, of the same list `/help` prints.
     pub(super) commands: Arc<Vec<Command>>,
-    // Where keys land. One place at a time: what draws a caret, takes a
-    // paste or answers the wheel is read off this, not off flags beside it.
-    pub(super) focus: Focus,
+    // The page up over the transcript, if any. The line keeps the keys
+    // under it; the page only decides what the history region shows.
+    pub(super) read: Option<Read>,
     // The press before this one, for the pairs the key table binds.
     pub(super) last_press: Option<LastPress>,
     // How long a bare character waits for the second of its pair.
@@ -143,14 +143,6 @@ pub(super) struct Ui {
     // The rows under the window the last frame drew; scrolled up, the row
     // under the history says so, and a click on it goes down to them.
     pub(super) below: usize,
-}
-
-/// Who has the keyboard.
-pub(super) enum Focus {
-    // The line, with completions over it while what is typed has some.
-    Editor,
-    // The reading page, the editor hidden; `browse.rs` keeps it.
-    Read(Read),
 }
 
 /// A press, kept for the one after it.
@@ -241,7 +233,7 @@ impl Ui {
             dismissed_at: None,
             seeded: None,
             said: Vec::new(),
-            focus: Focus::Editor,
+            read: None,
             last_press: None,
             pair_window: std::time::Duration::ZERO,
             at_menu: None,

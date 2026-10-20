@@ -449,7 +449,7 @@ fn a_panel_dims_the_transcript_under_it() {
     ui.open_slash(pi_store::listing::Listing::say(["/status answered"]));
     ui.flush(&lane, &mut view);
     assert!(dimmed(&ui), "under the panel");
-    ui.focus = crate::tui::ui::Focus::Editor;
+    ui.read = None;
     ui.flush(&lane, &mut view);
     assert!(!dimmed(&ui), "the panel closed");
 }
@@ -459,7 +459,7 @@ fn a_panel_dims_the_transcript_under_it() {
 #[test]
 fn a_search_brings_each_line_holding_it_to_the_top() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    let mut ui = test_ui(30, 12);
+    let mut ui = vim_ui_at(30, 12);
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     ui.preview(
@@ -501,16 +501,15 @@ fn a_search_brings_each_line_holding_it_to_the_top() {
     // The row the search took comes back, and the page is still at its end.
     press(&mut ui, &mut view, key(KeyCode::Esc));
     assert!(ui.drawn.iter().any(|r| r.starts_with("line 99")));
-    assert!(ui.reading(), "esc leaves the query, not the page");
+    assert!(ui.read.is_some(), "esc leaves the query, not the page");
 }
 
 // A slash page searches its own lines, not the transcript it was typed
-// over, though both hold the query. Long enough to page: a page that fits
-// gives `/` to the line.
+// over, though both hold the query.
 #[test]
 fn a_command_page_searches_only_its_own_lines() {
     use ratatui::style::Modifier;
-    let mut ui = test_ui(30, 12);
+    let mut ui = vim_ui_at(30, 12);
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     view.surface.scrollback = vec![Row::notice("beta in the transcript")].into();
@@ -531,13 +530,13 @@ fn a_command_page_searches_only_its_own_lines() {
             .contains(Modifier::REVERSED)
     };
     assert!(marked("beta"), "the page's own");
-    assert!(ui.reading(), "a page past its region keeps `/` for search");
+    assert!(ui.read.is_some());
 }
 
 // The query is edited with the line's own keys: `ctrl+w` takes a word.
 #[test]
 fn a_search_query_takes_the_line_editing_keys() {
-    let mut ui = test_ui(30, 12);
+    let mut ui = vim_ui_at(30, 12);
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     ui.preview(vec![Line::from("head").into()]);
@@ -550,14 +549,14 @@ fn a_search_query_takes_the_line_editing_keys() {
     assert_eq!(query(&ui).as_deref(), Some("/one "));
     ui.key(&lane, &mut view, ctrl('u'), false);
     assert_eq!(query(&ui).as_deref(), Some("/"));
-    assert!(ui.reading());
+    assert!(ui.read.is_some());
 }
 
 // What is counted is what is drawn: an escape the frame drops holds no
 // match, and a line wrapping past the window is stepped row by row.
 #[test]
 fn a_search_counts_what_is_drawn_and_reaches_rows_below_the_window() {
-    let mut ui = test_ui(30, 12);
+    let mut ui = vim_ui_at(30, 12);
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     let long = (0..200)
@@ -595,7 +594,7 @@ fn a_search_counts_what_is_drawn_and_reaches_rows_below_the_window() {
 // A paste while the query is typed goes on the query.
 #[test]
 fn a_paste_goes_on_the_query() {
-    let mut ui = test_ui(30, 12);
+    let mut ui = vim_ui_at(30, 12);
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     ui.preview(vec![Line::from("head").into()]);
