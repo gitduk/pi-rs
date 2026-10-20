@@ -192,12 +192,13 @@ pub(super) struct Tab {
 }
 
 impl Ui {
-    // What leaves with the checkout: the half-typed line (parked in its
-    // lane's view, not the shared editor) and lane-scoped state (flash, a seeded line).
+    // What leaves with the checkout: the half-typed line, parked in its lane's
+    // view, and the state that was that lane's.
     pub(super) fn leave_lane(&mut self, view: &mut View) {
         view.draft = self.editor.take_composing();
         self.flash = None;
         self.seeded = None;
+        self.said.clear();
     }
 
     pub(super) fn new(

@@ -15,9 +15,10 @@ use unicode_width::UnicodeWidthStr;
 impl Ui {
     // What the line could become: a completion while a command word is typed.
     pub(super) fn menu(&mut self) -> Vec<MenuEntry> {
-        // The line's row is the query's while one is typed.
+        // The line's row is the query's while one is typed; the list, the
+        // lines it is found on.
         if self.search_typing() {
-            return Vec::new();
+            return self.search_menu();
         }
         if self.picked_for.as_deref() != Some(self.editor.text()) {
             self.picked_for = Some(self.editor.text().to_string());
@@ -191,6 +192,8 @@ impl Ui {
         } else {
             at.saturating_sub(1)
         });
+        // A search's list moves the view with it.
+        self.search_follow();
     }
 }
 
@@ -202,7 +205,8 @@ pub(super) enum Path {
     Cd,
 }
 
-// One row the menu can offer: a completion of the line, or a path.
+// One row the menu can offer: a completion of the line, a path, or a line
+// a search found.
 #[derive(Clone)]
 pub(super) enum MenuEntry {
     Completion(Candidate),
@@ -219,6 +223,11 @@ pub(super) enum MenuEntry {
         // As a `Candidate`'s: Enter takes it only once moved to.
         picked_only: bool,
     },
+    // A line the query is found on; its note says how often, past once.
+    Hit {
+        show: String,
+        note: String,
+    },
 }
 
 impl MenuEntry {
@@ -226,6 +235,7 @@ impl MenuEntry {
         match self {
             MenuEntry::Completion(c) => &c.show,
             MenuEntry::File { show, .. } => show,
+            MenuEntry::Hit { show, .. } => show,
         }
     }
 
@@ -233,6 +243,7 @@ impl MenuEntry {
         match self {
             MenuEntry::Completion(c) => &c.help,
             MenuEntry::File { path, .. } => path,
+            MenuEntry::Hit { note, .. } => note,
         }
     }
 }

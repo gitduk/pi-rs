@@ -185,7 +185,10 @@ impl Ui {
                         self.apply_file(start, end, lead, &path, dir);
                         Asked::Own(Deed::Nothing)
                     }
-                    Some(MenuEntry::Completion(_) | MenuEntry::File { .. }) | None => {
+                    Some(
+                        MenuEntry::Completion(_) | MenuEntry::File { .. } | MenuEntry::Hit { .. },
+                    )
+                    | None => {
                         let typed = self.editor.take();
                         self.run_line(typed)
                     }
@@ -343,6 +346,7 @@ impl Ui {
                     dir,
                     ..
                 }) => self.apply_file(start, end, lead, &path, dir),
+                Some(MenuEntry::Hit { .. }) => self.search_accept(),
                 None => {}
             },
             Some(action @ (Action::MenuNext | Action::MenuPrevious)) => self.step_menu(action),

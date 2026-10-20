@@ -89,6 +89,11 @@ pub fn spent(t: &llm::Totals) -> String {
     parts.join(icons::PART_SEP)
 }
 
+/// How many times something came up, as every count beside it is written.
+pub fn times(n: usize) -> String {
+    format!("×{n}")
+}
+
 /// A file's size, in the largest unit that keeps it above one.
 pub fn size(bytes: u64) -> String {
     match bytes {

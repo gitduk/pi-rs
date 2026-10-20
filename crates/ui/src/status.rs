@@ -46,7 +46,7 @@ pub fn render(segment: Segment, s: &Snapshot) -> Option<String> {
         Segment::Compacted if s.compactions == 0 => return None,
         // A count only past one: a second pass in a run is the thing to notice.
         Segment::Compacted if s.compactions == 1 => "compacted".to_string(),
-        Segment::Compacted => format!("compacted ×{}", s.compactions),
+        Segment::Compacted => format!("compacted {}", pi_store::text::times(s.compactions)),
         Segment::Queued if s.queued == 0 => return None,
         Segment::Queued => format!("{} queued", s.queued),
         Segment::Model if s.model.is_empty() => return None,

@@ -819,3 +819,47 @@ fn a_double_click_takes_a_cell_of_a_wide_table() {
     let at = crate::tui::select::Point { row, col: 3 };
     assert_eq!(ui.unit_selection(&view, at).unwrap().1, "---");
 }
+
+// Typing lists the lines holding the query, one row per line however often
+// it holds it; moving down the list moves the view, and Enter keeps it there.
+#[test]
+fn the_search_lists_its_lines_and_enter_keeps_the_pick() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut ui = vim_ui_at(40, 16);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    let lines = ["head", "a cat", "dog", "cat and cat", "bird", "the cat"];
+    let filler = (0..30).map(|n| format!("filler {n}"));
+    ui.preview(
+        (lines.into_iter().map(String::from).chain(filler))
+            .map(|l| Line::from(l).into())
+            .collect(),
+    );
+    let key = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+    let mut press = |ui: &mut crate::tui::Ui, event| {
+        ui.key(&lane, &mut view, event, false);
+        // The list is laid out the frame after the answer.
+        ui.flush(&lane, &mut view);
+        ui.flush(&lane, &mut view);
+    };
+    press(&mut ui, typed('/'));
+    for c in "cat".chars() {
+        press(&mut ui, typed(c));
+    }
+    let listed: Vec<(String, String)> = (ui.menu().iter())
+        .map(|m| (m.show().to_string(), m.help().to_string()))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("a cat".into(), String::new()),
+            ("cat and cat".into(), "×2".into()),
+            ("the cat".into(), String::new()),
+        ]
+    );
+    press(&mut ui, key(KeyCode::Down));
+    assert_eq!(ui.drawn[1].trim_end(), "cat and cat", "the view followed");
+    press(&mut ui, key(KeyCode::Enter));
+    assert!(ui.menu().is_empty(), "the list went with the typing");
+    assert_eq!(ui.drawn[1].trim_end(), "cat and cat", "and the pick stayed");
+}

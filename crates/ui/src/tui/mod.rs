@@ -608,9 +608,11 @@ impl Tui {
             let root = self.core.lane().root();
             self.ui.jobs = jobs.jobs(root);
             self.ui.tools = Some(self.core.lane().agent().brief.clone());
-            // Read only by a line completing it: walking the transcript on
-            // every pass would cost a long session each redraw.
-            if self.ui.editor.text().starts_with(REWIND) {
+            // Walked once per line completing it, not on every pass: the
+            // transcript holds still while `/rewind` is on the line.
+            if !self.ui.editor.text().starts_with(REWIND) {
+                self.ui.said.clear();
+            } else if self.ui.said.is_empty() {
                 self.ui.said = said_of(self.core.lane());
             }
             let body = self.ui.job_open.and_then(|id| jobs.body(root, id));

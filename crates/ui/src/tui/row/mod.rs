@@ -629,7 +629,10 @@ impl Row {
                 // The count wears the muted style whatever the line it trails,
                 // so a repeated warning still reads as one warning.
                 let mut spans = super::screen::spans_of(text);
-                spans.push(paint.span(&paint.theme.muted, format!(" ×{times}")));
+                spans.push(paint.span(
+                    &paint.theme.muted,
+                    format!(" {}", pi_store::text::times(*times)),
+                ));
                 (Line::from(spans), None)
             }
             Kind::Result(r) => (r.line(i, paint, width), None),

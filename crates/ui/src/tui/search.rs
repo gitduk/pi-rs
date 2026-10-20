@@ -11,6 +11,7 @@ use ratatui::text::Line;
 
 use super::Ui;
 use super::browse::{Page, Read};
+use super::menu::MenuEntry;
 use super::mouse::Target;
 use super::screen;
 use super::select;
@@ -103,6 +104,38 @@ pub(super) struct Search {
     shown: Option<Place>,
     // A jump made, its view's top for the frame after it to record.
     placed: bool,
+    // The lines holding the query, in page order, as the list offers them.
+    lines: Vec<Found>,
+}
+
+// A line holding the query: its first hit, and how many it holds.
+struct Found {
+    hit: Hit,
+    // Which laid line it is, and which of every hit its first is.
+    line: usize,
+    first: usize,
+    // The row its first hit is on, as drawn, and how often it holds one.
+    show: String,
+    count: usize,
+}
+
+impl Search {
+    // The view brought to `hit`, the `first`-th of every hit, on laid `line`.
+    fn bring(&mut self, hit: Hit, line: usize, first: usize) {
+        self.at = Some(hit);
+        self.last = (line, hit.at.row);
+        self.count.0 = first + 1;
+        self.placed = true;
+    }
+
+    // The query let go of as typed: the view stays on the hit it was brought
+    // to, unless what was typed is still unanswered or found nothing.
+    fn enter(&mut self) {
+        self.typing = false;
+        if self.want.is_some() || self.at.is_none() {
+            self.want = Some(Want::Typed { entered: true });
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -166,6 +199,7 @@ impl Ui {
                 brought: false,
                 shown: None,
                 placed: false,
+                lines: Vec::new(),
             }));
             // The prompt takes a row off the bottom: the top line stays put.
             read.top = top.map(Anchor::from);
@@ -249,10 +283,7 @@ impl Ui {
         match (key.code, edit) {
             (KeyCode::Esc, _) => dropped = true,
             (KeyCode::Enter, _) if search.query.is_empty() => dropped = true,
-            (KeyCode::Enter, _) => {
-                search.typing = false;
-                search.want = Some(Want::Typed { entered: true });
-            }
+            (KeyCode::Enter, _) => search.enter(),
             // Back past the first character: no query, so no search.
             (_, Some(Action::DeleteCharBack)) if search.query.is_empty() => dropped = true,
             (_, Some(Action::DeleteCharBack)) => {
@@ -280,6 +311,7 @@ impl Ui {
                 None => return false,
             },
         }
+        let listed = search.typing && !dropped;
         if dropped {
             if search.brought {
                 self.close_page();
@@ -288,9 +320,60 @@ impl Ui {
                 read.search = None;
             }
         }
+        // The list went with the typing: a fresh one starts at its pick.
+        if !listed {
+            self.picked = None;
+        }
         // Typed text, not presses: none of it starts a pair.
         self.last_press = None;
         true
+    }
+
+    // The lines holding the query, while it is typed: the list over it.
+    pub(super) fn search_menu(&self) -> Vec<MenuEntry> {
+        match &self.read {
+            Some(Read {
+                search: Some(s), ..
+            }) if s.typing => (s.lines.iter())
+                .map(|f| MenuEntry::Hit {
+                    show: f.show.clone(),
+                    note: match f.count {
+                        1 => String::new(),
+                        n => pi_store::text::times(n),
+                    },
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    // The list's pick taken, as Enter takes it.
+    pub(super) fn search_accept(&mut self) {
+        if let Some(Read {
+            search: Some(search),
+            ..
+        }) = &mut self.read
+        {
+            search.enter();
+        }
+        self.picked = None;
+    }
+
+    // The list moved: the view goes to the line it is on now.
+    pub(super) fn search_follow(&mut self) {
+        let picked = self.picked;
+        let Some(read) = &mut self.read else {
+            return;
+        };
+        let Some(search) = read.search.as_mut().filter(|s| s.typing) else {
+            return;
+        };
+        let Some(found) = picked.and_then(|p| search.lines.get(p)) else {
+            return;
+        };
+        let (hit, line, first) = (found.hit, found.line, found.first);
+        search.bring(hit, line, first);
+        read.top = Some(Anchor::from(hit.at));
     }
 
     // A paste while the query is typed: its first line goes on the query,
@@ -339,6 +422,7 @@ impl Ui {
             return;
         };
         let mut missed = None;
+        let mut listed = None;
         if let Some(search) = &mut read.search
             && let Some(want) = search.want.take()
         {
@@ -407,21 +491,30 @@ impl Ui {
                     .or(n.checked_sub(1)),
                 _ => first_from(from),
             });
-            search.at = next.map(|h| {
-                let (i, r, k) = hits[h];
-                Hit {
-                    at: Place {
-                        spot: laid[i].spot,
-                        row: r,
-                    },
-                    k,
-                }
-            });
-            if let Some(h) = next {
-                search.last = (hits[h].0, hits[h].1);
-            }
-            search.count = (next.map_or(0, |h| h + 1), n);
+            search.count = (0, n);
+            search.at = None;
             search.placed = true;
+            if let Some(h) = next {
+                let (i, r, k) = hits[h];
+                let spot = laid[i].spot;
+                search.bring(
+                    Hit {
+                        at: Place { spot, row: r },
+                        k,
+                    },
+                    i,
+                    h,
+                );
+            }
+            if let Want::Typed { .. } = want {
+                search.lines = found_lines(&hits, laid);
+                // The list picks the line the view was brought to.
+                listed = Some(next.map(|h| {
+                    (search.lines.iter())
+                        .rposition(|f| f.first <= h)
+                        .unwrap_or(0)
+                }));
+            }
             read.top = search.at.map(|h| h.at).or(search.from).map(Anchor::from);
             let entered = matches!(want, Want::Typed { entered: true } | Want::Step { .. });
             if search.at.is_none() && entered {
@@ -431,6 +524,12 @@ impl Ui {
         if let Some(query) = missed {
             self.flash(format!("not found: {query}"));
             // The bar was laid out before this: the next frame says it.
+            self.redraw = true;
+        }
+        if let Some(picked) = listed {
+            self.picked = picked;
+            self.menu_top = 0;
+            // The list was laid out before this too.
             self.redraw = true;
         }
     }
@@ -452,6 +551,34 @@ impl Ui {
             }
         }
     }
+}
+
+// Every hit, grouped by the laid line it is on, in page order.
+fn found_lines(hits: &[(usize, usize, usize)], laid: &[Laid]) -> Vec<Found> {
+    let mut lines: Vec<Found> = Vec::new();
+    for (p, &(i, r, k)) in hits.iter().enumerate() {
+        match lines.last_mut() {
+            Some(f) if f.line == i => f.count += 1,
+            _ => lines.push(Found {
+                hit: Hit {
+                    at: Place {
+                        spot: laid[i].spot,
+                        row: r,
+                    },
+                    k,
+                },
+                line: i,
+                first: p,
+                // A row a line wrapped onto is marked as the rest of one.
+                show: match r {
+                    0 => laid[i].rows[r].trim().to_string(),
+                    _ => format!("{} {}", pi_store::icons::ELLIPSIS, laid[i].rows[r].trim()),
+                },
+                count: 1,
+            }),
+        }
+    }
+    lines
 }
 
 /// A drawn row with each place `query` is found in it underlined, the
