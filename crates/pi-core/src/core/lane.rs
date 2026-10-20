@@ -672,12 +672,13 @@ impl Core {
     /// back.
     ///
     /// The entry decides which of the two it is; a stale pick falls
-    /// through to removing nothing.
-    pub fn rewind_to(&mut self, entry: agent::session::EntryId) -> anyhow::Result<Rewound> {
+    /// through to removing nothing. A failed write still rewound: the
+    /// outcome comes back beside the error, so an unsent prompt is not lost.
+    pub fn rewind_to(&mut self, entry: agent::session::EntryId) -> (Rewound, anyhow::Result<()>) {
         // A rewind is refused while a run has the transcript, so this is the
         // idle path; without it there is nothing to go back through.
         let Some(session) = &mut self.lane_mut().talk.session else {
-            return Ok(Rewound::Nothing);
+            return (Rewound::Nothing, Ok(()));
         };
         let unsent = session.unsent_text(entry);
         let removed = match unsent {
@@ -685,13 +686,14 @@ impl Core {
             None => session.rollback_to(entry),
         };
         if removed == 0 {
-            return Ok(Rewound::Nothing);
+            return (Rewound::Nothing, Ok(()));
         }
-        self.save()?;
-        Ok(match unsent {
+        let saved = self.save();
+        let outcome = match unsent {
             Some(text) => Rewound::Unsent(text),
             None => Rewound::Kept,
-        })
+        };
+        (outcome, saved)
     }
     // Become the session `talk` holds: the journal and spill namespace
     // follow it, replaced whole — nothing of the old session carries over.

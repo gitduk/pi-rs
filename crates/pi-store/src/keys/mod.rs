@@ -33,12 +33,8 @@ pub enum When {
     // A page read, not typed into. It has the keyboard: the editor's
     // layers are not consulted under it.
     Pager,
-    // A list's movement and dismissal keys: over the line while completing,
-    // and under the picker's own letters.
+    // A list's movement and dismissal keys, over the line while completing.
     Menu,
-    // A list that has the keyboard — the rewind selector. Nothing types
-    // under it, so bare letters are free to move it.
-    Picker,
     // A turn is in flight.
     Run,
     // Only in that mode, and only while vim keys are on at all.
@@ -62,8 +58,6 @@ pub enum Surface {
     // The line, a completion list over it: the list's keys first, and
     // letters still type, to narrow it.
     Completion,
-    // The rewind selector.
-    Picker,
     // A command's output, a preview or the conversation view.
     Pager,
 }
@@ -116,8 +110,6 @@ pub enum Action {
     MenuAccept,
     MenuNext,
     MenuPrevious,
-    MenuFirst,
-    MenuLast,
     MenuDismiss,
     RunInterrupt,
     Rewind,
@@ -337,48 +329,6 @@ const BINDINGS: &[Binding] = &[
         when: W::Menu,
         keys: &["esc"],
         note: "until the next keystroke",
-    },
-    Binding {
-        id: "picker.next",
-        action: A::MenuNext,
-        when: W::Picker,
-        keys: &["j"],
-        note: "",
-    },
-    Binding {
-        id: "picker.previous",
-        action: A::MenuPrevious,
-        when: W::Picker,
-        keys: &["k"],
-        note: "",
-    },
-    Binding {
-        id: "picker.first",
-        action: A::MenuFirst,
-        when: W::Picker,
-        keys: &["g g"],
-        note: "",
-    },
-    Binding {
-        id: "picker.last",
-        action: A::MenuLast,
-        when: W::Picker,
-        keys: &["G"],
-        note: "",
-    },
-    Binding {
-        id: "picker.accept",
-        action: A::MenuAccept,
-        when: W::Picker,
-        keys: &["enter"],
-        note: "",
-    },
-    Binding {
-        id: "picker.close",
-        action: A::MenuDismiss,
-        when: W::Picker,
-        keys: &["q"],
-        note: "the rewind selector",
     },
     Binding {
         id: "run.interrupt",
@@ -994,7 +944,6 @@ impl Keys {
 fn live(layers: Layers) -> Vec<When> {
     let mut live = match layers.surface {
         Surface::Pager => return vec![When::Pager, When::App],
-        Surface::Picker => return vec![When::Picker, When::Menu, When::App],
         // `menu.dismiss` and `run.interrupt` both claim `esc`; dismissing
         // clears the menu so the next press reaches the run.
         Surface::Completion => vec![When::Menu],
@@ -1253,7 +1202,7 @@ mod tests {
         for b in BINDINGS {
             // Both halves of Normal: about what it does to pre-vim bindings,
             // not the modal keys themselves.
-            if matches!(b.when, W::Mode(_) | W::NormalEmpty | W::Pager | W::Picker) {
+            if matches!(b.when, W::Mode(_) | W::NormalEmpty | W::Pager) {
                 continue;
             }
             for spec in b.keys {

@@ -31,9 +31,10 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::render::Paint;
 use crate::status;
 use crate::tty;
-use pi_core::core::lane::Run;
+use pi_core::core::lane::{Lane, Run};
 use pi_core::core::{self, Core};
 use pi_core::driver::{Drivers, Origin, Said};
+use pi_core::input::commands::Choice;
 use pi_core::input::{self, Fate, Intent, Rewound, Step};
 use pi_store::keys::Keys;
 use pi_store::listing::Listing;
@@ -41,7 +42,7 @@ use ratatui::text::Line;
 use screen::Screen;
 use std::sync::Arc;
 
-use menu::{Lists, MenuEntry};
+use menu::Lists;
 use run::Done;
 use term::{HISTORY_KEEP, Hold, drop_shared_history, history_of, reader};
 use ui::{Mark, Tab, Ui, following_terminal, lane_name};
@@ -85,12 +86,8 @@ pub(crate) enum Deed {
     // The line being typed wants `$EDITOR`. The surface's own — only it
     // knows how to give the terminal away.
     External,
-    // The rewind selector wants everywhere the session can go back to —
-    // only the surface can overlay the transcript.
+    // `/rewind` on the line, what the user said offered under it.
     Rewind,
-    // A row chosen from it: the conversation rewinds there, kept or
-    // unsent depending on what the row was.
-    To(agent::session::EntryId),
     // Stop the run: from esc, or from the phone's `/stop`.
     Interrupt,
     // Esc caught a prompt on its way out: stop the run, then unsend it.
@@ -104,7 +101,7 @@ impl Deed {
     // care: the run in flight is writing it.
     fn fate(&self) -> Fate {
         match self {
-            Deed::Rewind | Deed::To(_) => {
+            Deed::Rewind => {
                 Fate::Refused("rewinding needs the transcript this run is writing — esc first")
             }
             _ => Fate::Now,
@@ -452,7 +449,6 @@ impl Tui {
             Deed::Interrupt => self.stop_current(false),
             Deed::Unsend => self.stop_current(true),
             Deed::Rewind => self.open_rewind(),
-            Deed::To(id) => self.rewind_turn(id),
             Deed::External => self.edit_externally().await,
             Deed::Job(id) => {
                 self.ui.job_open = (self.ui.job_open != Some(id)).then_some(id);
@@ -610,6 +606,7 @@ impl Tui {
             let root = self.core.lane().root();
             self.ui.jobs = jobs.jobs(root);
             self.ui.tools = Some(self.core.lane().agent().brief.clone());
+            self.ui.said = said_of(self.core.lane());
             let body = self.ui.job_open.and_then(|id| jobs.body(root, id));
             self.ui.job_open = self.ui.job_open.filter(|_| body.is_some());
             self.ui.job_body = body.unwrap_or_default();
@@ -752,6 +749,7 @@ impl Tui {
                     typed,
                 } => self.start_fetch(prompt, args, typed, origin, &fetched_tx),
                 Step::Swap(said) => self.land_swap(said),
+                Step::Rewound(rewound, unsaved) => self.land_rewound(rewound, unsaved),
                 Step::Moved(said) => {
                     self.follow_root();
                     self.land_notice(said);
@@ -844,14 +842,23 @@ impl Tui {
         Some((next.origin, wake))
     }
 
-    // Cut the transcript at an entry — chosen from the selector, or the
-    // prompt an Esc took back — and say what is left.
+    // Cut the transcript at the prompt an Esc took back, and say what is left.
     fn rewind_turn(&mut self, id: EntryId) {
-        match self.core.rewind_to(id) {
-            Ok(Rewound::Nothing) => {
+        let (outcome, saved) = self.core.rewind_to(id);
+        self.land_rewound(outcome, saved.err().map(|e| core::not_saved(&e)));
+    }
+
+    // The transcript went back: the view follows it, and says where it ends.
+    // Written or not, it went back; a failed write is a notice on top.
+    fn land_rewound(&mut self, outcome: Rewound, unsaved: Option<String>) {
+        if let Some(why) = unsaved {
+            self.notice(why);
+        }
+        match outcome {
+            Rewound::Nothing => {
                 self.ui.flash(NOTHING_TO_REWIND);
             }
-            Ok(outcome) => {
+            outcome => {
                 // The transcript is truth again: rebuild the whole view
                 // from it, back to the node the conversation returned to.
                 self.rebuild_front();
@@ -881,38 +888,31 @@ impl Tui {
                 self.ui
                     .say_muted(front_view(&mut self.views, self.core.lane()), &said);
             }
-            Err(e) => {
-                self.ui.say(
-                    front_view(&mut self.views, self.core.lane()),
-                    core::not_saved(&e),
-                );
-            }
         }
     }
 
-    // Open the rewind selector on what the user said: a rewind takes a prompt
-    // back, and an answer is a place the conversation carries on from.
+    // `/rewind ` on the line, what the user said completing it.
     fn open_rewind(&mut self) {
-        // A lane whose transcript a run took and could not read back has
-        // nothing to go back to; said, not panicked.
-        let Some(session) = self.core.lane().session() else {
-            self.ui.flash(NOTHING_TO_REWIND);
-            return;
-        };
-        let rows: Vec<MenuEntry> = session
-            .rewind_nodes()
-            .into_iter()
-            .map(|node| MenuEntry::Message {
-                id: node.id(),
-                show: pi_store::text::clip(node.show(), 60),
-            })
-            .collect();
-        if rows.is_empty() {
+        self.ui.said = said_of(self.core.lane());
+        if self.ui.said.is_empty() {
             self.ui.flash(NOTHING_TO_REWIND);
             return;
         }
-        self.ui.open_rewind(rows);
+        self.ui.seed("/rewind ");
     }
+}
+
+// What the user said, for `/rewind`: a rewind takes a prompt back, and an
+// answer is a place the conversation carries on from.
+fn said_of(lane: &Lane) -> Vec<Choice> {
+    lane.session().map_or_else(Vec::new, |session| {
+        (session.rewind_nodes().into_iter())
+            .map(|node| Choice {
+                name: node.id().0.to_string(),
+                note: pi_store::text::clip(node.show(), 60),
+            })
+            .collect()
+    })
 }
 
 #[cfg(test)]

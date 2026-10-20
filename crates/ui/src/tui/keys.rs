@@ -1,5 +1,5 @@
 //! Where a press goes: the key table read against who has the keyboard —
-//! the line, the rewind menu or the reading page — and the mouse.
+//! the line or the reading page — and the mouse.
 use super::browse::Page;
 use super::menu::MenuEntry;
 use super::ui::{Focus, LastPress};
@@ -99,7 +99,6 @@ impl Ui {
         }
         match self.focus {
             Focus::Read(_) => self.pager_key(view, action),
-            Focus::Rewind(_) => self.rewind_key(action),
             Focus::Editor => self.editor_key(lane, view, key, action),
         }
     }
@@ -114,7 +113,6 @@ impl Ui {
     fn layers(&mut self, running: bool) -> Layers {
         let surface = match self.focus {
             Focus::Read(_) => Surface::Pager,
-            Focus::Rewind(_) => Surface::Picker,
             Focus::Editor => {
                 if self.menu().is_empty() {
                     Surface::Editor
@@ -162,7 +160,7 @@ impl Ui {
     fn close_overlay(&mut self) -> bool {
         match self.focus {
             Focus::Editor => return false,
-            Focus::Read(_) | Focus::Rewind(_) => self.focus = Focus::Editor,
+            Focus::Read(_) => self.focus = Focus::Editor,
         }
         self.disarm();
         true
@@ -210,27 +208,6 @@ impl Ui {
         Asked::Own(Deed::Nothing)
     }
 
-    // The rewind selector: move, pick, or close; nothing else reaches it.
-    fn rewind_key(&mut self, action: Option<Action>) -> Asked {
-        match action {
-            Some(action @ (Action::MenuNext | Action::MenuPrevious)) => self.step_menu(action),
-            Some(Action::MenuFirst) => self.picked = Some(0),
-            Some(Action::MenuLast) => self.picked = Some(self.menu().len().saturating_sub(1)),
-            Some(Action::MenuAccept) => {
-                if let Some(MenuEntry::Message { id, .. }) = self.highlighted() {
-                    self.focus = Focus::Editor;
-                    return Asked::Own(Deed::To(id));
-                }
-            }
-            Some(Action::MenuDismiss) => {
-                self.focus = Focus::Editor;
-                self.disarm();
-            }
-            _ => {}
-        }
-        Asked::Own(Deed::Nothing)
-    }
-
     // The line has the keys, a completion list perhaps over it.
     fn editor_key(
         &mut self,
@@ -241,6 +218,7 @@ impl Ui {
     ) -> Asked {
         match action {
             Some(Action::LineSubmit) => {
+                self.seeded = None;
                 // Enter with a menu open runs what's highlighted, the typed
                 // text a mere prefix. Pick before draining the editor.
                 return match self.highlighted() {
@@ -264,12 +242,7 @@ impl Ui {
                         self.apply_file(start, end, lead, &path, dir);
                         Asked::Own(Deed::Nothing)
                     }
-                    Some(
-                        MenuEntry::Completion(_)
-                        | MenuEntry::File { .. }
-                        | MenuEntry::Message { .. },
-                    )
-                    | None => {
+                    Some(MenuEntry::Completion(_) | MenuEntry::File { .. }) | None => {
                         let typed = self.editor.take();
                         self.run_line(typed)
                     }
@@ -416,10 +389,13 @@ impl Ui {
                     dir,
                     ..
                 }) => self.apply_file(start, end, lead, &path, dir),
-                Some(MenuEntry::Message { .. }) | None => {}
+                None => {}
             },
             Some(action @ (Action::MenuNext | Action::MenuPrevious)) => self.step_menu(action),
             Some(Action::MenuDismiss) => {
+                if self.seeded.take().as_deref() == Some(self.editor.text()) {
+                    self.editor.clear();
+                }
                 // Keyed to the text, so any edit brings the list back —
                 // "not that", not "never again".
                 self.dismissed_at = Some(self.editor.text().to_string());

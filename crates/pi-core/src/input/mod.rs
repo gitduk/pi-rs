@@ -35,6 +35,8 @@ pub enum Builtin {
     Name(String),
     // The session to switch to, or empty to list what there is.
     Resume(String),
+    // The id of something said to go back to.
+    Rewind(String),
     // Everything after the word focuses the summary.
     Compact(String),
     // The name to move to, or empty to list what there is.
@@ -113,6 +115,9 @@ impl Intent {
             ) if name.trim().is_empty() => Fate::Now,
             Intent::Builtin(Builtin::Resume(_)) => Fate::Refused(
                 "/resume would replace the transcript this run is writing — stop the run first",
+            ),
+            Intent::Builtin(Builtin::Rewind(_)) => Fate::Refused(
+                "/rewind needs the transcript this run is writing — stop the run first",
             ),
             // A lane of its own to move to, and the one being left keeps
             // working in the tree it was already in.
@@ -289,6 +294,7 @@ fn rest(line: &str) -> String {
 
 /// What a rewind did. Which one it is says whether the entry was unsent or
 /// kept, rather than leaving that to be read off whether a string was there.
+#[derive(Debug)]
 pub enum Rewound {
     // The id named nothing the transcript still holds.
     Nothing,
@@ -344,6 +350,9 @@ pub enum Step {
     // The set of worktrees changed (a removal): drop the cached list, which
     // would keep naming the checkout that just went; with a notice.
     Worktrees(String),
+    // The transcript went back: the surface rebuilds its view from it. With
+    // a notice when it could not be written.
+    Rewound(Rewound, Option<String>),
     Quit,
 }
 
@@ -368,6 +377,7 @@ impl Step {
             | Step::Swap(_)
             | Step::Moved(_)
             | Step::Worktrees(_)
+            | Step::Rewound(..)
             | Step::Quit => false,
         }
     }

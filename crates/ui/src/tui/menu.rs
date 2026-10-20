@@ -1,9 +1,8 @@
-//! The lists a surface opens over the editor — completions, `/model`, the
-//! rewind menu: what they offer and how they read. `keys` drives them.
+//! The lists a surface opens over the editor — completions, `/model`,
+//! `/rewind`: what they offer and how they read. `keys` drives them.
 use super::Ui;
 use super::mouse::at_row_name;
 use super::ui::Focus;
-use agent::session::EntryId;
 use pi_core::core;
 use pi_core::input::commands::{Candidate, Choice};
 use pi_store::keys::Action;
@@ -15,13 +14,10 @@ use ratatui::widgets::ListItem;
 use unicode_width::UnicodeWidthStr;
 
 impl Ui {
-    // What the line could become: a completion while a command word is
-    // typed, or (rewind selector open) a message to rewind to.
+    // What the line could become: a completion while a command word is typed.
     pub(super) fn menu(&mut self) -> Vec<MenuEntry> {
-        match &self.focus {
-            Focus::Rewind(rows) => return rows.clone(),
-            Focus::Read(_) => return Vec::new(),
-            Focus::Editor => {}
+        if matches!(self.focus, Focus::Read(_)) {
+            return Vec::new();
         }
         if self.picked_for.as_deref() != Some(self.editor.text()) {
             self.picked_for = Some(self.editor.text().to_string());
@@ -86,6 +82,7 @@ impl Ui {
             pi_core::input::commands::Front {
                 jobs: &jobs,
                 tools: self.tools.as_ref().map(|brief| &brief.registry),
+                said: &self.said,
             },
             || self.lists.sessions(),
             || self.lists.worktrees(),
@@ -97,12 +94,13 @@ impl Ui {
         .collect()
     }
 
-    // Open the rewind selector on the given messages, newest selected first.
-    pub(super) fn open_rewind(&mut self, rows: Vec<MenuEntry>) {
-        self.picked = Some(rows.len().saturating_sub(1));
-        self.picked_for = None;
-        self.menu_top = 0;
-        self.focus = Focus::Rewind(rows);
+    // A command a key starts, on the line for its list to finish: typed into,
+    // so Insert. Dismissing the list untouched takes the line back.
+    pub(super) fn seed(&mut self, line: &str) {
+        self.editor.set_line(line);
+        self.seeded = Some(line.to_string());
+        self.dismissed_at = None;
+        self.leave_normal();
     }
 
     // The highlighted row, clamped: a list can change under the same line.
@@ -204,8 +202,7 @@ pub(super) enum Path {
     Cd,
 }
 
-// One row either menu can offer: a completion of the line, a path, or a
-// message from the rewind selector to go back to.
+// One row the menu can offer: a completion of the line, or a path.
 #[derive(Clone)]
 pub(super) enum MenuEntry {
     Completion(Candidate),
@@ -222,12 +219,6 @@ pub(super) enum MenuEntry {
         // As a `Candidate`'s: Enter takes it only once moved to.
         picked_only: bool,
     },
-    // Something the user said, to rewind to. Every row does the same, so
-    // none carries a note saying what.
-    Message {
-        id: EntryId,
-        show: String,
-    },
 }
 
 impl MenuEntry {
@@ -235,7 +226,6 @@ impl MenuEntry {
         match self {
             MenuEntry::Completion(c) => &c.show,
             MenuEntry::File { show, .. } => show,
-            MenuEntry::Message { show, .. } => show,
         }
     }
 
@@ -243,7 +233,6 @@ impl MenuEntry {
         match self {
             MenuEntry::Completion(c) => &c.help,
             MenuEntry::File { path, .. } => path,
-            MenuEntry::Message { .. } => "",
         }
     }
 }

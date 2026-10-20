@@ -350,6 +350,13 @@ impl Core {
                     }
                 }
             }
+            Intent::Builtin(Builtin::Rewind(id)) => match id.trim().parse() {
+                Ok(id) => {
+                    let (rewound, saved) = self.rewind_to(agent::session::EntryId(id));
+                    Step::Rewound(rewound, saved.err().map(|e| not_saved(&e)))
+                }
+                Err(_) => Step::Notice("/rewind takes the id of something you said".into()),
+            },
             Intent::Builtin(Builtin::Name(name)) => {
                 let said = if name.is_empty() {
                     self.lane_mut().set_name(None);
@@ -478,6 +485,48 @@ mod tests {
         );
         assert_eq!(offered.len(), 1);
         assert_eq!(offered[0].line, "/resume s1");
+    }
+
+    // Enter runs the row nearest the line: an accepted id must leave only its
+    // own row there, not a newer message that happens to hold its digits.
+    #[test]
+    fn an_accepted_rewind_id_offers_only_its_own_row() {
+        let mut notes = Vec::new();
+        let commands = commands(&[], &mut notes);
+        let said = [
+            Choice {
+                name: "12".into(),
+                note: "the first question".into(),
+            },
+            Choice {
+                name: "40".into(),
+                note: "retry issue 12".into(),
+            },
+        ];
+        let offered = |text: &str| -> Vec<String> {
+            crate::input::commands::complete(
+                text,
+                &commands,
+                &[],
+                crate::input::commands::Front {
+                    said: &said,
+                    ..Default::default()
+                },
+                || &[],
+                || &[],
+                || &[],
+            )
+            .into_iter()
+            .map(|c| c.line)
+            .collect()
+        };
+        assert_eq!(offered("/rewind 12"), ["/rewind 12"]);
+        assert_eq!(offered("/rewind ISSUE"), ["/rewind 40"]);
+        assert_eq!(
+            offered("/rewind "),
+            ["/rewind 40", "/rewind 12"],
+            "newest first"
+        );
     }
 
     fn skill(name: &str, description: &str) -> Skill {

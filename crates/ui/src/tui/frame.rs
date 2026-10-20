@@ -297,12 +297,10 @@ impl Ui {
                 return;
             }
             frame.render_widget(Rows(&rows), regions.history);
-            // While the keys are a panel's, the transcript under it steps back so
+            // While the keys are a page's, the transcript under it steps back so
             // the two do not read as one; a menu that comes with typing does not.
             let dim = ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::DIM);
-            if matches!(self.focus, Focus::Rewind(_)) {
-                frame.buffer_mut().set_style(regions.history, dim);
-            } else if slash {
+            if slash {
                 // The transcript the output lies over steps back.
                 let above = self
                     .row_targets

@@ -79,6 +79,12 @@ pub(crate) const BUILTIN: &[Command] = &[
         |_, rest| Intent::Builtin(Builtin::Resume(rest)),
     ),
     Command::builtin(
+        "/rewind",
+        "<said>",
+        "go back to something you said",
+        |_, rest| Intent::Builtin(Builtin::Rewind(rest)),
+    ),
+    Command::builtin(
         "/worktree",
         "[name]",
         "list this repository's worktrees, or work in one — rm removes one",
@@ -512,17 +518,19 @@ fn job_ids(jobs: &[Choice], args: &str) -> Vec<Candidate> {
 }
 
 /// What the front lane gives completion: the jobs running, by id, for `/job`,
-/// and its tools, for `/tool`.
+/// its tools, for `/tool`, and what was said, each named by its entry id,
+/// for `/rewind`.
 #[derive(Clone, Copy, Default)]
 pub struct Front<'a> {
     pub jobs: &'a [Choice],
     pub tools: Option<&'a tool::Registry>,
+    pub said: &'a [Choice],
 }
 
 /// What the line could still become: a command while its word is typed,
 /// then that command's own argument once the word is settled.
 ///
-/// Only args with a known name set are completed (`/model`, `/resume`,
+/// Only args with a known name set are completed (`/model`, `/resume`, `/rewind`,
 /// `/worktree`, `/edit`, `/job`, `/tool`); a prompt or focus phrase is prose, not guessed.
 ///
 /// Sessions, worktrees and files are asked for lazily: walking transcripts,
@@ -537,7 +545,7 @@ pub fn complete<'a>(
     worktrees: impl Fn() -> &'a [Choice],
     editable: impl Fn() -> &'a [Choice],
 ) -> Vec<Candidate> {
-    let Front { jobs, tools } = front;
+    let Front { jobs, tools, said } = front;
     if !line.starts_with('/') {
         return Vec::new();
     }
@@ -627,6 +635,25 @@ pub fn complete<'a>(
         "/worktree" => offer(worktrees(), "/worktree ", typed),
         // A first question is a whole sentence, and a session answers to the
         // name it was given as well, and to its id.
+        // A message is remembered by any word in it; an accepted row's id
+        // names that row alone. Newest first, so nearest the line.
+        "/rewind" => {
+            let lower = typed.to_lowercase();
+            let named = said.iter().any(|s| s.name == typed);
+            (said.iter().rev())
+                .filter(|s| match named {
+                    true => s.name == typed,
+                    false => s.note.to_lowercase().contains(&lower),
+                })
+                .map(|s| Candidate {
+                    show: s.note.clone(),
+                    line: format!("/rewind {}", s.name),
+                    help: String::new(),
+                    more: false,
+                    picked_only: false,
+                })
+                .collect()
+        }
         "/resume" => {
             let offered: Vec<&ResumeChoice> = sessions()
                 .iter()

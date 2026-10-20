@@ -107,6 +107,7 @@ refused, and resuming one from another directory moves it here.
 | Input                              | Does                                          |
 | ---------------------------------- | --------------------------------------------- |
 | `/new`, `/resume [id]`, `/name`    | start, switch, label a session                |
+| `/rewind <said>`, `esc esc`        | go back to something you said                 |
 | `/model [name]`                    | list the models, or move the session to one   |
 | `/effort [level]`                  | `off` `low` `medium` `high`, from now on      |
 | `/worktree [name]`, `/worktree rm` | work in `<repo>.worktrees/<name>`             |

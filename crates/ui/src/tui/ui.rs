@@ -9,7 +9,7 @@ use ratatui::text::Span;
 
 use super::browse::Read;
 use super::editor::Editor;
-use super::menu::{Lists, MenuEntry};
+use super::menu::Lists;
 use super::mouse::{Regions, Target};
 use super::row::Row;
 use super::screen::Screen;
@@ -50,11 +50,15 @@ pub(super) struct Ui {
     // window would pin the highlight to its bottom edge.
     pub(super) menu_top: usize,
     // The line `picked` and `menu_top` were set against: both are positions
-    // in the list it grew, so another line or the rewind list starts over.
+    // in the list it grew, so another line starts over.
     pub(super) picked_for: Option<String>,
     // Text the list was dismissed at. Any edit brings the list back —
     // Esc means "not that", not "never again".
     pub(super) dismissed_at: Option<String>,
+    // A line a key put there, which dismissing its list takes back untouched.
+    pub(super) seeded: Option<String>,
+    // What the front lane's user said, by entry id, for `/rewind`.
+    pub(super) said: Vec<Choice>,
     // The line just submitted, carried to its answer: echoed only once the
     // answer is known to land under it. The recall list hears of it too.
     pub(super) submitted: Option<String>,
@@ -145,8 +149,6 @@ pub(super) struct Ui {
 pub(super) enum Focus {
     // The line, with completions over it while what is typed has some.
     Editor,
-    // The messages a rewind can go back to, session order, newest last.
-    Rewind(Vec<MenuEntry>),
     // The reading page, the editor hidden; `browse.rs` keeps it.
     Read(Read),
 }
@@ -199,13 +201,11 @@ pub(super) struct Tab {
 
 impl Ui {
     // What leaves with the checkout: the half-typed line (parked in its
-    // lane's view, not the shared editor) and lane-scoped state (flash, rewind).
+    // lane's view, not the shared editor) and lane-scoped state (flash, a seeded line).
     pub(super) fn leave_lane(&mut self, view: &mut View) {
         view.draft = self.editor.take_composing();
         self.flash = None;
-        if matches!(self.focus, Focus::Rewind(_)) {
-            self.focus = Focus::Editor;
-        }
+        self.seeded = None;
     }
 
     pub(super) fn new(
@@ -239,6 +239,8 @@ impl Ui {
             menu_top: 0,
             picked_for: None,
             dismissed_at: None,
+            seeded: None,
+            said: Vec::new(),
             focus: Focus::Editor,
             last_press: None,
             pair_window: std::time::Duration::ZERO,

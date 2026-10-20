@@ -11,10 +11,6 @@ fn a_deed_says_whether_a_run_in_flight_allows_it() {
     // Only the two that rewrite the transcript care about a run in flight;
     // the rest are the screen's own and always go through.
     assert!(matches!(Deed::Rewind.fate(), Fate::Refused(_)));
-    assert!(matches!(
-        Deed::To(agent::session::EntryId(1)).fate(),
-        Fate::Refused(_)
-    ));
     for deed in [Deed::Nothing, Deed::External, Deed::Interrupt, Deed::Unsend] {
         assert!(matches!(deed.fate(), Fate::Now), "{deed:?} should proceed");
     }
@@ -80,11 +76,45 @@ async fn an_idle_lane_opens_the_rewind_selector() {
         panic!("an idle lane refused the rewind: {:?}", tui.ui.flash);
     };
     tui.carry(deed).await;
-    assert!(
-        matches!(tui.ui.focus, Focus::Rewind(_)),
-        "the selector opened on what the user said"
+    assert_eq!(tui.ui.editor.text(), "/rewind ");
+    let offered: Vec<String> = tui.ui.menu().iter().map(|m| m.show().to_string()).collect();
+    assert_eq!(
+        offered,
+        ["the first question"],
+        "completing it with what the user said"
     );
     assert!(tui.ui.flash.is_none(), "and nothing was refused");
+}
+
+// The transcript rewinds in memory before it is written: a failed write must
+// still hand the unsent prompt back, its only copy, and say it was not saved.
+#[tokio::test]
+async fn an_unsent_prompt_survives_a_failed_write() {
+    use agent::session::Session;
+
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let mut session = Session::new();
+    session.prompt("the first question");
+    let token = tui.core.lanes[0].token();
+    tui.settle(crate::tui::run::Done {
+        token,
+        kind: crate::tui::run::Kind::Turn,
+        ran: Some((session, Ok(llm::stream::Usage::default()))),
+    })
+    .await;
+    // A file where the store's directory goes: no write gets under it.
+    let state = dir.path().join("state");
+    let _ = std::fs::remove_dir_all(&state);
+    std::fs::write(&state, "").expect("a file in the way");
+    tui.ui.flash = None;
+
+    let id = tui.core.lane().last_ask().expect("the prompt");
+    tui.rewind_turn(id);
+
+    assert_eq!(tui.ui.editor.text(), "the first question");
+    let flash = tui.ui.flash.as_ref().map(|(text, _)| text.as_str());
+    assert!(flash.is_some_and(|f| f.contains("not saved")), "{flash:?}");
 }
 
 // A panicked job leaves the lane idle with nothing in it (`NO_TRANSCRIPT`).
@@ -115,10 +145,7 @@ async fn the_rewind_of_a_lane_with_no_transcript_says_so() {
     };
     tui.carry(deed).await;
 
-    assert!(
-        !matches!(tui.ui.focus, Focus::Rewind(_)),
-        "there is nothing to go back to"
-    );
+    assert!(tui.ui.editor.is_empty(), "there is nothing to go back to");
 }
 
 // `/new`, `/worktree` to an open checkout, and `/loop` (which only arms a
@@ -356,49 +383,40 @@ async fn the_stop_that_closed_a_command_page_is_not_half_a_quit() {
     assert!(tui.ui.flash.is_some(), "the second only warns");
 }
 
-// The rewind selector has the keyboard too: a letter neither types nor
-// closes it, and the `esc` that closes it is not the first of another.
+// Esc on the line `esc esc` put there, untouched, takes it back; an edited one
+// stays. The `esc` that does it is not the first of another.
 #[tokio::test]
-async fn the_rewind_selector_has_the_keyboard() {
-    use crate::tui::menu::MenuEntry;
-    use agent::session::EntryId;
+async fn esc_takes_back_the_rewind_line_it_was_given() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use pi_core::input::commands::Choice;
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    tui.ui.open_rewind(vec![MenuEntry::Message {
-        id: EntryId(1),
-        show: "the first question".into(),
-    }]);
+    tui.ui.said = vec![Choice {
+        name: "1".into(),
+        note: "the first question".into(),
+    }];
     let token = tui.core.lane().token();
     let press = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
-
-    let lane = tui.core.lane_mut();
-    tui.ui.key(
-        lane,
-        view_at(&mut tui.views, token),
-        press(KeyCode::Char('x')),
-        false,
-    );
-    assert!(
-        matches!(tui.ui.focus, Focus::Rewind(_)),
-        "a letter is swallowed"
-    );
-    assert!(tui.ui.editor.is_empty());
-
-    for (n, expect_open) in [(1, false), (2, false)] {
+    let key = |tui: &mut crate::tui::Tui, code| {
         let lane = tui.core.lane_mut();
-        let asked = tui.ui.key(
-            lane,
-            view_at(&mut tui.views, token),
-            press(KeyCode::Esc),
-            false,
-        );
+        tui.ui
+            .key(lane, view_at(&mut tui.views, token), press(code), false)
+    };
+
+    tui.ui.seed("/rewind ");
+    for n in 1..=2 {
+        let asked = key(&mut tui, KeyCode::Esc);
         assert!(
             matches!(asked, Asked::Own(Deed::Nothing)),
             "esc {n}: {asked:?}"
         );
-        assert_eq!(matches!(tui.ui.focus, Focus::Rewind(_)), expect_open);
+        assert!(tui.ui.editor.is_empty(), "esc {n}");
     }
+
+    tui.ui.seed("/rewind ");
+    key(&mut tui, KeyCode::Char('f'));
+    key(&mut tui, KeyCode::Esc);
+    assert_eq!(tui.ui.editor.text(), "/rewind f");
 }
 
 // The `esc` that closed a slash page is not the first of `esc esc`: a quick
