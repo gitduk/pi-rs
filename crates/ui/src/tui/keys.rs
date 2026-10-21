@@ -103,13 +103,8 @@ impl Ui {
 
     // The layers the key table reads: the line's, a list or a page over it.
     fn layers(&mut self, running: bool) -> Layers {
-        let surface = if self.menu().is_empty() {
-            Surface::Editor
-        } else {
-            Surface::Completion
-        };
         Layers {
-            surface,
+            surface: self.surface(),
             run: running,
             mode: self.vim.unwrap_or_default(),
             // Whether the line has anything on it, which the keys bound
@@ -118,6 +113,15 @@ impl Ui {
             // A search reads the transcript as a page is read: `n` steps,
             // esc lets go.
             page: self.read.is_some() || self.search.is_some(),
+        }
+    }
+
+    // A list over the line has its keys read first.
+    pub(super) fn surface(&mut self) -> Surface {
+        if self.menu().is_empty() {
+            Surface::Editor
+        } else {
+            Surface::Completion
         }
     }
 

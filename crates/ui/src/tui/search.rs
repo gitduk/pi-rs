@@ -6,7 +6,7 @@
 //! read off the rows as drawn, so what is counted is what is marked.
 
 use crossterm::event::{KeyCode, KeyEvent};
-use pi_store::keys::{Action, Layers, Surface};
+use pi_store::keys::{Action, Layers};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
@@ -280,11 +280,16 @@ impl Ui {
     // A key while the query is typed; false leaves it to the key table, so
     // the stop still closes what is up.
     pub(super) fn search_key(&mut self, view: &mut View, key: &KeyEvent) -> bool {
-        // The line's own editing keys, as the user bound them, edit the query.
+        if !self.search_typing() {
+            return false;
+        }
+        // The line's own editing keys, as the user bound them, edit the query;
+        // the list's own keys go to the list, as over the line.
+        let surface = self.surface();
         let edit = self.keys.action(
             super::keys::press_of(key),
             Layers {
-                surface: Surface::Editor,
+                surface,
                 ..Layers::default()
             },
         );
