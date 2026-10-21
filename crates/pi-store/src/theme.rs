@@ -319,6 +319,9 @@ pub struct Theme {
     pub status: Status,
     #[serde(default)]
     pub menu: Menu,
+    /// Where a search's query is found, on the transcript and in its list.
+    #[serde(default = "default_match", rename = "match")]
+    pub matched: Style,
     #[serde(default)]
     pub prompt: Prompt,
     #[serde(default = "default_input")]
@@ -480,6 +483,13 @@ fn default_err() -> Style {
 fn default_warn() -> Style {
     Style::color(YELLOW)
 }
+fn default_match() -> Style {
+    Style {
+        color: Some(YELLOW),
+        sgr: vec![Attr::Underline],
+        rendered: OnceLock::new(),
+    }
+}
 fn default_selected() -> Style {
     Style::attrs(&[Attr::Bold])
 }
@@ -518,6 +528,7 @@ impl Default for Theme {
             diff: Diff::default(),
             status: Status::default(),
             menu: Menu::default(),
+            matched: default_match(),
             prompt: Prompt::default(),
             input: default_input(),
             table: default_table(),

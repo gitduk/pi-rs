@@ -142,6 +142,7 @@ impl Ui {
         let mark = self.rat_style(&self.paint.theme.prompt.color);
         let chosen = self.rat_style(&self.paint.theme.menu.selected);
         let query = self.search_query().map(|(query, _)| query);
+        let look = self.rat_style(&self.paint.theme.matched);
         menu.iter()
             .enumerate()
             .map(|(at, c)| {
@@ -177,7 +178,7 @@ impl Ui {
                 // A found line marks the query as the transcript does.
                 ListItem::new(match (c, query) {
                     (MenuEntry::Hit { .. }, Some(query)) => {
-                        super::search::marked(line, query, None)
+                        super::search::marked(line, query, None, look)
                     }
                     _ => line,
                 })

@@ -222,6 +222,7 @@ impl Ui {
         }
         self.search_settle();
         // The query marked on the rows a search reads, a slash page's own.
+        let look = self.rat_style(&self.paint.theme.matched);
         let rows = match self.search_query() {
             Some((query, at)) => {
                 let places = self.row_targets.iter().zip(&self.row_of);
@@ -234,7 +235,7 @@ impl Ui {
                         let current = at
                             .filter(|h| Spot::of(*target) == h.at.spot && r == h.at.row)
                             .map(|h| h.k);
-                        search::marked(row, query, current)
+                        search::marked(row, query, current, look)
                     })
                     .collect()
             }

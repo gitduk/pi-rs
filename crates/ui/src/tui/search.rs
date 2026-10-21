@@ -7,7 +7,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 use pi_store::keys::{Action, Layers, Surface};
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
 use super::Ui;
@@ -563,17 +563,23 @@ fn found_lines(hits: &[(usize, usize, usize)], laid: &[Laid]) -> Vec<Found> {
     lines
 }
 
-/// A drawn row with each place `query` is found in it underlined, the
-/// `current`-th reversed instead.
-pub(super) fn marked(line: Line<'static>, query: &str, current: Option<usize>) -> Line<'static> {
+/// A drawn row with each place `query` is found in it worn as `look`, the
+/// `current`-th reversed as well. A muted row's dim does not reach it.
+pub(super) fn marked(
+    line: Line<'static>,
+    query: &str,
+    current: Option<usize>,
+    look: Style,
+) -> Line<'static> {
+    let look = Style::new().remove_modifier(Modifier::DIM).patch(look);
     found_in(&screen::plain(&line), query)
         .into_iter()
         .enumerate()
         .fold(line, |line, (k, (from, to))| {
             let mark = if Some(k) == current {
-                Modifier::REVERSED
+                look.add_modifier(Modifier::REVERSED)
             } else {
-                Modifier::UNDERLINED
+                look
             };
             select::modified(line, from, to, mark)
         })

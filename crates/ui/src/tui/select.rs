@@ -2,7 +2,7 @@
 //! line clicked twice or thrice. Read off the drawn rows, frames and borders
 //! left out and wrapped rows joined back into the line they came from.
 
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 /// A cell of the transcript region: its row there, and its column.
@@ -135,22 +135,22 @@ pub(super) fn word_at(s: &str, col: usize) -> (usize, usize) {
 
 /// `line` with the cells `from..to` drawn reversed.
 pub(super) fn reversed(line: Line<'static>, from: usize, to: usize) -> Line<'static> {
-    modified(line, from, to, Modifier::REVERSED)
+    modified(
+        line,
+        from,
+        to,
+        Style::new().add_modifier(Modifier::REVERSED),
+    )
 }
 
-/// `line` with `mark` added to the cells `from..to`.
-pub(super) fn modified(
-    line: Line<'static>,
-    from: usize,
-    to: usize,
-    mark: Modifier,
-) -> Line<'static> {
+/// `line` with `mark` laid over the cells `from..to`.
+pub(super) fn modified(line: Line<'static>, from: usize, to: usize, mark: Style) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut at = 0;
     for span in line.spans {
         for c in span.content.chars() {
             let style = if at >= from && at < to {
-                span.style.add_modifier(mark)
+                span.style.patch(mark)
             } else {
                 span.style
             };
