@@ -406,7 +406,7 @@ impl Core {
         if let Some(jobs) = &self.jobs {
             jobs.drop_under(&removed.path);
         }
-        // The checkout leaving the bar says it went; what else went does not.
+        // That the checkout went is the surface's to show; what else went is not.
         let mut said = Vec::new();
         if let Some(branch) = removed.branch {
             said.push(format!("branch {branch} deleted"));

@@ -306,8 +306,8 @@ pub enum Rewound {
 
 #[derive(Debug)]
 pub enum Step {
-    // A line for the bar, not an answer asked for: a refusal, a warning,
-    // what a change did that the screen does not show. Empty says nothing.
+    // Said in passing, not an answer asked for: a refusal, a warning, what
+    // a change did that nothing else shows. Empty says nothing.
     Notice(String),
     // A `!` command to run. The surface runs and records it, because only it
     // can await; `run_bash` does the work and `record_bash` files it.
@@ -392,7 +392,7 @@ pub enum Drive {
     Job(String),
 }
 
-/// Lines of a notice as the one line the bar shows.
+/// Lines of a notice folded into one.
 pub fn notice(lines: impl IntoIterator<Item = impl AsRef<str>>) -> String {
     (lines.into_iter())
         .map(|l| l.as_ref().trim().to_string())

@@ -39,7 +39,7 @@ pub enum Said {
     Nothing,
     // The answer to the command, for whoever typed it.
     Command(Vec<String>),
-    // A refusal or what did not happen: a line for the bar, not an answer.
+    // A refusal or what did not happen: a notice, not an answer.
     Notice(String),
     // A notice (empty when there is none) and a note the model reads before
     // it next speaks: something it started was changed under it.
@@ -253,7 +253,7 @@ fn job_ids(ids: &[&str]) -> Result<Vec<u64>, Said> {
 }
 
 // What a `/job` verb did to jobs the model may have started: only what
-// failed is said on the bar, and the model is told the rest, since nothing
+// failed is a notice, and the model is told the rest, since nothing
 // comes back from them to say so. `note` gets `#id (what)`s and whether one.
 fn job_note(
     (failed, done): (Vec<String>, Vec<String>),

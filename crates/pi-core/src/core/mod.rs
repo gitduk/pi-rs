@@ -326,7 +326,7 @@ impl Core {
             Intent::Builtin(Builtin::Help) => Step::Handled(help(&self.commands)),
             Intent::Builtin(Builtin::Keys) => Step::Handled(self.keys.listing()),
             Intent::Builtin(Builtin::Status) => Step::Handled(self.status()),
-            // Bare, it is asked; with a level, a change the bar already shows.
+            // Bare, it is asked; with a level, a change the surface shows.
             Intent::Builtin(Builtin::Effort(arg)) if arg.trim().is_empty() => {
                 Step::Handled(Listing::say(self.effort("")))
             }

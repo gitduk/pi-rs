@@ -287,7 +287,7 @@ impl Core {
         };
         let mut said: Vec<String> = dialled.warning.into_iter().chain(dialled.assumed).collect();
         let spec = &dialled.spec;
-        // The model's name is on the bar already; what it costs is not.
+        // The surface shows the model's name already; what it costs it does not.
         said.push(summary(
             spec.format.name(),
             spec.context_window,
