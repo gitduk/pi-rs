@@ -141,6 +141,7 @@ impl Ui {
         let muted = self.rat_style(&self.paint.theme.muted);
         let mark = self.rat_style(&self.paint.theme.prompt.color);
         let chosen = self.rat_style(&self.paint.theme.menu.selected);
+        let query = self.search_query().map(|(query, _)| query);
         menu.iter()
             .enumerate()
             .map(|(at, c)| {
@@ -164,17 +165,22 @@ impl Ui {
                 let used = MENU_MARK.width() + name.width() + lead.width();
                 let help = pi_store::text::clip(c.help(), width.saturating_sub(used));
                 let rest = format!("{lead}{help}");
-                if at != picked {
-                    return ListItem::new(Line::from(Span::styled(
-                        format!("  {name}{rest}"),
-                        muted,
-                    )));
-                }
-                ListItem::new(Line::from(vec![
-                    Span::styled(MENU_MARK, mark),
-                    Span::styled(name.to_string(), chosen),
-                    rest.into(),
-                ]))
+                let line = if at != picked {
+                    Line::from(Span::styled(format!("  {name}{rest}"), muted))
+                } else {
+                    Line::from(vec![
+                        Span::styled(MENU_MARK, mark),
+                        Span::styled(name.to_string(), chosen),
+                        rest.into(),
+                    ])
+                };
+                // A found line marks the query as the transcript does.
+                ListItem::new(match (c, query) {
+                    (MenuEntry::Hit { .. }, Some(query)) => {
+                        super::search::marked(line, query, None)
+                    }
+                    _ => line,
+                })
             })
             .collect()
     }

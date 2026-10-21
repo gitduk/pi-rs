@@ -537,6 +537,9 @@ pub(super) fn at_row_name(path: &str, dir: bool) -> String {
 /// a panel or the bar — so its last line never reads as part of them.
 pub(super) const HISTORY_GAP: u16 = 1;
 
+// The most rows a list over the editor shows; the rest scroll.
+const MENU_ROWS: usize = 10;
+
 impl Regions {
     /// The rows each part asks for, as many as `area` holds: input last, so
     /// the caret sits on the bottom row and the bar reads as history's edge.
@@ -556,8 +559,9 @@ impl Regions {
         ])
         .split(area);
         // The list lies over the rows above the bar, as a command's output
-        // does: nothing under it moves as it grows and shrinks.
-        let menu = menu.min(left) as u16;
+        // does: nothing under it moves as it grows and shrinks. A few rows,
+        // and half at most, so what it moves the view to stays in sight.
+        let menu = menu.min(MENU_ROWS).min(left.div_ceil(2)) as u16;
         Self {
             history: chunks[0],
             gap: chunks[1],
