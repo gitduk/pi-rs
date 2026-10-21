@@ -238,7 +238,6 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
         subagent_deadline: None,
         standing: standing.into(),
         ceiling: tool::Tier::Exec,
-        keys: Arc::new(pi_store::keys::Keys::default()),
         commands: Arc::new(Vec::new()),
         watched: Vec::new(),
         prompt_files: Default::default(),

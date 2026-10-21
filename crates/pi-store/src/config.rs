@@ -67,6 +67,10 @@ pub struct Config {
     /// replaces that action's defaults rather than adding to them.
     #[serde(default)]
     pub keys: BTreeMap<String, Binds>,
+    /// The key table `keys` asks for, defaults included: read with the file,
+    /// so a binding that cannot stand refuses the file it is in.
+    #[serde(skip)]
+    pub key_table: std::sync::Arc<crate::keys::Keys>,
     /// The SGR codes behind every colour the terminal uses.
     #[serde(default)]
     pub theme: crate::theme::Theme,
@@ -279,8 +283,7 @@ impl Config {
         out
     }
 
-    /// The key table this config asks for, defaults included.
-    pub fn key_map(&self) -> Result<crate::keys::Keys> {
+    fn key_map(&self) -> Result<crate::keys::Keys> {
         let overrides = self
             .keys
             .iter()
@@ -822,7 +825,7 @@ impl Config {
                 config.spec(model, entry)?;
             }
         }
-        config.key_map()?;
+        config.key_table = std::sync::Arc::new(config.key_map()?);
         Ok(config)
     }
 

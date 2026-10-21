@@ -1,5 +1,5 @@
 //! The state a session owns, and the verbs that move it: `Core` is the root
-//! — the store, config, keys, commands, settings, open checkouts.
+//! — the store, config, commands, settings, open checkouts.
 //!
 //! Each verb lives with its state — see `settings.rs`, `lane.rs`,
 //! `status.rs`, `meter.rs`, `bash.rs`, `driver/`.
@@ -24,7 +24,7 @@ pub mod update;
 pub mod worktree;
 
 use crate::core::lane::Lane;
-use crate::input::commands::{Command, help, with_prompts};
+use crate::input::commands::{Command, help, with_prompts, with_surface};
 use crate::input::{Builtin, Drive, Intent, Step, notice, step_for};
 use pi_store::config;
 use pi_store::listing::Listing;
@@ -68,14 +68,12 @@ pub fn not_saved(e: &impl std::fmt::Display) -> String {
 /// an intent is answered.
 pub struct Core {
     pub store: Store,
-    /// Held so `/keys` can show what is actually in force, overrides included.
-    pub keys: std::sync::Arc<pi_store::keys::Keys>,
     /// The config in force, as opposed to the one on disk. `/model` picks from
     /// this, so a switch cannot quietly apply an edit a reload has not.
     pub config: std::sync::Arc<config::Config>,
     /// The command line's say over the config, re-applied over every reload.
     pub pinned: crate::args::Pinned,
-    /// What a slash answers to: built-ins and skills. Rebuilt by
+    /// What a slash answers to: built-ins, the surface's words and skills. Rebuilt by
     /// a reload, since a skill can appear between one turn and the next.
     ///
     /// Shared rather than copied: a surface may hold the same table and
@@ -97,16 +95,24 @@ pub struct Core {
     /// Where calls that outlive their turn are kept, when a surface serves
     /// them; a run with nothing to come back to keeps no jobs.
     pub jobs: Option<std::sync::Arc<crate::driver::jobs::Table>>,
+    /// Words the surface answers itself, listed beside the built-ins.
+    pub surface: &'static [Command],
 }
 
 impl Core {
-    // Put the lane in front's key map and command table in force: a skill
-    // and a rebound key belong to one tree, not another.
+    // Put the lane in front's command table in force: a skill belongs to one
+    // tree, not another.
     fn in_force(&mut self) {
-        self.keys = self.lane().resolved().keys.clone();
-        let table = self.lane().resolved().commands.clone();
+        let table = with_surface(self.lane().resolved().commands.clone(), self.surface);
         self.prompts_seen = ::mcp::generation();
         self.commands = with_prompts(table, crate::core::mcp::prompts());
+    }
+
+    /// Put `words` in the table for the surface to answer: each comes back
+    /// as [`Step::Surface`].
+    pub fn surface_words(&mut self, words: &'static [Command]) {
+        self.surface = words;
+        self.in_force();
     }
 
     /// Put the servers' prompts in the table again when their lists moved.
@@ -285,7 +291,7 @@ impl Core {
         match crate::input::read(goal, &self.commands) {
             Intent::Prompt(_) | Intent::Bash(_) => true,
             Intent::Other { word, .. } => crate::input::starts_turn(&self.commands, &word),
-            Intent::Builtin(_) => false,
+            Intent::Builtin(_) | Intent::Surface { .. } => false,
         }
     }
 
@@ -298,6 +304,7 @@ impl Core {
         match intent {
             Intent::Bash(command) => Step::Bash(command),
             Intent::Prompt(send) => Step::Prompt { send, typed: None },
+            Intent::Surface { word, args } => Step::Surface { word, args },
             Intent::Builtin(Builtin::Job(arg)) => Step::Drive(Drive::Job(arg)),
             Intent::Builtin(Builtin::Tool(line)) if line.trim().is_empty() => Step::Handled(
                 crate::input::commands::tool_listing(&self.lane().agent().brief.registry),
@@ -324,7 +331,6 @@ impl Core {
             },
             Intent::Builtin(Builtin::Quit) => Step::Quit,
             Intent::Builtin(Builtin::Help) => Step::Handled(help(&self.commands)),
-            Intent::Builtin(Builtin::Keys) => Step::Handled(self.keys.listing()),
             Intent::Builtin(Builtin::Status) => Step::Handled(self.status()),
             // Bare, it is asked; with a level, a change the surface shows.
             Intent::Builtin(Builtin::Effort(arg)) if arg.trim().is_empty() => {
@@ -609,14 +615,14 @@ mod tests {
 
     #[test]
     fn a_key_and_a_line_that_mean_the_same_thing_are_one_intent() {
-        // A key bound to it also returns `Intent::Builtin(Builtin::New)`; the
+        // The surface asks for it as `Intent::Builtin(Builtin::New)` too; the
         // typed word lands on the same variant, so `fate` sees one value.
         assert_eq!(read("/new", BUILTIN), Intent::Builtin(Builtin::New));
     }
 
     #[test]
     fn leaving_is_never_refused() {
-        // One intent for `/exit`, `/quit` and the keys bound to leaving; it
+        // One intent for `/exit`, `/quit` and the surface's way of leaving; it
         // always proceeds — a wedged run must not trap the user.
         assert!(matches!(Intent::Builtin(Builtin::Quit).fate(), Fate::Now));
     }
@@ -641,7 +647,6 @@ mod tests {
         for intent in [
             Intent::Builtin(Builtin::Status),
             Intent::Builtin(Builtin::Help),
-            Intent::Builtin(Builtin::Keys),
             Intent::Builtin(Builtin::Model(String::new())),
             Intent::Builtin(Builtin::Worktree("tree".into())),
             Intent::Builtin(Builtin::Settings(String::new())),
@@ -781,7 +786,6 @@ mod tests {
             None,
         );
 
-        let keys = resolved.keys.clone();
         let commands = resolved.commands.clone();
         let mut lane = crate::core::lane::Lane::opened(crate::core::lane::Opening {
             id: "s1".into(),
@@ -794,7 +798,6 @@ mod tests {
         lane.return_session(agent::session::Session::default());
         crate::core::Core {
             store,
-            keys,
             config: std::sync::Arc::new(pi_store::config::Config::default()),
             pinned: crate::args::Pinned::default(),
             commands,
@@ -807,6 +810,7 @@ mod tests {
             refused: Default::default(),
             jobs: None,
             current: 0,
+            surface: &[],
         }
     }
 

@@ -33,8 +33,6 @@ pub struct Resolved {
     /// How far this run may reach. The lane needs it to decide whether the
     /// subagent, offered after this set is cut, belongs in it.
     pub ceiling: tool::Tier,
-    /// The key table this tree asked for, defaults included.
-    pub keys: std::sync::Arc<pi_store::keys::Keys>,
     /// The built-ins plus one command per skill. Here rather than in the Core
     /// because a skill discovered at reload has to reach the prompt the same
     /// way everything else the config decides does.
@@ -353,7 +351,6 @@ pub fn resolve(
             .map(|s| std::time::Duration::from_secs(s.max(1))),
         standing: standing.into(),
         ceiling: tier,
-        keys: std::sync::Arc::new(config.key_map()?),
         commands: std::sync::Arc::new(commands),
         watched: read_from,
         shelf,

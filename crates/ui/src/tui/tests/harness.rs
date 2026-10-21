@@ -98,10 +98,8 @@ pub(super) fn running_lane(dir: &std::path::Path) -> Lane {
 }
 
 pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
-    let keys = std::sync::Arc::new(Keys::default());
     let core = Core {
         store: Store::new(dir.join("state")),
-        keys: keys.clone(),
         config: std::sync::Arc::new(pi_store::config::Config::default()),
         pinned: pi_core::args::Pinned::default(),
         commands: std::sync::Arc::new(Vec::new()),
@@ -111,8 +109,9 @@ pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
         refused: Default::default(),
         jobs: None,
         current: 0,
+        surface: &[],
     };
-    crate::tui::Tui::on_test_screen(core, keys)
+    crate::tui::Tui::on_test_screen(core)
 }
 
 // Put another lane in front, the way a checkout switch would, and

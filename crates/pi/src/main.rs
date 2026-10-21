@@ -232,7 +232,6 @@ async fn main() -> Result<ExitCode> {
     // Armed here rather than field by field: the brief the lane keeps and the
     // one the agent runs on are the same value, subagent tool and all.
     let resolved = lane::arm(&mut ag, Arc::new(resolved), archive, retry, None);
-    let key_map = resolved.keys.clone();
 
     // An explicit --name renames a resumed session; otherwise it keeps its own.
     let name = args
@@ -262,7 +261,6 @@ async fn main() -> Result<ExitCode> {
         first.return_session(carried);
         let mut core = Core {
             store,
-            keys: key_map.clone(),
             config: config.clone(),
             pinned: pinned.clone(),
             commands,
@@ -272,13 +270,14 @@ async fn main() -> Result<ExitCode> {
             lanes: vec![first],
             refused: Default::default(),
             jobs: None,
+            surface: &[],
         };
         let drivers = pi_core::driver::Drivers::default();
         core.enable_jobs(drivers.jobs());
         core.reopen(&args.lanes());
         core::update::watch();
         core::update::check(env!("CARGO_PKG_REPOSITORY"));
-        let out = tui::Tui::new(core, key_map, drivers)?.run().await;
+        let out = tui::Tui::new(core, drivers)?.run().await;
         // Subagents handed their transcripts to a background save; wait
         // for those to land before the runtime goes with them.
         settle().await;

@@ -13,7 +13,7 @@ use pi_store::session::ResumeChoice;
 
 #[derive(Clone)]
 pub enum Source {
-    // A word `read` knows and `command` answers itself.
+    // A word `read` knows: answered here, or by the surface that added it.
     Builtin,
     // A `SKILL.md` to read and hand to the model as if the user had typed it.
     Skill(Skill),
@@ -52,6 +52,16 @@ impl Command {
             intent,
             source: Source::Builtin,
         }
+    }
+}
+
+impl Command {
+    /// A word the surface answers itself, listed with the built-ins.
+    pub const fn surface(word: &'static str, args: &'static str, help: &'static str) -> Self {
+        Self::builtin(word, args, help, |word, args| Intent::Surface {
+            word: word.to_string(),
+            args,
+        })
     }
 }
 
@@ -158,12 +168,6 @@ pub(crate) const BUILTIN: &[Command] = &[
         "everything the model is given before your first word, AGENTS.md included",
         |_, _| Intent::Builtin(Builtin::Content),
     ),
-    Command::builtin(
-        "/keys",
-        "",
-        "what every key does, and the id to rebind it under",
-        |_, _| Intent::Builtin(Builtin::Keys),
-    ),
     Command::builtin("/help", "", "this list", |_, _| {
         Intent::Builtin(Builtin::Help)
     }),
@@ -222,6 +226,22 @@ pub fn commands(skills: &[Skill], notes: &mut Vec<String>) -> Vec<Command> {
         });
     }
     out
+}
+
+/// `table` with `words` after its built-ins, in place of any row of theirs.
+pub fn with_surface(table: Arc<Vec<Command>>, words: &[Command]) -> Arc<Vec<Command>> {
+    if words.is_empty() {
+        return table;
+    }
+    let mut out: Vec<Command> = (table.iter())
+        .filter(|c| !words.iter().any(|w| w.word == c.word))
+        .cloned()
+        .collect();
+    let at = (out.iter())
+        .position(|c| !matches!(c.source, Source::Builtin))
+        .unwrap_or(out.len());
+    out.splice(at..at, words.iter().cloned());
+    Arc::new(out)
 }
 
 /// `table` with the running servers' prompts after it. A prompt whose word

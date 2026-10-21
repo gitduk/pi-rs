@@ -948,7 +948,10 @@ fn a_now_intent_runs_with_the_transcript_a_run_has() {
 
     for intent in [
         Intent::Builtin(Builtin::Help),
-        Intent::Builtin(Builtin::Keys),
+        Intent::Surface {
+            word: crate::tui::keys::KEYS.into(),
+            args: String::new(),
+        },
         Intent::Builtin(Builtin::Status),
         Intent::Builtin(Builtin::Name("n".into())),
         Intent::Builtin(Builtin::Model(String::new())),

@@ -18,6 +18,8 @@ pub enum Intent {
     Bash(String),
     // A word from the table.
     Builtin(Builtin),
+    // A word the surface put in the table, for the surface to answer.
+    Surface { word: String, args: String },
     // Not a built-in word: the table's skill rows land here too, because what a
     // skill *is* — a line to expand — is `step_for`'s to say, not the door's.
     Other { word: String, args: String },
@@ -29,7 +31,6 @@ pub enum Intent {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Builtin {
     Help,
-    Keys,
     Status,
     Content,
     Name(String),
@@ -64,11 +65,11 @@ pub enum Builtin {
     Tool(String),
     // Bare, the MCP servers and their tools; `restart [name]` reconnects.
     Mcp(String),
-    // `/new` and the keys bound to it are one variant: a fresh session, old one
-    // kept on disk, screen rebuilt empty — one intent, however expressed.
+    // `/new` and whatever else the surface asks it by are one variant: a fresh
+    // session, old one kept on disk, screen rebuilt empty — however expressed.
     New,
-    // Leave now — `/exit`, `/quit`, or the keys bound to leaving — one intent,
-    // so none can answer differently.
+    // Leave now — `/exit`, `/quit`, or the surface's own way of asking — one
+    // intent, so none can answer differently.
     Quit,
 }
 
@@ -95,11 +96,10 @@ impl Intent {
     /// writes through `Arc::make_mut`, not because a rule says so.
     pub fn fate(&self) -> Fate {
         match self {
-            // Answered from the config, the key map or the lane's own tally
-            // — none of which the run is holding.
+            // Answered from the config or the lane's own tally — none of which
+            // the run is holding.
             Intent::Builtin(
                 Builtin::Help
-                | Builtin::Keys
                 | Builtin::Status
                 | Builtin::Content
                 | Builtin::Name(_)
@@ -135,6 +135,8 @@ impl Intent {
             // reload re-arms through `Arc::make_mut`, as a file watched does.
             Intent::Builtin(Builtin::Settings(_) | Builtin::Edit(_)) => Fate::Now,
             Intent::Other { .. } | Intent::Prompt(_) => Fate::Queued,
+            // The surface answers it from what it holds, not from the run.
+            Intent::Surface { .. } => Fate::Now,
             // Its first round is due at once, and a round wants the lane free.
             Intent::Builtin(Builtin::Loop(_)) => Fate::Queued,
             Intent::Builtin(Builtin::Background(_)) => Fate::Queued,
@@ -306,6 +308,11 @@ pub enum Rewound {
 
 #[derive(Debug)]
 pub enum Step {
+    // A word of the surface's own, with what followed it.
+    Surface {
+        word: String,
+        args: String,
+    },
     // Said in passing, not an answer asked for: a refusal, a warning, what
     // a change did that nothing else shows. Empty says nothing.
     Notice(String),
@@ -374,6 +381,7 @@ impl Step {
             | Step::Drive(_)
             | Step::Edit(_)
             | Step::Handled(_)
+            | Step::Surface { .. }
             | Step::Swap(_)
             | Step::Moved(_)
             | Step::Worktrees(_)

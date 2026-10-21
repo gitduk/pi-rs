@@ -14,6 +14,16 @@ use pi_core::input::{self, Intent};
 use pi_store::keys::{Action, Key, Layers, Mode, Mods, Press, Surface};
 use std::time::Instant;
 
+/// The word that lists what every key does.
+pub(super) const KEYS: &str = "/keys";
+
+// The words this surface answers itself, listed beside the built-ins.
+pub(super) const WORDS: &[input::commands::Command] = &[input::commands::Command::surface(
+    KEYS,
+    "",
+    "what every key does, and the id to rebind it under",
+)];
+
 impl Ui {
     // The line submitted since this was last asked, if any: the surface
     // catches the recall list up and carries the line to its answer.

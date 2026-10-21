@@ -36,7 +36,6 @@ use pi_core::core::{self, Core};
 use pi_core::driver::{Drivers, Origin, Said};
 use pi_core::input::commands::Choice;
 use pi_core::input::{self, Fate, Intent, Rewound, Step};
-use pi_store::keys::Keys;
 use pi_store::listing::Listing;
 use ratatui::text::Line;
 use screen::Screen;
@@ -154,7 +153,7 @@ pub struct Tui {
 }
 
 impl Tui {
-    pub fn new(mut core: Core, keys: Arc<Keys>, drivers: Drivers) -> Result<Self> {
+    pub fn new(mut core: Core, drivers: Drivers) -> Result<Self> {
         // The screen first, for raw mode: the answer to the background query
         // carries no newline, so a cooked read would wait for one forever.
         let screen = Screen::new()?;
@@ -163,9 +162,10 @@ impl Tui {
             true,
             Arc::new(following_terminal(&core.config.theme, answer.bg)),
         );
+        core.surface_words(keys::WORDS);
         let mut ui = Ui::new(
             screen,
-            keys,
+            core.config.key_table.clone(),
             core.choices(),
             core.commands.clone(),
             Lists::new(core.store.clone(), core.lane_mut().root().to_path_buf()),
@@ -210,11 +210,12 @@ impl Tui {
     // A surface on an in-memory screen, for tests driving the loop's
     // settle side. No reader thread, no history file to touch.
     #[cfg(test)]
-    fn on_test_screen(mut core: Core, keys: Arc<Keys>) -> Self {
+    fn on_test_screen(mut core: Core) -> Self {
         let paint = Paint::with_theme(false, Arc::new(core.config.theme.clone()));
+        core.surface_words(keys::WORDS);
         let mut ui = Ui::new(
             screen::Screen::test(80, 24),
-            keys,
+            core.config.key_table.clone(),
             core.choices(),
             core.commands.clone(),
             Lists::new(core.store.clone(), core.lane_mut().root().to_path_buf()),
@@ -784,6 +785,10 @@ impl Tui {
                     self.ui.lists.forget();
                 }
                 Step::Handled(lines) => self.land_lines(lines),
+                Step::Surface { word, .. } if word == keys::KEYS => {
+                    self.land_lines(self.ui.keys.listing())
+                }
+                Step::Surface { word, .. } => self.notice(format!("unknown command {word}")),
                 Step::Compact(focus) => self.start_compact(focus, &done_tx),
                 Step::Tool { name, args } => self.start_tool(name, args, &started_tx),
                 Step::Drive(drive) => {

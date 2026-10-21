@@ -765,7 +765,7 @@ pub struct Hit {
 }
 
 /// Every binding in force, resolved once at startup.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Keys {
     map: HashMap<(When, Chord), Action>,
     // Which binding owns each chord, so `listing` can ask "what's bound to

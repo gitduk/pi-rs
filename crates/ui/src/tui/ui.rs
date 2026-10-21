@@ -351,8 +351,8 @@ impl Ui {
     pub(super) fn adopt_config(&mut self, core: &Core, view: &mut View) {
         // The key map lives in two places; a reload has to reach both or the
         // screen keeps answering to the old bindings.
-        if !Arc::ptr_eq(&self.keys, &core.keys) {
-            self.keys = core.keys.clone();
+        if !Arc::ptr_eq(&self.keys, &core.config.key_table) {
+            self.keys = core.config.key_table.clone();
         }
         // Likewise the completion list: a reload is allowed to define models —
         // and skills — the last one did not.
