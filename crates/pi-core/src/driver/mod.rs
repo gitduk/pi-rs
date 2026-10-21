@@ -244,10 +244,7 @@ fn reply(mut said: String, ended: &Ended) -> String {
 // The ids after a `/job` verb, `#` or not; the first that is none, said.
 fn job_ids(ids: &[&str]) -> Result<Vec<u64>, Said> {
     (ids.iter())
-        .map(|id| {
-            (id.trim_start_matches('#').parse())
-                .map_err(|_| Said::Notice(format!("`{id}` is not a job id")))
-        })
+        .map(|id| jobs::parse_id(id).ok_or_else(|| Said::Notice(format!("`{id}` is not a job id"))))
         .collect()
 }
 

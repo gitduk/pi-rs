@@ -16,12 +16,7 @@ pub(crate) fn header(path: &str) -> String {
 /// Content hash for the staleness note: a file that changed underneath the
 /// model since its last view gets a note beside the report.
 pub(crate) fn view_hash(content: &str) -> String {
-    let mut h: u32 = 0x811c_9dc5;
-    for b in content.as_bytes() {
-        h ^= *b as u32;
-        h = h.wrapping_mul(0x0100_0193);
-    }
-    format!("{:04X}", (h ^ (h >> 16)) & 0xFFFF)
+    format!("{:016X}", tool::stamp::fnv(content.as_bytes()))
 }
 
 /// Where each construct that opens on a row ends, keyed by the row it opens on.

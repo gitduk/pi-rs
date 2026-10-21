@@ -1,7 +1,8 @@
-//! What says a file changed without reading it, and a value built from files
-//! that is built again only when that says so.
+//! What says a file or some bytes changed since last time, and a value built
+//! from files that is built again only when that says so.
 
 use std::fs::Metadata;
+use std::hash::Hasher as _;
 use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
 use std::time::SystemTime;
@@ -18,6 +19,37 @@ pub fn of(path: PathBuf) -> Option<Stamp> {
 /// The stamp of `path` from metadata already in hand.
 pub fn from_meta(path: PathBuf, meta: &Metadata) -> Stamp {
     (path, meta.modified().ok(), meta.len())
+}
+
+/// FNV-1a over bytes: a cheap answer to "the same bytes as last time?" that
+/// holds still across builds, never a defence against bytes chosen to collide.
+#[derive(Clone, Copy)]
+pub struct Fnv(u64);
+
+impl Default for Fnv {
+    fn default() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+}
+
+impl std::hash::Hasher for Fnv {
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 ^= u64::from(*b);
+            self.0 = self.0.wrapping_mul(0x100_0000_01b3);
+        }
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+/// [`Fnv`] of `bytes` in one go.
+pub fn fnv(bytes: &[u8]) -> u64 {
+    let mut h = Fnv::default();
+    h.write(bytes);
+    h.finish()
 }
 
 /// A value built from files, kept until their stamps move.
@@ -52,6 +84,15 @@ impl<T> Stamped<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Journal fingerprints are compared across builds, so the hash is FNV-1a
+    // exactly, pinned by the reference vectors.
+    #[test]
+    fn fnv_is_fnv_1a_64() {
+        assert_eq!(fnv(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv(b"foobar"), 0x8594_4171_f739_67e8);
+    }
 
     // A first read builds even when no file is there, and only a moved
     // stamp builds again: an empty directory still owes its built-ins.

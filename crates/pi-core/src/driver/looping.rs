@@ -5,6 +5,7 @@
 //! knows nothing of loops.
 
 use std::collections::BTreeMap;
+use std::hash::Hasher as _;
 
 use tool::Ctx;
 
@@ -182,16 +183,12 @@ type TreeState = std::collections::BTreeMap<std::path::PathBuf, TreeFile>;
 // A content fingerprint over every written path, plus cached bytes to diff
 // against; a path whose stat is unchanged since `prev` skips the re-read.
 fn tree_mark(ctx: &Ctx, prev: &TreeState) -> (String, TreeState) {
-    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut h = tool::stamp::Fnv::default();
     let mut tree = TreeState::new();
     for path in ctx.writes() {
         let rel = path.strip_prefix(ctx.workspace.root()).unwrap_or(&path);
-        for b in rel.to_string_lossy().as_bytes() {
-            h ^= *b as u64;
-            h = h.wrapping_mul(0x100_0000_01b3);
-        }
-        h ^= 0xff;
-        h = h.wrapping_mul(0x100_0000_01b3);
+        h.write(rel.to_string_lossy().as_bytes());
+        h.write_u8(0xff);
         let meta = std::fs::metadata(&path).ok();
         let len = meta.as_ref().map_or(0, std::fs::Metadata::len);
         let mtime = meta.as_ref().and_then(|m| m.modified().ok());
@@ -205,13 +202,10 @@ fn tree_mark(ctx: &Ctx, prev: &TreeState) -> (String, TreeState) {
         } else {
             std::fs::read(&path).unwrap_or_default()
         };
-        for b in &bytes {
-            h ^= *b as u64;
-            h = h.wrapping_mul(0x100_0000_01b3);
-        }
+        h.write(&bytes);
         tree.insert(path, TreeFile { bytes, len, mtime });
     }
-    (format!("{h:016x}"), tree)
+    (format!("{:016x}", h.finish()), tree)
 }
 
 fn count_changes(prev: &[u8], now: &[u8]) -> usize {

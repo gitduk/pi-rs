@@ -1,5 +1,6 @@
 use llm::message::AssistantContent;
 use llm::model::ModelSpec;
+use llm::slice::clip_bytes;
 
 use crate::session::Entry;
 use llm::stream::{StopReason, Usage};
@@ -19,13 +20,6 @@ const TOTAL_BYTES: usize = 60_000;
 // reaches it has lost its last sections.
 const MAX_SUMMARY_TOKENS: u32 = 4_000;
 
-fn clip(s: &str, max: usize) -> String {
-    match s.char_indices().find(|(i, c)| i + c.len_utf8() > max) {
-        Some((i, _)) => format!("{}… {} more bytes", &s[..i], s.len() - i),
-        None => s.to_string(),
-    }
-}
-
 /// Flatten history into one user turn.
 ///
 /// The dropped span starts on an assistant turn, so replaying it as messages
@@ -42,7 +36,7 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
             Entry::Ask { ask, .. } if ask.relayed.is_some() => lines.push(format!(
                 "[came back: {}] {}",
                 ask.shown_text(),
-                clip(&ask.text, BLOCK_BYTES)
+                clip_bytes(&ask.text, BLOCK_BYTES)
             )),
             Entry::Ask { ask, .. } => lines.push(format!(
                 "[user]{} {}",
@@ -51,10 +45,10 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
                     1 => " (image)".to_string(),
                     n => format!(" ({n} images)"),
                 },
-                clip(&ask.text, BLOCK_BYTES)
+                clip_bytes(&ask.text, BLOCK_BYTES)
             )),
             Entry::Bash { run, .. } => {
-                lines.push(format!("[user ran] {}", clip(&run.text, BLOCK_BYTES)))
+                lines.push(format!("[user ran] {}", clip_bytes(&run.text, BLOCK_BYTES)))
             }
             // A note is a directive for the one turn it opened; by the
             // time a summary carries it, it is stale.
@@ -64,14 +58,14 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
                 lines.push(format!(
                     "[{} result{mark}] {}",
                     r.name,
-                    clip(&r.flatten_text(), BLOCK_BYTES)
+                    clip_bytes(&r.flatten_text(), BLOCK_BYTES)
                 ));
             }
             Entry::Answer { blocks, .. } => {
                 for b in blocks {
                     match b {
                         AssistantContent::Text(t) => {
-                            lines.push(format!("[assistant] {}", clip(&t.text, BLOCK_BYTES)))
+                            lines.push(format!("[assistant] {}", clip_bytes(&t.text, BLOCK_BYTES)))
                         }
                         // Prior reasoning is the agent's scratch work, not a
                         // record of what happened.
@@ -79,7 +73,7 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
                         AssistantContent::ToolCall(c) => lines.push(format!(
                             "[calls {}] {}",
                             c.name,
-                            clip(&c.args.to_string(), 400)
+                            clip_bytes(&c.args.to_string(), 400)
                         )),
                     }
                 }

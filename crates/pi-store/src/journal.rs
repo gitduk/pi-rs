@@ -94,25 +94,11 @@ pub(crate) fn secret(name: &str) -> bool {
 // Enough to tell two keys apart, not enough to reconstruct either. FNV-1a
 // because the question is only "is this the same string as last time".
 fn fingerprint(s: &str) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("<redacted {h:08x}>")
+    format!("<redacted {:08x}>", tool::stamp::fnv(s.as_bytes()))
 }
 
-// Cut on a char boundary, and say how much went. A silently short value reads
-// as the whole value, which is how a truncated log tells you a lie.
 fn clip(s: &str, cap: usize) -> Value {
-    if s.len() <= cap {
-        return Value::String(s.to_string());
-    }
-    let mut end = cap;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    Value::String(format!("{}… {} more bytes", &s[..end], s.len() - end))
+    Value::String(llm::slice::clip_bytes(s, cap))
 }
 
 // RFC 3339, UTC, milliseconds. Hand-rolled: a calendar is thirty lines and a

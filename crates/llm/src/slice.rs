@@ -8,6 +8,16 @@ pub fn head_bytes(s: &str, max: usize) -> &str {
     }
 }
 
+/// `s` cut to `max` bytes on a char boundary, saying how much went: a value
+/// cut silently reads as the whole of it.
+pub fn clip_bytes(s: &str, max: usize) -> String {
+    let head = head_bytes(s, max);
+    match s.len() - head.len() {
+        0 => s.to_string(),
+        left => format!("{head}… {left} more bytes"),
+    }
+}
+
 /// Mirror of [`head_bytes`] from the end.
 pub fn tail_bytes(s: &str, max: usize) -> &str {
     let start = s.len().saturating_sub(max);

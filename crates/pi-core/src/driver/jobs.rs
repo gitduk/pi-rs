@@ -633,6 +633,11 @@ impl Table {
     }
 }
 
+/// A job's id as a person or the model writes it: `3` or `#3`.
+pub fn parse_id(word: &str) -> Option<u64> {
+    word.trim_start_matches('#').parse().ok()
+}
+
 /// The `job` tool, and where a call that outlives its turn is kept.
 pub struct Jobs {
     table: Arc<Table>,
@@ -799,7 +804,7 @@ impl Tool for Jobs {
         // A lone id, as the field once took, still names one; so does `"#3"`.
         let id = |v: &Value| {
             v.as_u64()
-                .or_else(|| v.as_str()?.trim_start_matches('#').parse().ok())
+                .or_else(|| parse_id(v.as_str()?))
                 .ok_or_else(|| ToolError::Invalid(format!("`{v}` is not a job id")))
         };
         let ids_of = |key: &str| -> Result<Vec<u64>, ToolError> {

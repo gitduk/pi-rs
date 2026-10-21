@@ -338,7 +338,7 @@ fn offer(choices: &[Choice], head: &str, typed: &str) -> Vec<Candidate> {
 // any other text is something to start in the background.
 fn job(rest: String) -> Intent {
     let words: Vec<&str> = rest.split_whitespace().collect();
-    let id = |w: &&str| w.trim_start_matches('#').parse::<u64>().is_ok();
+    let id = |w: &&str| crate::driver::jobs::parse_id(w).is_some();
     match words.as_slice() {
         [] => Intent::Builtin(Builtin::Job(rest)),
         ["stop", ids @ ..] if ids.iter().all(id) => Intent::Builtin(Builtin::Job(rest)),
