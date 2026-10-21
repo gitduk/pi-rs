@@ -592,7 +592,7 @@ mod budget {
         let before = llm::estimate::tokens(&s.context(), &spec());
         assert!(before < a.budget(), "the automatic pass would decline this");
 
-        let (report, _) = a.compact_now(&mut s, None).await.expect("something to do");
+        let report = a.compact_now(&mut s, None).await.expect("something to do");
         assert!(report.touched());
         let after = llm::estimate::tokens(&s.context(), &spec());
         assert!(after < before, "{before} -> {after}");
@@ -614,8 +614,9 @@ mod budget {
         );
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut s = s;
+        let meter = Arc::default();
         let run = agent::Working {
-            transport: &Never,
+            wire: llm::meter::Metered::new(&Never, &meter),
             spec: &spec(),
             summarize: agent::compaction::SUMMARIZE,
             overhead: 0,
@@ -672,7 +673,7 @@ mod budget {
             let mut a = agent_with(1_000_000, 32_000);
             crate::common::compacting(&mut a, Some((Arc::new(Summary(stop)), spec())));
             let mut s = bulky_session();
-            let (report, _) = a.compact_now(&mut s, None).await.expect("something to do");
+            let report = a.compact_now(&mut s, None).await.expect("something to do");
             assert_eq!(report.summarized, kept, "{stop:?}");
         }
     }

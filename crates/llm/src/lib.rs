@@ -3,6 +3,7 @@ pub mod estimate;
 pub mod fault;
 pub mod figures;
 pub mod message;
+pub mod meter;
 pub mod model;
 pub mod request;
 pub mod slice;

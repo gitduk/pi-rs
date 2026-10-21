@@ -887,6 +887,49 @@ async fn a_stream_that_stops_sending_does_not_hold_the_turn_open() {
     );
 }
 
+// States its prompt, then never sends anything more.
+struct StatedThenWedged;
+
+#[async_trait]
+impl Transport for StatedThenWedged {
+    async fn stream(
+        &self,
+        _: &ModelSpec,
+        _: &Request,
+    ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
+        let start = StreamEvent::MessageStart {
+            usage: Usage {
+                input: 500,
+                ..Default::default()
+            },
+        };
+        Ok(futures::stream::iter([Ok(start)])
+            .chain(futures::stream::pending())
+            .boxed())
+    }
+}
+
+// Every attempt given up on, the retried one and the last, is still charged
+// for the prompt it stated: the provider billed it whatever the run did.
+#[tokio::test]
+async fn an_attempt_given_up_on_is_still_charged() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let a = tooled(Arc::new(StatedThenWedged), spec());
+    let mut retry = fast_retry();
+    retry.attempts = 1;
+    retry.idle = std::time::Duration::from_millis(120);
+
+    let (_s, out, events) = drive_retrying(&a, &ctx, "go", &retry).await;
+
+    assert!(out.is_err(), "{out:?}");
+    let attempts = 1 + events
+        .iter()
+        .filter(|e| matches!(e, Event::Retrying { .. }))
+        .count() as u64;
+    assert_eq!(a.meter.read().usage.input, 500 * attempts);
+}
+
 fn call_message(id: &str) -> Message {
     Message::Assistant {
         content: vec![llm::message::AssistantContent::ToolCall(

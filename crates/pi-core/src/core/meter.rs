@@ -21,11 +21,11 @@ pub struct Snapshot {
     pub elapsed: Option<Duration>,
     pub input: u64,
     pub output: u64,
-    pub cache_read: u64,
+    /// Percent of the prompt tokens this run sent that were read from cache,
+    /// floored; `None` until a request of the run has reported its prompt.
+    pub cached: Option<u64>,
     /// In dollars. Zero is an unpriced model rather than a free run.
     pub cost: f64,
-    /// Turns begun. Zero is a run that has not started one.
-    pub turns: usize,
     /// What a request occupies against the model's window, in tokens.
     /// Compaction fires short of 100%, at the budget inside the window.
     pub ctx: Option<(usize, usize)>,
@@ -42,19 +42,16 @@ pub struct Snapshot {
     pub worktree: Option<String>,
 }
 
-/// What the events have said was spent: one per lane and one per one-shot run,
-/// holding the run in flight for the lines and the session for `/status`.
+/// What the events have said a run spent: one per lane and one per one-shot
+/// run, for the lines that say the run alone. The session's figure is counted
+/// at the wire instead, by `llm::meter`.
 #[derive(Debug, Default, Clone)]
 pub struct Tally {
-    // What earlier runs had spent when this one started, injected by the
-    // surface; absent (a one-shot run) it is zero.
-    base: Totals,
     // Turns of this run that have reported, and what they were priced at.
     settled: Totals,
     // The turn in flight; superseded (not added to) on `TurnEnd`, else the
     // input would count twice. Unpriced until it ends.
     turn: Usage,
-    turns: usize,
     ctx: Option<(usize, usize)>,
     compactions: usize,
     // The run's warnings, kept whole for `/status`.
@@ -70,19 +67,12 @@ pub struct Tally {
 }
 
 impl Tally {
-    /// Start a run's counts with the session's earlier runs already spent,
-    /// and pin the rate this run is priced at. `/model` is answered at once,
-    /// so a turn that began on one model and ends after a switch is still
-    /// costed at what the model that ran it charges.
-    pub fn seed(&mut self, base: Totals, pricing: Pricing) {
+    /// Start a run's counts afresh and pin the rate it is priced at. `/model`
+    /// is answered at once, so a turn that began on one model and ends after a
+    /// switch is still costed at what the model that ran it charges.
+    pub fn seed(&mut self, pricing: Pricing) {
         *self = Self::default();
-        self.base = base;
         self.pricing = pricing;
-    }
-
-    /// The rate this run is priced at.
-    pub fn pricing(&self) -> Pricing {
-        self.pricing
     }
 
     /// State the rate from outside a run: a surface that reads a receiver of
@@ -92,11 +82,9 @@ impl Tally {
     }
 
     /// Read one event for whatever number it carries, priced at the rate this
-    /// run was seeded with — one source of that answer, so the line and the
-    /// session total cannot disagree.
+    /// run was seeded with.
     pub fn on(&mut self, event: &agent::Event) {
         match event {
-            agent::Event::TurnStart { turn } => self.turns = *turn,
             // A retry sends a second one for the same turn: the count it
             // carries replaces the abandoned attempt's rather than joining it.
             agent::Event::Usage(usage) => self.turn = *usage,
@@ -125,17 +113,16 @@ impl Tally {
             // Replaces the running count (not adds): a compaction summary
             // is a paid call with no event of its own, only caught here.
             agent::Event::Done {
-                turns,
                 usage,
                 ctx,
                 compactions,
+                ..
             } => {
                 self.settled = Totals {
                     usage: *usage,
                     cost: self.pricing.cost(usage),
                 };
                 self.turn = Usage::default();
-                self.turns = *turns;
                 self.ctx = Some(*ctx);
                 self.compactions = *compactions;
             }
@@ -158,9 +145,8 @@ impl Tally {
             elapsed,
             input: run.usage.input,
             output: run.usage.output,
-            cache_read: run.usage.cache_read,
+            cached: cached(&run.usage),
             cost: run.cost,
-            turns: self.turns,
             ctx: self.ctx,
             speed: self.speed(),
             compactions: self.compactions,
@@ -197,23 +183,20 @@ impl Tally {
         self.ctx
     }
 
-    /// What this run has spent so far: the turns that have reported plus the
-    /// one in flight. The lines read it, and the surface reads it again when a
-    /// run ends without its own word — an interrupted turn — so the spend still
-    /// lands in the totals.
-    pub fn run_spend(&self) -> Totals {
+    // What this run has spent so far: the turns that have reported plus the
+    // one in flight.
+    fn run_spend(&self) -> Totals {
         let mut t = self.settled;
         t.usage.add(&self.turn);
         t
     }
+}
 
-    /// What the session has spent, the run in flight included: every run of it
-    /// this surface has watched. `/status` reads it; the lines say the run alone.
-    pub fn session(&self) -> Totals {
-        let mut t = self.base;
-        t.merge(&self.run_spend());
-        t
-    }
+// Over the same sums `input` and the cost are, so the three agree. Transports
+// report cached tokens apart from `input`, so the prompt is all three.
+fn cached(u: &Usage) -> Option<u64> {
+    let sent = u.input + u.cache_read + u.cache_write;
+    (sent > 0).then(|| u.cache_read * 100 / sent)
 }
 
 /// A compaction's report in one line, for `/status` and the surfaces that
@@ -261,7 +244,7 @@ pub fn compaction_line(r: &agent::Report) -> String {
 // Takes the three pieces rather than a config entry: the running model may
 // never have had one — a passed-through name has no entry to read.
 pub(super) fn summary(format: &str, window: u32, p: &llm::model::Pricing) -> String {
-    let mut parts = vec![format.to_string(), llm::figures::short(u64::from(window))];
+    let mut parts = vec![format.to_string(), llm::figures::size(u64::from(window))];
     if p.input_per_mtok > 0.0 || p.output_per_mtok > 0.0 {
         parts.push(format!(
             "${:.2}/${:.2} per Mtok",
@@ -296,7 +279,7 @@ mod tests {
     // A tally on the rate `priced()` states, which is what a run starts with.
     fn seeded() -> Tally {
         let mut t = Tally::default();
-        t.seed(Totals::default(), priced());
+        t.seed(priced());
         t
     }
 
@@ -309,7 +292,7 @@ mod tests {
         t.on(&agent::Event::Usage(usage(100, 5)));
         t.on(&agent::Event::Usage(usage(100, 20)));
         let mid = t.snapshot("m", None, None, 0);
-        assert_eq!((mid.input, mid.output, mid.turns), (100, 20, 1));
+        assert_eq!((mid.input, mid.output), (100, 20));
 
         t.on(&agent::Event::TurnEnd {
             usage: usage(100, 30),
@@ -319,12 +302,39 @@ mod tests {
         t.on(&agent::Event::TurnStart { turn: 2 });
         t.on(&agent::Event::Usage(usage(400, 7)));
         let s = t.snapshot("m", None, None, 0);
-        assert_eq!((s.input, s.output, s.turns), (500, 37, 2));
+        assert_eq!((s.input, s.output), (500, 37));
         // 100 in at 10/mtok, 30 out at 100/mtok. The turn in flight is not
         // priced until it ends, so it contributes to neither figure.
         assert_eq!(s.cost, 0.004);
         // Speed is the finished turn's: 30 out over its 2s of streaming.
         assert_eq!(s.speed, Some(15.0));
+    }
+
+    // The cache share is weighted over the run's requests, not the latest
+    // one's, and a mid-stream report of output alone leaves it be.
+    #[test]
+    fn the_cache_share_is_the_runs() {
+        let mut t = seeded();
+        assert_eq!(t.snapshot("m", None, None, 0).cached, None);
+        let hit = |input, cache_read| Usage {
+            input,
+            cache_read,
+            ..Default::default()
+        };
+        t.on(&agent::Event::TurnEnd {
+            usage: hit(1_000, 0),
+            text: String::new(),
+            generating: None,
+        });
+        t.on(&agent::Event::TurnEnd {
+            usage: hit(51, 27_800),
+            text: String::new(),
+            generating: None,
+        });
+        // 27,800 of 28,851 prompt tokens.
+        assert_eq!(t.snapshot("m", None, None, 0).cached, Some(96));
+        t.on(&agent::Event::Usage(usage(0, 12)));
+        assert_eq!(t.snapshot("m", None, None, 0).cached, Some(96));
     }
 
     // A run's own total replaces the running one (same turns counted once):
@@ -347,58 +357,12 @@ mod tests {
         let s = t.snapshot("m", None, None, 0);
         // The run's word replaces the running tally rather than joining it:
         // the same turns counted twice would double every number here.
-        assert_eq!(s.turns, 2);
         assert_eq!((s.input, s.output), (8_400, 390));
         assert_eq!(s.cost, 0.123);
         assert_eq!(s.ctx, Some((72_400, 114_000)));
         assert_eq!(s.compactions, 1);
         // Nothing streamed, so no time to divide by.
         assert_eq!(s.speed, None);
-    }
-
-    // Seeded with what the session spent before this run; that stays off
-    // the lines — `session` is where the whole figure is asked for.
-    #[test]
-    fn a_seeded_tally_keeps_the_session_off_the_line() {
-        let base = Totals {
-            usage: Usage {
-                input: 10_000,
-                output: 4_000,
-                cache_read: 300_000,
-                ..Default::default()
-            },
-            cost: 0.02,
-        };
-        let mut t = seeded();
-        t.seed(base, priced());
-        t.on(&agent::Event::TurnStart { turn: 1 });
-        t.on(&agent::Event::Usage(usage(100, 5)));
-        let mid = t.snapshot("m", None, None, 0);
-        assert_eq!((mid.input, mid.output, mid.cache_read), (100, 5, 0));
-        assert_eq!(mid.cost, 0.0);
-        let session = t.session();
-        assert_eq!(
-            (
-                session.usage.input,
-                session.usage.output,
-                session.usage.cache_read
-            ),
-            (10_100, 4_005, 300_000)
-        );
-        assert_eq!(session.cost, 0.02);
-
-        t.on(&agent::Event::Done {
-            turns: 1,
-            usage: usage(200, 30),
-            ctx: (72_400, 114_000),
-            compactions: 0,
-        });
-        let s = t.snapshot("m", None, None, 0);
-        assert_eq!((s.input, s.output), (200, 30));
-        assert_eq!(s.cost, 0.005);
-        let session = t.session();
-        assert_eq!((session.usage.input, session.usage.output), (10_200, 4_030));
-        assert_eq!(session.cost, 0.025);
     }
 
     // A `!` command and a compaction begin no turn, and a host that reports
@@ -420,7 +384,6 @@ mod tests {
             compactions: 0,
         });
         let s = t.snapshot("m", None, None, 0);
-        assert_eq!(s.turns, 3);
         assert_eq!((s.input, s.output), (0, 0));
     }
 

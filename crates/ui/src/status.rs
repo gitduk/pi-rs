@@ -15,22 +15,15 @@ pub const SPIN: Duration = Duration::from_millis(90);
 pub fn render(segment: Segment, s: &Snapshot) -> Option<String> {
     Some(match segment {
         Segment::Elapsed => llm::figures::elapsed(s.elapsed?),
-        // Dashes (elsewhere) mean "ran, but reported nothing"; this drops the
-        // part instead when nothing has been spent on yet.
-        Segment::InOut if s.turns == 0 && s.input == 0 && s.output == 0 => return None,
-        Segment::InOut => llm::figures::in_out(s.input, s.output),
-        // Shown whenever in/out is, a dash until a turn has streamed: a part
-        // that came and went between frames would read as a glitch.
-        Segment::Speed if s.turns == 0 && s.input == 0 && s.output == 0 => return None,
-        Segment::Speed => match s.speed {
-            Some(rate) => format!("{rate:.0} t/s"),
-            None => "- t/s".to_string(),
-        },
-        Segment::Cache if s.cache_read == 0 => return None,
-        Segment::Cache => format!("{} cached", llm::figures::short(s.cache_read)),
+        // Each half appears once the provider states it: most state both only
+        // as the stream ends, and a waiting line of dashes reads as broken.
+        Segment::InOut if s.input == 0 && s.output == 0 => return None,
+        Segment::InOut => llm::figures::in_out_so_far(s.input, s.output),
+        Segment::Speed => format!("{:.0} t/s", s.speed?),
+        Segment::Cache => format!("{}% cached", s.cached?),
         // An unpriced model reports no cost rather than $0.
         Segment::Cost if s.cost <= 0.0 => return None,
-        Segment::Cost => format!("${:.4}", s.cost),
+        Segment::Cost => llm::figures::dollars(s.cost),
         // Both numbers rather than the share between them: a percentage of
         // a million-token window reads as 0% for most of a session.
         Segment::Ctx => match s.ctx? {
@@ -39,7 +32,7 @@ pub fn render(segment: Segment, s: &Snapshot) -> Option<String> {
             (used, window) => format!(
                 "ctx {}/{}{}",
                 llm::figures::short(used as u64),
-                llm::figures::short(window as u64),
+                llm::figures::size(window as u64),
                 if s.refit { "↓" } else { "" }
             ),
         },

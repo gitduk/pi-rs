@@ -52,7 +52,7 @@ impl JobHandle for Handle {
     fn status(&self, text: String) {
         self.said.lock().unwrap().push(format!("status {text}"));
     }
-    fn result(&self, text: String, _spent: llm::stream::Usage) {
+    fn result(&self, text: String) {
         self.said
             .lock()
             .unwrap()

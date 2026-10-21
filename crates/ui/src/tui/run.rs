@@ -48,9 +48,9 @@ pub(super) enum Kind {
         // with — plus the flash for a command that never ran.
         lines: Vec<String>,
     },
-    // A `/compact`, and what it shrank and spent. None means the transcript
-    // already fit — or, with a cancelled `ran`, that nobody ever looked.
-    Compact(Option<(agent::Report, llm::stream::Usage)>),
+    // A `/compact`, and what it shrank. None means the transcript already
+    // fit — or, with a cancelled `ran`, that nobody ever looked.
+    Compact(Option<agent::Report>),
 }
 
 // A run off the loop, reporting back via one channel (not a
@@ -613,10 +613,6 @@ impl Tui {
             let _ = self.core.save_lane(lane);
         }
 
-        // The run's totals (subagents' included) land on its lane; an
-        // interrupted run lands as the spend the view showed.
-        self.core.lanes[lane].charge_run(&out);
-
         // A `!` draws its own rows as it lands, so its cursor is wherever the
         // transcript that came home ends: the archive's end if it panicked.
         if was_bash && let Some(session) = self.core.lanes[lane].session() {
@@ -697,8 +693,7 @@ impl Tui {
             None => self.recover_session(lane, "compaction"),
         };
 
-        if let Some((report, spent)) = report {
-            self.core.lanes[lane].charge(&spent);
+        if let Some(report) = report {
             let _ = self.core.lanes[lane]
                 .sender()
                 .send(Event::Compacted(report));

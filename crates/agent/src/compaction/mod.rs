@@ -25,8 +25,8 @@ use ladder::{Policy, Report};
 /// The compactor that ships.
 pub struct Summarizing {
     policy: Policy,
-    /// Who writes the summary, when it is not the model doing the work.
-    /// Its spec shapes the call only: what it spends is priced at the run's rate.
+    /// Who writes the summary, when it is not the model doing the work. The
+    /// session's meter prices it at its own rate; the run's line, at the run's.
     writer: Option<(Arc<dyn Transport>, ModelSpec)>,
     /// How long a wedged stream is given before it is read as wedged, for the
     /// summary's own call.
@@ -90,7 +90,8 @@ impl Summarizing {
     }
 
     /// Failure is not fatal: entries still go, only the summary is lost.
-    /// Returns tokens only; billed at the run's rate, not the writer's own.
+    /// Returns tokens, for the run's own figures; the wire charges the writer's
+    /// rate to the meter as it goes.
     async fn retire_span(
         &self,
         session: &session::Session,
@@ -99,8 +100,8 @@ impl Summarizing {
         focus: Option<&str>,
     ) -> Usage {
         let (transport, spec) = match &self.writer {
-            Some((t, s)) => (&**t, s),
-            None => (run.transport, run.spec),
+            Some((t, s)) => (run.wire.over(&**t), s),
+            None => (run.wire, run.spec),
         };
         let history = summary::render(&session.summaries(), &session.entries_for(&record.dropped));
 
@@ -172,13 +173,14 @@ impl Compactor for Summarizing {
         run: Working<'_>,
         budget: usize,
         focus: Option<&str>,
-    ) -> Option<(Report, Usage)> {
+    ) -> Option<Report> {
         let tail = self.tail_within(budget);
         let policy = Policy {
             protect_tail: tail,
             ..self.policy
         };
-        self.pass(session, run, tail, budget, &policy, focus).await
+        let pass = self.pass(session, run, tail, budget, &policy, focus).await;
+        pass.map(|(report, _)| report)
     }
 
     fn kept_tokens(&self, budget: usize) -> usize {

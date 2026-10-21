@@ -27,6 +27,30 @@ impl Usage {
         self.cache_read += cache_read;
         self.cache_write += cache_write;
     }
+
+    /// Take in what `ev` says of one call's counts: a start states them
+    /// whole; a terminal frame only the ones it carries, since one that omits
+    /// a counter reports 0 and must not clobber a count already delivered.
+    pub fn observe(&mut self, ev: &StreamEvent) {
+        match ev {
+            StreamEvent::MessageStart { usage } => *self = *usage,
+            StreamEvent::Done { usage, .. } => {
+                if usage.input > 0 {
+                    self.input = usage.input;
+                }
+                if usage.output > 0 {
+                    self.output = usage.output;
+                }
+                if usage.cache_read > 0 {
+                    self.cache_read = usage.cache_read;
+                }
+                if usage.cache_write > 0 {
+                    self.cache_write = usage.cache_write;
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -142,10 +166,9 @@ impl Accumulator {
     }
 
     pub fn push(&mut self, ev: StreamEvent) {
+        self.usage.observe(&ev);
         match ev {
-            StreamEvent::MessageStart { usage } => {
-                self.usage = usage;
-            }
+            StreamEvent::MessageStart { .. } => {}
             StreamEvent::BlockStart { index, kind } => {
                 self.blocks.entry(index).or_default().kind = Some(kind);
             }
@@ -165,23 +188,7 @@ impl Accumulator {
             StreamEvent::Complete { content, invalid } => {
                 self.complete = Some((content, invalid));
             }
-            StreamEvent::Done { stop, usage } => {
-                self.stop = stop;
-                // A terminal frame that omits a counter reports 0; never let
-                // that clobber a count an earlier frame already delivered.
-                if usage.input > 0 {
-                    self.usage.input = usage.input;
-                }
-                if usage.output > 0 {
-                    self.usage.output = usage.output;
-                }
-                if usage.cache_read > 0 {
-                    self.usage.cache_read = usage.cache_read;
-                }
-                if usage.cache_write > 0 {
-                    self.usage.cache_write = usage.cache_write;
-                }
-            }
+            StreamEvent::Done { stop, .. } => self.stop = stop,
         }
     }
 

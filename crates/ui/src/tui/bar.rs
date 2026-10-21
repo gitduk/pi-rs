@@ -35,8 +35,7 @@ pub(super) struct Facts {
     pub worktree: Option<String>,
     /// Used against budget, in tokens, as the last turn left it.
     pub ctx: Option<(usize, usize)>,
-    /// What the session has spent, in dollars: completed turns only, so it
-    /// moves a few times a run rather than every frame.
+    /// What the session has spent, in dollars, as each call ends.
     pub spent: f64,
     /// What is wrong and stays so until it is fixed, drawn where a flash
     /// goes whenever none is up; `/status` says why.
@@ -61,7 +60,7 @@ impl Facts {
             root: lane.root().to_path_buf(),
             worktree: lane.worktree().map(str::to_string),
             ctx: lane.tally().ctx(),
-            spent: lane.tally().session().cost,
+            spent: lane.spent().cost,
             alerts: [
                 lane.unsaved().map(|_| "unsaved"),
                 pi_store::journal::failed().then_some("journal off"),
@@ -313,6 +312,8 @@ impl Ui {
                 (None, Some(released)) => format!("{released} available"),
                 (None, None) => return None,
             },
+            Part::Spent if facts.spent <= 0.0 => return None,
+            Part::Spent => llm::figures::dollars(facts.spent),
             Part::Status(segment) => return crate::status::render(segment, snap),
         })
     }

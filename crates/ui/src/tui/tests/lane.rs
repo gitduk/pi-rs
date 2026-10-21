@@ -132,10 +132,7 @@ async fn every_kind_of_job_leaves_its_lane_idle() {
             ("compact", crate::tui::run::Kind::Compact(None)),
             (
                 "compact with a report",
-                crate::tui::run::Kind::Compact(Some((
-                    agent::Report::default(),
-                    llm::stream::Usage::default(),
-                ))),
+                crate::tui::run::Kind::Compact(Some(agent::Report::default())),
             ),
         ]
     };
@@ -258,67 +255,6 @@ async fn a_stopped_run_does_not_tell_the_model_a_request_was_cancelled() {
         !after_turn.contains("stopped the previous run"),
         "a stopped turn adds no note: {after_turn}"
     );
-}
-
-// An interrupted turn states no word of its own, so the spend already
-// shown is what lands in the totals — the next run's base carries it.
-#[tokio::test]
-async fn an_interrupted_turn_keeps_its_spend_in_the_session_totals() {
-    let dir = tempfile::tempdir().expect("a temp dir");
-    let mut tui = surface(dir.path());
-    let mut session = agent::session::Session::new();
-    session.prompt("the task the user actually asked for");
-
-    tui.core.lanes[0].note(&agent::Event::TurnStart { turn: 1 });
-    tui.core.lanes[0].note(&agent::Event::Usage(llm::stream::Usage {
-        input: 100,
-        output: 20,
-        ..Default::default()
-    }));
-
-    tui.settle(crate::tui::run::Done {
-        token: tui.core.lanes[0].token(),
-        kind: crate::tui::run::Kind::Turn,
-        ran: Some((session, Err(agent::AgentError::Cancelled))),
-    })
-    .await;
-
-    assert_eq!(tui.core.lanes[0].totals().usage.input, 100);
-    assert_eq!(tui.core.lanes[0].totals().usage.output, 20);
-}
-
-// The same for a lane out of sight: its meter hears the run as it goes, so a
-// stop that lands before anyone looks still charges what the run spent.
-#[tokio::test]
-async fn an_interrupted_turn_out_of_sight_keeps_its_spend_too() {
-    let dir = tempfile::tempdir().expect("a temp dir");
-    let mut tui = surface(dir.path());
-    let lane = running_lane(dir.path());
-    let token = lane.token();
-    let sent = lane.sender().clone();
-    tui.core.lanes.push(lane);
-    let mut session = agent::session::Session::new();
-    session.prompt("the task behind you");
-
-    for event in [
-        agent::Event::TurnStart { turn: 1 },
-        agent::Event::Usage(llm::stream::Usage {
-            input: 100,
-            output: 20,
-            ..Default::default()
-        }),
-    ] {
-        sent.send(event).expect("the lane is listening");
-    }
-    tui.settle(crate::tui::run::Done {
-        token,
-        kind: crate::tui::run::Kind::Turn,
-        ran: Some((session, Err(agent::AgentError::Cancelled))),
-    })
-    .await;
-
-    assert_eq!(tui.core.lanes[1].totals().usage.input, 100);
-    assert_eq!(tui.core.lanes[1].totals().usage.output, 20);
 }
 
 // A flash is transient: it is not part of the transcript, and it is
@@ -1011,8 +947,8 @@ async fn a_jobs_result_opens_a_turn_under_its_label() {
         Default::default(),
         None,
     );
-    job.result("check the build".into(), Default::default());
-    job.result("/compact".into(), Default::default());
+    job.result("check the build".into());
+    job.result("/compact".into());
     job.end();
 
     for said in ["check the build", "/compact"] {

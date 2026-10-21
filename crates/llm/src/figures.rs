@@ -40,6 +40,32 @@ pub fn short(n: u64) -> String {
     }
 }
 
+/// A size that never climbs, such as a context window: `200k`, not `200.0k`.
+/// The decimals `short` keeps are for counts that must hold still while rising.
+pub fn size(n: u64) -> String {
+    let s = short(n);
+    let Some((whole, rest)) = s.split_once('.') else {
+        return s;
+    };
+    let unit = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    let decimals = &rest[..rest.len() - unit.len()];
+    if decimals.chars().all(|c| c == '0') {
+        format!("{whole}{unit}")
+    } else {
+        s
+    }
+}
+
+/// Money spent: four places under a dollar, where a run's cost lives, two
+/// once past it, where the cents beyond are noise.
+pub fn dollars(d: f64) -> String {
+    if d < 1.0 {
+        format!("${d:.4}")
+    } else {
+        format!("${d:.2}")
+    }
+}
+
 // A figure the provider reported, or the dash standing for one it left out —
 // never a count of ours standing in for it.
 fn reported(n: u64) -> String {
@@ -49,6 +75,16 @@ fn reported(n: u64) -> String {
 /// The in/out counts in the one wording every line that shows them uses.
 pub fn in_out(input: u64, output: u64) -> String {
     format!("{} in / {} out", reported(input), reported(output))
+}
+
+/// The in/out counts while they are still arriving: a half not yet stated is
+/// left off rather than dashed, so a repainting line does not read as broken.
+pub fn in_out_so_far(input: u64, output: u64) -> String {
+    match (input, output) {
+        (_, 0) => format!("{} in", short(input)),
+        (0, _) => format!("{} out", short(output)),
+        _ => in_out(input, output),
+    }
 }
 
 /// The same two figures where the words will not fit: a row that

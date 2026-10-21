@@ -13,7 +13,7 @@ use llm::transport::Transport;
 /// Ask `transport` one question under `system` and read back the text, and
 /// why it stopped.
 pub async fn ask(
-    transport: &dyn Transport,
+    transport: llm::meter::Metered<'_>,
     spec: &ModelSpec,
     system: &str,
     body: String,

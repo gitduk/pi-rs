@@ -98,9 +98,7 @@ struct Conversation {
     _claim: Option<session::Claim>,
     // What the user calls this session, if anything.
     name: Option<String>,
-    // What this session's finished runs have cost, in and out and in money.
-    totals: Totals,
-    // What the run in flight has cost so far, seeded from `totals` when a run
+    // What the run in flight has cost so far, seeded when a run
     // arms; the status lines read this run alone, `/status` the session.
     tally: Tally,
     // Rows and notes filed while a run had the transcript out. They land
@@ -137,7 +135,6 @@ impl Conversation {
             created,
             _claim: claim,
             name,
-            totals: Totals::default(),
             tally: Tally::default(),
             held: Vec::new(),
             unsaved: None,
@@ -529,9 +526,15 @@ impl Lane {
         self.talk.unsaved.as_deref()
     }
 
-    /// What the run in flight has cost, over the session's settled totals.
+    /// What the run in flight has cost, for the lines that say the run alone.
     pub fn tally(&self) -> &Tally {
         &self.talk.tally
+    }
+
+    /// What this session has spent, counted at the wire: its runs, its
+    /// compactions and the children and jobs they started alike.
+    pub fn spent(&self) -> Totals {
+        self.checkout.agent.meter.read()
     }
 
     /// Fold an event into the meter. The loop's facts arrive here and nowhere
@@ -540,31 +543,10 @@ impl Lane {
         self.talk.tally.on(event);
     }
 
-    /// Start the meter at what the session has already spent, so a resumed
-    /// tree does not read as a free run, and pin the rate this run is priced
-    /// at: a `/model` answered mid-run does not reprice the turn in flight.
+    /// Start the run's count afresh and pin the rate it is priced at: a
+    /// `/model` answered mid-run does not reprice the turn in flight.
     pub fn seed_meter(&mut self) {
-        self.talk
-            .tally
-            .seed(self.talk.totals, self.checkout.agent.spec().pricing);
-    }
-
-    /// Charge what a run spent to the session, once it has reported it, at the
-    /// rate that run was started on — the meter's own, pinned at its seed.
-    pub fn charge(&mut self, spent: &llm::stream::Usage) {
-        let cost = self.talk.tally.pricing().cost(spent);
-        self.talk.totals.add(spent, cost);
-    }
-
-    /// The same, from the run itself: its own word when it has one, and the
-    /// meter's reading of the turn in flight when it was cut short before
-    /// pricing it.
-    pub fn charge_run(&mut self, out: &Result<llm::stream::Usage, agent::AgentError>) {
-        let spent = match out {
-            Ok(usage) => *usage,
-            Err(_) => self.talk.tally.run_spend().usage,
-        };
-        self.charge(&spent);
+        self.talk.tally.seed(self.checkout.agent.spec().pricing);
     }
 
     /// Lend the transcript to a job for the length of its run.
@@ -639,10 +621,6 @@ impl Lane {
 impl Lane {
     pub fn set_worktree(&mut self, name: Option<String>) {
         self.checkout.worktree = name;
-    }
-
-    pub fn totals(&self) -> &Totals {
-        &self.talk.totals
     }
 
     pub fn held(&self) -> usize {
@@ -728,6 +706,9 @@ impl Core {
     fn becomes(&mut self, talk: Conversation) {
         let lane = self.lane_mut();
         lane.talk = talk;
+        // In place, not a new `Arc`: the subagent tool holds this one. A job
+        // of the old session still out charges the new one from here.
+        lane.checkout.agent.meter.reset(Totals::default());
         lane.checkout.ctx = lane
             .checkout
             .ctx
@@ -871,6 +852,8 @@ impl Core {
         let agent = &self.lanes[like].checkout.agent;
         let archive = self.archive(root, agent.spec().model.clone());
         let mut ag = (**agent).clone();
+        // Before `arm`, which hands the meter on to the subagent it builds.
+        ag.meter = Arc::default();
         let resolved = arm(
             &mut ag,
             Arc::new(resolved),
@@ -1055,14 +1038,27 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use crate::core::tests::{Recording, a_lane, a_repl};
-    use llm::model::Pricing;
-    use llm::stream::Usage;
 
-    // A lane's model is one value behind two `Arc`s; a test that reprices it
-    // takes the copies the same way `/model` does.
-    fn price(lane: &mut crate::core::lane::Lane, pricing: Pricing) {
-        let agent = std::sync::Arc::make_mut(&mut lane.checkout.agent);
-        std::sync::Arc::make_mut(&mut agent.model).spec.pricing = pricing;
+    // An opened lane is cloned from another's agent, so it would share that
+    // meter unless given its own; a session taken up counts from nothing.
+    #[test]
+    fn spend_is_one_lanes_and_one_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
+        let spent = agent::Totals {
+            cost: 1.0,
+            ..Default::default()
+        };
+        core.lane().agent().meter.reset(spent);
+
+        let ws = tool::Workspace::new(dir.path()).unwrap();
+        core.open_lane(ws, None, 0).unwrap();
+        assert_eq!(core.lane().spent(), agent::Totals::default());
+        assert_eq!(core.lanes[0].spent(), spent);
+
+        core.current = 0;
+        core.fresh_session();
+        assert_eq!(core.lane().spent(), agent::Totals::default());
     }
 
     // A child's detach would land as a turn on this lane, which the child
@@ -1104,35 +1100,6 @@ mod tests {
         assert!(lane.unwrap().flatten().contains("job #1"));
         let child = off(&resolved.brief.registry).execute(args, &ctx).await;
         assert!(child.unwrap_err().to_string().contains("cannot keep"));
-    }
-
-    // `/model` applies at once, but a run in flight stays charged at the
-    // rate it started — else `/status` prices tokens the new model never ran.
-    #[test]
-    fn a_switch_mid_run_does_not_reprice_the_run_in_flight() {
-        let cheap = Pricing {
-            input_per_mtok: 3.0,
-            output_per_mtok: 15.0,
-            ..Default::default()
-        };
-        let dear = Pricing {
-            input_per_mtok: 30.0,
-            output_per_mtok: 150.0,
-            ..Default::default()
-        };
-
-        let mut lane = a_lane("s");
-        price(&mut lane, cheap);
-        lane.seed_meter();
-        // `/model`: the lane's own rate moves, this run's does not.
-        price(&mut lane, dear);
-        lane.charge(&Usage {
-            input: 1_000_000,
-            output: 1_000_000,
-            ..Default::default()
-        });
-
-        assert_eq!(lane.talk.totals.cost, 3.0 + 15.0);
     }
 
     // Screen rows filed while a run holds the transcript wait rather than

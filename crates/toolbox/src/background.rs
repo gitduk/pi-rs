@@ -30,13 +30,13 @@ pub trait JobSink: Send + Sync {
 }
 
 /// A running job's way to report. Each `result` comes back to its checkout
-/// as a turn of its own, with what it `spent` getting there; an `input` is a
+/// as a turn of its own; an `input` is a
 /// person speaking through the job, read as if typed; `end` says it will
 /// report no more.
 pub trait JobHandle: Send + Sync {
     fn id(&self) -> u64;
     fn status(&self, text: String);
-    fn result(&self, text: String, spent: llm::stream::Usage);
+    fn result(&self, text: String);
     fn input(&self, text: String);
     /// A line for the person, never the model: a code to scan, say.
     fn notice(&self, text: String);

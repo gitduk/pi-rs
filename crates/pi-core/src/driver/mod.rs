@@ -54,8 +54,6 @@ pub struct Next {
     pub line: String,
     pub note: String,
     pub origin: Origin,
-    /// Spent before the line was sent, by a subagent in the background.
-    pub spent: llm::stream::Usage,
     /// Set when the line is the model's own come back, not the user's: what
     /// the screen names it by. The note then rides with the ask.
     pub label: Option<String>,
@@ -97,14 +95,12 @@ impl Drivers {
                 line: due.line,
                 note: due.note,
                 origin: Origin::Job,
-                spent: due.spent,
                 label: Some(due.label),
             },
             Some((job, jobs::Back::Input { text, note })) => Next {
                 line: text,
                 note,
                 origin: Origin::Input(job),
-                spent: Default::default(),
                 label: None,
             },
             None => {
@@ -113,7 +109,6 @@ impl Drivers {
                     line: due.goal,
                     note: due.note,
                     origin: Origin::Loop,
-                    spent: Default::default(),
                     label: None,
                 }
             }

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use llm::message::{AssistantContent, Message, ToolCall};
+use llm::meter::{Meter, Metered};
 use llm::model::ModelSpec;
 use llm::request::{Effort, Request};
 use llm::stream::Usage;
@@ -77,7 +78,8 @@ impl NoteOutcome for Session {
 /// the model changes, which moves nothing else about a run.
 #[derive(Clone)]
 pub struct Model {
-    pub transport: Arc<dyn Transport>,
+    // Reached through `Agent::wire`, so no call can go out uncounted.
+    pub(crate) transport: Arc<dyn Transport>,
     pub spec: ModelSpec,
 }
 
@@ -102,6 +104,9 @@ pub struct Agent {
     /// What shrinks the transcript when it outgrows the window. The identity
     /// until something is installed — see `Compactor`.
     pub compactor: Arc<dyn Compactor>,
+    /// What every call this agent and the children it starts make is charged
+    /// to. A clone shares it; whoever owns a new one gives it a fresh meter.
+    pub meter: Arc<Meter>,
 }
 
 impl Agent {
@@ -119,7 +124,13 @@ impl Agent {
                 hooks: Arc::new(NoHooks),
             }),
             compactor: Arc::new(seams::Untouched),
+            meter: Arc::default(),
         }
+    }
+
+    /// The wire every call goes out on, counted on this agent's meter.
+    pub fn wire(&self) -> Metered<'_> {
+        Metered::new(&*self.model.transport, &self.meter)
     }
 
     /// The model this agent runs: the wire and the facts about it.
@@ -396,11 +407,7 @@ impl Agent {
     /// Targets the same tail the automatic pass protects — "summarize
     /// everything but what I'm in the middle of" — and runs even when the
     /// transcript already fits, since the point is a phase ending, not a budget.
-    pub async fn compact_now(
-        &self,
-        session: &mut Session,
-        focus: Option<&str>,
-    ) -> Option<(Report, Usage)> {
+    pub async fn compact_now(&self, session: &mut Session, focus: Option<&str>) -> Option<Report> {
         self.compactor
             .compact_now(session, self.working(), self.budget(), focus)
             .await
@@ -410,7 +417,7 @@ impl Agent {
     /// its summary with these when it has no writer of its own.
     fn working(&self) -> Working<'_> {
         Working {
-            transport: &*self.model.transport,
+            wire: self.wire(),
             spec: &self.model.spec,
             summarize: &self.brief.summarize,
             overhead: self.overhead(),

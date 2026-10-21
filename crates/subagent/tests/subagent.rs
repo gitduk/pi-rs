@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
+use llm::meter::Meter;
 use llm::model::ModelSpec;
 use llm::request::Request;
 use llm::stream::{BlockKind, StopReason, StreamEvent, Usage};
@@ -668,7 +669,6 @@ async fn two_calls_in_one_turn_both_reach_the_child() {
 #[derive(Default)]
 struct Host {
     said: Arc<std::sync::Mutex<Vec<String>>>,
-    spent: Arc<std::sync::Mutex<llm::stream::Usage>>,
     ended: Arc<tokio::sync::Notify>,
 }
 
@@ -686,7 +686,6 @@ impl toolbox::background::JobSink for Host {
             .push(format!("start {description}"));
         Arc::new(Host {
             said: self.said.clone(),
-            spent: self.spent.clone(),
             ended: self.ended.clone(),
         })
     }
@@ -697,9 +696,8 @@ impl toolbox::background::JobHandle for Host {
         4
     }
     fn status(&self, _text: String) {}
-    fn result(&self, text: String, spent: llm::stream::Usage) {
+    fn result(&self, text: String) {
         self.said.lock().unwrap().push(text);
-        *self.spent.lock().unwrap() = spent;
     }
     fn input(&self, _text: String) {}
     fn notice(&self, _text: String) {}
@@ -712,7 +710,8 @@ impl toolbox::background::JobHandle for Host {
     }
 }
 
-fn offered(turns: Vec<Vec<StreamEvent>>, host: Arc<Host>) -> Subagent {
+// The parent's meter comes back too: what the child spends is charged there.
+fn offered(turns: Vec<Vec<StreamEvent>>, host: Arc<Host>) -> (Subagent, Arc<Meter>) {
     let parent = Agent::new(
         Arc::new(Scripted {
             turns,
@@ -721,14 +720,15 @@ fn offered(turns: Vec<Vec<StreamEvent>>, host: Arc<Host>) -> Subagent {
         }),
         spec(),
     );
-    Subagent::new(
+    let child = Subagent::new(
         &parent,
         parent.brief.clone(),
         Arc::new(Kept::default()),
         STANDING,
         Retry::default(),
     )
-    .with_background(host)
+    .with_background(host);
+    (child, parent.meter.clone())
 }
 
 // Sent off, the child answers into the tool's job host, spend and all, and
@@ -739,7 +739,8 @@ async fn a_background_child_reports_through_the_tools_jobs() {
     let host = Arc::new(Host::default());
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
     let ended = host.ended.notified();
-    let out = offered(vec![text_turn("there are four files")], host.clone())
+    let (child, meter) = offered(vec![text_turn("there are four files")], host.clone());
+    let out = child
         .execute(
             serde_json::json!({"description": "count", "prompt": "count the files", "background": true}),
             &ctx,
@@ -754,8 +755,9 @@ async fn a_background_child_reports_through_the_tools_jobs() {
     assert_eq!(said[0], "start count");
     assert!(said[1].contains("there are four files"), "{said:?}");
     assert_eq!(said[2], "end");
-    assert!(
-        host.spent.lock().unwrap().input > 0,
-        "its spend comes along"
+    assert_eq!(
+        meter.read().usage.input,
+        1_000,
+        "charged to the parent's meter"
     );
 }

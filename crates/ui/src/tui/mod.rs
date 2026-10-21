@@ -828,12 +828,11 @@ impl Tui {
         Ok(ended)
     }
 
-    // The line a driver sends the front lane next, drawn and its spend
-    // charged, with who sent it: a relay opens a turn, anything else is read.
+    // The line a driver sends the front lane next, drawn, with who sent it:
+    // a relay opens a turn, anything else is read.
     fn driver_line(&mut self) -> Option<(Origin, Wake)> {
         let lane = self.core.lane();
         let next = self.drivers.next(lane.token(), lane.root())?;
-        self.core.lane_mut().charge(&next.spent);
         let view = front_view(&mut self.views, self.core.lane());
         view.surface.follow();
         // A job's result is relayed under its label; a loop's line is read as

@@ -4,6 +4,7 @@
 use futures::StreamExt;
 use llm::request::Request;
 use llm::stream::{Accumulator, StreamEvent};
+use llm::transport::Transport as _;
 use tool::Ctx;
 
 use crate::event::Voice;
@@ -87,8 +88,9 @@ impl Agent {
         let mut acc = Accumulator::new(self.model.spec.model.clone());
         let idle = retry.idle;
 
+        let wire = self.wire();
         let mut stream = tokio::select! {
-            r = leashed(idle, self.model.transport.stream(&self.model.spec, req)) => match r {
+            r = leashed(idle, wire.stream(&self.model.spec, req)) => match r {
                 Ok(r) => r.map_err(|e| (AgentError::from(e), None))?,
                 Err(e) => return Err((AgentError::Llm(e), None)),
             },
@@ -134,7 +136,7 @@ impl Agent {
 
         // What the host owed and did not send, said once per session by the
         // reporter. Said here too, not just the log — else it looks ordinary.
-        for gap in self.model.transport.gaps() {
+        for gap in wire.gaps() {
             voice.say(Event::Warning(gap));
         }
 

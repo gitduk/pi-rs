@@ -177,7 +177,7 @@ async fn go_on(
             biased;
             said = fd3.next() => match said {
                 Said::Status(text) => job.status(text),
-                Said::Result(text) => job.result(text, Default::default()),
+                Said::Result(text) => job.result(text),
                 Said::Input(text) => job.input(text),
                 Said::Notice(text) => job.notice(text),
                 Said::Interrupt => job.interrupt(),
@@ -209,7 +209,7 @@ async fn go_on(
         .filter(|s| !s.trim().is_empty())
         .collect();
     if !said.is_empty() {
-        job.result(said.join("\n\n"), Default::default());
+        job.result(said.join("\n\n"));
     }
     job.end();
 }

@@ -80,15 +80,17 @@ idle_timeout = 300
 #
 # The spend parts — in_out, cache and cost — are the run's own: what this
 # answer has cost since you sent it, not what the session had before it. The
-# session's running total is the `spent:` line `/status` prints, and no part
-# of the status line reads it.
+# session's running total is the `spent:` line `/status` prints and the bar's
+# `spent` part, and no part of the status line reads it.
 #
 #   elapsed    3s / 2m05s — nothing times a one-shot run, so it drops there
-#   in_out     8.4k in / 390 out, a dash for a half the provider never stated
-#   speed      41 t/s, output over the time the model spent streaming it
-#   cache      41.2k cached, left out when nothing was read from cache
+#   in_out     8.4k in / 390 out, each half once the provider states it
+#   speed      41 t/s, output over the time the model spent streaming it,
+#              left out until a turn has streamed
+#   cache      96% cached, the run's prompt tokens read from cache,
+#              left out until a request has reported its prompt
 #   cost       $0.0012, left out when the model carries no pricing
-#   ctx        ctx 9.6k/1.0m, the request against the model's window
+#   ctx        ctx 9.6k/1m, the request against the model's window
 #   compacted  compacted / compacted ×2, left out when the run never shrank the transcript
 #   queued     2 queued — waiting work not drawn as a line: a job's input,
 #              a command like /settings typed while the run worked
@@ -98,7 +100,7 @@ idle_timeout = 300
 # A part with nothing to say is left out rather than shown empty, so one list
 # serves the running line and the finished one: `queued` is gone once the run
 # ends, `cost` until something has been spent.
-status = ["elapsed", "in_out", "speed", "cache", "ctx", "compacted", "queued", "cost"]
+status = ["elapsed", "in_out", "speed", "cache", "ctx", "cost", "compacted", "queued"]
 
 # ---------------------------------------------------------------------------
 # Facts about a model the defaults get wrong.

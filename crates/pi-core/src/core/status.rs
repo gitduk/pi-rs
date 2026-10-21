@@ -33,7 +33,7 @@ impl Core {
             format!(
                 "{}{sep}effort {effort}{sep}{} window",
                 spec.model,
-                figures::short(spec.context_window.into())
+                figures::size(spec.context_window.into())
             ),
         ]));
         // The file's endpoint names its source; a model on its own host
@@ -74,7 +74,7 @@ impl Core {
                 format!(
                     "{} / {} ({}%)",
                     figures::short(used as u64),
-                    figures::short(window as u64),
+                    figures::size(window as u64),
                     used * 100 / window
                 ),
             ]));
@@ -90,7 +90,7 @@ impl Core {
         }
         // Left out until something has been spent: a session nothing has been
         // asked of yet has no figure, and a row of dashes is not one.
-        let spent = lane.tally().session();
+        let spent = lane.spent();
         if spent != Totals::default() {
             rows.push(Row::new(["spent".into(), pi_store::text::spent(&spent)]));
         }

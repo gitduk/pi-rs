@@ -253,14 +253,11 @@ fn supervise(
             Err(e) => format!("`{name}` could not be waited on: {e}"),
         };
         let said = body(&out, &err);
-        job.result(
-            if said.is_empty() {
-                format!("{ended}, no output")
-            } else {
-                format!("{ended}:\n{said}")
-            },
-            Default::default(),
-        );
+        job.result(if said.is_empty() {
+            format!("{ended}, no output")
+        } else {
+            format!("{ended}:\n{said}")
+        });
         job.end();
     });
 }

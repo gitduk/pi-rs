@@ -36,7 +36,14 @@ impl Default for Layout {
     fn default() -> Self {
         Self {
             lines: vec![Line {
-                left: vec![Item::Part(Part::Tabs), Item::Part(Part::Model)],
+                left: vec![
+                    Item::Part(Part::Tabs),
+                    Item::Part(Part::Model),
+                    Item::Styled(Styled {
+                        part: Part::Spent,
+                        style: Look::Tone(Tone::Muted),
+                    }),
+                ],
                 right: vec![
                     Item::Styled(Styled {
                         part: Part::Update,
@@ -89,6 +96,9 @@ pub enum Part {
     /// The version installed under the running pi, absent while they match;
     /// else a later release, once one is found.
     Update,
+    /// What the session has cost so far, absent for an unpriced model. The
+    /// `cost` part is the run's alone.
+    Spent,
     /// A status line part — `ctx`, `cost`, `elapsed` … — drawn as the status
     /// line draws it, from the run in flight or the one that last ended.
     Status(Segment),
@@ -104,6 +114,7 @@ enum Own {
     Effort,
     Tier,
     Update,
+    Spent,
 }
 
 impl<'de> Deserialize<'de> for Part {
@@ -126,6 +137,7 @@ impl<'de> Deserialize<'de> for Part {
             Own::Effort => Part::Effort,
             Own::Tier => Part::Tier,
             Own::Update => Part::Update,
+            Own::Spent => Part::Spent,
         })
     }
 }

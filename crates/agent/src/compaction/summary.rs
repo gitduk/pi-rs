@@ -4,7 +4,6 @@ use llm::slice::clip_bytes;
 
 use crate::session::Entry;
 use llm::stream::{StopReason, Usage};
-use llm::transport::Transport;
 
 pub const PROMPT: &str = include_str!("../../prompts/summarize.md");
 
@@ -112,7 +111,7 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
 /// the same string on every summarization, which is what makes its cache worth
 /// having, and a per-call instruction folded into it would break that.
 pub async fn run(
-    transport: &dyn Transport,
+    transport: llm::meter::Metered<'_>,
     spec: &ModelSpec,
     prompt: &str,
     history: String,

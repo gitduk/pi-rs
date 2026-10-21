@@ -55,7 +55,7 @@ pub struct Fitted {
 /// a mid-session model switch already left behind.
 #[derive(Clone, Copy)]
 pub struct Working<'a> {
-    pub transport: &'a dyn Transport,
+    pub wire: llm::meter::Metered<'a>,
     pub spec: &'a ModelSpec,
     /// The prompt the run's brief writes summaries under.
     pub summarize: &'a str,
@@ -98,7 +98,7 @@ pub trait Compactor: Send + Sync {
         run: Working<'_>,
         budget: usize,
         focus: Option<&str>,
-    ) -> Option<(Report, Usage)> {
+    ) -> Option<Report> {
         let _ = (session, run, budget, focus);
         None
     }

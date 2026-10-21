@@ -17,9 +17,4 @@ impl Totals {
         self.usage.add(usage);
         self.cost += cost;
     }
-
-    /// Fold another run's totals in whole.
-    pub fn merge(&mut self, other: &Self) {
-        self.add(&other.usage, other.cost);
-    }
 }

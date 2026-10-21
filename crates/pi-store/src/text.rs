@@ -84,7 +84,7 @@ pub fn spent(t: &llm::Totals) -> String {
         parts.push(format!("{} cached", short(t.usage.cache_read)));
     }
     if t.cost > 0.0 {
-        parts.push(format!("${:.4}", t.cost));
+        parts.push(llm::figures::dollars(t.cost));
     }
     parts.join(icons::PART_SEP)
 }

@@ -49,8 +49,9 @@ pub fn default_parts() -> Vec<Segment> {
         Segment::Speed,
         Segment::Cache,
         Segment::Ctx,
+        Segment::Cost,
+        // Parts that come and go last, so the ones that stay hold their place.
         Segment::Compacted,
         Segment::Queued,
-        Segment::Cost,
     ]
 }

@@ -106,7 +106,7 @@ impl Item {
         self.notices.clear();
     }
 
-    fn due(&self, text: &str, spent: llm::stream::Usage) -> Due {
+    fn due(&self, text: &str) -> Due {
         let (id, name) = (self.id, &self.description);
         let first = text.lines().next().unwrap_or("").trim();
         Due {
@@ -117,7 +117,6 @@ impl Item {
             ),
             label: format!("{name} #{id} {first}"),
             text: text.to_string(),
-            spent,
         }
     }
 }
@@ -229,8 +228,6 @@ pub struct Due {
     pub label: String,
     /// What the job said, as it said it.
     pub text: String,
-    /// What a background subagent spent getting here, owed to the session.
-    pub spent: llm::stream::Usage,
 }
 
 impl Table {
@@ -501,7 +498,7 @@ impl Table {
             {
                 let secs = LET_GO.as_secs();
                 let why = format!("could not start again: the last run held on past {secs}s");
-                handle.result(why, Default::default());
+                handle.result(why);
                 handle.end();
                 return;
             }
@@ -510,7 +507,7 @@ impl Table {
                 return;
             }
             if let Err(e) = rerun(handle.clone(), stop) {
-                handle.result(format!("could not start again: {e}"), Default::default());
+                handle.result(format!("could not start again: {e}"));
                 handle.end();
             }
         });
@@ -704,10 +701,10 @@ impl JobHandle for Handle {
         self.table.update(self.id, self.run, |i| i.progress = text);
     }
 
-    fn result(&self, text: String, spent: llm::stream::Usage) {
+    fn result(&self, text: String) {
         tracing::info!(target: "pi::job", job = self.id, text = %text, "result");
         self.table.update(self.id, self.run, |i| {
-            let due = i.due(&text, spent);
+            let due = i.due(&text);
             i.wait(Back::Result(due));
         });
     }
@@ -893,7 +890,7 @@ mod tests {
             CancellationToken::new(),
             Some(tx),
         );
-        job.result("connected".into(), Default::default());
+        job.result("connected".into());
         job.input("why did the tests fail".into());
         assert!(matches!(table.take_back(&root), Some((_, Back::Result(_)))));
         let Some((id, Back::Input { text, note })) = table.take_back(&root) else {
@@ -949,24 +946,17 @@ mod tests {
         assert!(table.take_interrupts().is_empty());
     }
 
-    // What a background subagent spent rides with its answer, owed to the session.
     #[tokio::test]
-    async fn a_result_carries_what_it_spent() {
+    async fn a_result_is_delivered_once() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
         let job = start(&table, &root, "find callers");
         assert!(table.working(&root));
-        let spent = llm::stream::Usage {
-            input: 100,
-            output: 20,
-            ..Default::default()
-        };
-        job.result("three callers".into(), spent);
+        job.result("three callers".into());
         job.end();
         let due = result_of(&table, &root).unwrap();
         assert!(due.line.contains("three callers"), "{}", due.line);
         assert_eq!(due.label, "find callers #1 three callers");
-        assert_eq!((due.spent.input, due.spent.output), (100, 20));
         assert!(result_of(&table, &root).is_none(), "delivered once");
         assert!(table.jobs(&root).is_empty());
     }
@@ -986,7 +976,7 @@ mod tests {
         assert!(table.stop(Path::new("/elsewhere"), job.id()).is_err());
         table.stop(&root, job.id()).unwrap();
         assert!(stop.is_cancelled());
-        job.result("too late".into(), Default::default());
+        job.result("too late".into());
         job.end();
         assert!(
             result_of(&table, &root).is_none(),
@@ -1009,8 +999,8 @@ mod tests {
             None,
         );
         job.status("1/2 pages".into());
-        job.result("page one".into(), Default::default());
-        job.result("page two".into(), Default::default());
+        job.result("page one".into());
+        job.result("page two".into());
         job.end();
         assert_eq!(
             table.waiting(&root, job.id()).unwrap(),
@@ -1039,7 +1029,7 @@ mod tests {
             None,
         );
         for n in 0..MAX_WAITING + 3 {
-            job.result(n.to_string(), Default::default());
+            job.result(n.to_string());
         }
         let mut last = None;
         while let Some(due) = result_of(&table, &root) {
@@ -1123,7 +1113,7 @@ mod tests {
         let id = old.id();
 
         table.stop(&root, id).unwrap();
-        old.result("said as it went".into(), Default::default());
+        old.result("said as it went".into());
         assert_eq!(table.jobs(&root)[0].state, State::Stopped);
 
         table.restart(&root, id).unwrap();
@@ -1131,7 +1121,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(reruns.try_recv().is_err(), "the last run still holds on");
 
-        old.result("late".into(), Default::default());
+        old.result("late".into());
         drop(old);
         let (new, stop) = reruns.recv().await.expect("run again");
         assert_eq!(new.id(), id);
@@ -1140,7 +1130,7 @@ mod tests {
 
         table.restart(&root, id).unwrap();
         assert!(stop.is_cancelled(), "a running one is stopped first");
-        new.result("exited 1".into(), Default::default());
+        new.result("exited 1".into());
         new.end();
         assert_eq!(table.jobs(&root)[0].state, State::Running);
     }
@@ -1152,7 +1142,7 @@ mod tests {
         let root = PathBuf::from("/checkout");
         let (job, _reruns) = rerunnable(&table, &root);
         let id = job.id();
-        job.result("exited 1".into(), Default::default());
+        job.result("exited 1".into());
         job.end();
         assert!(result_of(&table, &root).is_some());
         assert_eq!(table.jobs(&root)[0].state, State::Exited);

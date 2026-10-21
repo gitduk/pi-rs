@@ -118,6 +118,7 @@ impl Subagent {
             model: parent.model.clone(),
             brief: child,
             compactor: parent.compactor.clone(),
+            meter: parent.meter.clone(),
         };
         Self {
             agent: Arc::new(agent),
@@ -281,11 +282,12 @@ impl Subagent {
             .with_cancel(stop)
             .with_progress(progress);
         tokio::spawn(async move {
-            let (answer, spent) = match this.run(args, &ctx).await {
-                Ok(out) => (format!("{}\n\n{}", out.preview(), out.flatten()), out.spent),
-                Err(why) => (why.to_string(), Default::default()),
+            // What it spent was charged as it went, to the meter it shares.
+            let answer = match this.run(args, &ctx).await {
+                Ok(out) => format!("{}\n\n{}", out.preview(), out.flatten()),
+                Err(why) => why.to_string(),
             };
-            job.result(answer, spent);
+            job.result(answer);
             job.end();
         });
         let preview = format!("{} [background #{id}]", description.trim());
