@@ -403,9 +403,10 @@ impl Core {
             }
         }
         let dropped = self.store.drop_under(&removed.path);
-        if let Some(jobs) = &self.jobs {
-            jobs.drop_under(&removed.path);
-        }
+        let jobs_dropped = self
+            .jobs
+            .as_ref()
+            .map_or(0, |jobs| jobs.drop_under(&removed.path));
         // That the checkout went is the surface's to show; what else went is not.
         let mut said = Vec::new();
         if let Some(branch) = removed.branch {
@@ -416,6 +417,9 @@ impl Core {
         }
         if dropped > 0 {
             said.push(format!("{dropped} session record(s) dropped"));
+        }
+        if jobs_dropped > 0 {
+            said.push(format!("{jobs_dropped} job(s) dropped"));
         }
         Ok(Step::Worktrees(crate::input::notice(said)))
     }

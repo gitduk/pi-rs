@@ -12,6 +12,8 @@ use tokio::process::Command;
 use tool::output::{Capture, Captured};
 use tool::{Ctx, ToolError};
 
+use crate::background::Peek;
+
 /// The longest any child may run, whatever its caller asked for.
 pub(crate) const MAX_RUN: Duration = tool::limit::MAX_CALL;
 
@@ -150,7 +152,7 @@ const PEEK: usize = 8 * 1024;
 
 /// The last of what a job's streams printed, both in the order it arrived.
 #[derive(Clone, Default)]
-pub(crate) struct Tail(Arc<Mutex<(Vec<u8>, usize)>>);
+struct Tail(Arc<Mutex<(Vec<u8>, usize)>>);
 
 impl Tail {
     fn push(&self, chunk: &[u8]) {
@@ -162,7 +164,7 @@ impl Tail {
     }
 
     /// What it holds, cut to whole lines once earlier bytes have gone.
-    pub(crate) fn read(&self) -> String {
+    fn read(&self) -> String {
         let held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let (kept, total) = (&held.0, held.1);
         if kept.len() == total {
@@ -178,7 +180,7 @@ impl Tail {
     }
 
     /// `pipe`, with what is read from it also kept here.
-    pub(crate) fn tee<R>(&self, pipe: R) -> Tee<R> {
+    fn tee<R>(&self, pipe: R) -> Tee<R> {
         Tee {
             pipe,
             tail: self.clone(),
@@ -186,7 +188,7 @@ impl Tail {
     }
 }
 
-pub(crate) struct Tee<R> {
+struct Tee<R> {
     pipe: R,
     tail: Tail,
 }
@@ -207,7 +209,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for Tee<R> {
 }
 
 /// Pull `pipe` into a bounded capture on a task of its own.
-pub(crate) fn drain<R>(mut pipe: R, ctx: &Ctx) -> tokio::task::JoinHandle<Captured>
+fn drain<R>(mut pipe: R, ctx: &Ctx) -> tokio::task::JoinHandle<Captured>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
@@ -219,25 +221,60 @@ where
     })
 }
 
-pub(crate) async fn captured(task: &mut tokio::task::JoinHandle<Captured>) -> Captured {
+async fn captured(task: &mut tokio::task::JoinHandle<Captured>) -> Captured {
     task.await.unwrap_or_else(|_| Capture::new().finish())
 }
 
-/// A job's output once its process has exited, taking down what it left
-/// holding the pipes after a moment; `None` when the job was stopped.
-pub(crate) async fn drained(
-    stdout: &mut tokio::task::JoinHandle<Captured>,
-    stderr: &mut tokio::task::JoinHandle<Captured>,
-    group: Option<u32>,
-    stop: &tokio_util::sync::CancellationToken,
-) -> Option<(Captured, Captured)> {
-    tokio::select! {
-        both = async { (captured(stdout).await, captured(stderr).await) } => Some(both),
-        () = tokio::time::sleep(LINGER) => {
-            reap(group).await;
-            Some((captured(stdout).await, captured(stderr).await))
+/// A child's two pipes, each drained into a bounded capture on a task of its
+/// own, the latest of both kept to be read while it runs: how a job is watched.
+pub(crate) struct Streams {
+    tail: Tail,
+    stdout: tokio::task::JoinHandle<Captured>,
+    stderr: tokio::task::JoinHandle<Captured>,
+}
+
+impl Streams {
+    /// Take over `child`'s piped stdout and stderr.
+    pub(crate) fn of(child: &mut tokio::process::Child, ctx: &Ctx) -> Self {
+        let tail = Tail::default();
+        let stdout = drain(tail.tee(child.stdout.take().expect("stdout is piped")), ctx);
+        let stderr = drain(tail.tee(child.stderr.take().expect("stderr is piped")), ctx);
+        Self {
+            tail,
+            stdout,
+            stderr,
         }
-        () = stop.cancelled() => None,
+    }
+
+    /// The latest of what it printed, for a job to watch.
+    pub(crate) fn peek(&self) -> Peek {
+        let tail = self.tail.clone();
+        Arc::new(move || tail.read())
+    }
+
+    /// Both captures, once both pipes have closed.
+    pub(crate) async fn captured(&mut self) -> (Captured, Captured) {
+        (
+            captured(&mut self.stdout).await,
+            captured(&mut self.stderr).await,
+        )
+    }
+
+    /// Its output once its process has exited, taking down what it left
+    /// holding the pipes after a moment; `None` when the job was stopped.
+    pub(crate) async fn drained(
+        &mut self,
+        group: Option<u32>,
+        stop: &tokio_util::sync::CancellationToken,
+    ) -> Option<(Captured, Captured)> {
+        tokio::select! {
+            both = self.captured() => Some(both),
+            () = tokio::time::sleep(LINGER) => {
+                reap(group).await;
+                Some(self.captured().await)
+            }
+            () = stop.cancelled() => None,
+        }
     }
 }
 

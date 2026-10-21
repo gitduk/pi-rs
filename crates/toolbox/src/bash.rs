@@ -196,9 +196,7 @@ fn spills_only(ctx: &Ctx) -> Ctx {
 struct Launched {
     child: tokio::process::Child,
     group: Option<u32>,
-    tail: crate::process::Tail,
-    stdout: tokio::task::JoinHandle<output::Captured>,
-    stderr: tokio::task::JoinHandle<output::Captured>,
+    streams: crate::process::Streams,
 }
 
 fn launch(command: &str, cwd: &std::path::Path, ctx: &Ctx) -> Result<Launched, ToolError> {
@@ -214,15 +212,11 @@ fn launch(command: &str, cwd: &std::path::Path, ctx: &Ctx) -> Result<Launched, T
     cmd.process_group(0);
     let mut child = crate::process::spawn(&mut cmd)?;
     let group = child.id();
-    let tail = crate::process::Tail::default();
-    let out_pipe = tail.tee(child.stdout.take().expect("stdout is piped"));
-    let err_pipe = tail.tee(child.stderr.take().expect("stderr is piped"));
+    let streams = crate::process::Streams::of(&mut child, ctx);
     Ok(Launched {
         child,
         group,
-        tail,
-        stdout: crate::process::drain(out_pipe, ctx),
-        stderr: crate::process::drain(err_pipe, ctx),
+        streams,
     })
 }
 
@@ -236,11 +230,9 @@ fn supervise(
     let Launched {
         mut child,
         group,
-        tail,
-        mut stdout,
-        mut stderr,
+        mut streams,
     } = launched;
-    job.watch(Arc::new(move || tail.read()));
+    job.watch(streams.peek());
     let guard = group.map(crate::process::Group);
     tokio::spawn(async move {
         let _guard = guard;
@@ -253,9 +245,7 @@ fn supervise(
                 return;
             }
         };
-        let Some((out, err)) =
-            crate::process::drained(&mut stdout, &mut stderr, group, &stop).await
-        else {
+        let Some((out, err)) = streams.drained(group, &stop).await else {
             return;
         };
         let ended = match status {

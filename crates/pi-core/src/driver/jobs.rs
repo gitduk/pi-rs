@@ -564,10 +564,11 @@ impl Table {
         self.changed.notify_one();
     }
 
-    /// Stop and forget every job of checkouts at or under `root`: the
-    /// checkout is gone, and a new one there is not it.
-    pub fn drop_under(&self, root: &Path) {
+    /// Stop and forget every job of checkouts at or under `root`, saying how
+    /// many went: the checkout is gone, and a new one there is not it.
+    pub fn drop_under(&self, root: &Path) -> usize {
         let mut inner = self.lock();
+        let had = inner.items.len();
         inner.items.retain(|i| {
             let gone = i.root.starts_with(root);
             if gone {
@@ -578,8 +579,10 @@ impl Table {
             }
             !gone
         });
+        let gone = had - inner.items.len();
         drop(inner);
         self.changed.notify_one();
+        gone
     }
 
     fn add(

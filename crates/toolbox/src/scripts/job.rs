@@ -16,14 +16,12 @@ use tokio::net::unix::OwnedReadHalf;
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tool::output::Captured;
 use tool::{Ctx, ToolError};
 
 use crate::background::{JobHandle, JobSink, Told};
 
-use crate::process::{Exited, Group, MAX_RUN, captured, drain, drained, reap, spawn};
+use crate::process::{Exited, Group, MAX_RUN, Streams, reap, spawn};
 
 /// The variable naming the descriptor, so a script can tell pi is listening.
 pub const FD_VAR: &str = "PI_EVENTS_FD";
@@ -92,8 +90,7 @@ pub async fn run(
     drop(tokio::spawn(async move {
         let _ = stdin.write_all(&input).await;
     }));
-    let mut stdout = drain(child.stdout.take().expect("stdout is piped"), ctx);
-    let mut stderr = drain(child.stderr.take().expect("stderr is piped"), ctx);
+    let mut streams = Streams::of(&mut child, ctx);
 
     ours.set_nonblocking(true)?;
     let (read, write) = tokio::net::UnixStream::from_std(ours)?.into_split();
@@ -129,6 +126,7 @@ pub async fn run(
                             stop.clone(),
                             Some(told),
                         );
+                        job.watch(streams.peek());
                         tokio::spawn(tell(write, hear));
                         let id = job.id();
                         // Owned before the task is first polled: a shutdown that
@@ -137,7 +135,7 @@ pub async fn run(
                     let name = name.to_string();
                     tokio::spawn(async move {
                         let _group = group;
-                        go_on(name, child, fd3, stdout, stderr, job, stop).await;
+                        go_on(name, child, fd3, streams, job, stop).await;
                     });
                         return Ok(Ran::Detached { said: text, id });
                     }
@@ -147,8 +145,8 @@ pub async fn run(
             },
             // The pipes too: what the script left running may hold them, and
             // the deadline and a stop still have to reach that.
-            (status, stdout, stderr) = async {
-                (child.wait().await, captured(&mut stdout).await, captured(&mut stderr).await)
+            (status, (stdout, stderr)) = async {
+                (child.wait().await, streams.captured().await)
             } => {
                 return Ok(Ran::Exited(Exited { status: status?, stdout, stderr }));
             }
@@ -169,8 +167,7 @@ async fn go_on(
     name: String,
     mut child: Child,
     mut fd3: Fd3,
-    mut stdout: JoinHandle<Captured>,
-    mut stderr: JoinHandle<Captured>,
+    mut streams: Streams,
     job: std::sync::Arc<dyn JobHandle>,
     stop: CancellationToken,
 ) {
@@ -195,7 +192,7 @@ async fn go_on(
             }
         }
     };
-    let Some((out, err)) = drained(&mut stdout, &mut stderr, group, &stop).await else {
+    let Some((out, err)) = streams.drained(group, &stop).await else {
         return;
     };
     // One turn for one ending: what it printed, then how it failed, if it did.
