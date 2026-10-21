@@ -63,6 +63,18 @@ impl Registry {
         self.sources.push(source);
     }
 
+    /// Read `new` in the place `old` was read, and say whether it was: for a
+    /// copy of a set that differs from the original in what one source offers.
+    pub fn swap_source(&mut self, old: &Arc<dyn Source>, new: Arc<dyn Source>) -> bool {
+        match self.sources.iter_mut().find(|s| Arc::ptr_eq(s, old)) {
+            Some(slot) => {
+                *slot = new;
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         match self.tools.get(name) {
             Some(tool) => Some(tool.clone()),

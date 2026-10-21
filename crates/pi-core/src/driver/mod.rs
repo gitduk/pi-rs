@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use agent::Event;
 use tool::Ctx;
+use toolbox::background::Told;
 
 use crate::input::Drive;
 use looping::Loops;
@@ -186,7 +187,7 @@ impl Drivers {
     ) -> Option<String> {
         for owed in self.owed.extract_if(.., |o| o.lane == lane) {
             self.jobs
-                .tell(owed.job, tool::Told::Reply(reply(owed.said, ended)));
+                .tell(owed.job, Told::Reply(reply(owed.said, ended)));
         }
         self.loops
             .turn_ended(lane, ended, ctx, cap)
@@ -202,10 +203,8 @@ impl Drivers {
     pub fn retain(&mut self, live: impl Fn(u64) -> bool) -> Vec<String> {
         // A job left waiting on a reply would wait for good.
         for owed in self.owed.extract_if(.., |o| !live(o.lane)) {
-            self.jobs.tell(
-                owed.job,
-                tool::Told::Reply(reply(owed.said, &Ended::Stopped)),
-            );
+            self.jobs
+                .tell(owed.job, Told::Reply(reply(owed.said, &Ended::Stopped)));
         }
         self.loops.retain(live)
     }
@@ -223,7 +222,7 @@ impl Drivers {
             said: String::new(),
             turn_from: 0,
         });
-        self.jobs.tell(job, tool::Told::Started);
+        self.jobs.tell(job, Told::Started);
     }
 }
 
@@ -317,7 +316,7 @@ impl Drivers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tool::{JobSink as _, Told};
+    use toolbox::background::JobSink as _;
 
     // The line a person sent through a job opens a turn as if typed; the
     // job hears it begin, then gets the whole answer, cut short or not.

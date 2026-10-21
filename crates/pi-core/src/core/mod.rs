@@ -196,16 +196,10 @@ impl Core {
         self.lanes.iter().position(|lane| lane.root() == root)
     }
 
-    /// The context a turn on the lane in front runs with: the lane's, and
-    /// where a call that outlives the turn goes on, when jobs are served.
-    pub fn turn_ctx(&self, cancel: tokio_util::sync::CancellationToken) -> tool::Ctx {
-        let ctx = self.lane().ctx_for(cancel);
-        match &self.jobs {
-            Some(jobs) => ctx.with_jobs(std::sync::Arc::new(crate::driver::jobs::Jobs::new(
-                jobs.clone(),
-            ))),
-            None => ctx,
-        }
+    /// Where a call that outlives its turn is kept, when jobs are served.
+    pub fn job_sink(&self) -> Option<std::sync::Arc<dyn toolbox::background::JobSink>> {
+        let jobs = crate::driver::jobs::Jobs::new(self.jobs.clone()?);
+        Some(std::sync::Arc::new(jobs))
     }
 
     /// Offer `job` on every lane, writing into `table`, which the surface

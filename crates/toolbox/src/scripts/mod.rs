@@ -19,6 +19,8 @@ mod job {
     use std::time::Duration;
     use tool::{Ctx, ToolError};
 
+    use crate::background::JobSink;
+
     pub enum Ran {
         Exited(crate::process::Exited),
         Detached { said: String, id: u64 },
@@ -30,6 +32,7 @@ mod job {
         input: Vec<u8>,
         timeout: Duration,
         ctx: &Ctx,
+        _jobs: Option<&dyn JobSink>,
     ) -> Result<Ran, ToolError> {
         crate::process::run(cmd, Some(input), timeout, ctx)
             .await
@@ -44,6 +47,8 @@ use std::time::SystemTime;
 
 use tool::Tool;
 
+use crate::background::JobSink;
+
 use script::Runner;
 pub use script::{Script, cargo_script, run_script};
 
@@ -55,6 +60,7 @@ pub const SKILL: &str = include_str!("../../skills/pi-extend/SKILL.md");
 pub struct Dir {
     dir: PathBuf,
     seen: Mutex<Seen>,
+    jobs: Option<Arc<dyn JobSink>>,
 }
 
 #[derive(Default)]
@@ -82,6 +88,16 @@ impl Dir {
         Self {
             dir: dir.into(),
             seen: Mutex::default(),
+            jobs: None,
+        }
+    }
+
+    /// The same directory, its scripts able to detach into jobs kept by `jobs`.
+    pub fn with_jobs(&self, jobs: Arc<dyn JobSink>) -> Self {
+        Self {
+            dir: self.dir.clone(),
+            seen: Mutex::default(),
+            jobs: Some(jobs),
         }
     }
 
@@ -97,7 +113,10 @@ impl Dir {
             let (scripts, skipped) = discover_in(&self.dir);
             let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
             for script in scripts {
-                tools.push(Arc::new(script));
+                tools.push(Arc::new(Script {
+                    jobs: self.jobs.clone(),
+                    ..script
+                }));
             }
             // A broken script stands in the list as what is wrong with it: the
             // model reads the list every turn, so that is where it learns why.
@@ -210,6 +229,7 @@ pub fn discover_in(dir: &Path) -> (Vec<Script>, Vec<Skip>) {
             args,
             path,
             runner,
+            jobs: None,
         });
     }
     (tools, skipped)

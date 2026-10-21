@@ -1,9 +1,12 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tool::{Concurrency, Ctx, Tier, Tool, ToolError, ToolOutput};
+
+use crate::background::JobSink;
 
 const TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -28,6 +31,8 @@ pub struct Script {
     pub(crate) args: Vec<(String, String)>,
     pub(crate) path: PathBuf,
     pub(crate) runner: Runner,
+    // Where a detached call is kept; without it a detach is refused.
+    pub(crate) jobs: Option<Arc<dyn JobSink>>,
 }
 
 /// How a script is started.
@@ -172,7 +177,16 @@ impl Tool for Script {
             .envs(shared.iter().map(|(k, v)| (k, v)))
             .envs(self.env(&args, &shared));
         let input = serde_json::to_vec(&args).unwrap_or_default();
-        let exited = match super::job::run(&self.name, command, input, TIMEOUT, ctx).await? {
+        let exited = match super::job::run(
+            &self.name,
+            command,
+            input,
+            TIMEOUT,
+            ctx,
+            self.jobs.as_deref(),
+        )
+        .await?
+        {
             super::job::Ran::Exited(exited) => exited,
             super::job::Ran::Detached { said, id } => {
                 return Ok(ToolOutput::text(format!(
@@ -216,6 +230,7 @@ mod tests {
             ],
             path: PathBuf::from("spy.rs"),
             runner: Runner::Cargo,
+            jobs: None,
         };
         let args = json!({
             "PATH": "/hijacked",
@@ -240,6 +255,7 @@ mod tests {
             ],
             path: PathBuf::from("later"),
             runner: Runner::Cargo,
+            jobs: None,
         };
         let schema = script.schema();
         assert_eq!(schema["required"], json!(["prompt"]));

@@ -174,7 +174,7 @@ impl Tui {
             .collect();
         self.ui.adopt(view, &fresh);
         let cancel = CancellationToken::new();
-        let ctx = self.core.turn_ctx(cancel.clone());
+        let ctx = self.core.lane().ctx_for(cancel.clone());
 
         self.arm_view(false);
         // Read while the agent is still reachable: `/model` may replace it
@@ -253,10 +253,11 @@ impl Tui {
             return;
         };
         self.ui.flash(format!("starting {name}…"));
-        let ctx = self.core.turn_ctx(CancellationToken::new());
+        let ctx = self.core.lane().ctx_for(CancellationToken::new());
+        let jobs = self.core.job_sink();
         let (token, started) = (self.core.lane().token(), started.clone());
         tokio::spawn(async move {
-            let said = guard(core::tools::run_named(tool, args, &ctx))
+            let said = guard(core::tools::run_named(tool, args, &ctx, jobs.as_deref()))
                 .await
                 .unwrap_or_else(|| Some(Err("it panicked".into())));
             let _ = started.send(Started { token, name, said });

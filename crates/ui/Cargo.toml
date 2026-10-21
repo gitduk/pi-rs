@@ -33,6 +33,7 @@ imagesize = "0.15.0"
 
 [dev-dependencies]
 pi-core = { workspace = true, features = ["testing"] }
+toolbox.workspace = true
 async-trait.workspace = true
 toml.workspace = true
 tempfile = "3"

@@ -1004,7 +1004,7 @@ async fn a_queued_line_remembers_the_job_it_came_from() {
 async fn a_jobs_result_opens_a_turn_under_its_label() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    let job = tool::JobSink::start(
+    let job = toolbox::background::JobSink::start(
         &pi_core::driver::jobs::Jobs::new(tui.drivers.jobs()),
         dir.path().to_path_buf(),
         "later".into(),
@@ -1036,7 +1036,7 @@ async fn a_jobs_result_opens_a_turn_under_its_label() {
 async fn a_persons_line_through_a_job_is_always_a_prompt() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    let job = tool::JobSink::start(
+    let job = toolbox::background::JobSink::start(
         &pi_core::driver::jobs::Jobs::new(tui.drivers.jobs()),
         dir.path().to_path_buf(),
         "wechat".into(),

@@ -672,14 +672,14 @@ struct Host {
     ended: Arc<tokio::sync::Notify>,
 }
 
-impl tool::JobSink for Host {
+impl toolbox::background::JobSink for Host {
     fn start(
         &self,
         _root: std::path::PathBuf,
         description: String,
         _stop: tokio_util::sync::CancellationToken,
-        _told: Option<tokio::sync::mpsc::UnboundedSender<tool::Told>>,
-    ) -> Arc<dyn tool::JobHandle> {
+        _told: Option<tokio::sync::mpsc::UnboundedSender<toolbox::background::Told>>,
+    ) -> Arc<dyn toolbox::background::JobHandle> {
         self.said
             .lock()
             .unwrap()
@@ -692,7 +692,7 @@ impl tool::JobSink for Host {
     }
 }
 
-impl tool::JobHandle for Host {
+impl toolbox::background::JobHandle for Host {
     fn id(&self) -> u64 {
         4
     }
@@ -704,7 +704,7 @@ impl tool::JobHandle for Host {
     fn input(&self, _text: String) {}
     fn notice(&self, _text: String) {}
     fn interrupt(&self) {}
-    fn watch(&self, _output: tool::Peek) {}
+    fn watch(&self, _output: toolbox::background::Peek) {}
     fn follow(&self) {}
     fn end(&self) {
         self.said.lock().unwrap().push("end".into());
@@ -712,7 +712,7 @@ impl tool::JobHandle for Host {
     }
 }
 
-fn offered(turns: Vec<Vec<StreamEvent>>) -> Subagent {
+fn offered(turns: Vec<Vec<StreamEvent>>, host: Arc<Host>) -> Subagent {
     let parent = Agent::new(
         Arc::new(Scripted {
             turns,
@@ -728,18 +728,18 @@ fn offered(turns: Vec<Vec<StreamEvent>>) -> Subagent {
         STANDING,
         Retry::default(),
     )
-    .with_background()
+    .with_background(host)
 }
 
-// Sent off, the child answers into the run's job host, spend and all, and
+// Sent off, the child answers into the tool's job host, spend and all, and
 // the call returns at once with the job's id.
 #[tokio::test]
-async fn a_background_child_reports_through_the_runs_jobs() {
+async fn a_background_child_reports_through_the_tools_jobs() {
     let dir = tempfile::tempdir().unwrap();
     let host = Arc::new(Host::default());
-    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap()).with_jobs(host.clone());
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
     let ended = host.ended.notified();
-    let out = offered(vec![text_turn("there are four files")])
+    let out = offered(vec![text_turn("there are four files")], host.clone())
         .execute(
             serde_json::json!({"description": "count", "prompt": "count the files", "background": true}),
             &ctx,
@@ -758,18 +758,4 @@ async fn a_background_child_reports_through_the_runs_jobs() {
         host.spent.lock().unwrap().input > 0,
         "its spend comes along"
     );
-}
-
-#[tokio::test]
-async fn background_is_refused_where_the_run_keeps_no_jobs() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-    let err = offered(vec![])
-        .execute(
-            serde_json::json!({"description": "count", "prompt": "count", "background": true}),
-            &ctx,
-        )
-        .await
-        .expect_err("refused");
-    assert!(err.to_string().contains("cannot keep"), "{err}");
 }

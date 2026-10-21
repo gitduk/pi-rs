@@ -3,9 +3,10 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::background::{JobHandle, Peek, Told};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use tool::{Ctx, JobHandle, Told};
+use tool::Ctx;
 
 #[derive(Default)]
 pub(crate) struct Sink {
@@ -13,16 +14,16 @@ pub(crate) struct Sink {
     pub(crate) ended: Arc<Notify>,
     pub(crate) stop: Mutex<Option<CancellationToken>>,
     pub(crate) told: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Told>>>,
-    pub(crate) output: Arc<Mutex<Option<tool::Peek>>>,
+    pub(crate) output: Arc<Mutex<Option<Peek>>>,
 }
 
 struct Handle {
     said: Arc<Mutex<Vec<String>>>,
     ended: Arc<Notify>,
-    output: Arc<Mutex<Option<tool::Peek>>>,
+    output: Arc<Mutex<Option<Peek>>>,
 }
 
-impl tool::JobSink for Sink {
+impl crate::background::JobSink for Sink {
     fn start(
         &self,
         _root: std::path::PathBuf,
@@ -69,7 +70,7 @@ impl JobHandle for Handle {
     fn follow(&self) {
         self.said.lock().unwrap().push("follow".into());
     }
-    fn watch(&self, output: tool::Peek) {
+    fn watch(&self, output: Peek) {
         *self.output.lock().unwrap() = Some(output);
     }
     fn end(&self) {

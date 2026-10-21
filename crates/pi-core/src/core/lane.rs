@@ -169,6 +169,7 @@ pub fn arm(
     retry: agent::Retry,
     jobs: Option<Arc<crate::driver::jobs::Table>>,
 ) -> Arc<Resolved> {
+    let jobs = jobs.map(|table| Arc::new(crate::driver::jobs::Jobs::new(table)));
     let mut subagent = Subagent::prompted(
         agent,
         resolved.brief.clone(),
@@ -181,8 +182,8 @@ pub fn arm(
         subagent = subagent.with_deadline(deadline);
     }
     // Its answer comes back as a job's does, so only with somewhere to keep it.
-    if jobs.is_some() {
-        subagent = subagent.with_background();
+    if let Some(jobs) = &jobs {
+        subagent = subagent.with_background(jobs.clone());
     }
     // A fresh `Arc`, since the child holds the old one: it runs on the
     // registry it came from, and only the lane's copy carries the tool.
@@ -205,9 +206,7 @@ pub fn arm(
         && tool::Tier::Exec.under(resolved.ceiling)
     {
         let patch = Arc::make_mut(&mut brief);
-        patch
-            .registry
-            .offer(Arc::new(crate::driver::jobs::Jobs::new(jobs)));
+        patch.registry.offer(jobs.clone());
         // The same shell, now able to leave its turn; the child keeps the
         // plain one, having nowhere to keep a job.
         if patch.registry.get(toolbox::bash::Bash::NAME).is_some() {
@@ -215,7 +214,14 @@ pub fn arm(
             patch.registry = registry;
             patch
                 .registry
-                .offer(Arc::new(toolbox::bash::WithBackground));
+                .offer(Arc::new(toolbox::bash::WithBackground::new(jobs.clone())));
+        }
+        // Scripts likewise: the lane's may detach, the child's may not.
+        for dir in &resolved.scripts {
+            let held: Arc<dyn tool::Source> = dir.clone();
+            let swapped =
+                (patch.registry).swap_source(&held, Arc::new(dir.with_jobs(jobs.clone())));
+            debug_assert!(swapped, "a script dir the brief never read");
         }
     }
     agent.apply(brief);
@@ -240,6 +246,7 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
         ceiling: tool::Tier::Exec,
         commands: Arc::new(Vec::new()),
         watched: Vec::new(),
+        scripts: Vec::new(),
         prompt_files: Default::default(),
         shelf: None,
         shelf_seen: 0,
@@ -1056,6 +1063,47 @@ mod tests {
     fn price(lane: &mut crate::core::lane::Lane, pricing: Pricing) {
         let agent = std::sync::Arc::make_mut(&mut lane.checkout.agent);
         std::sync::Arc::make_mut(&mut agent.model).spec.pricing = pricing;
+    }
+
+    // A child's detach would land as a turn on this lane, which the child
+    // never hears; only the lane's copy of the scripts may leave a turn.
+    #[tokio::test]
+    async fn only_the_lanes_scripts_may_detach() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let tools = dir.path().join("tools");
+        std::fs::create_dir(&tools).unwrap();
+        std::fs::write(
+            tools.join("off"),
+            "#!/bin/sh\n# ---\n# description = \"Go off\"\n# ---\necho '{\"detach\":\"x\"}' >&3\n",
+        )
+        .unwrap();
+        let scripts = Arc::new(toolbox::scripts::Dir::new(&tools));
+        let mut resolved = Arc::try_unwrap(super::a_resolved("standing")).ok().unwrap();
+        Arc::make_mut(&mut resolved.brief)
+            .registry
+            .read(scripts.clone());
+        resolved.scripts = vec![scripts];
+        let mut agent = agent::Agent::new(
+            Arc::new(Recording::default()),
+            crate::core::tests::test_spec("m"),
+        );
+        let resolved = super::arm(
+            &mut agent,
+            Arc::new(resolved),
+            crate::core::archive::nowhere(),
+            agent::Retry::default(),
+            Some(Arc::default()),
+        );
+
+        let ctx = tool::Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let off = |registry: &tool::Registry| registry.get("off").unwrap();
+        let args = serde_json::json!({});
+        let lane = off(&agent.brief.registry).execute(args.clone(), &ctx).await;
+        assert!(lane.unwrap().flatten().contains("job #1"));
+        let child = off(&resolved.brief.registry).execute(args, &ctx).await;
+        assert!(child.unwrap_err().to_string().contains("cannot keep"));
     }
 
     // `/model` applies at once, but a run in flight stays charged at the

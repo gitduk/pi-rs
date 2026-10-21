@@ -253,75 +253,10 @@ pub struct Ctx {
     spill_root: std::path::PathBuf,
     // Where a running call says how far it has got; set per call by the loop.
     progress: Option<Progress>,
-    // Where a call that outlives its turn goes on; None where nothing could
-    // bring its results back, such as a one-shot run or a subagent.
-    jobs: Option<std::sync::Arc<dyn JobSink>>,
 }
 
 /// Takes a running call's latest word on its progress, replacing the last.
 pub type Progress = std::sync::Arc<dyn Fn(String) + Send + Sync>;
-
-/// Reads the latest of what a running job has printed, on demand.
-pub type Peek = std::sync::Arc<dyn Fn() -> String + Send + Sync>;
-
-/// Starts a job over: runs it again, reporting through the handle it is
-/// given and wound down by the token, as the first run was.
-pub type Rerun = std::sync::Arc<
-    dyn Fn(
-            std::sync::Arc<dyn JobHandle>,
-            tokio_util::sync::CancellationToken,
-        ) -> Result<(), ToolError>
-        + Send
-        + Sync,
->;
-
-/// Where a call that will outlive its turn is kept: a job of the checkout at
-/// `root`, which the host lists, stops through `stop`, and delivers from.
-/// What the host has to tell the job goes to `told`, when it listens.
-pub trait JobSink: Send + Sync {
-    fn start(
-        &self,
-        root: std::path::PathBuf,
-        description: String,
-        stop: tokio_util::sync::CancellationToken,
-        told: Option<tokio::sync::mpsc::UnboundedSender<Told>>,
-    ) -> std::sync::Arc<dyn JobHandle>;
-}
-
-/// A running job's way to report. Each `result` comes back to its checkout
-/// as a turn of its own, with what it `spent` getting there; an `input` is a
-/// person speaking through the job, read as if typed; `end` says it will
-/// report no more.
-pub trait JobHandle: Send + Sync {
-    fn id(&self) -> u64;
-    fn status(&self, text: String);
-    fn result(&self, text: String, spent: llm::stream::Usage);
-    fn input(&self, text: String);
-    /// A line for the person, never the model: a code to scan, say.
-    fn notice(&self, text: String);
-    /// Stop whatever runs where the job was started, as the user's stop would.
-    fn interrupt(&self);
-    /// Where the latest of what it prints can be read while it runs.
-    fn watch(&self, output: Peek);
-    /// From now on it is told of every turn its checkout runs, not only
-    /// the ones its `input` opened.
-    fn follow(&self);
-    /// How it runs again once stopped or ended; one that never says is
-    /// gone then, and cannot be started over.
-    fn rerun(&self, _how: Rerun) {}
-    fn end(&self);
-}
-
-/// What the host tells a job about the turns its `input` opened, or every
-/// turn once it follows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Told {
-    /// A turn one of its inputs opened has begun.
-    Started,
-    /// That turn has ended: its whole answer, how it ended if not cleanly,
-    /// and empty when it said nothing.
-    Reply(String),
-}
 
 pub type FileLocks =
     std::sync::Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, FileLock>>>;
@@ -349,7 +284,6 @@ impl Ctx {
             session: None,
             spill_root: spill::temp(),
             progress: None,
-            jobs: None,
         }
     }
 }
@@ -448,23 +382,6 @@ impl Ctx {
     pub fn with_own_writes(mut self) -> Self {
         self.writes = Default::default();
         self
-    }
-
-    /// Let calls under this context outlive their turn as jobs kept by `to`.
-    pub fn with_jobs(mut self, to: std::sync::Arc<dyn JobSink>) -> Self {
-        self.jobs = Some(to);
-        self
-    }
-
-    /// Calls under this context end with their turn.
-    pub fn without_jobs(mut self) -> Self {
-        self.jobs = None;
-        self
-    }
-
-    /// Where a call may go on after its turn, if anywhere.
-    pub fn jobs(&self) -> Option<&std::sync::Arc<dyn JobSink>> {
-        self.jobs.as_ref()
     }
 
     /// Route this call's progress to `to`.

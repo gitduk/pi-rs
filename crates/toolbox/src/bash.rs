@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::process::Command;
 
+use crate::background::{JobHandle, JobSink};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput, output};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -108,7 +109,16 @@ async fn prepare(
 
 /// `bash` for a run that keeps jobs: a call may leave its turn with
 /// `background`, its exit status and output coming back as a turn of its own.
-pub struct WithBackground;
+pub struct WithBackground {
+    jobs: Arc<dyn JobSink>,
+}
+
+impl WithBackground {
+    /// The shell whose background calls are kept by `jobs`.
+    pub fn new(jobs: Arc<dyn JobSink>) -> Self {
+        Self { jobs }
+    }
+}
 
 #[async_trait]
 impl Tool for WithBackground {
@@ -146,18 +156,12 @@ impl Tool for WithBackground {
         if !background {
             return Bash.execute(args, ctx).await;
         }
-        let Some(sink) = ctx.jobs() else {
-            return Err(ToolError::Invalid(
-                "this run cannot keep a command in the background; run it without `background`"
-                    .into(),
-            ));
-        };
         let args: Args = tool::parse_args_hinted(args, ARGS_HINT)?;
         let preview = first_line(&args.command).to_string();
         let (command, cwd) = prepare(args, self.tier(), ctx).await?;
         let launched = launch(&command, &cwd, ctx)?;
         let stop = tokio_util::sync::CancellationToken::new();
-        let job = sink.start(
+        let job = self.jobs.start(
             ctx.workspace.root().to_path_buf(),
             preview.clone(),
             stop.clone(),
@@ -179,7 +183,7 @@ impl Tool for WithBackground {
 }
 
 // What a rerun keeps of the call's context: where output spills, not the
-// turn's locks, progress or the job table holding the rerun itself.
+// turn's locks or progress.
 fn spills_only(ctx: &Ctx) -> Ctx {
     let fresh = Ctx::new(ctx.workspace.clone());
     match ctx.session() {
@@ -226,7 +230,7 @@ fn launch(command: &str, cwd: &std::path::Path, ctx: &Ctx) -> Result<Launched, T
 fn supervise(
     launched: Launched,
     name: String,
-    job: Arc<dyn tool::JobHandle>,
+    job: Arc<dyn JobHandle>,
     stop: tokio_util::sync::CancellationToken,
 ) {
     let Launched {
@@ -354,7 +358,10 @@ mod background_tests {
     #[test]
     fn only_the_backgroundable_shell_offers_background() {
         assert!(Bash.schema()["properties"].get("background").is_none());
-        assert!(WithBackground.schema()["properties"]["background"].is_object());
+        assert!(
+            WithBackground::new(Arc::new(Sink::default())).schema()["properties"]["background"]
+                .is_object()
+        );
     }
 
     // The call returns at once; the end comes back as one result, exit code
@@ -363,9 +370,9 @@ mod background_tests {
     async fn a_background_command_reports_its_end_as_one_result() {
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(Sink::default());
-        let ctx = ctx(dir.path()).with_jobs(sink.clone());
+        let ctx = ctx(dir.path());
         let ended = sink.ended.notified();
-        let out = WithBackground
+        let out = WithBackground::new(sink.clone())
             .execute(
                 json!({"cwd": ".", "command": "sleep 0.2; echo imported 40 rows; exit 3", "background": true}),
                 &ctx,
@@ -390,8 +397,8 @@ mod background_tests {
     async fn a_running_command_shows_what_it_printed_so_far() {
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(Sink::default());
-        let ctx = ctx(dir.path()).with_jobs(sink.clone());
-        WithBackground
+        let ctx = ctx(dir.path());
+        WithBackground::new(sink.clone())
             .execute(
                 json!({"cwd": ".", "command": "echo listening on 8080; echo warn >&2; sleep 30", "background": true}),
                 &ctx,
@@ -413,7 +420,7 @@ mod background_tests {
     #[tokio::test]
     async fn without_background_it_is_the_plain_shell() {
         let dir = tempfile::tempdir().unwrap();
-        let out = WithBackground
+        let out = WithBackground::new(Arc::new(Sink::default()))
             .execute(
                 json!({"cwd": ".", "command": "echo hi", "background": false}),
                 &ctx(dir.path()),
@@ -424,24 +431,11 @@ mod background_tests {
     }
 
     #[tokio::test]
-    async fn background_is_refused_where_the_run_keeps_no_jobs() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = WithBackground
-            .execute(
-                json!({"cwd": ".", "command": "true", "background": true}),
-                &ctx(dir.path()),
-            )
-            .await
-            .expect_err("refused");
-        assert!(err.to_string().contains("cannot keep"), "{err}");
-    }
-
-    #[tokio::test]
     async fn stopping_a_background_command_takes_its_group_and_says_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(Sink::default());
-        let ctx = ctx(dir.path()).with_jobs(sink.clone());
-        WithBackground
+        let ctx = ctx(dir.path());
+        WithBackground::new(sink.clone())
             .execute(
                 json!({"cwd": ".", "command": "echo $$ > pid; sleep 30", "background": true}),
                 &ctx,

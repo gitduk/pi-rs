@@ -19,7 +19,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tool::output::Captured;
-use tool::{Ctx, JobHandle, Told, ToolError};
+use tool::{Ctx, ToolError};
+
+use crate::background::{JobHandle, JobSink, Told};
 
 use crate::process::{Exited, Group, MAX_RUN, captured, drain, drained, reap, spawn};
 
@@ -53,6 +55,7 @@ pub async fn run(
     input: Vec<u8>,
     timeout: Duration,
     ctx: &Ctx,
+    jobs: Option<&dyn JobSink>,
 ) -> Result<Ran, ToolError> {
     let (ours, theirs) = std::os::unix::net::UnixStream::pair()?;
     let fd = theirs.as_raw_fd();
@@ -111,7 +114,7 @@ pub async fn run(
             said = fd3.next() => match said {
                 Said::Status(text) => ctx.progress(text),
                 Said::Detach(text) => {
-                        let Some(sink) = ctx.jobs() else {
+                        let Some(sink) = jobs else {
                             reap(group).await;
                             return Err(ToolError::Invalid(format!(
                                 "{name} asked to go on in the background, which this run \
@@ -309,9 +312,16 @@ mod tests {
     async fn a_script_that_never_writes_fd_3_runs_as_before() {
         let dir = tempfile::tempdir().unwrap();
         let cmd = script(dir.path(), "cat; echo \" and $PI_EVENTS_FD\"");
-        let ran = run("plain", cmd, b"in".to_vec(), 5 * SECOND, &ctx(dir.path()))
-            .await
-            .unwrap();
+        let ran = run(
+            "plain",
+            cmd,
+            b"in".to_vec(),
+            5 * SECOND,
+            &ctx(dir.path()),
+            None,
+        )
+        .await
+        .unwrap();
         let Ran::Exited(exited) = ran else {
             panic!("it never detached")
         };
@@ -326,9 +336,7 @@ mod tests {
         let sink = Arc::new(Sink::default());
         let progress = Arc::new(Mutex::new(Vec::new()));
         let seen = progress.clone();
-        let ctx = ctx(dir.path())
-            .with_jobs(sink.clone())
-            .with_progress(Arc::new(move |t| seen.lock().unwrap().push(t)));
+        let ctx = ctx(dir.path()).with_progress(Arc::new(move |t| seen.lock().unwrap().push(t)));
         let cmd = script(
             dir.path(),
             r#"echo '{"status":"warming up"}' >&3
@@ -339,7 +347,7 @@ echo '{"result":"page two"}' >&3
 echo 'all done'"#,
         );
         let ended = sink.ended.notified();
-        let ran = run("crawl", cmd, Vec::new(), 5 * SECOND, &ctx)
+        let ran = run("crawl", cmd, Vec::new(), 5 * SECOND, &ctx, Some(&*sink))
             .await
             .unwrap();
         let Ran::Detached { said, id } = ran else {
@@ -367,13 +375,15 @@ echo 'all done'"#,
     async fn a_detached_script_that_fails_says_how() {
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(Sink::default());
-        let ctx = ctx(dir.path()).with_jobs(sink.clone());
+        let ctx = ctx(dir.path());
         let cmd = script(
             dir.path(),
             "echo '{\"detach\":\"off\"}' >&3; echo broke >&2; exit 4",
         );
         let ended = sink.ended.notified();
-        run("job", cmd, Vec::new(), 5 * SECOND, &ctx).await.unwrap();
+        run("job", cmd, Vec::new(), 5 * SECOND, &ctx, Some(&*sink))
+            .await
+            .unwrap();
         tokio::time::timeout(5 * SECOND, ended)
             .await
             .expect("the job ended");
@@ -394,7 +404,7 @@ echo 'all done'"#,
             dir.path(),
             "echo $$ > pid; echo '{\"detach\":\"x\"}' >&3; sleep 30",
         );
-        let err = run("job", cmd, Vec::new(), 5 * SECOND, &ctx(dir.path()))
+        let err = run("job", cmd, Vec::new(), 5 * SECOND, &ctx(dir.path()), None)
             .await
             .err()
             .expect("refused");
@@ -406,12 +416,14 @@ echo 'all done'"#,
     async fn stopping_a_job_kills_its_script() {
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(Sink::default());
-        let ctx = ctx(dir.path()).with_jobs(sink.clone());
+        let ctx = ctx(dir.path());
         let cmd = script(
             dir.path(),
             "echo $$ > pid; echo '{\"detach\":\"x\"}' >&3; sleep 30; echo '{\"result\":\"late\"}' >&3",
         );
-        run("job", cmd, Vec::new(), 5 * SECOND, &ctx).await.unwrap();
+        run("job", cmd, Vec::new(), 5 * SECOND, &ctx, Some(&*sink))
+            .await
+            .unwrap();
         sink.stop.lock().unwrap().take().expect("started").cancel();
         assert_gone(&dir.path().join("pid")).await;
         assert_eq!(
@@ -427,7 +439,7 @@ echo 'all done'"#,
     async fn a_left_behind_child_holding_stdout_still_times_out() {
         let dir = tempfile::tempdir().unwrap();
         let cmd = script(dir.path(), "sleep 30 &\necho $! > pid");
-        let err = run("leaky", cmd, Vec::new(), SECOND, &ctx(dir.path()))
+        let err = run("leaky", cmd, Vec::new(), SECOND, &ctx(dir.path()), None)
             .await
             .err()
             .expect("timed out");
@@ -441,13 +453,13 @@ echo 'all done'"#,
     async fn a_detached_scripts_leftover_child_does_not_keep_its_job_running() {
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(Sink::default());
-        let ctx = ctx(dir.path()).with_jobs(sink.clone());
+        let ctx = ctx(dir.path());
         let cmd = script(
             dir.path(),
             "echo '{\"detach\":\"x\"}' >&3; sleep 30 &\necho $! > pid; echo done",
         );
         let ended = sink.ended.notified();
-        run("leaky", cmd, Vec::new(), 5 * SECOND, &ctx)
+        run("leaky", cmd, Vec::new(), 5 * SECOND, &ctx, Some(&*sink))
             .await
             .unwrap();
         tokio::time::timeout(5 * SECOND, ended)
@@ -476,7 +488,9 @@ echo 'all done'"#,
                 MAX_LINE * 3
             ),
         );
-        run("big", cmd, Vec::new(), 5 * SECOND, &ctx).await.unwrap();
+        run("big", cmd, Vec::new(), 5 * SECOND, &ctx, None)
+            .await
+            .unwrap();
         assert_eq!(*progress.lock().unwrap(), ["after"]);
     }
 
@@ -493,10 +507,12 @@ echo 'all done'"#,
         let mut cmd = Command::new(python);
         cmd.arg(later).current_dir(dir.path());
         let sink = Arc::new(Sink::default());
-        let ctx = ctx(dir.path()).with_jobs(sink.clone());
+        let ctx = ctx(dir.path());
         let ended = sink.ended.notified();
         let input = br#"{"prompt": "check the build", "after": "0s"}"#.to_vec();
-        let Ran::Detached { said, .. } = run("later", cmd, input, 5 * SECOND, &ctx).await.unwrap()
+        let Ran::Detached { said, .. } = run("later", cmd, input, 5 * SECOND, &ctx, Some(&*sink))
+            .await
+            .unwrap()
         else {
             panic!("it detached")
         };
@@ -528,7 +544,7 @@ echo 'all done'"#,
     async fn a_detached_script_speaks_for_a_person_and_hears_the_reply() {
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(Sink::default());
-        let ctx = ctx(dir.path()).with_jobs(sink.clone());
+        let ctx = ctx(dir.path());
         let cmd = script(
             dir.path(),
             r#"echo '{"detach":"connected"}' >&3
@@ -540,7 +556,7 @@ read -r a <&3; read -r b <&3
 printf '%s\n%s\n' "$a" "$b" > heard"#,
         );
         let ended = sink.ended.notified();
-        run("bridge", cmd, Vec::new(), 5 * SECOND, &ctx)
+        run("bridge", cmd, Vec::new(), 5 * SECOND, &ctx, Some(&*sink))
             .await
             .unwrap();
         let told = sink.told.lock().unwrap().clone().expect("it listens");

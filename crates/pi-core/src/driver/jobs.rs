@@ -17,7 +17,8 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tool::{Ctx, Tier, Told, Tool, ToolError, ToolOutput};
+use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
+use toolbox::background::{JobHandle, JobSink, Peek, Rerun, Told};
 
 // Screen lines a job may have waiting before the oldest give way.
 const MAX_NOTICES: usize = 200;
@@ -64,10 +65,10 @@ struct Item {
     // Lines for the screen, not yet shown.
     notices: VecDeque<String>,
     // Reads the latest of what it printed; None for one that keeps none.
-    output: Option<tool::Peek>,
+    output: Option<Peek>,
     // How it runs again. One that has it is kept once it ends, to be
     // started over; one without leaves.
-    rerun: Option<tool::Rerun>,
+    rerun: Option<Rerun>,
     // Which run of it this is: a handle from an earlier one is not heard.
     run: u64,
     // Cancelled once this run's task has let go of what it held.
@@ -124,7 +125,7 @@ impl Item {
 impl Item {
     // What it has to show: what it printed, or what it sends back for one
     // that keeps no output. Read outside the table's lock.
-    fn said(&self) -> tool::Peek {
+    fn said(&self) -> Peek {
         if let Some(peek) = &self.output {
             return peek.clone();
         }
@@ -329,7 +330,7 @@ impl Table {
 
     /// The jobs for `root`, oldest first.
     pub fn jobs(&self, root: &Path) -> Vec<Job> {
-        let held: Vec<(Job, tool::Peek)> = (self.lock().items.iter())
+        let held: Vec<(Job, Peek)> = (self.lock().items.iter())
             .filter(|i| i.root == root)
             .map(|i| {
                 let job = Job {
@@ -482,7 +483,7 @@ impl Table {
         item.output = None;
         item.started = Instant::now();
         item.started_at = SystemTime::now();
-        let handle: Arc<dyn tool::JobHandle> = Arc::new(Handle {
+        let handle: Arc<dyn JobHandle> = Arc::new(Handle {
             id,
             run: item.run,
             gone: item.gone.clone(),
@@ -645,14 +646,14 @@ impl Jobs {
     }
 }
 
-impl tool::JobSink for Jobs {
+impl JobSink for Jobs {
     fn start(
         &self,
         root: PathBuf,
         description: String,
         stop: CancellationToken,
         told: Option<UnboundedSender<Told>>,
-    ) -> Arc<dyn tool::JobHandle> {
+    ) -> Arc<dyn JobHandle> {
         let (id, gone) = self.table.add(root, description, stop, told);
         Arc::new(Handle {
             id,
@@ -685,7 +686,7 @@ impl Drop for Handle {
     }
 }
 
-impl tool::JobHandle for Handle {
+impl JobHandle for Handle {
     fn id(&self) -> u64 {
         self.id
     }
@@ -728,7 +729,7 @@ impl tool::JobHandle for Handle {
         self.table.update(self.id, self.run, |i| i.interrupt = true);
     }
 
-    fn watch(&self, output: tool::Peek) {
+    fn watch(&self, output: Peek) {
         self.table
             .update(self.id, self.run, |i| i.output = Some(output));
     }
@@ -738,7 +739,7 @@ impl tool::JobHandle for Handle {
         self.table.update(self.id, self.run, |i| i.follows = true);
     }
 
-    fn rerun(&self, how: tool::Rerun) {
+    fn rerun(&self, how: Rerun) {
         self.table
             .update(self.id, self.run, |i| i.rerun = Some(how));
     }
@@ -853,8 +854,8 @@ impl Tool for Jobs {
 mod tests {
     use super::*;
 
-    fn start(table: &Arc<Table>, root: &Path, name: &str) -> Arc<dyn tool::JobHandle> {
-        tool::JobSink::start(
+    fn start(table: &Arc<Table>, root: &Path, name: &str) -> Arc<dyn JobHandle> {
+        JobSink::start(
             &Jobs::new(table.clone()),
             root.to_path_buf(),
             name.into(),
@@ -877,7 +878,7 @@ mod tests {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let job = tool::JobSink::start(
+        let job = JobSink::start(
             &Jobs::new(table.clone()),
             root.clone(),
             "wechat".into(),
@@ -967,7 +968,7 @@ mod tests {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
         let stop = CancellationToken::new();
-        let job = tool::JobSink::start(
+        let job = JobSink::start(
             &Jobs::new(table.clone()),
             root.clone(),
             "long job".into(),
@@ -992,7 +993,7 @@ mod tests {
     async fn a_detached_job_reports_many_results_in_order() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
-        let job = tool::JobSink::start(
+        let job = JobSink::start(
             &Jobs::new(table.clone()),
             root.clone(),
             "crawl".into(),
@@ -1022,7 +1023,7 @@ mod tests {
     async fn results_past_the_cap_are_counted_not_kept() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
-        let job = tool::JobSink::start(
+        let job = JobSink::start(
             &Jobs::new(table.clone()),
             root.clone(),
             "flood".into(),
@@ -1058,7 +1059,7 @@ mod tests {
     async fn a_job_that_ends_with_nothing_to_say_leaves() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
-        let job = tool::JobSink::start(
+        let job = JobSink::start(
             &Jobs::new(table.clone()),
             root.clone(),
             "quiet".into(),
@@ -1090,12 +1091,11 @@ mod tests {
         assert_eq!(table.jobs(Path::new("/repo")).len(), 1);
     }
 
-    type Reruns =
-        tokio::sync::mpsc::UnboundedReceiver<(Arc<dyn tool::JobHandle>, CancellationToken)>;
+    type Reruns = tokio::sync::mpsc::UnboundedReceiver<(Arc<dyn JobHandle>, CancellationToken)>;
 
     // A job that can run again: each rerun hands back the handle and stop
     // it was given, as a launch would keep them.
-    fn rerunnable(table: &Arc<Table>, root: &Path) -> (Arc<dyn tool::JobHandle>, Reruns) {
+    fn rerunnable(table: &Arc<Table>, root: &Path) -> (Arc<dyn JobHandle>, Reruns) {
         let job = start(table, root, "serve");
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         job.rerun(Arc::new(move |job, stop| {

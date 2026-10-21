@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc::unbounded_channel, watch};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
+use toolbox::background::JobSink;
 use toolbox::bash;
 
 use agent::session::Session;
@@ -72,8 +73,9 @@ pub struct Subagent {
     // The retry schedule the child runs on, handed in when the tool is hung:
     // a tool has no way to reach the config where it is called.
     retry: Retry,
-    // Whether `background` is offered; without it every call blocks its turn.
-    background: bool,
+    // Where a call sent to the background is kept; without it `background`
+    // is not offered and every call blocks its turn.
+    background: Option<Arc<dyn JobSink>>,
 }
 
 // How long a child may run silent unless `with_deadline` says otherwise.
@@ -122,14 +124,14 @@ impl Subagent {
             archive,
             deadline: DEADLINE,
             retry,
-            background: false,
+            background: None,
         }
     }
 
-    /// Offer `background`: a call may leave its turn as a job of the
-    /// context it runs under, its answer coming back as a turn of its own.
-    pub fn with_background(mut self) -> Self {
-        self.background = true;
+    /// Offer `background`: a call may leave its turn as a job kept by
+    /// `jobs`, its answer coming back as a turn of its own.
+    pub fn with_background(mut self, jobs: Arc<dyn JobSink>) -> Self {
+        self.background = Some(jobs);
         self
     }
 
@@ -224,7 +226,7 @@ impl Tool for Subagent {
             "required": ["description", "prompt"],
             "additionalProperties": false,
         });
-        if self.background {
+        if self.background.is_some() {
             schema["properties"]["background"] = json!({
                 "type": "boolean",
                 "description": "Run it apart from this turn: the call returns at once with an id, and the answer comes back later as a turn of its own. For a long job you need not wait on — keep working, or end the turn. It shares this checkout, so give it work that touches no file you are editing.",
@@ -248,10 +250,9 @@ impl Tool for Subagent {
                 "the subagent's `prompt` is empty — say what it should do".into(),
             ));
         }
-        if self.background && args.background {
-            self.send_off(args, ctx)
-        } else {
-            self.run(args, ctx).await
+        match &self.background {
+            Some(jobs) if args.background => self.send_off(args, ctx, jobs.as_ref()),
+            _ => self.run(args, ctx).await,
         }
     }
 }
@@ -259,17 +260,10 @@ impl Tool for Subagent {
 impl Subagent {
     // Started apart from the turn: the job's own token, so a stop leaves it
     // running, and its own record of writes, since the caller's run will end.
-    fn send_off(&self, args: Args, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let Some(sink) = ctx.jobs() else {
-            return Err(ToolError::Invalid(
-                "this run cannot keep a subagent in the background; call it without \
-                 `background`"
-                    .into(),
-            ));
-        };
+    fn send_off(&self, args: Args, ctx: &Ctx, jobs: &dyn JobSink) -> Result<ToolOutput, ToolError> {
         let description = args.description.replace('\n', " ");
         let stop = tokio_util::sync::CancellationToken::new();
-        let job = sink.start(
+        let job = jobs.start(
             ctx.workspace.root().to_path_buf(),
             description.clone(),
             stop.clone(),
@@ -308,16 +302,14 @@ impl Subagent {
             NEXT.fetch_add(1, Ordering::Relaxed)
         );
         // Tree, locks and renumbering are shared with the parent (same files);
-        // transcript, spill name and token are the child's own. It keeps no
-        // jobs: nothing would bring their results back to the child.
+        // transcript, spill name and token are the child's own.
         let stop = ctx.cancel.child_token();
         let root = ctx.spill_root().to_path_buf();
         let child = ctx
             .clone()
             .with_cancel(stop.clone())
             .with_session(&id, root)
-            .with_own_writes()
-            .without_jobs();
+            .with_own_writes();
 
         let (tx, mut rx) = unbounded_channel();
         // Every event resets the silence clock, whatever kind it is: an

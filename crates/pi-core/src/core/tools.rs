@@ -34,7 +34,7 @@ const LISTED_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Run `tool` as the user asked for it by name, with no model in between:
 /// what it answered, or why it did not; `None` once stopped as a job, which
-/// it is once it outlasts `LISTED_AFTER` where `ctx` keeps jobs. Free of
+/// it is once it outlasts `LISTED_AFTER` where `jobs` keeps them. Free of
 /// `Core`, as `run_bash` is.
 ///
 /// Not a model's call, so `agent`'s journal never sees it; it is kept here.
@@ -42,6 +42,7 @@ pub async fn run_named(
     tool: std::sync::Arc<dyn tool::Tool>,
     args: serde_json::Value,
     ctx: &tool::Ctx,
+    jobs: Option<&dyn toolbox::background::JobSink>,
 ) -> Option<Result<String, String>> {
     let name = tool.name().to_string();
     tracing::info!(target: "pi::tool", tool = %name, args = %args, "call by the user");
@@ -51,7 +52,7 @@ pub async fn run_named(
     let said = tokio::select! {
         said = &mut call => said,
         () = tokio::time::sleep(LISTED_AFTER) => {
-            let job = ctx.jobs().map(|sink| {
+            let job = jobs.map(|sink| {
                 let root = ctx.workspace.root().to_path_buf();
                 sink.start(root, label, ctx.cancel.clone(), None)
             });

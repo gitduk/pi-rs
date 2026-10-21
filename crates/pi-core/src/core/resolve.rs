@@ -41,6 +41,9 @@ pub struct Resolved {
     /// the lane is resolved again. Skills and scripts are read live, and the
     /// prompt's files are `prompt_files`, so neither is here.
     pub watched: Vec<Stamp>,
+    /// The script directories `brief` reads, for a lane to swap for ones whose
+    /// scripts may detach: the subagent keeps these.
+    pub scripts: Vec<Arc<toolbox::scripts::Dir>>,
     /// What the prompt was told from files, held through every reload.
     pub prompt_files: Arc<PromptFiles>,
     /// Where skills are read from, live; `None` under `--no-skills`.
@@ -276,8 +279,9 @@ pub fn resolve(
     if registry.get(subagent::Subagent::NAME).is_some() {
         notes.push("tool skipped — subagent: the name is taken".to_string());
     }
-    for (scripts, _) in script_dirs {
-        registry.read(scripts);
+    let scripts: Vec<_> = script_dirs.into_iter().map(|(dir, _)| dir).collect();
+    for dir in &scripts {
+        registry.read(dir.clone());
     }
     // Read live like the scripts: a server's tools join once it has listed them.
     if !config.mcp.is_empty() {
@@ -355,6 +359,7 @@ pub fn resolve(
         ceiling: tier,
         commands: std::sync::Arc::new(commands),
         watched: read_from,
+        scripts,
         shelf,
         shelf_seen,
         notes,
