@@ -515,7 +515,8 @@ fn a_command_page_searches_only_its_own_lines() {
     assert!(ui.read.is_some());
 }
 
-// The query is edited with the line's own keys: `ctrl+w` takes a word.
+// The query is edited with the line's own keys: `ctrl+w` takes a word,
+// and on an empty query takes the `/` too.
 #[test]
 fn a_search_query_takes_the_line_editing_keys() {
     let mut ui = vim_ui_at(30, 12);
@@ -532,6 +533,8 @@ fn a_search_query_takes_the_line_editing_keys() {
     ui.key(&lane, &mut view, ctrl('u'), false);
     assert_eq!(query(&ui).as_deref(), Some("/"));
     assert!(ui.read.is_some());
+    ui.key(&lane, &mut view, ctrl('w'), false);
+    assert_eq!(query(&ui), None, "back past the `/`, as backspace goes");
 }
 
 // What is counted is what is drawn: an escape the frame drops holds no

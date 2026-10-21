@@ -160,6 +160,11 @@ impl Ui {
         key: crossterm::event::KeyEvent,
         action: Option<Action>,
     ) -> Asked {
+        if let Some(action) = action
+            && self.editor.edit(action)
+        {
+            return Asked::Own(Deed::Nothing);
+        }
         match action {
             Some(Action::LineSubmit) => {
                 self.seeded = None;
@@ -255,17 +260,6 @@ impl Ui {
                 }
             }
             Some(Action::InsertNewline) => self.editor.insert('\n'),
-            Some(Action::DeleteCharBack) => self.editor.backspace_tag(),
-            Some(Action::DeleteCharForward) => self.editor.delete_tag(),
-            Some(Action::DeleteWordBack) => self.editor.kill_word_back(),
-            Some(Action::DeleteToLineEnd) => self.editor.kill_to_end(),
-            Some(Action::DeleteToLineStart) => self.editor.kill_to_start(),
-            Some(Action::DeleteLine) => self.editor.delete_line(),
-            Some(Action::MoveCharLeft) => self.editor.left(),
-            Some(Action::MoveCharRight) => self.editor.right(),
-            Some(Action::MoveWordLeft) => self.editor.word_left(),
-            Some(Action::MoveWordRight) => self.editor.word_right(),
-            Some(Action::MoveWordNext) => self.editor.word_next(),
             Some(Action::ModeNormal) => self.set_mode(Mode::Normal),
             Some(Action::ModeInsert) => self.leave_normal(),
             Some(Action::ModeInsertAfter) => {
@@ -297,9 +291,6 @@ impl Ui {
                 self.editor.open_above();
                 self.leave_normal();
             }
-            Some(Action::MoveLineStart) => self.editor.home(),
-            Some(Action::MoveLineEnd) => self.editor.end(),
-            Some(Action::MoveLineFirstNonBlank) => self.editor.first_non_blank(),
             Some(Action::MoveBufferStart) => self.buffer_ends(view, true),
             Some(Action::MoveBufferEnd) => self.buffer_ends(view, false),
             Some(Action::HistoryOlder) => self.history_older(view),

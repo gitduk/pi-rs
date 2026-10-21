@@ -12,6 +12,7 @@ use ratatui::text::Line;
 
 use super::Ui;
 use super::browse::Page;
+use super::editor::Editor;
 use super::menu::MenuEntry;
 use super::mouse::Target;
 use super::screen;
@@ -84,7 +85,7 @@ impl Laid {
 }
 
 pub(super) struct Search {
-    pub(super) query: String,
+    pub(super) query: Editor,
     // Still being typed: the keys are the query's, not the line's.
     pub(super) typing: bool,
     // The hit the view was last brought to.
@@ -201,7 +202,7 @@ impl Ui {
             }
             None => {
                 self.search = Some(Box::new(Search {
-                    query: String::new(),
+                    query: Editor::default(),
                     typing: true,
                     at: None,
                     last: (0, 0),
@@ -250,10 +251,16 @@ impl Ui {
                     _ if s.query.is_empty() => String::new(),
                     (at, of) => format!("  {at}/{of}"),
                 };
-                Some((format!("/{}", s.query), count))
+                Some((format!("/{}", s.query.text()), count))
             }
             _ => None,
         }
+    }
+
+    // The prompt up to the caret, for the frame to stand it after.
+    pub(super) fn search_caret(&self) -> Option<String> {
+        let query = &self.search.as_deref()?.query;
+        Some(format!("/{}", &query.text()[..query.cursor()]))
     }
 
     // Whether the query is still being typed: the caret is on its row.
@@ -265,7 +272,7 @@ impl Ui {
     // and the hit the view is on.
     pub(super) fn search_query(&self) -> Option<(&str, Option<Hit>)> {
         match self.search.as_deref() {
-            Some(s) if !s.query.is_empty() => Some((&s.query, s.at)),
+            Some(s) if !s.query.is_empty() => Some((s.query.text(), s.at)),
             _ => None,
         }
     }
@@ -285,37 +292,30 @@ impl Ui {
             return false;
         };
         let typed = Some(Want::Typed { entered: false });
+        let was = search.query.text().to_string();
         let mut dropped = false;
         match (key.code, edit) {
             (KeyCode::Esc, _) => dropped = true,
             (KeyCode::Enter, _) if search.query.is_empty() => dropped = true,
             (KeyCode::Enter, _) => search.enter(),
             // Back past the first character: no query, so no search.
-            (_, Some(Action::DeleteCharBack)) if search.query.is_empty() => dropped = true,
-            (_, Some(Action::DeleteCharBack)) => {
-                search.query.pop();
-                search.want = typed;
-            }
-            (_, Some(Action::DeleteWordBack)) => {
-                let end = search.query.trim_end().len();
-                let start = search.query[..end]
-                    .char_indices()
-                    .rfind(|(_, c)| c.is_whitespace())
-                    .map_or(0, |(i, c)| i + c.len_utf8());
-                search.query.truncate(start);
-                search.want = typed;
-            }
-            (_, Some(Action::DeleteToLineStart | Action::LineClear)) => {
-                search.query.clear();
-                search.want = typed;
-            }
-            _ => match super::keys::bare_letter(key) {
-                Some(c) => {
-                    search.query.push(c);
-                    search.want = typed;
+            (
+                _,
+                Some(Action::DeleteCharBack | Action::DeleteWordBack | Action::DeleteToLineStart),
+            ) if search.query.is_empty() => dropped = true,
+            (_, Some(Action::LineClear)) => search.query.clear(),
+            _ => {
+                if !edit.is_some_and(|action| search.query.edit(action)) {
+                    let Some(c) = super::keys::bare_letter(key) else {
+                        return false;
+                    };
+                    search.query.insert(c);
                 }
-                None => return false,
-            },
+            }
+        }
+        // A caret moved finds nothing new.
+        if search.query.text() != was {
+            search.want = typed;
         }
         let listed = search.typing && !dropped;
         if dropped {
@@ -375,9 +375,8 @@ impl Ui {
             && search.typing
         {
             let line = text.lines().next().unwrap_or_default();
-            search
-                .query
-                .extend(line.chars().filter(|c| !c.is_control()));
+            let line: String = line.chars().filter(|c| !c.is_control()).collect();
+            search.query.insert_str(&line);
             search.want = Some(Want::Typed { entered: false });
         }
     }
@@ -411,7 +410,7 @@ impl Ui {
             // A slash page's own lines only, not the transcript over it.
             let own = |spot: Spot| !slash || matches!(spot, Spot::Text(_));
             // Every match, row by row: a line's index, its row, which of the row's.
-            let query = &search.query;
+            let query = search.query.text();
             let hits: Vec<(usize, usize, usize)> = laid
                 .iter()
                 .enumerate()
@@ -502,7 +501,7 @@ impl Ui {
             ));
             let entered = matches!(want, Want::Typed { entered: true } | Want::Step { .. });
             if search.at.is_none() && entered {
-                missed = Some(search.query.clone());
+                missed = Some(search.query.text().to_string());
             }
         }
         if let Some((top, newest)) = top {

@@ -1,5 +1,6 @@
 //! The line being typed: a text buffer, a caret, and the history behind it.
 
+use pi_store::keys::Action;
 use ratatui::text::{Line, Span};
 
 use crate::render::Paint;
@@ -113,6 +114,29 @@ impl Editor {
     pub fn insert_str(&mut self, s: &str) {
         self.text.insert_str(self.cursor, s);
         self.cursor += s.len();
+    }
+
+    /// A key table's text edit done on the buffer; false for any other
+    /// action. Every line that takes typing edits through here.
+    pub fn edit(&mut self, action: Action) -> bool {
+        match action {
+            Action::DeleteCharBack => self.backspace_tag(),
+            Action::DeleteCharForward => self.delete_tag(),
+            Action::DeleteWordBack => self.kill_word_back(),
+            Action::DeleteToLineEnd => self.kill_to_end(),
+            Action::DeleteToLineStart => self.kill_to_start(),
+            Action::DeleteLine => self.delete_line(),
+            Action::MoveCharLeft => self.left(),
+            Action::MoveCharRight => self.right(),
+            Action::MoveWordLeft => self.word_left(),
+            Action::MoveWordRight => self.word_right(),
+            Action::MoveWordNext => self.word_next(),
+            Action::MoveLineStart => self.home(),
+            Action::MoveLineEnd => self.end(),
+            Action::MoveLineFirstNonBlank => self.first_non_blank(),
+            _ => return false,
+        }
+        true
     }
 
     pub fn backspace(&mut self) {

@@ -354,10 +354,10 @@ impl Ui {
         }
     }
 
-    // The search's row, and the column the caret stands at after the query.
+    // The search's row, and the column the caret stands at in the query.
     fn search_line(&self) -> Option<(Line<'static>, u16)> {
         let (query, count) = self.search_prompt()?;
-        let col = unicode_width::UnicodeWidthStr::width(query.as_str()) as u16;
+        let col = unicode_width::UnicodeWidthStr::width(self.search_caret()?.as_str()) as u16;
         let line = Line::from(vec![
             query.into(),
             self.paint.span(&self.paint.theme.muted, count),
