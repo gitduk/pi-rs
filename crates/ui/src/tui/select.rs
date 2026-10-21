@@ -62,8 +62,10 @@ pub(super) struct Drawn {
 pub(super) fn text(sel: &Selection, rows: &[Drawn], width: usize) -> String {
     let mut out = String::new();
     let (from, to) = sel.span();
-    for at in from.row..=to.row.min(rows.len().saturating_sub(1)) {
-        let row = &rows[at];
+    for at in from.row..=to.row {
+        let Some(row) = rows.get(at) else {
+            break;
+        };
         let Some((start, end)) = sel.cols(at) else {
             continue;
         };

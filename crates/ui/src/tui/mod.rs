@@ -877,41 +877,39 @@ impl Tui {
         if let Some(why) = unsaved {
             self.notice(why);
         }
-        match outcome {
+        // Past a rewind the transcript is truth again: the whole view is
+        // rebuilt from it, back to the node the conversation returned to.
+        let said = match outcome {
             Rewound::Nothing => {
                 self.ui.flash(NOTHING_TO_REWIND);
+                return;
             }
-            outcome => {
-                // The transcript is truth again: rebuild the whole view
-                // from it, back to the node the conversation returned to.
+            Rewound::Unsent(_) if !self.ui.editor.is_empty() => {
+                "unsent — the line you were typing stands; Up recalls it".to_string()
+            }
+            // Unsent is half-typed, not gone: the text goes back to
+            // the editor, and the cursor on it says what happened.
+            Rewound::Unsent(text) => {
                 self.rebuild_front();
-                let said = match outcome {
-                    Rewound::Unsent(_) if !self.ui.editor.is_empty() => {
-                        "unsent — the line you were typing stands; Up recalls it".to_string()
-                    }
-                    // Unsent is half-typed, not gone: the text goes back to
-                    // the editor, and the cursor on it says what happened.
-                    Rewound::Unsent(text) => {
-                        self.ui.editor.set_line(&text);
-                        return;
-                    }
-                    Rewound::Kept | Rewound::Nothing => {
-                        let at = self
-                            .core
-                            .lane()
-                            .session()
-                            .and_then(|s| s.last_node())
-                            .map(|n| pi_store::text::clip(n.show(), 60))
-                            .filter(|t| !t.is_empty())
-                            .map(|t| format!(" — the transcript now ends at {t}"))
-                            .unwrap_or_default();
-                        format!("rewound{at}")
-                    }
-                };
-                self.ui
-                    .say_muted(front_view(&mut self.views, self.core.lane()), &said);
+                self.ui.editor.set_line(&text);
+                return;
             }
-        }
+            Rewound::Kept => {
+                let at = self
+                    .core
+                    .lane()
+                    .session()
+                    .and_then(|s| s.last_node())
+                    .map(|n| pi_store::text::clip(n.show(), 60))
+                    .filter(|t| !t.is_empty())
+                    .map(|t| format!(" — the transcript now ends at {t}"))
+                    .unwrap_or_default();
+                format!("rewound{at}")
+            }
+        };
+        self.rebuild_front();
+        self.ui
+            .say_muted(front_view(&mut self.views, self.core.lane()), &said);
     }
 
     // `/rewind ` on the line, what the user said completing it.
