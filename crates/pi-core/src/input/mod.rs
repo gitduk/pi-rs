@@ -207,10 +207,15 @@ pub(crate) fn starts_turn(commands: &[Command], word: &str) -> bool {
 /// skill command is a prompt wearing a slash. Built-ins are operations
 /// rather than words to re-say, and a word pi does not know is nothing.
 pub fn recallable(line: &str, commands: &[Command]) -> bool {
-    match line.split_whitespace().next() {
-        Some(word) if word.starts_with('/') => starts_turn(commands, word),
-        _ => true,
-    }
+    command_word(line).is_none_or(|word| starts_turn(commands, word))
+}
+
+// Only a slash in the first column names a command: a leading space is how
+// prose that opens with a path, like `/api/v1/users`, reaches the model.
+fn command_word(line: &str) -> Option<&str> {
+    line.split(char::is_whitespace)
+        .next()
+        .filter(|word| word.starts_with('/'))
 }
 
 // A word `read` did not know: a skill to run, or a typo to name.
@@ -229,7 +234,11 @@ pub(crate) fn step_for(commands: &[Command], word: &str, args: &str) -> Step {
                 typed: typed(),
             };
         }
-        _ => return Step::Notice(format!("unknown command {word}")),
+        _ => {
+            return Step::Notice(format!(
+                "unknown command {word} — a leading space sends the line as text"
+            ));
+        }
     };
     match expanded(skill, args) {
         Ok(send) => Step::Prompt {
@@ -269,12 +278,9 @@ pub fn read(line: &str, commands: &[Command]) -> Intent {
     if let Some(command) = bash_command(line) {
         return Intent::Bash(command.to_string());
     }
-    let Some(word) = line.split_whitespace().next() else {
+    let Some(word) = command_word(line) else {
         return Intent::Prompt(line.to_string());
     };
-    if !word.starts_with('/') {
-        return Intent::Prompt(line.to_string());
-    }
     let args = rest(line);
     // The table is the only list of words: a built-in row says what it
     // means, a skill's hands the line on; no match is nothing till `step_for`.
