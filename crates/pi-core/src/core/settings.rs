@@ -37,6 +37,7 @@ impl Core {
             &self.config,
             &self.settings,
             None,
+            self.surface,
         ) {
             Ok(r) => r,
             Err(e) => return Some(vec![format!("prompt files not re-read — {e:#}")]),
@@ -87,6 +88,7 @@ impl Core {
             &config,
             settings.as_ref().unwrap_or(&self.settings),
             prompt_files,
+            self.surface,
         ) {
             Ok(r) => r,
             Err(e) => return failed(e),

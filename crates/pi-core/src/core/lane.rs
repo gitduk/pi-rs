@@ -849,9 +849,15 @@ impl Core {
     ) -> Result<(), String> {
         let root = ws.root().to_path_buf();
         let failed = |e| format!("nothing opened — {}", refused("worktree", e));
-        let resolved =
-            crate::core::resolve::resolve(&self.pinned, &ws, &self.config, &self.settings, None)
-                .map_err(failed)?;
+        let resolved = crate::core::resolve::resolve(
+            &self.pinned,
+            &ws,
+            &self.config,
+            &self.settings,
+            None,
+            self.surface,
+        )
+        .map_err(failed)?;
 
         // The model travels; what the root decides does not. A switch changes
         // trees, and which model is answering was a decision made elsewhere.

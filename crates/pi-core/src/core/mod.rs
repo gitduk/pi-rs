@@ -24,7 +24,7 @@ pub mod update;
 pub mod worktree;
 
 use crate::core::lane::Lane;
-use crate::input::commands::{Command, help, with_prompts, with_surface};
+use crate::input::commands::{Command, help, with_prompts};
 use crate::input::{Builtin, Drive, Intent, Step, notice, step_for};
 use pi_store::config;
 use pi_store::listing::Listing;
@@ -95,7 +95,8 @@ pub struct Core {
     /// Where calls that outlive their turn are kept, when a surface serves
     /// them; a run with nothing to come back to keeps no jobs.
     pub jobs: Option<std::sync::Arc<crate::driver::jobs::Table>>,
-    /// Words the surface answers itself, listed beside the built-ins.
+    /// Words the surface answers itself, listed beside the built-ins: each
+    /// comes back as [`Step::Surface`]. Every resolve is handed them.
     pub surface: &'static [Command],
 }
 
@@ -103,16 +104,9 @@ impl Core {
     // Put the lane in front's command table in force: a skill belongs to one
     // tree, not another.
     fn in_force(&mut self) {
-        let table = with_surface(self.lane().resolved().commands.clone(), self.surface);
+        let table = self.lane().resolved().commands.clone();
         self.prompts_seen = ::mcp::generation();
         self.commands = with_prompts(table, crate::core::mcp::prompts());
-    }
-
-    /// Put `words` in the table for the surface to answer: each comes back
-    /// as [`Step::Surface`].
-    pub fn surface_words(&mut self, words: &'static [Command]) {
-        self.surface = words;
-        self.in_force();
     }
 
     /// Put the servers' prompts in the table again when their lists moved.
@@ -172,8 +166,11 @@ impl Core {
             }
             let mut notes = Vec::new();
             let mut fresh = (**resolved).clone();
-            fresh.commands =
-                std::sync::Arc::new(crate::input::commands::commands(&found.skills, &mut notes));
+            fresh.commands = std::sync::Arc::new(crate::input::commands::commands(
+                &found.skills,
+                self.surface,
+                &mut notes,
+            ));
             fresh.shelf_seen = seen;
             said.extend(
                 found
@@ -445,7 +442,7 @@ mod tests {
             &[]
         };
         let mut notes = Vec::new();
-        let commands = commands(&[], &mut notes);
+        let commands = commands(&[], &[], &mut notes);
         let line = |text: &str| {
             asked.borrow_mut().clear();
             crate::input::commands::complete(
@@ -495,7 +492,7 @@ mod tests {
     #[test]
     fn an_accepted_rewind_id_offers_only_its_own_row() {
         let mut notes = Vec::new();
-        let commands = commands(&[], &mut notes);
+        let commands = commands(&[], &[], &mut notes);
         let said = [
             Choice {
                 name: "12".into(),
@@ -601,16 +598,29 @@ mod tests {
     fn a_skill_cannot_take_a_built_in_word() {
         // A skill that could redefine /new would make a copied-in file the
         // owner of a word the session depends on.
-        let found = [skill("new", "not this one"), skill("archify", "diagrams")];
+        // A surface's own word holds the same way.
+        let found = [
+            skill("new", "not this one"),
+            skill("look", "nor this"),
+            skill("archify", "diagrams"),
+        ];
+        let words = [crate::input::commands::Command::surface(
+            "/look",
+            "",
+            "the surface's",
+        )];
         let mut notes = Vec::new();
-        let table = commands(&found, &mut notes);
-        let new = table.iter().find(|c| c.word == "/new").unwrap();
-        assert!(matches!(new.source, Source::Builtin));
-        assert_eq!(table.iter().filter(|c| c.word == "/new").count(), 1);
+        let table = commands(&found, &words, &mut notes);
+        for word in ["/new", "/look"] {
+            let rows: Vec<_> = table.iter().filter(|c| c.word == word).collect();
+            assert_eq!(rows.len(), 1, "{word}");
+            assert!(matches!(rows[0].source, Source::Builtin), "{word}");
+        }
         assert!(table.iter().any(|c| c.word == "/archify"));
         // Silently absent is how a user goes looking in the wrong place.
-        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(notes.len(), 2, "{notes:?}");
         assert!(notes[0].contains("/new"), "{}", notes[0]);
+        assert!(notes[1].contains("/look"), "{}", notes[1]);
     }
 
     #[test]

@@ -8,6 +8,7 @@ mod clipboard;
 mod editor;
 mod frame;
 mod keys;
+pub use keys::WORDS;
 mod menu;
 mod mouse;
 mod row;
@@ -162,7 +163,6 @@ impl Tui {
             true,
             Arc::new(following_terminal(&core.config.theme, answer.bg)),
         );
-        core.surface_words(keys::WORDS);
         let mut ui = Ui::new(
             screen,
             core.config.key_table.clone(),
@@ -212,7 +212,6 @@ impl Tui {
     #[cfg(test)]
     fn on_test_screen(mut core: Core) -> Self {
         let paint = Paint::with_theme(false, Arc::new(core.config.theme.clone()));
-        core.surface_words(keys::WORDS);
         let mut ui = Ui::new(
             screen::Screen::test(80, 24),
             core.config.key_table.clone(),

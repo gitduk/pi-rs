@@ -174,7 +174,12 @@ async fn main() -> Result<ExitCode> {
     let pinned = args.pinned();
     let dialled = dial(&pinned, &config, &named, named_by)?;
 
-    let mut resolved = resolve(&pinned, &workspace, &config, &settings, None)?;
+    // Only the terminal answers its own words; a one-shot run has none.
+    let words = match prompt {
+        None => tui::WORDS,
+        Some(_) => &[],
+    };
+    let mut resolved = resolve(&pinned, &workspace, &config, &settings, None, words)?;
     pi_core::core::mcp::sync(&config, workspace.root());
     pi_core::core::warm_rtk();
     if prompt.is_none() {
@@ -270,7 +275,7 @@ async fn main() -> Result<ExitCode> {
             lanes: vec![first],
             refused: Default::default(),
             jobs: None,
-            surface: &[],
+            surface: words,
         };
         let drivers = pi_core::driver::Drivers::default();
         core.enable_jobs(drivers.jobs());

@@ -185,7 +185,11 @@ async fn only_an_answer_under_the_line_echoes_it() {
     let mut tui = surface(dir.path());
     // The real table, or `/keys` is a word the door does not know and the
     // line is read as a prompt — which is a different test.
-    let table = std::sync::Arc::new(pi_core::input::commands::commands(&[], &mut Vec::new()));
+    let table = std::sync::Arc::new(pi_core::input::commands::commands(
+        &[],
+        crate::tui::WORDS,
+        &mut Vec::new(),
+    ));
     tui.core.commands = table.clone();
     tui.ui.commands = table;
     let token = tui.core.lane().token();

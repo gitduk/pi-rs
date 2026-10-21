@@ -201,12 +201,14 @@ pub(crate) fn gist(description: &str) -> String {
         .join(" ")
 }
 
-/// What a slash answers to: the built-ins, then one command per skill.
+/// What a slash answers to: the built-ins and the surface's `words`, then one
+/// command per skill.
 ///
 /// No prefix: a skill is `/commit`, not `/skill:commit`. On a name clash a
 /// built-in wins — the skill stays loadable by name, and the note says so.
-pub fn commands(skills: &[Skill], notes: &mut Vec<String>) -> Vec<Command> {
+pub fn commands(skills: &[Skill], words: &[Command], notes: &mut Vec<String>) -> Vec<Command> {
     let mut out = BUILTIN.to_vec();
+    out.extend(words.iter().cloned());
     for skill in skills {
         let word = format!("/{}", skill.name);
         if out.iter().any(|c| c.word.as_ref() == word) {
@@ -226,22 +228,6 @@ pub fn commands(skills: &[Skill], notes: &mut Vec<String>) -> Vec<Command> {
         });
     }
     out
-}
-
-/// `table` with `words` after its built-ins, in place of any row of theirs.
-pub fn with_surface(table: Arc<Vec<Command>>, words: &[Command]) -> Arc<Vec<Command>> {
-    if words.is_empty() {
-        return table;
-    }
-    let mut out: Vec<Command> = (table.iter())
-        .filter(|c| !words.iter().any(|w| w.word == c.word))
-        .cloned()
-        .collect();
-    let at = (out.iter())
-        .position(|c| !matches!(c.source, Source::Builtin))
-        .unwrap_or(out.len());
-    out.splice(at..at, words.iter().cloned());
-    Arc::new(out)
 }
 
 /// `table` with the running servers' prompts after it. A prompt whose word

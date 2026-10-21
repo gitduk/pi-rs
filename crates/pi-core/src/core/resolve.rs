@@ -33,9 +33,9 @@ pub struct Resolved {
     /// How far this run may reach. The lane needs it to decide whether the
     /// subagent, offered after this set is cut, belongs in it.
     pub ceiling: tool::Tier,
-    /// The built-ins plus one command per skill. Here rather than in the Core
-    /// because a skill discovered at reload has to reach the prompt the same
-    /// way everything else the config decides does.
+    /// The built-ins and the surface's words, plus one command per skill.
+    /// Here rather than in the Core because a skill discovered at reload has
+    /// to reach the prompt the same way everything else the config decides does.
     pub commands: std::sync::Arc<Vec<Command>>,
     /// The config files this was built from, as they stood: when one moves,
     /// the lane is resolved again. Skills and scripts are read live, and the
@@ -180,12 +180,14 @@ fn changed<'a, K: PartialEq>(
 /// which is why a reload computes all of this before touching anything.
 ///
 /// `prompt_files` is the prompt's files as last read; `None` reads them now.
+/// `words` are the surface's own, listed with the built-ins.
 pub fn resolve(
     pinned: &Pinned,
     workspace: &tool::Workspace,
     config: &config::Config,
     settings: &Settings,
     prompt_files: Option<Arc<PromptFiles>>,
+    words: &[Command],
 ) -> Result<Resolved> {
     let root = workspace.root();
     let mut notes = Vec::new();
@@ -217,7 +219,7 @@ pub fn resolve(
     );
     // A skill is two things at once, a command the user can type and a body
     // the model can load, and both read the same list.
-    let commands = commands(&found.skills, &mut notes);
+    let commands = commands(&found.skills, words, &mut notes);
     if let Some(shelf) = &shelf {
         if registry.get(skills::Load::NAME).is_some() {
             notes.push("tool skipped — skill: the name is taken".to_string());

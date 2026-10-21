@@ -109,7 +109,7 @@ pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
         refused: Default::default(),
         jobs: None,
         current: 0,
-        surface: &[],
+        surface: crate::tui::WORDS,
     };
     crate::tui::Tui::on_test_screen(core)
 }

@@ -17,8 +17,8 @@ use std::time::Instant;
 /// The word that lists what every key does.
 pub(super) const KEYS: &str = "/keys";
 
-// The words this surface answers itself, listed beside the built-ins.
-pub(super) const WORDS: &[input::commands::Command] = &[input::commands::Command::surface(
+/// The words this surface answers itself, listed beside the built-ins.
+pub const WORDS: &[input::commands::Command] = &[input::commands::Command::surface(
     KEYS,
     "",
     "what every key does, and the id to rebind it under",
