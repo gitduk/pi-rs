@@ -139,6 +139,23 @@ pub struct Vim {
     /// typed as text; the pairs themselves are `[keys]` bindings.
     #[serde(default = "default_pair_ms")]
     pub pair_timeout_ms: u64,
+    /// The cursor in Insert.
+    #[serde(default = "default_insert_cursor")]
+    pub insert_cursor: Cursor,
+    /// The cursor in Normal. Unthemed, it is the only mark of the mode, so
+    /// keep it unlike Insert's.
+    #[serde(default = "default_normal_cursor")]
+    pub normal_cursor: Cursor,
+}
+
+/// A cursor shape. `default` is the terminal's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Cursor {
+    Block,
+    Bar,
+    Underline,
+    Default,
 }
 
 /// A command run on events, handed each as JSON on stdin.
@@ -237,6 +254,14 @@ fn default_enabled() -> bool {
 fn default_pair_ms() -> u64 {
     250
 }
+
+fn default_insert_cursor() -> Cursor {
+    Cursor::Bar
+}
+
+fn default_normal_cursor() -> Cursor {
+    Cursor::Block
+}
 fn default_loop_max_rounds() -> Option<usize> {
     Some(DEFAULT_LOOP_MAX_ROUNDS)
 }
@@ -251,6 +276,8 @@ impl Default for Vim {
         Self {
             enabled: default_enabled(),
             pair_timeout_ms: default_pair_ms(),
+            insert_cursor: default_insert_cursor(),
+            normal_cursor: default_normal_cursor(),
         }
     }
 }

@@ -184,3 +184,6 @@ enabled = true
 # How long the first of a pair of bare characters (`j k`, `g g`, `d d`)
 # waits for the second. Pairs with ctrl, alt or a named key wait 500 ms.
 pair_timeout_ms = 250
+# The cursor in each mode: block, bar, underline, or default (the terminal's own).
+insert_cursor = "bar"
+normal_cursor = "block"

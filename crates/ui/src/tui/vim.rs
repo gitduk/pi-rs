@@ -3,6 +3,7 @@
 
 use super::view::View;
 use super::{Ui, screen};
+use pi_store::config::Cursor;
 use pi_store::keys::Mode;
 
 impl Ui {
@@ -42,15 +43,15 @@ impl Ui {
     pub(super) fn show_mode(&mut self) {
         // Three states, not two: vim off is not "Insert", and a caret shaped
         // for a mode nobody turned on is a change to somebody else's terminal.
-        let normal = self.vim.map(|m| m == Mode::Normal);
-        let icon = match normal {
-            Some(true) => self.paint.theme.prompt.normal.clone(),
-            _ => self.paint.theme.prompt.icon.clone(),
+        let (icon, cursor) = match self.vim {
+            Some(Mode::Normal) => (&self.paint.theme.prompt.normal, self.normal_cursor),
+            Some(Mode::Insert) => (&self.paint.theme.prompt.icon, self.insert_cursor),
+            None => (&self.paint.theme.prompt.icon, Cursor::Default),
         };
-        self.prompt = Self::paint_prompt(&self.paint, &icon);
+        self.prompt = Self::paint_prompt(&self.paint, icon);
         self.editor
             .set_prompts(self.prompt.clone(), self.bang_prompt.clone());
-        self.screen.cursor_shape(normal);
+        self.screen.cursor_shape(cursor);
     }
 
     // Turning modal keys off drops the state (not parks it), so coming back
@@ -63,6 +64,8 @@ impl Ui {
         } else {
             std::time::Duration::ZERO
         };
+        self.insert_cursor = cfg.insert_cursor;
+        self.normal_cursor = cfg.normal_cursor;
         match (&mut self.vim, cfg.enabled) {
             (slot @ None, true) => *slot = Some(Mode::Insert),
             (slot, false) => *slot = None,

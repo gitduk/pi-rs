@@ -89,6 +89,8 @@ pub(super) struct Ui {
     pub(super) spinner: usize,
     // The modal keys, or None while they are off.
     pub(super) vim: Option<pi_store::keys::Mode>,
+    pub(super) insert_cursor: pi_store::config::Cursor,
+    pub(super) normal_cursor: pi_store::config::Cursor,
     // The segments the status line shows, in the order the config named them.
     pub(super) status: Vec<Segment>,
     // What the bar says, in ring order. Rebuilt before every draw.
@@ -246,6 +248,8 @@ impl Ui {
             at_menu: None,
             at_root: std::path::PathBuf::new(),
             vim: None,
+            insert_cursor: pi_store::config::Cursor::Default,
+            normal_cursor: pi_store::config::Cursor::Default,
             spinner: 0,
             status: default_parts(),
             tabs: Vec::new(),

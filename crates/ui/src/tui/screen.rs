@@ -560,17 +560,19 @@ impl Screen {
         }
     }
 
-    /// Shapes the caret for the mode: block for Normal, bar for Insert,
-    /// `None` (vim off) hands the shape back. Live terminals only.
-    pub fn cursor_shape(&mut self, normal: Option<bool>) {
+    /// Shapes the caret; `Cursor::Default` hands the shape back to the
+    /// terminal. Live terminals only.
+    pub fn cursor_shape(&mut self, cursor: pi_store::config::Cursor) {
         if !matches!(self.term, Term::Live(_)) {
             return;
         }
         use crossterm::cursor::SetCursorStyle as Shape;
-        let style = match normal {
-            Some(true) => Shape::SteadyBlock,
-            Some(false) => Shape::SteadyBar,
-            None => Shape::DefaultUserShape,
+        use pi_store::config::Cursor;
+        let style = match cursor {
+            Cursor::Block => Shape::SteadyBlock,
+            Cursor::Bar => Shape::SteadyBar,
+            Cursor::Underline => Shape::SteadyUnderScore,
+            Cursor::Default => Shape::DefaultUserShape,
         };
         let _ = crossterm::execute!(std::io::stdout(), style);
     }
