@@ -111,7 +111,7 @@ impl Ui {
         Layers {
             surface,
             run: running,
-            mode: self.vim,
+            mode: self.vim.unwrap_or_default(),
             // Whether the line has anything on it, which the keys bound
             // to an empty one read. Only Normal asks.
             line_empty: self.editor.is_empty(),

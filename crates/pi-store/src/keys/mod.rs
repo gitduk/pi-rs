@@ -18,8 +18,8 @@ pub use text::{chord, parse};
 /// more layers — nothing here can express being in both at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Mode {
-    // Keys type. The layer is empty: everything Insert does, it does by
-    // falling through to `Editor`.
+    // Keys type, and the keys that edit as typing does are live. Vim off
+    // reads keys as this, with no way into Normal.
     #[default]
     Insert,
     // Keys command. Bare characters move and delete instead of typing.
@@ -37,13 +37,13 @@ pub enum When {
     Menu,
     // A turn is in flight.
     Run,
-    // Only in that mode, and only while vim keys are on at all.
+    // Only in that mode.
     Mode(Mode),
     // Normal with nothing on the line and something read: the line has
     // nothing to move through, so its movement keys move what is read.
     NormalPage,
-    // Always — in both modes, so bindings older than the vim layer keep
-    // working under it.
+    // In both modes: moving, sending, scrolling — what the line is for,
+    // not how its text is written.
     Editor,
     // Whatever has the keyboard: the stop and the way out.
     App,
@@ -66,10 +66,8 @@ pub enum Surface {
 pub struct Layers {
     pub surface: Surface,
     pub run: bool,
-    /// The mode, or `None` when vim keys are off. Three legal states in three
-    /// representations: a separate `vim: bool` beside a `Mode` would make
-    /// "off, but in Normal" expressible and meaningless.
-    pub mode: Option<Mode>,
+    /// The mode. Vim off is Insert here: the caller never enters Normal.
+    pub mode: Mode,
     /// Whether the line has anything on it. Read only in Normal, by the keys
     /// that command the history instead when there is nothing to command.
     pub line_empty: bool,
@@ -179,42 +177,42 @@ const BINDINGS: &[Binding] = &[
     Binding {
         id: "edit.insert.newline",
         action: A::InsertNewline,
-        when: W::Editor,
+        when: W::Mode(Mode::Insert),
         keys: &["alt+enter", "ctrl+j", "shift+enter"],
         note: "",
     },
     Binding {
         id: "edit.delete.char-back",
         action: A::DeleteCharBack,
-        when: W::Editor,
+        when: W::Mode(Mode::Insert),
         keys: &["backspace", "ctrl+h"],
         note: "",
     },
     Binding {
         id: "edit.delete.char-forward",
         action: A::DeleteCharForward,
-        when: W::Editor,
+        when: W::Mode(Mode::Insert),
         keys: &["delete"],
         note: "",
     },
     Binding {
         id: "edit.delete.word-back",
         action: A::DeleteWordBack,
-        when: W::Editor,
+        when: W::Mode(Mode::Insert),
         keys: &["ctrl+w", "alt+backspace", "ctrl+backspace"],
         note: "",
     },
     Binding {
         id: "edit.delete.to-line-end",
         action: A::DeleteToLineEnd,
-        when: W::Editor,
+        when: W::Mode(Mode::Insert),
         keys: &["ctrl+k"],
         note: "",
     },
     Binding {
         id: "edit.delete.to-line-start",
         action: A::DeleteToLineStart,
-        when: W::Editor,
+        when: W::Mode(Mode::Insert),
         keys: &["ctrl+u"],
         note: "",
     },
@@ -581,7 +579,7 @@ const BINDINGS: &[Binding] = &[
     Binding {
         id: "edit.paste.image",
         action: A::PasteImage,
-        when: W::Editor,
+        when: W::Mode(Mode::Insert),
         keys: &["ctrl+v"],
         note: "the clipboard's image, saved under ~/.pi/images",
     },
@@ -891,14 +889,12 @@ fn live(layers: Layers) -> Vec<When> {
     if layers.run {
         live.push(When::Run);
     }
-    if let Some(mode) = layers.mode {
-        // The line's own layer first: a key that names the empty line wins
-        // over the layer that holds whether or not there is one.
-        if mode == Mode::Normal && layers.line_empty && layers.page {
-            live.push(When::NormalPage);
-        }
-        live.push(When::Mode(mode));
+    // The line's own layer first: a key that names the empty line wins
+    // over the layer that holds whether or not there is one.
+    if layers.mode == Mode::Normal && layers.line_empty && layers.page {
+        live.push(When::NormalPage);
     }
+    live.push(When::Mode(layers.mode));
     live.push(When::Editor);
     live.push(When::App);
     live
@@ -950,7 +946,7 @@ mod tests {
         let page = Layers {
             surface: Surface::Editor,
             run: true,
-            mode: Some(Mode::Normal),
+            mode: Mode::Normal,
             line_empty: true,
             page: true,
         };
@@ -963,7 +959,7 @@ mod tests {
         };
         assert_eq!(k.action(press("j"), typed), Some(Action::HistoryNewer));
         let insert = Layers {
-            mode: Some(Mode::Insert),
+            mode: Mode::Insert,
             ..page
         };
         assert_eq!(k.action(press("j"), insert), None, "typed, not bound");
@@ -1038,7 +1034,7 @@ mod tests {
                 Layers {
                     surface: Surface::Completion,
                     run: true,
-                    mode: None,
+                    mode: Mode::Insert,
                     line_empty: false,
                     page: false,
                 }
@@ -1065,7 +1061,7 @@ mod tests {
             .expect("a binding that stops a run");
         for spec in stop.keys {
             let key = parse(spec).unwrap();
-            for mode in [None, Some(Mode::Insert), Some(Mode::Normal)] {
+            for mode in [Mode::Insert, Mode::Normal] {
                 assert_eq!(
                     k.action(
                         key,
@@ -1139,7 +1135,7 @@ mod tests {
     #[test]
     fn the_normal_layer_takes_nothing_away() {
         // The premise the whole table rests on: Normal binds only bare
-        // characters, so every binding older than vim still answers under it.
+        // characters, so every binding outside the two modes answers in both.
         let k = Keys::default();
         for b in BINDINGS {
             // Both halves of Normal: about what it does to pre-vim bindings,
@@ -1159,7 +1155,7 @@ mod tests {
                         Surface::Editor
                     },
                     run: b.when == W::Run,
-                    mode: None,
+                    mode: Mode::Insert,
                     line_empty: false,
                     page: false,
                 };
@@ -1169,7 +1165,7 @@ mod tests {
                         prev,
                         press,
                         Layers {
-                            mode: Some(Mode::Normal),
+                            mode: Mode::Normal,
                             ..insert
                         }
                     ),
@@ -1181,29 +1177,12 @@ mod tests {
     }
 
     #[test]
-    fn the_normal_layer_is_dead_while_vim_is_off() {
-        // `mode: None` is what off means, and it is the only representation of
-        // it: there is no flag beside a mode that could disagree with it.
-        let k = Keys::default();
-        assert_eq!(k.action(press("H"), Layers::default()), None);
-        assert_eq!(
-            k.action(
-                press("H"),
-                Layers {
-                    mode: Some(Mode::Normal),
-                    ..Layers::default()
-                }
-            ),
-            Some(Action::LanePrev)
-        );
-    }
-    #[test]
     fn normal_tells_a_capital_from_its_lowercase() {
         // What shift-folding buys: `x` and `X` delete in two directions,
         // distinct presses rather than one collapsed together.
         let k = Keys::default();
         let normal = Layers {
-            mode: Some(Mode::Normal),
+            mode: Mode::Normal,
             ..Layers::default()
         };
         assert_eq!(
@@ -1224,7 +1203,7 @@ mod tests {
         // nothing — so the pair has to be in the table, not merely unclaimed.
         let k = Keys::default();
         let normal = Layers {
-            mode: Some(Mode::Normal),
+            mode: Mode::Normal,
             ..Layers::default()
         };
         assert_eq!(k.action(press("h"), normal), Some(Action::MoveCharLeft));
@@ -1236,7 +1215,7 @@ mod tests {
     #[test]
     fn clearing_the_line_and_cancelling_are_two_keys() {
         let k = Keys::default();
-        for mode in [None, Some(Mode::Insert), Some(Mode::Normal)] {
+        for mode in [Mode::Insert, Mode::Normal] {
             let layers = Layers {
                 mode,
                 ..Layers::default()
@@ -1250,7 +1229,7 @@ mod tests {
     fn opening_lines_and_buffer_jumps_reach_the_table() {
         let k = Keys::default();
         let normal = Layers {
-            mode: Some(Mode::Normal),
+            mode: Mode::Normal,
             ..Layers::default()
         };
         assert_eq!(k.action(press("o"), normal), Some(Action::OpenLineBelow));

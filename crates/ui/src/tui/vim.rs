@@ -56,8 +56,13 @@ impl Ui {
     // Turning modal keys off drops the state (not parks it), so coming back
     // never resumes Normal without an intervening keystroke.
     pub(super) fn set_vim(&mut self, cfg: &pi_store::config::Vim) {
-        // Pairs of bare characters outlive the modes: `g g` reads a slash page too.
-        self.pair_window = std::time::Duration::from_millis(cfg.pair_timeout_ms);
+        // Every pair of bare characters is a vim key; with vim off none forms,
+        // so `j k` typed as text stays text.
+        self.pair_window = if cfg.enabled {
+            std::time::Duration::from_millis(cfg.pair_timeout_ms)
+        } else {
+            std::time::Duration::ZERO
+        };
         match (&mut self.vim, cfg.enabled) {
             (slot @ None, true) => *slot = Some(Mode::Insert),
             (slot, false) => *slot = None,
