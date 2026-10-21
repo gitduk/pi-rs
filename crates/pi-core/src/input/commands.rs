@@ -7,6 +7,7 @@ use std::sync::Arc;
 use skills::Skill;
 
 use super::{Builtin, Intent};
+use crate::driver::jobs::Job;
 use pi_store::listing::{Listing, Row};
 use pi_store::session::ResumeChoice;
 
@@ -493,7 +494,7 @@ fn tool_args(tool: &dyn tool::Tool, head: &str, typed: &str) -> Vec<Candidate> {
 // The ids after `/job <verb>` not named yet, completing the one being typed.
 // Once one is named, a bare space offers nothing: submitting runs the line
 // as typed, not an offered id tacked on.
-fn job_ids(jobs: &[Choice], verb: &str, args: &str) -> Vec<Candidate> {
+fn job_ids(jobs: &[&Job], verb: &str, args: &str) -> Vec<Candidate> {
     let mut named: Vec<&str> = args.split_whitespace().collect();
     let typing = if args.is_empty() || args.ends_with(char::is_whitespace) {
         ""
@@ -502,28 +503,31 @@ fn job_ids(jobs: &[Choice], verb: &str, args: &str) -> Vec<Candidate> {
     };
     let typing = typing.trim_start_matches('#');
     let settled = |id: &str| named.iter().any(|n| n.trim_start_matches('#') == id);
-    if (typing.is_empty() && !named.is_empty()) || jobs.iter().any(|j| j.name == typing) {
+    let ids: Vec<(String, &str)> = (jobs.iter())
+        .map(|j| (j.id.to_string(), j.description.as_str()))
+        .collect();
+    if (typing.is_empty() && !named.is_empty()) || ids.iter().any(|(id, _)| id == typing) {
         return Vec::new();
     }
     let head: String = named.iter().map(|n| format!("{n} ")).collect();
-    jobs.iter()
-        .filter(|j| j.name.starts_with(typing) && !settled(&j.name))
-        .map(|j| Candidate {
-            show: format!("#{}", j.name),
-            line: format!("/job {verb} {head}{}", j.name),
-            help: j.note.clone(),
+    ids.iter()
+        .filter(|(id, _)| id.starts_with(typing) && !settled(id))
+        .map(|(id, what)| Candidate {
+            show: format!("#{id}"),
+            line: format!("/job {verb} {head}{id}"),
+            help: what.to_string(),
             more: false,
             picked_only: false,
         })
         .collect()
 }
 
-/// What the front lane gives completion: the jobs running, by id, for `/job`,
+/// What the front lane gives completion: its jobs, kept ones too, for `/job`,
 /// its tools, for `/tool`, and what was said, each named by its entry id,
 /// for `/rewind`.
 #[derive(Clone, Copy, Default)]
 pub struct Front<'a> {
-    pub jobs: &'a [Choice],
+    pub jobs: &'a [Job],
     pub tools: Option<&'a tool::Registry>,
     pub said: &'a [Choice],
 }
@@ -583,10 +587,12 @@ pub fn complete<'a>(
         "/model" => offer(models, "/model ", typed),
         "/edit" => offer(editable(), "/edit ", typed),
         "/job" if typed.starts_with("stop ") => {
-            job_ids(jobs, "stop", typed["stop ".len()..].trim_start())
+            let running: Vec<&Job> = jobs.iter().filter(|j| j.state.stoppable()).collect();
+            job_ids(&running, "stop", typed["stop ".len()..].trim_start())
         }
         "/job" if typed.starts_with("restart ") => {
-            job_ids(jobs, "restart", typed["restart ".len()..].trim_start())
+            let every: Vec<&Job> = jobs.iter().collect();
+            job_ids(&every, "restart", typed["restart ".len()..].trim_start())
         }
         // Past its first word `/job` is prose for the model; nothing to offer.
         "/job" if typed.contains(char::is_whitespace) => Vec::new(),

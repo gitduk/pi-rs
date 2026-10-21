@@ -169,6 +169,7 @@ fn settle(items: &mut Vec<Item>, at: usize) {
 }
 
 /// A job as a surface lists it.
+#[derive(Clone)]
 pub struct Job {
     pub id: u64,
     pub description: String,
@@ -202,6 +203,12 @@ impl State {
             State::Running | State::Back => true,
             State::Stopped | State::Exited => false,
         }
+    }
+
+    /// Whether stopping it stops anything: a finished one's results only
+    /// wait for the lane, and stopping it would throw them away.
+    pub fn stoppable(self) -> bool {
+        self == State::Running
     }
 }
 
@@ -527,11 +534,9 @@ impl Table {
     /// none are named: a line for each not stopped, and those stopped, as
     /// `#id (what)`.
     pub fn stop_each(&self, root: &Path, ids: &[u64]) -> (Vec<String>, Vec<String>) {
-        // A finished one's results only wait for the lane: stopping it
-        // would throw them away, not stop anything.
         let ids = if ids.is_empty() {
             (self.jobs(root).iter())
-                .filter(|j| j.state == State::Running)
+                .filter(|j| j.state.stoppable())
                 .map(|j| j.id)
                 .collect()
         } else {

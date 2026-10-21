@@ -134,7 +134,7 @@ pub(super) struct Ui {
     // drawn over the bar.
     pub(super) jobs: Vec<pi_core::driver::jobs::Job>,
     // Every job of the front checkout, kept ones too, for `/job` to complete.
-    pub(super) job_ids: Vec<pi_core::input::commands::Choice>,
+    pub(super) every_job: Vec<pi_core::driver::jobs::Job>,
     // The front lane's tools, for `/tool` to complete; read only when it does,
     // since reading one re-stats the tools directory.
     pub(super) tools: Option<Arc<agent::Briefing>>,
@@ -253,7 +253,7 @@ impl Ui {
             flash_hit: None,
             copied: None,
             jobs: Vec::new(),
-            job_ids: Vec::new(),
+            every_job: Vec::new(),
             tools: None,
             job_open: None,
             job_body: String::new(),

@@ -607,15 +607,11 @@ impl Tui {
                 }
             }
             let root = self.core.lane().root();
-            let mut listed = jobs.jobs(root);
-            self.ui.job_ids = (listed.iter())
-                .map(|j| pi_core::input::commands::Choice {
-                    name: j.id.to_string(),
-                    note: j.description.clone(),
-                })
+            self.ui.every_job = jobs.jobs(root);
+            self.ui.jobs = (self.ui.every_job.iter())
+                .filter(|j| j.state.busy())
+                .cloned()
                 .collect();
-            listed.retain(|j| j.state.busy());
-            self.ui.jobs = listed;
             self.ui.tools = Some(self.core.lane().agent().brief.clone());
             // Walked once per line completing it, not on every pass: the
             // transcript holds still while `/rewind` is on the line.
