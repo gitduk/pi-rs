@@ -12,7 +12,7 @@ use super::row::{self, PendingTool, Row};
 use super::scrollback::{Folds, Scrollback};
 use crate::render::{Paint, named};
 use pi_core::core::tools::modifies;
-use pi_core::driver::jobs::Job;
+use pi_core::driver::jobs::{Job, State};
 use pi_store::icons;
 
 // A tool call still running. Its line is drawn by the group it will fold
@@ -138,10 +138,11 @@ fn job_text(job: &Job) -> (String, String) {
             icons::PART_SEP
         ),
     };
-    let state = if job.ended {
-        format!("{}done, back when idle", icons::PART_SEP)
-    } else {
-        row::out_for(None, Some(job.started.elapsed().as_secs()))
+    let state = match job.state {
+        State::Running => row::out_for(None, Some(job.started.elapsed().as_secs())),
+        State::Back => format!("{}done, back when idle", icons::PART_SEP),
+        State::Stopped => format!("{}stopped", icons::PART_SEP),
+        State::Exited => format!("{}exited", icons::PART_SEP),
     };
     (head, state)
 }

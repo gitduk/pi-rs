@@ -21,6 +21,8 @@ use tool::{Ctx, Tier, Told, Tool, ToolError, ToolOutput};
 
 // Screen lines a job may have waiting before the oldest give way.
 const MAX_NOTICES: usize = 200;
+// How long a restart waits for the last run to let go before giving up.
+const LET_GO: std::time::Duration = std::time::Duration::from_secs(10);
 // What a job may have waiting at once; past it they are counted, not kept,
 // so a job that outruns its lane cannot grow without bound.
 const MAX_WAITING: usize = 100;
@@ -47,7 +49,7 @@ struct Item {
     started: Instant,
     // The same moment on the wall clock, for a surface to say when.
     started_at: SystemTime,
-    running: bool,
+    phase: Phase,
     // What it said that is not yet delivered, oldest first. A job leaves the
     // table once it has stopped running and these are gone.
     waiting: VecDeque<Back>,
@@ -61,13 +63,48 @@ struct Item {
     interrupt: bool,
     // Lines for the screen, not yet shown.
     notices: VecDeque<String>,
-    // Asks it to wind down: a subagent as a stopped run is, a process by signal.
-    stop: CancellationToken,
     // Reads the latest of what it printed; None for one that keeps none.
     output: Option<tool::Peek>,
+    // How it runs again. One that has it is kept once it ends, to be
+    // started over; one without leaves.
+    rerun: Option<tool::Rerun>,
+    // Which run of it this is: a handle from an earlier one is not heard.
+    run: u64,
+    // Cancelled once this run's task has let go of what it held.
+    gone: CancellationToken,
+}
+
+// Where a job's latest run stands.
+enum Phase {
+    // `stop` asks it to wind down: a subagent as a stopped run is, a process
+    // by signal.
+    Running { stop: CancellationToken },
+    // Over: the user stopped it, or it ended by itself.
+    Over { stopped: bool },
 }
 
 impl Item {
+    fn running(&self) -> bool {
+        matches!(self.phase, Phase::Running { .. })
+    }
+
+    fn state(&self) -> State {
+        match self.phase {
+            Phase::Running { .. } => State::Running,
+            Phase::Over { .. } if !self.waiting.is_empty() => State::Back,
+            Phase::Over { stopped: true } => State::Stopped,
+            Phase::Over { stopped: false } => State::Exited,
+        }
+    }
+
+    // Nothing of the last run is left to show or deliver.
+    fn clear_run(&mut self) {
+        self.progress.clear();
+        self.waiting.clear();
+        self.dropped = 0;
+        self.notices.clear();
+    }
+
     fn due(&self, text: &str, spent: llm::stream::Usage) -> Due {
         let (id, name) = (self.id, &self.description);
         let first = text.lines().next().unwrap_or("").trim();
@@ -111,9 +148,22 @@ impl Item {
     }
 }
 
-// A job that has stopped with nothing left to say leaves.
+// `act` on each of `ids`: why each failed, and those done as `#id (what)`.
+fn each(ids: &[u64], act: impl Fn(u64) -> Result<String, String>) -> (Vec<String>, Vec<String>) {
+    let (mut failed, mut done) = (Vec::new(), Vec::new());
+    for &id in ids {
+        match act(id) {
+            Ok(what) => done.push(format!("#{id} ({what})")),
+            Err(why) => failed.push(why),
+        }
+    }
+    (failed, done)
+}
+
+// A job that has stopped with nothing left to say leaves, unless it can
+// be started over.
 fn settle(items: &mut Vec<Item>, at: usize) {
-    if !items[at].running && items[at].waiting.is_empty() {
+    if !items[at].running() && items[at].waiting.is_empty() && items[at].rerun.is_none() {
         items.remove(at);
     }
 }
@@ -126,11 +176,33 @@ pub struct Job {
     pub started: Instant,
     /// When it started, by the wall clock.
     pub started_at: SystemTime,
-    /// Done, its results waiting for the lane to be free.
-    pub ended: bool,
+    pub state: State,
     /// The last line of what it printed, or of what it sends back for one
     /// that keeps no output; empty when nothing yet.
     pub last: String,
+}
+
+/// Where a listed job stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum State {
+    Running,
+    /// Done, its results waiting for the lane to be free.
+    Back,
+    /// Stopped by the user, kept to be started over.
+    Stopped,
+    /// Ended by itself, its results delivered, kept to be started over.
+    Exited,
+}
+
+impl State {
+    /// Running or with something to deliver: one only kept to be started
+    /// over holds nothing up and needs no one's eye.
+    pub fn busy(self) -> bool {
+        match self {
+            State::Running | State::Back => true,
+            State::Stopped | State::Exited => false,
+        }
+    }
 }
 
 /// What comes back from a job: a result, or a person speaking through it,
@@ -243,7 +315,7 @@ impl Table {
     /// The running jobs on `root` told of every turn there.
     pub fn followers(&self, root: &Path) -> Vec<u64> {
         (self.lock().items.iter())
-            .filter(|i| i.root == root && i.running && i.follows && i.told.is_some())
+            .filter(|i| i.root == root && i.running() && i.follows && i.told.is_some())
             .map(|i| i.id)
             .collect()
     }
@@ -259,7 +331,7 @@ impl Table {
                     progress: i.progress.clone(),
                     started: i.started,
                     started_at: i.started_at,
-                    ended: !i.running,
+                    state: i.state(),
                     last: String::new(),
                 };
                 (job, i.said())
@@ -323,12 +395,12 @@ impl Table {
         self.jobs(root)
             .into_iter()
             .map(|j| {
-                let state = if j.ended {
-                    "done, back when idle".to_string()
-                } else if j.progress.is_empty() {
-                    "running".to_string()
-                } else {
-                    format!("running, {}", j.progress)
+                let state = match j.state {
+                    State::Running if j.progress.is_empty() => "running".to_string(),
+                    State::Running => format!("running, {}", j.progress),
+                    State::Back => "done, back when idle".to_string(),
+                    State::Stopped => "stopped, can restart".to_string(),
+                    State::Exited => "exited, can restart".to_string(),
                 };
                 format!("#{}  {state}: {}", j.id, j.description)
             })
@@ -341,11 +413,12 @@ impl Table {
         self.lock()
             .items
             .iter()
-            .any(|i| i.root == root && i.running)
+            .any(|i| i.root == root && i.running())
     }
 
-    /// Stop `id` of `root`'s and forget it, waiting results and all: what
-    /// it was.
+    /// Stop `id` of `root`'s, waiting results and all: what it was. One
+    /// that can be started over is kept, to be until this process ends; any
+    /// other is forgotten.
     pub fn stop(&self, root: &Path, id: u64) -> Result<String, String> {
         let mut inner = self.lock();
         let at = inner
@@ -353,12 +426,101 @@ impl Table {
             .iter()
             .position(|i| i.id == id && i.root == root)
             .ok_or_else(|| format!("no job #{id} here"))?;
-        let item = inner.items.remove(at);
-        item.stop.cancel();
+        let item = &mut inner.items[at];
+        let what = item.description.clone();
+        match (&item.phase, item.rerun.is_some()) {
+            (Phase::Over { .. }, true) => return Err(format!("#{id} ({what}) is not running")),
+            (Phase::Running { stop }, true) => {
+                stop.cancel();
+                item.phase = Phase::Over { stopped: true };
+                // What the stopped run still says is no one's to hear.
+                item.run += 1;
+                item.clear_run();
+                tracing::info!(target: "pi::job", job = id, "stopped");
+            }
+            (phase, false) => {
+                if let Phase::Running { stop } = phase {
+                    stop.cancel();
+                }
+                inner.items.remove(at);
+                tracing::info!(target: "pi::job", job = id, "stopped and forgotten");
+            }
+        }
         drop(inner);
-        tracing::info!(target: "pi::job", job = id, "stopped");
         self.changed.notify_one();
-        Ok(item.description)
+        Ok(what)
+    }
+
+    /// Start `id` of `root`'s over under the same id, stopping it first if
+    /// it still runs: what it is. What the last run left unsaid is dropped.
+    pub fn restart(self: &Arc<Self>, root: &Path, id: u64) -> Result<String, String> {
+        let mut inner = self.lock();
+        let item = (inner.items.iter_mut())
+            .find(|i| i.id == id && i.root == root)
+            .ok_or_else(|| format!("no job #{id} here"))?;
+        let Some(rerun) = item.rerun.clone() else {
+            return Err(format!(
+                "#{id} ({}) cannot be started over",
+                item.description
+            ));
+        };
+        if let Phase::Running { stop } = &item.phase {
+            stop.cancel();
+        }
+        let stop = CancellationToken::new();
+        let gone = std::mem::replace(&mut item.gone, CancellationToken::new());
+        item.phase = Phase::Running { stop: stop.clone() };
+        item.run += 1;
+        item.clear_run();
+        item.output = None;
+        item.started = Instant::now();
+        item.started_at = SystemTime::now();
+        let handle: Arc<dyn tool::JobHandle> = Arc::new(Handle {
+            id,
+            run: item.run,
+            gone: item.gone.clone(),
+            table: self.clone(),
+        });
+        let what = item.description.clone();
+        drop(inner);
+        tracing::info!(target: "pi::job", job = id, "restarting");
+        self.changed.notify_one();
+        tokio::spawn(async move {
+            // What the last run held, a port say, is let go before the next.
+            if tokio::time::timeout(LET_GO, gone.cancelled())
+                .await
+                .is_err()
+            {
+                let secs = LET_GO.as_secs();
+                let why = format!("could not start again: the last run held on past {secs}s");
+                handle.result(why, Default::default());
+                handle.end();
+                return;
+            }
+            // Stopped or restarted again meanwhile: this run never starts.
+            if stop.is_cancelled() {
+                return;
+            }
+            if let Err(e) = rerun(handle.clone(), stop) {
+                handle.result(format!("could not start again: {e}"), Default::default());
+                handle.end();
+            }
+        });
+        Ok(what)
+    }
+
+    /// Start each of `ids` of `root`'s over: a line for each not restarted,
+    /// and those restarted, as `#id (what)`.
+    pub fn restart_each(self: &Arc<Self>, root: &Path, ids: &[u64]) -> (Vec<String>, Vec<String>) {
+        each(ids, |id| self.restart(root, id))
+    }
+
+    /// Whether a job for `root` is running or has something to deliver:
+    /// one only kept to be started over holds nothing up.
+    pub fn busy(&self, root: &Path) -> bool {
+        (self.lock().items.iter())
+            .filter(|i| i.root == root)
+            .any(|i| i.state().busy())
     }
 
     /// Stop each of `ids` of `root`'s, or every one still running there when
@@ -369,7 +531,7 @@ impl Table {
         // would throw them away, not stop anything.
         let ids = if ids.is_empty() {
             (self.jobs(root).iter())
-                .filter(|j| !j.ended)
+                .filter(|j| j.state == State::Running)
                 .map(|j| j.id)
                 .collect()
         } else {
@@ -381,14 +543,7 @@ impl Table {
                 Vec::new(),
             );
         }
-        let (mut failed, mut stopped) = (Vec::new(), Vec::new());
-        for id in ids {
-            match self.stop(root, id) {
-                Ok(what) => stopped.push(format!("#{id} ({what})")),
-                Err(why) => failed.push(why),
-            }
-        }
-        (failed, stopped)
+        each(&ids, |id| self.stop(root, id))
     }
 
     /// Every job of `from` comes back to `to` from now on: the conversation
@@ -411,7 +566,9 @@ impl Table {
             let gone = i.root.starts_with(root);
             if gone {
                 tracing::info!(target: "pi::job", job = i.id, "stopped with its checkout");
-                i.stop.cancel();
+                if let Phase::Running { stop } = &i.phase {
+                    stop.cancel();
+                }
             }
             !gone
         });
@@ -425,10 +582,11 @@ impl Table {
         description: String,
         stop: CancellationToken,
         told: Option<UnboundedSender<Told>>,
-    ) -> u64 {
+    ) -> (u64, CancellationToken) {
         let mut inner = self.lock();
         inner.next_id += 1;
         let id = inner.next_id;
+        let gone = CancellationToken::new();
         tracing::info!(
             target: "pi::job", job = id, name = %description, root = %root.display(), "started"
         );
@@ -439,25 +597,28 @@ impl Table {
             progress: String::new(),
             started: Instant::now(),
             started_at: SystemTime::now(),
-            running: true,
+            phase: Phase::Running { stop },
             waiting: VecDeque::new(),
             dropped: 0,
             told,
             follows: false,
             interrupt: false,
             notices: VecDeque::new(),
-            stop,
             output: None,
+            rerun: None,
+            run: 0,
+            gone: gone.clone(),
         });
         drop(inner);
         self.changed.notify_one();
-        id
+        (id, gone)
     }
 
-    // Change job `id`, if it is still here, and wake whoever draws it.
-    fn update(&self, id: u64, change: impl FnOnce(&mut Item)) {
+    // Change run `run` of job `id`, if it is still here, and wake whoever
+    // draws it.
+    fn update(&self, id: u64, run: u64, change: impl FnOnce(&mut Item)) {
         let mut inner = self.lock();
-        if let Some(at) = inner.items.iter().position(|i| i.id == id) {
+        if let Some(at) = (inner.items.iter()).position(|i| i.id == id && i.run == run) {
             change(&mut inner.items[at]);
             settle(&mut inner.items, at);
         }
@@ -487,17 +648,21 @@ impl tool::JobSink for Jobs {
         stop: CancellationToken,
         told: Option<UnboundedSender<Told>>,
     ) -> Arc<dyn tool::JobHandle> {
-        let id = self.table.add(root, description, stop, told);
+        let (id, gone) = self.table.add(root, description, stop, told);
         Arc::new(Handle {
             id,
+            run: 0,
+            gone,
             table: self.table.clone(),
         })
     }
 }
 
-// One detached call's line back into the table.
+// One run of a detached call's line back into the table.
 struct Handle {
     id: u64,
+    run: u64,
+    gone: CancellationToken,
     table: Arc<Table>,
 }
 
@@ -505,12 +670,13 @@ struct Handle {
 // `end` — a panic — does not stay listed as running for good.
 impl Drop for Handle {
     fn drop(&mut self) {
-        self.table.update(self.id, |i| {
-            if i.running {
+        self.table.update(self.id, self.run, |i| {
+            if i.running() {
                 tracing::warn!(target: "pi::job", job = i.id, "its task went without ending");
+                i.phase = Phase::Over { stopped: false };
             }
-            i.running = false
         });
+        self.gone.cancel();
     }
 }
 
@@ -521,12 +687,12 @@ impl tool::JobHandle for Handle {
 
     fn status(&self, text: String) {
         tracing::debug!(target: "pi::job", job = self.id, status = %text, "status");
-        self.table.update(self.id, |i| i.progress = text);
+        self.table.update(self.id, self.run, |i| i.progress = text);
     }
 
     fn result(&self, text: String, spent: llm::stream::Usage) {
         tracing::info!(target: "pi::job", job = self.id, text = %text, "result");
-        self.table.update(self.id, |i| {
+        self.table.update(self.id, self.run, |i| {
             let due = i.due(&text, spent);
             i.wait(Back::Result(due));
         });
@@ -534,7 +700,7 @@ impl tool::JobHandle for Handle {
 
     fn input(&self, text: String) {
         tracing::info!(target: "pi::job", job = self.id, text = %text, "input");
-        self.table.update(self.id, |i| {
+        self.table.update(self.id, self.run, |i| {
             i.wait(Back::Input {
                 text,
                 note: String::new(),
@@ -544,7 +710,7 @@ impl tool::JobHandle for Handle {
 
     fn notice(&self, text: String) {
         tracing::info!(target: "pi::job", job = self.id, text = %text, "notice");
-        self.table.update(self.id, |i| {
+        self.table.update(self.id, self.run, |i| {
             if i.notices.len() >= MAX_NOTICES {
                 i.notices.pop_front();
             }
@@ -554,21 +720,29 @@ impl tool::JobHandle for Handle {
 
     fn interrupt(&self) {
         tracing::info!(target: "pi::job", job = self.id, "interrupt");
-        self.table.update(self.id, |i| i.interrupt = true);
+        self.table.update(self.id, self.run, |i| i.interrupt = true);
     }
 
     fn watch(&self, output: tool::Peek) {
-        self.table.update(self.id, |i| i.output = Some(output));
+        self.table
+            .update(self.id, self.run, |i| i.output = Some(output));
     }
 
     fn follow(&self) {
         tracing::info!(target: "pi::job", job = self.id, "follows");
-        self.table.update(self.id, |i| i.follows = true);
+        self.table.update(self.id, self.run, |i| i.follows = true);
+    }
+
+    fn rerun(&self, how: tool::Rerun) {
+        self.table
+            .update(self.id, self.run, |i| i.rerun = Some(how));
     }
 
     fn end(&self) {
         tracing::info!(target: "pi::job", job = self.id, "ended");
-        self.table.update(self.id, |i| i.running = false);
+        self.table.update(self.id, self.run, |i| {
+            i.phase = Phase::Over { stopped: false }
+        });
     }
 }
 
@@ -581,8 +755,10 @@ impl Tool for Jobs {
     fn description(&self) -> &str {
         "List what runs in the background for this checkout — subagents sent \
          off with `background`, tools that went on after their call returned — \
-         show the latest a command printed with `output`, or `stop` some by id, \
-         or `stop_all`. A stopped job's results never come back."
+         show the latest a command printed with `output`, `stop` some by id, \
+         or `stop_all`. A stopped job's results never come back. `restart` \
+         runs a background command again under its id, stopped first if it \
+         still runs; a stopped or exited one stays listed for that."
     }
 
     fn tier(&self) -> Tier {
@@ -599,6 +775,11 @@ impl Tool for Jobs {
                     "description": "The ids of those to stop.",
                 },
                 "stop_all": { "type": "boolean", "description": "Stop every one still running." },
+                "restart": {
+                    "type": "array",
+                    "items": { "type": "integer" },
+                    "description": "The ids of those to start over.",
+                },
                 "output": {
                     "type": "integer",
                     "description": "The id of one whose latest output to show, as it runs.",
@@ -615,21 +796,39 @@ impl Tool for Jobs {
                 .or_else(|| v.as_str()?.trim_start_matches('#').parse().ok())
                 .ok_or_else(|| ToolError::Invalid(format!("`{v}` is not a job id")))
         };
-        let ids: Vec<u64> = match args.get("stop") {
-            Some(Value::Array(ids)) => ids.iter().map(id).collect::<Result<_, _>>()?,
-            Some(Value::Null) | None => Vec::new(),
-            Some(v) => vec![id(v)?],
+        let ids_of = |key: &str| -> Result<Vec<u64>, ToolError> {
+            match args.get(key) {
+                Some(Value::Array(ids)) => ids.iter().map(id).collect(),
+                Some(Value::Null) | None => Ok(Vec::new()),
+                Some(v) => Ok(vec![id(v)?]),
+            }
         };
+        let ids = ids_of("stop")?;
+        let restart = ids_of("restart")?;
         let all = args.get("stop_all").and_then(Value::as_bool) == Some(true);
-        if all || !ids.is_empty() {
-            let (failed, stopped) = self.table.stop_each(root, if all { &[] } else { &ids });
-            if stopped.is_empty() {
+        if !restart.is_empty() && (all || !ids.is_empty()) {
+            return Err(ToolError::Invalid(
+                "stop or restart in one call, not both".into(),
+            ));
+        }
+        // What was done, then each that was not; an error when none was.
+        let reply = |verb: &str, (failed, done): (Vec<String>, Vec<String>)| {
+            if done.is_empty() {
                 return Err(ToolError::Invalid(failed.join("\n")));
             }
-            let said = std::iter::once(format!("stopped {}", stopped.join(", ")));
-            return Ok(ToolOutput::text(
+            let said = std::iter::once(format!("{verb} {}", done.join(", ")));
+            Ok(ToolOutput::text(
                 said.chain(failed).collect::<Vec<_>>().join("\n"),
-            ));
+            ))
+        };
+        if !restart.is_empty() {
+            return reply("restarted", self.table.restart_each(root, &restart));
+        }
+        if all || !ids.is_empty() {
+            return reply(
+                "stopped",
+                self.table.stop_each(root, if all { &[] } else { &ids }),
+            );
         }
         if let Some(v) = args.get("output").filter(|v| !v.is_null()) {
             return (self.table.output(root, id(v)?))
@@ -805,7 +1004,7 @@ mod tests {
         );
         assert!(table.waiting(Path::new("/elsewhere"), job.id()).is_none());
         assert_eq!(table.jobs(&root)[0].progress, "1/2 pages");
-        assert!(table.jobs(&root)[0].ended);
+        assert_eq!(table.jobs(&root)[0].state, State::Back);
         let first = result_of(&table, &root).unwrap();
         assert!(first.line.ends_with("page one"), "{}", first.line);
         assert_eq!(table.jobs(&root).len(), 1, "one result still waits");
@@ -869,17 +1068,109 @@ mod tests {
     #[tokio::test]
     async fn a_removed_checkout_stops_its_jobs() {
         let table = Arc::new(Table::default());
-        let a = table.add(
+        let (a, _) = table.add(
             "/repo.worktrees/a".into(),
             "a".into(),
             Default::default(),
             None,
         );
         table.add("/repo".into(), "main".into(), Default::default(), None);
-        let stop = table.lock().items[0].stop.clone();
+        let stop = match &table.lock().items[0].phase {
+            Phase::Running { stop } => stop.clone(),
+            Phase::Over { .. } => panic!("it runs"),
+        };
         table.drop_under(Path::new("/repo.worktrees/a"));
         assert!(stop.is_cancelled(), "#{a} was asked to stop");
         assert!(table.jobs(Path::new("/repo.worktrees/a")).is_empty());
         assert_eq!(table.jobs(Path::new("/repo")).len(), 1);
+    }
+
+    type Reruns =
+        tokio::sync::mpsc::UnboundedReceiver<(Arc<dyn tool::JobHandle>, CancellationToken)>;
+
+    // A job that can run again: each rerun hands back the handle and stop
+    // it was given, as a launch would keep them.
+    fn rerunnable(table: &Arc<Table>, root: &Path) -> (Arc<dyn tool::JobHandle>, Reruns) {
+        let job = start(table, root, "serve");
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        job.rerun(Arc::new(move |job, stop| {
+            let _ = tx.send((job, stop));
+            Ok(())
+        }));
+        (job, rx)
+    }
+
+    // Stopped, it stays listed; restarted, it runs again under its id once
+    // the last run has let go, and that run's late words are not heard.
+    #[tokio::test]
+    async fn a_restarted_job_waits_for_the_last_run_and_keeps_its_id() {
+        let table = Arc::new(Table::default());
+        let root = PathBuf::from("/checkout");
+        let (old, mut reruns) = rerunnable(&table, &root);
+        let id = old.id();
+
+        table.stop(&root, id).unwrap();
+        old.result("said as it went".into(), Default::default());
+        assert_eq!(table.jobs(&root)[0].state, State::Stopped);
+
+        table.restart(&root, id).unwrap();
+        assert_eq!(table.jobs(&root)[0].state, State::Running);
+        tokio::task::yield_now().await;
+        assert!(reruns.try_recv().is_err(), "the last run still holds on");
+
+        old.result("late".into(), Default::default());
+        drop(old);
+        let (new, stop) = reruns.recv().await.expect("run again");
+        assert_eq!(new.id(), id);
+        assert!(table.waiting(&root, id).unwrap().is_empty(), "{id}");
+        assert_eq!(table.jobs(&root)[0].state, State::Running);
+
+        table.restart(&root, id).unwrap();
+        assert!(stop.is_cancelled(), "a running one is stopped first");
+        new.result("exited 1".into(), Default::default());
+        new.end();
+        assert_eq!(table.jobs(&root)[0].state, State::Running);
+    }
+
+    // One that ended by itself is kept to start over; a stop leaves it be.
+    #[tokio::test]
+    async fn an_exited_job_is_kept_to_start_over() {
+        let table = Arc::new(Table::default());
+        let root = PathBuf::from("/checkout");
+        let (job, _reruns) = rerunnable(&table, &root);
+        let id = job.id();
+        job.result("exited 1".into(), Default::default());
+        job.end();
+        assert!(result_of(&table, &root).is_some());
+        assert_eq!(table.jobs(&root)[0].state, State::Exited);
+        assert!(table.stop(&root, id).is_err());
+        assert_eq!(table.jobs(&root)[0].state, State::Exited);
+    }
+
+    // Stopped while waiting for the last run to let go: nothing starts.
+    #[tokio::test]
+    async fn a_restart_stopped_before_it_starts_never_runs() {
+        let table = Arc::new(Table::default());
+        let root = PathBuf::from("/checkout");
+        let (old, mut reruns) = rerunnable(&table, &root);
+        let id = old.id();
+        table.restart(&root, id).unwrap();
+        table.stop(&root, id).unwrap();
+        drop(old);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(reruns.try_recv().is_err(), "it was stopped first");
+        assert_eq!(table.jobs(&root)[0].state, State::Stopped);
+    }
+
+    #[tokio::test]
+    async fn only_a_job_that_says_how_can_restart() {
+        let table = Arc::new(Table::default());
+        let root = PathBuf::from("/checkout");
+        let job = start(&table, &root, "find callers");
+        let why = table.restart(&root, job.id()).unwrap_err();
+        assert!(why.contains("cannot be started over"), "{why}");
+        assert!(table.restart(&root, 99).is_err());
     }
 }

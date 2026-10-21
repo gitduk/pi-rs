@@ -130,8 +130,11 @@ pub(super) struct Ui {
     // Whether the live block lists every call in flight or just the newest
     // with a count; a click flips it. Outlives the calls themselves.
     pub(super) live_tools_shown: bool,
-    // The front checkout's subagents in the background, drawn over the bar.
+    // The front checkout's jobs running or with something to deliver,
+    // drawn over the bar.
     pub(super) jobs: Vec<pi_core::driver::jobs::Job>,
+    // Every job of the front checkout, kept ones too, for `/job` to complete.
+    pub(super) job_ids: Vec<pi_core::input::commands::Choice>,
     // The front lane's tools, for `/tool` to complete; read only when it does,
     // since reading one re-stats the tools directory.
     pub(super) tools: Option<Arc<agent::Briefing>>,
@@ -250,6 +253,7 @@ impl Ui {
             flash_hit: None,
             copied: None,
             jobs: Vec::new(),
+            job_ids: Vec::new(),
             tools: None,
             job_open: None,
             job_body: String::new(),

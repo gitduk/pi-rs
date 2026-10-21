@@ -70,19 +70,13 @@ impl Ui {
                 .collect();
         }
         self.lists.catch_up();
-        let jobs: Vec<Choice> = (self.jobs.iter())
-            .map(|j| Choice {
-                name: j.id.to_string(),
-                note: j.description.clone(),
-            })
-            .collect();
         // Bottom-up: the best match belongs on the row right above the input.
         pi_core::input::commands::complete(
             self.editor.text(),
             &self.commands,
             &self.choices,
             pi_core::input::commands::Front {
-                jobs: &jobs,
+                jobs: &self.job_ids,
                 tools: self.tools.as_ref().map(|brief| &brief.registry),
                 said: &self.said,
             },

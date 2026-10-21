@@ -264,6 +264,17 @@ pub type Progress = std::sync::Arc<dyn Fn(String) + Send + Sync>;
 /// Reads the latest of what a running job has printed, on demand.
 pub type Peek = std::sync::Arc<dyn Fn() -> String + Send + Sync>;
 
+/// Starts a job over: runs it again, reporting through the handle it is
+/// given and wound down by the token, as the first run was.
+pub type Rerun = std::sync::Arc<
+    dyn Fn(
+            std::sync::Arc<dyn JobHandle>,
+            tokio_util::sync::CancellationToken,
+        ) -> Result<(), ToolError>
+        + Send
+        + Sync,
+>;
+
 /// Where a call that will outlive its turn is kept: a job of the checkout at
 /// `root`, which the host lists, stops through `stop`, and delivers from.
 /// What the host has to tell the job goes to `told`, when it listens.
@@ -295,6 +306,9 @@ pub trait JobHandle: Send + Sync {
     /// From now on it is told of every turn its checkout runs, not only
     /// the ones its `input` opened.
     fn follow(&self);
+    /// How it runs again once stopped or ended; one that never says is
+    /// gone then, and cannot be started over.
+    fn rerun(&self, _how: Rerun) {}
     fn end(&self);
 }
 

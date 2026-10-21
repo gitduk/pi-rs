@@ -606,7 +606,15 @@ impl Tui {
                 }
             }
             let root = self.core.lane().root();
-            self.ui.jobs = jobs.jobs(root);
+            let mut listed = jobs.jobs(root);
+            self.ui.job_ids = (listed.iter())
+                .map(|j| pi_core::input::commands::Choice {
+                    name: j.id.to_string(),
+                    note: j.description.clone(),
+                })
+                .collect();
+            listed.retain(|j| j.state.busy());
+            self.ui.jobs = listed;
             self.ui.tools = Some(self.core.lane().agent().brief.clone());
             // Walked once per line completing it, not on every pass: the
             // transcript holds still while `/rewind` is on the line.
@@ -616,7 +624,8 @@ impl Tui {
                 self.ui.said = said_of(self.core.lane());
             }
             let body = self.ui.job_open.and_then(|id| jobs.body(root, id));
-            self.ui.job_open = self.ui.job_open.filter(|_| body.is_some());
+            let shown = |id: &u64| self.ui.jobs.iter().any(|j| j.id == *id);
+            self.ui.job_open = self.ui.job_open.filter(|id| body.is_some() && shown(id));
             self.ui.job_body = body.unwrap_or_default();
             let view = front_view(&mut self.views, self.core.lane());
             self.ui.flush(self.core.lane(), view);

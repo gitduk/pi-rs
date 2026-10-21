@@ -242,9 +242,33 @@ fn reply(mut said: String, ended: &Ended) -> String {
     said
 }
 
+// The ids after a `/job` verb, `#` or not; the first that is none, said.
+fn job_ids(ids: &[&str]) -> Result<Vec<u64>, Said> {
+    (ids.iter())
+        .map(|id| {
+            (id.trim_start_matches('#').parse())
+                .map_err(|_| Said::Notice(format!("`{id}` is not a job id")))
+        })
+        .collect()
+}
+
+// What a `/job` verb did to jobs the model may have started: only what
+// failed is said on the bar, and the model is told the rest, since nothing
+// comes back from them to say so. `note` gets `#id (what)`s and whether one.
+fn job_note(
+    (failed, done): (Vec<String>, Vec<String>),
+    note: impl Fn(&str, bool) -> String,
+) -> Said {
+    let failed = crate::input::notice(failed);
+    if done.is_empty() {
+        return Said::Notice(failed);
+    }
+    Said::Noted(failed, note(&done.join(", "), done.len() == 1))
+}
+
 impl Drivers {
     // `/job`: what runs in the background here, `stop [id…]` to end them,
-    // every one when none is named.
+    // every one when none is named, `restart id…` to start them over.
     fn job_command(&self, arg: &str, ctx: &Ctx) -> Said {
         let root = ctx.workspace.root();
         let lines = match arg.split_whitespace().collect::<Vec<_>>().as_slice() {
@@ -257,39 +281,32 @@ impl Drivers {
                 }
             }
             ["stop", ids @ ..] => {
-                let parsed: Result<Vec<u64>, _> = ids
-                    .iter()
-                    .map(|id| id.trim_start_matches('#').parse().map_err(|_| id))
-                    .collect();
-                match parsed {
-                    Ok(ids) => {
-                        // Only what did not stop is said: a job gone from the
-                        // table is its own report.
-                        let (failed, stopped) = self.jobs.stop_each(root, &ids);
-                        let failed = crate::input::notice(failed);
-                        if stopped.is_empty() {
-                            return Said::Notice(failed);
-                        }
-                        // A job it started ends without a word back: say so.
-                        let (job, it) = match stopped.len() {
-                            1 => ("job", "it"),
-                            _ => ("jobs", "them"),
-                        };
-                        let note = format!(
-                            "The user stopped background {job} {}; nothing more will come \
-                             back from {it}.",
-                            stopped.join(", ")
-                        );
-                        return Said::Noted(failed, note);
-                    }
-                    Err(id) => {
-                        return Said::Notice(format!("`{id}` is not a job id"));
-                    }
-                }
+                return match job_ids(ids) {
+                    Ok(ids) => job_note(self.jobs.stop_each(root, &ids), |ids, one| {
+                        let (job, it) = if one { ("job", "it") } else { ("jobs", "them") };
+                        format!(
+                            "The user stopped background {job} {ids}; nothing more will come \
+                             back from {it}."
+                        )
+                    }),
+                    Err(said) => said,
+                };
+            }
+            ["restart", ids @ ..] if !ids.is_empty() => {
+                return match job_ids(ids) {
+                    Ok(ids) => job_note(self.jobs.restart_each(root, &ids), |ids, one| {
+                        let job = if one { "job" } else { "jobs" };
+                        format!(
+                            "The user restarted background {job} {ids}: each runs again under \
+                             the same id, and what the earlier run had not yet reported is dropped."
+                        )
+                    }),
+                    Err(said) => said,
+                };
             }
             _ => vec![
                 "/job lists what runs in the background; /job stop [id…] ends them, or all; \
-                 /job <text> has the model start it there"
+                 /job restart id… starts them over; /job <text> has the model start it there"
                     .into(),
             ],
         };

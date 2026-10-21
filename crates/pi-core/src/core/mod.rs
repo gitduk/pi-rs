@@ -259,10 +259,7 @@ impl Core {
             return None;
         }
         if let Some(jobs) = &self.jobs
-            && self
-                .lanes
-                .iter()
-                .any(|lane| !jobs.jobs(lane.root()).is_empty())
+            && self.lanes.iter().any(|lane| jobs.busy(lane.root()))
         {
             return None;
         }

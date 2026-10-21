@@ -155,24 +155,7 @@ impl Tool for WithBackground {
         let args: Args = tool::parse_args_hinted(args, ARGS_HINT)?;
         let preview = first_line(&args.command).to_string();
         let (command, cwd) = prepare(args, self.tier(), ctx).await?;
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg(&command)
-            .current_dir(&cwd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        cmd.process_group(0);
-        let mut child = crate::process::spawn(&mut cmd)?;
-        let group = child.id();
-        let tail = crate::process::Tail::default();
-        let out_pipe = tail.tee(child.stdout.take().expect("stdout is piped"));
-        let err_pipe = tail.tee(child.stderr.take().expect("stderr is piped"));
-        let mut stdout = crate::process::drain(out_pipe, ctx);
-        let mut stderr = crate::process::drain(err_pipe, ctx);
-
+        let launched = launch(&command, &cwd, ctx)?;
         let stop = tokio_util::sync::CancellationToken::new();
         let job = sink.start(
             ctx.workspace.root().to_path_buf(),
@@ -181,44 +164,111 @@ impl Tool for WithBackground {
             None,
         );
         let id = job.id();
-        job.watch(Arc::new(move || tail.read()));
-        let guard = group.map(crate::process::Group);
-        let name = preview.clone();
-        tokio::spawn(async move {
-            let _guard = guard;
-            let status = tokio::select! {
-                status = child.wait() => status,
-                () = stop.cancelled() => {
-                    crate::process::reap(group).await;
-                    return;
-                }
-            };
-            let Some((out, err)) =
-                crate::process::drained(&mut stdout, &mut stderr, group, &stop).await
-            else {
-                return;
-            };
-            let ended = match status {
-                Ok(status) => format!("`{name}` exited {}", status.code().unwrap_or(-1)),
-                Err(e) => format!("`{name}` could not be waited on: {e}"),
-            };
-            let said = body(&out, &err);
-            job.result(
-                if said.is_empty() {
-                    format!("{ended}, no output")
-                } else {
-                    format!("{ended}:\n{said}")
-                },
-                Default::default(),
-            );
-            job.end();
-        });
+        let (name, ctx) = (preview.clone(), spills_only(ctx));
+        job.rerun(Arc::new(move |job, stop| {
+            supervise(launch(&command, &cwd, &ctx)?, name.clone(), job, stop);
+            Ok(())
+        }));
+        supervise(launched, preview.clone(), job, stop);
         Ok(ToolOutput::text(format!(
             "running in the background as job #{id}; its exit status and output come back on \
              their own later."
         ))
         .with_preview(format!("{preview} [background #{id}]")))
     }
+}
+
+// What a rerun keeps of the call's context: where output spills, not the
+// turn's locks, progress or the job table holding the rerun itself.
+fn spills_only(ctx: &Ctx) -> Ctx {
+    let fresh = Ctx::new(ctx.workspace.clone());
+    match ctx.session() {
+        Some(id) => fresh.with_session(id, ctx.spill_root()),
+        None => fresh.with_spill_root(ctx.spill_root()),
+    }
+}
+
+// A background command just spawned, not yet anyone's job.
+struct Launched {
+    child: tokio::process::Child,
+    group: Option<u32>,
+    tail: crate::process::Tail,
+    stdout: tokio::task::JoinHandle<output::Captured>,
+    stderr: tokio::task::JoinHandle<output::Captured>,
+}
+
+fn launch(command: &str, cwd: &std::path::Path, ctx: &Ctx) -> Result<Launched, ToolError> {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let mut child = crate::process::spawn(&mut cmd)?;
+    let group = child.id();
+    let tail = crate::process::Tail::default();
+    let out_pipe = tail.tee(child.stdout.take().expect("stdout is piped"));
+    let err_pipe = tail.tee(child.stderr.take().expect("stderr is piped"));
+    Ok(Launched {
+        child,
+        group,
+        tail,
+        stdout: crate::process::drain(out_pipe, ctx),
+        stderr: crate::process::drain(err_pipe, ctx),
+    })
+}
+
+// Report `launched` as `job` until it exits, or `stop` takes its group.
+fn supervise(
+    launched: Launched,
+    name: String,
+    job: Arc<dyn tool::JobHandle>,
+    stop: tokio_util::sync::CancellationToken,
+) {
+    let Launched {
+        mut child,
+        group,
+        tail,
+        mut stdout,
+        mut stderr,
+    } = launched;
+    job.watch(Arc::new(move || tail.read()));
+    let guard = group.map(crate::process::Group);
+    tokio::spawn(async move {
+        let _guard = guard;
+        let status = tokio::select! {
+            status = child.wait() => status,
+            () = stop.cancelled() => {
+                crate::process::reap(group).await;
+                // Gone, not just signalled: a restart may want its port.
+                let _ = child.wait().await;
+                return;
+            }
+        };
+        let Some((out, err)) =
+            crate::process::drained(&mut stdout, &mut stderr, group, &stop).await
+        else {
+            return;
+        };
+        let ended = match status {
+            Ok(status) => format!("`{name}` exited {}", status.code().unwrap_or(-1)),
+            Err(e) => format!("`{name}` could not be waited on: {e}"),
+        };
+        let said = body(&out, &err);
+        job.result(
+            if said.is_empty() {
+                format!("{ended}, no output")
+            } else {
+                format!("{ended}:\n{said}")
+            },
+            Default::default(),
+        );
+        job.end();
+    });
 }
 
 /// What a finished command left behind.
