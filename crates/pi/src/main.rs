@@ -206,6 +206,9 @@ async fn main() -> Result<ExitCode> {
     let model_id = dialled.spec.model.clone();
 
     let mut ag = agent::Agent::new(dialled.transport, dialled.spec);
+    if let Some(prior) = &prior {
+        ag.meter.reset(prior.spent);
+    }
     // Resolved here rather than lazily: a name that does not exist should be a
     // startup error, not a surprise once compaction first needs it.
     let writer = summary_writer(&pinned, &config, &model_id)?;
@@ -339,7 +342,14 @@ async fn main() -> Result<ExitCode> {
     // Saved whichever way the run ended: an aborted turn is exactly the one
     // worth resuming. A one-shot has no session to save.
     if keeps {
-        match store.save(&id, &root, &model_id, name.as_deref(), created, &session) {
+        let header = session::Header {
+            id: &id,
+            model: &model_id,
+            name: name.as_deref(),
+            created,
+            spent: ag.meter.read(),
+        };
+        match store.save(&root, header, &session) {
             Ok(_) if !args.quiet => {
                 let called = name.as_deref().map_or(String::new(), |n| format!(" “{n}”"));
                 let carried = if resumed > 0 {

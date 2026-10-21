@@ -6,7 +6,8 @@ use crate::stream::Usage;
 ///
 /// Usage figures are the provider's own, verbatim: a field the host left out
 /// reads as zero — never presented as "not reported", just a real zero.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Totals {
     pub usage: Usage,
     pub cost: f64,

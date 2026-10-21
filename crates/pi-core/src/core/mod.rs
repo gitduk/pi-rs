@@ -545,7 +545,17 @@ mod tests {
         let mut talk = agent::session::Session::default();
         talk.send_prompt("hi", None);
         core.store
-            .save("s2", &root, "model-a", None, 0, &talk)
+            .save(
+                &root,
+                pi_store::session::Header {
+                    id: "s2",
+                    model: "model-a",
+                    name: None,
+                    created: 0,
+                    spent: Default::default(),
+                },
+                &talk,
+            )
             .unwrap();
 
         let elsewhere = core.store.claim(&root, "s2").unwrap();

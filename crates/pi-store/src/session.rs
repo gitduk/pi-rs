@@ -29,8 +29,23 @@ pub struct Stored {
     /// nobody recognises a week later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// What the session has cost so far; absent in a file older than it.
+    #[serde(default)]
+    pub spent: llm::Totals,
     #[serde(flatten, default)]
     pub session: Session,
+}
+
+/// What a save files beside the transcript.
+#[derive(Debug, Clone, Copy)]
+pub struct Header<'a> {
+    pub id: &'a str,
+    pub model: &'a str,
+    pub name: Option<&'a str>,
+    pub created: u64,
+    /// Here, not with the entries: a rewind takes turns back, never the money
+    /// they cost.
+    pub spent: llm::Totals,
 }
 
 // A save as its parts, borrowed, so serializing never needs a `Stored`
@@ -43,6 +58,7 @@ struct StoredRef<'a> {
     created: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<&'a str>,
+    spent: llm::Totals,
     #[serde(flatten)]
     session: &'a Session,
 }
@@ -291,15 +307,7 @@ const SUBAGENTS: &str = "subagents";
 
 // One transcript, written whole. The rename means a crash mid-write cannot
 // leave a truncated one.
-fn write(
-    path: &Path,
-    id: &str,
-    workspace: &Path,
-    model: &str,
-    name: Option<&str>,
-    created: u64,
-    session: &Session,
-) -> Result<PathBuf> {
+fn write(path: &Path, workspace: &Path, header: Header<'_>, session: &Session) -> Result<PathBuf> {
     std::fs::create_dir_all(path.parent().expect("a session directory"))?;
     let tmp = path.with_extension("json.tmp");
     let file = std::fs::OpenOptions::new()
@@ -317,11 +325,12 @@ fn write(
     // Serialized by reference: a transcript is megabytes by the end, and
     // cloning it plus buffering would cost every parallel subagent a copy.
     let stored = StoredRef {
-        id,
+        id: header.id,
         workspace: workspace.display().to_string(),
-        model,
-        created,
-        name,
+        model: header.model,
+        created: header.created,
+        name: header.name,
+        spent: header.spent,
         session,
     };
     use std::io::Write;
@@ -492,18 +501,10 @@ impl Store {
     /// `created` is the caller's because it is set once and never changes.
     /// Reading it back off disk here meant parsing the whole transcript to
     /// recover one integer — on every turn, growing with the session it saved.
-    pub fn save(
-        &self,
-        id: &str,
-        workspace: &Path,
-        model: &str,
-        name: Option<&str>,
-        created: u64,
-        session: &Session,
-    ) -> Result<PathBuf> {
-        let path = self.path_of(workspace, id);
+    pub fn save(&self, workspace: &Path, header: Header<'_>, session: &Session) -> Result<PathBuf> {
+        let path = self.path_of(workspace, header.id);
         self.changed();
-        write(&path, id, workspace, model, name, created, session)
+        write(&path, workspace, header, session)
     }
 
     /// Where a subagent's transcript is: inside its parent's session, so
@@ -526,15 +527,15 @@ impl Store {
         session: &Session,
     ) -> Result<PathBuf> {
         let path = self.subagent_path(workspace, parent, id);
-        write(
-            &path,
+        // Nothing spent: the parent's meter counted the child's calls already.
+        let header = Header {
             id,
-            workspace,
             model,
-            Some("subagent"),
+            name: Some("subagent"),
             created,
-            session,
-        )
+            spent: llm::Totals::default(),
+        };
+        write(&path, workspace, header, session)
     }
 
     /// How far every saved session has got, across all workspaces, read
@@ -806,6 +807,16 @@ mod tests {
     use llm::message::{AssistantContent, Message, ToolCall};
     use serde_json::json;
 
+    fn header<'a>(id: &'a str, model: &'a str, name: Option<&'a str>, created: u64) -> Header<'a> {
+        Header {
+            id,
+            model,
+            name,
+            created,
+            spent: llm::Totals::default(),
+        }
+    }
+
     fn log_with(messages: Vec<Message>) -> Session {
         Session::from_messages(messages)
     }
@@ -846,7 +857,9 @@ mod tests {
         let live = tempfile::tempdir().unwrap();
 
         let save = |id: &str, at: &std::path::Path| {
-            store.save(id, at, "test-model", None, 7, &log).unwrap();
+            store
+                .save(at, header(id, "test-model", None, 7), &log)
+                .unwrap();
         };
         save("live", live.path());
         save("gone", std::path::Path::new("/no/such/checkout"));
@@ -870,7 +883,7 @@ mod tests {
         let ws = tempfile::tempdir().unwrap();
         for id in ["old", "resumed"] {
             store
-                .save(id, ws.path(), "test-model", None, 7, &log)
+                .save(ws.path(), header(id, "test-model", None, 7), &log)
                 .unwrap();
         }
 
@@ -898,10 +911,10 @@ mod tests {
         std::fs::create_dir_all(&live).unwrap();
         assert_eq!(key_of(&live), key_of(&gone), "the two trees share a bucket");
         store
-            .save("live", &live, "test-model", None, 7, &log)
+            .save(&live, header("live", "test-model", None, 7), &log)
             .unwrap();
         store
-            .save("gone", &gone, "test-model", None, 7, &log)
+            .save(&gone, header("gone", "test-model", None, 7), &log)
             .unwrap();
         assert_eq!(store.buckets().len(), 1, "one bucket, two workspaces");
 
@@ -926,7 +939,9 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let log = log_with(vec![Message::user("hi")]);
         let save = |id: &str, at: &std::path::Path| {
-            store.save(id, at, "test-model", None, 7, &log).unwrap();
+            store
+                .save(at, header(id, "test-model", None, 7), &log)
+                .unwrap();
         };
         let tree = home.path().join(".worktrees").join("feature-one");
         let deep = tree.join("crates/pi");
@@ -951,10 +966,10 @@ mod tests {
         let tree = home.path().join(".worktrees").join("feature-x");
         let sibling = home.path().join(".worktrees").join("feature/x");
         store
-            .save("mine", &tree, "test-model", None, 7, &log)
+            .save(&tree, header("mine", "test-model", None, 7), &log)
             .unwrap();
         store
-            .save("theirs", &sibling, "test-model", None, 7, &log)
+            .save(&sibling, header("theirs", "test-model", None, 7), &log)
             .unwrap();
         assert_eq!(key_of(&tree), key_of(&sibling));
 
@@ -970,11 +985,8 @@ mod tests {
         let log = log_with(vec![Message::user("hi"), Message::assistant_text("there")]);
         let path = store
             .save(
-                "t1",
                 std::path::Path::new("/w"),
-                "test-model",
-                Some("the flaky test"),
-                7,
+                header("t1", "test-model", Some("the flaky test"), 7),
                 &log,
             )
             .unwrap();
@@ -1018,7 +1030,7 @@ mod tests {
         let store = Store::new(tmp.path());
         let log = log_with(vec![Message::user("go"), call("read"), results()]);
         store
-            .save("t", std::path::Path::new("/w"), "m", None, 1, &log)
+            .save(std::path::Path::new("/w"), header("t", "m", None, 1), &log)
             .unwrap();
 
         let back = store.load("t").unwrap().into_session();
@@ -1046,7 +1058,7 @@ mod tests {
             ..Default::default()
         });
         store
-            .save("t", std::path::Path::new("/w"), "m", None, 1, &log)
+            .save(std::path::Path::new("/w"), header("t", "m", None, 1), &log)
             .unwrap();
 
         let back = store.load("t").unwrap().into_session();
@@ -1065,15 +1077,27 @@ mod tests {
         let store = Store::new(tmp.path());
         let log = log_with(vec![Message::user("x")]);
         store
-            .save("old", std::path::Path::new("/a"), "m", None, 1, &log)
+            .save(
+                std::path::Path::new("/a"),
+                header("old", "m", None, 1),
+                &log,
+            )
             .unwrap();
         store
-            .save("other", std::path::Path::new("/b"), "m", None, 1, &log)
+            .save(
+                std::path::Path::new("/b"),
+                header("other", "m", None, 1),
+                &log,
+            )
             .unwrap();
         // A second session in the same workspace, named `new` to sort after
         // `old` by id — so only recency can put it first.
         store
-            .save("new", std::path::Path::new("/a"), "m", None, 1, &log)
+            .save(
+                std::path::Path::new("/a"),
+                header("new", "m", None, 1),
+                &log,
+            )
             .unwrap();
 
         touched_at(&store, std::path::Path::new("/a"), "old", 100);
@@ -1105,6 +1129,41 @@ mod tests {
         );
     }
 
+    // What the session cost comes back with it; a file from before the field
+    // existed reads as nothing spent rather than refusing to load.
+    #[test]
+    fn spend_is_kept_with_the_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path());
+        let w = Path::new("/w");
+        let spent = llm::Totals {
+            usage: llm::Usage {
+                input: 1_200,
+                cache_read: 30_000,
+                ..Default::default()
+            },
+            cost: 0.25,
+        };
+        let log = log_with(vec![Message::user("x")]);
+        let path = store
+            .save(
+                w,
+                Header {
+                    spent,
+                    ..header("s", "m", None, 1)
+                },
+                &log,
+            )
+            .unwrap();
+        assert_eq!(store.take(w, "s").unwrap().0.spent, spent);
+
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        raw.as_object_mut().unwrap().remove("spent");
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        assert_eq!(store.load("s").unwrap().spent, llm::Totals::default());
+    }
+
     // Taken from another workspace, a session moves rather than forks: one
     // copy, under the workspace now using it — never while another pi has it.
     #[test]
@@ -1113,7 +1172,7 @@ mod tests {
         let store = Store::new(tmp.path());
         let (a, b) = (Path::new("/a"), Path::new("/b"));
         let log = log_with(vec![Message::user("x")]);
-        store.save("s", a, "m", None, 1, &log).unwrap();
+        store.save(a, header("s", "m", None, 1), &log).unwrap();
         store.save_subagent("s", "s-sub", a, "m", 2, &log).unwrap();
 
         let held = store.claim(a, "s").unwrap();
@@ -1144,7 +1203,9 @@ mod tests {
             assert_ne!(reader.version(), seen, "{what} left the version");
             seen = reader.version();
         };
-        store.save("s", a, "m", Some("named"), 1, &log).unwrap();
+        store
+            .save(a, header("s", "m", Some("named"), 1), &log)
+            .unwrap();
         moved("save");
         let (_, claim) = store.take(b, "s").unwrap();
         drop(claim);
@@ -1161,7 +1222,7 @@ mod tests {
         let store = Store::new(tmp.path());
         let w = std::path::Path::new("/w");
         let log = log_with(vec![Message::user("x")]);
-        store.save("p", w, "m", None, 1, &log).unwrap();
+        store.save(w, header("p", "m", None, 1), &log).unwrap();
         let at = store
             .save_subagent("p", "p-subagent-0", w, "m", 2, &log)
             .unwrap();
@@ -1178,17 +1239,21 @@ mod tests {
         let store = Store::new(tmp.path());
         let log = log_with(vec![Message::user("x")]);
         store
-            .save("a", std::path::Path::new("/w"), "m", None, 1, &log)
+            .save(std::path::Path::new("/w"), header("a", "m", None, 1), &log)
             .unwrap();
         store
-            .save("b", std::path::Path::new("/w"), "m", None, 1, &log)
+            .save(std::path::Path::new("/w"), header("b", "m", None, 1), &log)
             .unwrap();
         store
-            .save("c", std::path::Path::new("/other"), "m", None, 1, &log)
+            .save(
+                std::path::Path::new("/other"),
+                header("c", "m", None, 1),
+                &log,
+            )
             .unwrap();
 
         store
-            .save("z", std::path::Path::new("/w"), "m", None, 1, &log)
+            .save(std::path::Path::new("/w"), header("z", "m", None, 1), &log)
             .unwrap();
 
         // Expected order is the reverse of the ids' own, so a list that
@@ -1223,15 +1288,16 @@ mod tests {
             Message::assistant_text("there"),
         ]);
         store
-            .save("a", std::path::Path::new("/w"), "m", None, 1, &asked)
+            .save(
+                std::path::Path::new("/w"),
+                header("a", "m", None, 1),
+                &asked,
+            )
             .unwrap();
         store
             .save(
-                "b",
                 std::path::Path::new("/w"),
-                "m",
-                None,
-                1,
+                header("b", "m", None, 1),
                 &Session::new(),
             )
             .unwrap();
@@ -1248,7 +1314,7 @@ mod tests {
         let store = Store::new(tmp.path());
         let log = log_with(vec![Message::user("x")]);
         store
-            .save("t", std::path::Path::new("/w"), "m", None, 1, &log)
+            .save(std::path::Path::new("/w"), header("t", "m", None, 1), &log)
             .unwrap();
 
         // A session is a directory in the bucket, holding the transcript and

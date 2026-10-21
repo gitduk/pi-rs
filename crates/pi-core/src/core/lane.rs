@@ -651,14 +651,16 @@ impl Core {
         let Some(session) = &lane.talk.session else {
             return Ok(());
         };
-        let saved = self.store.save(
-            &lane.talk.id,
-            lane.checkout.ctx.workspace.root(),
-            &lane.checkout.agent.spec().model,
-            lane.talk.name.as_deref(),
-            lane.talk.created,
-            session,
-        );
+        let header = session::Header {
+            id: &lane.talk.id,
+            model: &lane.checkout.agent.spec().model,
+            name: lane.talk.name.as_deref(),
+            created: lane.talk.created,
+            spent: lane.spent(),
+        };
+        let saved = self
+            .store
+            .save(lane.checkout.ctx.workspace.root(), header, session);
         lane.talk.unsaved = saved.as_ref().err().map(|e| format!("{e:#}"));
         saved?;
         lane.talk.filed = false;
@@ -736,6 +738,7 @@ impl Core {
     // Parting with what is being left is the caller's; they differ on when.
     fn adopt_session(&mut self, stored: Stored, claim: session::Claim) -> Vec<String> {
         let (id, name, created) = (stored.id.clone(), stored.name.clone(), stored.created);
+        let spent = stored.spent;
         self.becomes(Conversation::new(
             id,
             created,
@@ -743,6 +746,7 @@ impl Core {
             name,
             Some(claim),
         ));
+        self.lane().checkout.agent.meter.reset(spent);
         // The id (timestamp+pid) is nothing to read; only a name — what the
         // user called it — is worth a line.
         match self.lane().talk.name.as_deref() {
@@ -1040,7 +1044,7 @@ mod tests {
     use crate::core::tests::{Recording, a_lane, a_repl};
 
     // An opened lane is cloned from another's agent, so it would share that
-    // meter unless given its own; a session taken up counts from nothing.
+    // meter unless given its own; a session taken up counts from its own file.
     #[test]
     fn spend_is_one_lanes_and_one_sessions() {
         let dir = tempfile::tempdir().unwrap();
@@ -1057,8 +1061,13 @@ mod tests {
         assert_eq!(core.lanes[0].spent(), spent);
 
         core.current = 0;
+        core.save().unwrap();
+        let left = core.lane().talk.id.clone();
         core.fresh_session();
         assert_eq!(core.lane().spent(), agent::Totals::default());
+
+        core.resume(&left).unwrap();
+        assert_eq!(core.lane().spent(), spent, "the saved figure comes back");
     }
 
     // A child's detach would land as a turn on this lane, which the child
