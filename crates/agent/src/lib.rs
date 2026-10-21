@@ -25,9 +25,9 @@ pub use transcript as session;
 pub use approval::Ceiling;
 pub use compaction::Summarizing;
 pub use compaction::ladder::{Policy, Report};
-use event::say;
+use event::Voice;
 pub use event::{Event, Totals};
-pub use hooks::{Hooks, NoHooks};
+pub use hooks::{GatesOnly, Hooks, NoHooks};
 pub use retry::Retry;
 pub use seams::{Approver, Archive, Compactor, Decision, Fitted, Untouched, Working};
 
@@ -155,7 +155,8 @@ impl Agent {
         tx: &UnboundedSender<Event>,
         retry: &Retry,
     ) -> Result<Usage, AgentError> {
-        let out = self.turns(session, ctx, tx, retry).await;
+        let voice = Voice::new(tx.clone(), self.brief.hooks.clone());
+        let out = self.turns(session, ctx, &voice, retry).await;
         match &out {
             Ok(_) => {}
             Err(AgentError::Cancelled) => session.close_open(session::STOPPED_CALL),
@@ -168,7 +169,7 @@ impl Agent {
         &self,
         session: &mut Session,
         ctx: &Ctx,
-        tx: &UnboundedSender<Event>,
+        voice: &Voice,
         retry: &Retry,
     ) -> Result<Usage, AgentError> {
         let mut totals = Usage::default();
@@ -183,7 +184,7 @@ impl Agent {
         let mut compactions = 0usize;
 
         for turn in 1.. {
-            say(tx, Event::TurnStart { turn });
+            voice.say(Event::TurnStart { turn });
             // Entered around each await, not held across it — a guard spanning
             // an await labels whatever else the runtime polls meanwhile.
             let span = tracing::info_span!(
@@ -208,7 +209,7 @@ impl Agent {
                 budget = ((self.budget_within(window) as f64) * scale) as usize;
                 let fitted = self
                     .compactor
-                    .compact(session, self.working(), budget, squeezes > 0, tx)
+                    .compact(session, self.working(), budget, squeezes > 0, voice)
                     .instrument(span.clone())
                     .await;
                 totals.add(&fitted.spent);
@@ -218,13 +219,10 @@ impl Agent {
                 }
                 used = llm::estimate::tokens(&sent, &self.model.spec);
                 let (occupied, window) = self.occupancy(used, window);
-                say(
-                    tx,
-                    Event::Context {
-                        used: occupied,
-                        window,
-                    },
-                );
+                voice.say(Event::Context {
+                    used: occupied,
+                    window,
+                });
                 tracing::debug!(
                     target: "pi::loop",
                     parent: &span,
@@ -250,7 +248,7 @@ impl Agent {
                 };
 
                 match self
-                    .stream_turn(&req, ctx, tx, retry, &mut generating)
+                    .stream_turn(&req, ctx, voice, retry, &mut generating)
                     .instrument(span.clone())
                     .await
                 {
@@ -269,25 +267,19 @@ impl Agent {
                                     scale = 1.0;
                                 }
                                 named_window = Some(limit);
-                                say(
-                                    tx,
-                                    Event::Refit(format!(
-                                        "the provider reports a {limit}-token window; refitting to it"
-                                    )),
-                                );
+                                voice.say(Event::Refit(format!(
+                                    "the provider reports a {limit}-token window; refitting to it"
+                                )));
                             }
                             // A window the request was already fitted to means
                             // the estimate was off: refitting would resend it.
                             _ => {
                                 scale *= SQUEEZE;
-                                say(
-                                    tx,
-                                    Event::Refit(format!(
-                                        "the request did not fit and named no limit below the \
+                                voice.say(Event::Refit(format!(
+                                    "the request did not fit and named no limit below the \
                                      budget; retrying at {}% of the estimated budget",
-                                        (scale * 100.0).round()
-                                    )),
-                                );
+                                    (scale * 100.0).round()
+                                )));
                             }
                         }
                     }
@@ -305,13 +297,11 @@ impl Agent {
             };
 
             totals.add(&done.usage);
-            say(
-                tx,
-                Event::TurnEnd {
-                    usage: done.usage,
-                    generating,
-                },
-            );
+            voice.say(Event::TurnEnd {
+                usage: done.usage,
+                text: done.message.text(),
+                generating,
+            });
 
             // Two providers accept an oversized request instead of refusing:
             // one silently, one by truncating — both look like success.
@@ -320,14 +310,11 @@ impl Agent {
                 || (done.stop == llm::StopReason::MaxTokens && done.usage.output == 0);
             if silently_truncated && scale > SQUEEZE.powi(MAX_SQUEEZE as i32) {
                 scale *= SQUEEZE;
-                say(
-                    tx,
-                    Event::Refit(format!(
-                        "the provider took {} input tokens against a {window}-token window and \
+                voice.say(Event::Refit(format!(
+                    "the provider took {} input tokens against a {window}-token window and \
                      answered from a truncated prompt; tightening the budget",
-                        done.usage.input
-                    )),
-                );
+                    done.usage.input
+                )));
             }
 
             // Sizes beside the stop: a reply that ends after two words reads
@@ -360,20 +347,17 @@ impl Agent {
             session.push_assistant(content);
 
             if calls.is_empty() {
-                say(
-                    tx,
-                    Event::Done {
-                        turns: turn,
-                        usage: totals,
-                        // Re-measured rather than reused: `used` is what went
-                        // out, and the reply landed in the session since.
-                        ctx: self.occupancy(
-                            llm::estimate::tokens(&session.context(), &self.model.spec),
-                            named_window.unwrap_or(self.window()),
-                        ),
-                        compactions,
-                    },
-                );
+                voice.say(Event::Done {
+                    turns: turn,
+                    usage: totals,
+                    // Re-measured rather than reused: `used` is what went
+                    // out, and the reply landed in the session since.
+                    ctx: self.occupancy(
+                        llm::estimate::tokens(&session.context(), &self.model.spec),
+                        named_window.unwrap_or(self.window()),
+                    ),
+                    compactions,
+                });
                 return Ok(totals);
             }
 
@@ -383,18 +367,15 @@ impl Agent {
                 .map(|i| (i.call.clone(), i.clone()))
                 .collect();
             let (results, stopped) = self
-                .run_calls(&calls, &bad, ctx, tx, &mut totals)
+                .run_calls(&calls, &bad, ctx, voice, &mut totals)
                 .instrument(span.clone())
                 .await;
             let ids = session.push_previewed(results);
             // A state update, not a drawing instruction: the renderer derives
             // the results' rows from these entries through `f_entry`.
-            say(
-                tx,
-                Event::Committed {
-                    entries: session.entries_for(&ids).into_iter().cloned().collect(),
-                },
-            );
+            voice.say(Event::Committed {
+                entries: session.entries_for(&ids).into_iter().cloned().collect(),
+            });
             if stopped {
                 return Err(AgentError::Cancelled);
             }

@@ -15,10 +15,9 @@ use async_trait::async_trait;
 use llm::model::ModelSpec;
 use llm::stream::Usage;
 use llm::transport::Transport;
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::Instrument as _;
 
-use crate::event::{Event, say};
+use crate::event::{Event, Voice};
 use crate::seams::{Compactor, Fitted, Working};
 use crate::session;
 use ladder::{Policy, Report};
@@ -129,7 +128,7 @@ impl Compactor for Summarizing {
         run: Working<'_>,
         budget: usize,
         urgent: bool,
-        tx: &UnboundedSender<Event>,
+        voice: &Voice,
     ) -> Fitted {
         let measured = session.context();
         if llm::estimate::tokens(&measured, run.spec) <= budget {
@@ -152,7 +151,7 @@ impl Compactor for Summarizing {
             .await
         {
             Some((report, spent)) => {
-                say(tx, Event::Compacted(report));
+                voice.say(Event::Compacted(report));
                 Fitted {
                     context: session.context(),
                     changed: true,

@@ -1,44 +1,202 @@
-//! `[[hooks]]`: shell commands run around tool calls, each handed the call as
-//! JSON on stdin. Before a call, exit 2 refuses it and what the hook printed
-//! is the reason; after one, what it printed joins the result.
+//! `[[hooks]]`: shell commands run on what a run does, each handed the event
+//! as JSON on stdin. Around a tool call they are gates: before one, exit 2
+//! refuses it and what the hook printed is the reason; after one, what it
+//! printed joins the result. Every other event they only watch, queued off
+//! the loop: each hook runs its events one at a time, in the order said.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use agent::Event;
 use async_trait::async_trait;
-use pi_store::config::{Hook, HookWhen};
+use pi_store::config::{Hook, HookOn};
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use tool::{Ctx, ToolOutput};
 
 const WAIT: Duration = Duration::from_secs(30);
 
-/// The hooks a config names, or none at all when it names none.
-pub fn of(hooks: &[Hook]) -> Arc<dyn agent::Hooks> {
+// Events waiting on watching hooks. Past this a hook is not keeping up, and
+// what it misses is journaled rather than held without bound.
+const QUEUE: usize = 256;
+
+// How long leaving waits on watching hooks still queued or running.
+const LEAVING: Duration = Duration::from_secs(5);
+
+// Events queued and not yet run, across every config's hooks, so leaving
+// can wait them out.
+static PENDING: AtomicUsize = AtomicUsize::new(0);
+static DRAINED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Wait, a few seconds at most, for watching hooks to run what was queued:
+/// the last events of a run are said just before pi leaves.
+pub async fn flush() {
+    let _ = tokio::time::timeout(LEAVING, async {
+        loop {
+            let drained = DRAINED.notified();
+            if PENDING.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            drained.await;
+        }
+    })
+    .await;
+}
+
+/// The hooks a config names, or none at all when it names none. Watching
+/// hooks run in `workspace`, as the gates run in their call's.
+pub fn of(hooks: &[Hook], workspace: &tool::Workspace) -> Arc<dyn agent::Hooks> {
     if hooks.is_empty() {
         return Arc::new(agent::NoHooks);
     }
-    Arc::new(Shell(hooks.to_vec()))
+    Arc::new(Shell {
+        hooks: hooks.to_vec(),
+        ctx: Ctx::new(workspace.clone()),
+        queues: OnceLock::new(),
+    })
 }
 
-struct Shell(Vec<Hook>);
+struct Shell {
+    hooks: Vec<Hook>,
+    // What watching hooks run under: the workspace, and no stop of a run's.
+    ctx: Ctx,
+    // One per hook that watches anything, so a slow one holds up only its
+    // own events. Started by the first event watched, on the run's runtime.
+    queues: OnceLock<Vec<Option<mpsc::Sender<Vec<u8>>>>>,
+}
 
 impl Shell {
-    fn around<'a>(&'a self, when: HookWhen, tool: &'a str) -> impl Iterator<Item = &'a Hook> {
-        self.0.iter().filter(move |h| {
-            h.when == when && (h.tools.is_empty() || h.tools.iter().any(|t| t == tool))
+    fn around<'a>(&'a self, on: HookOn, tool: &'a str) -> impl Iterator<Item = &'a Hook> {
+        self.on(on, Some(tool)).map(|(_, h)| h)
+    }
+
+    // The hooks for `on`, by index; a `tool.*` event's only when about one
+    // of the hook's tools.
+    fn on<'a>(
+        &'a self,
+        on: HookOn,
+        tool: Option<&'a str>,
+    ) -> impl Iterator<Item = (usize, &'a Hook)> {
+        self.hooks.iter().enumerate().filter(move |(_, h)| {
+            h.on.contains(&on)
+                && (h.tools.is_empty() || tool.is_none_or(|t| h.tools.iter().any(|n| n == t)))
         })
     }
+
+    fn queues(&self) -> Option<&[Option<mpsc::Sender<Vec<u8>>>]> {
+        if let Some(queues) = self.queues.get() {
+            return Some(queues);
+        }
+        let runtime = tokio::runtime::Handle::try_current().ok()?;
+        let gate = |on: &HookOn| matches!(on, HookOn::ToolBefore | HookOn::ToolAfter);
+        let started = (self.hooks.iter())
+            .map(|hook| {
+                if hook.on.iter().all(gate) {
+                    return None;
+                }
+                let (tx, rx) = mpsc::channel(QUEUE);
+                runtime.spawn(watch(rx, hook.clone(), self.ctx.clone()));
+                Some(tx)
+            })
+            .collect();
+        // A racing first event may have started a set too: its senders are
+        // dropped here, and its workers end with nothing to do.
+        Some(self.queues.get_or_init(|| started))
+    }
+}
+
+// Runs what was queued for `hook`, one at a time, until the hooks are replaced.
+async fn watch(mut rx: mpsc::Receiver<Vec<u8>>, hook: Hook, ctx: Ctx) {
+    while let Some(input) = rx.recv().await {
+        let hook = &hook;
+        match run(hook, &input, &ctx).await {
+            Ok((0, _)) => {}
+            Ok((code, said)) => warn(hook, &format!("exit {code}: {said}")),
+            Err(why) => warn(hook, &why),
+        }
+        if PENDING.fetch_sub(1, Ordering::AcqRel) == 1 {
+            DRAINED.notify_waiters();
+        }
+    }
+}
+
+// An event as a hook watches it: its name, its tool, its own fields. Calls
+// are their gates'; the rest come too often to be events.
+fn watched(event: &Event) -> Option<(HookOn, Option<&str>, Value)> {
+    let usage = |u: &llm::stream::Usage| {
+        json!({
+            "input": u.input,
+            "output": u.output,
+            "cache_read": u.cache_read,
+            "cache_write": u.cache_write,
+        })
+    };
+    let (on, own) = match event {
+        Event::ToolDenied { id, name, reason } => {
+            let own = json!({ "id": id, "tool": name, "reason": reason });
+            return Some((HookOn::ToolDenied, Some(name), own));
+        }
+        Event::TurnStart { turn } => (HookOn::TurnStart, json!({ "turn": turn })),
+        Event::TurnEnd {
+            usage: u,
+            text,
+            generating,
+        } => (
+            HookOn::TurnEnd,
+            json!({
+                "text": text,
+                "usage": usage(u),
+                "generating_ms": generating.map(|d| d.as_millis() as u64),
+            }),
+        ),
+        Event::Compacted(r) => (
+            HookOn::Compacted,
+            json!({ "before": r.before, "after": r.after, "summarized": r.summarized }),
+        ),
+        Event::Retrying {
+            attempt,
+            delay_ms,
+            reason,
+        } => (
+            HookOn::Retrying,
+            json!({ "attempt": attempt, "delay_ms": delay_ms, "reason": reason }),
+        ),
+        Event::Warning(text) | Event::Refit(text) => (HookOn::Warning, json!({ "text": text })),
+        Event::Done {
+            turns,
+            usage: u,
+            ctx: (used, window),
+            compactions,
+        } => (
+            HookOn::RunDone,
+            json!({
+                "turns": turns,
+                "usage": usage(u),
+                "context": { "used": used, "window": window },
+                "compactions": compactions,
+            }),
+        ),
+        // A tool's results land at its gates; a state update is no event.
+        Event::ToolStart { .. } | Event::ToolEnd { .. } | Event::Committed { .. } => return None,
+        Event::TextDelta(_)
+        | Event::ReasoningDelta(_)
+        | Event::ToolProgress { .. }
+        | Event::Usage(_)
+        | Event::Context { .. } => return None,
+    };
+    Some((on, None, own))
 }
 
 #[async_trait]
 impl agent::Hooks for Shell {
     async fn before(&self, tool: &str, args: &Value, ctx: &Ctx) -> Result<(), String> {
-        let hooks: Vec<&Hook> = self.around(HookWhen::Before, tool).collect();
+        let hooks: Vec<&Hook> = self.around(HookOn::ToolBefore, tool).collect();
         if hooks.is_empty() {
             return Ok(());
         }
         let input = json!({ "tool": tool, "args": args, "workspace": ctx.workspace.root() });
-        let input = input.to_string().into_bytes();
+        let input = format!("{input}\n").into_bytes();
         for hook in hooks {
             match run(hook, &input, ctx).await {
                 Ok((0, _)) => {}
@@ -60,7 +218,7 @@ impl agent::Hooks for Shell {
     }
 
     async fn after(&self, tool: &str, args: &Value, out: &ToolOutput, ctx: &Ctx) -> Option<String> {
-        let hooks: Vec<&Hook> = self.around(HookWhen::After, tool).collect();
+        let hooks: Vec<&Hook> = self.around(HookOn::ToolAfter, tool).collect();
         if hooks.is_empty() {
             return None;
         }
@@ -70,7 +228,7 @@ impl agent::Hooks for Shell {
             "workspace": ctx.workspace.root(),
             "result": out.flatten(),
         });
-        let input = input.to_string().into_bytes();
+        let input = format!("{input}\n").into_bytes();
         let mut notes = Vec::new();
         for hook in hooks {
             match run(hook, &input, ctx).await {
@@ -81,13 +239,41 @@ impl agent::Hooks for Shell {
         }
         (!notes.is_empty()).then(|| notes.join("\n"))
     }
+
+    fn saw(&self, event: &Event) {
+        let Some((on, tool, own)) = watched(event) else {
+            return;
+        };
+        let mut hooks = self.on(on, tool).map(|(at, _)| at).peekable();
+        if hooks.peek().is_none() {
+            return;
+        }
+        let Some(queues) = self.queues() else {
+            return;
+        };
+        let mut input = json!({ "event": on, "workspace": self.ctx.workspace.root() });
+        if let (Value::Object(head), Value::Object(own)) = (&mut input, own) {
+            head.extend(own);
+        }
+        let input = format!("{input}\n").into_bytes();
+        for at in hooks {
+            let Some(queue) = &queues[at] else {
+                continue;
+            };
+            PENDING.fetch_add(1, Ordering::AcqRel);
+            if queue.try_send(input.clone()).is_err() {
+                PENDING.fetch_sub(1, Ordering::AcqRel);
+                warn(&self.hooks[at], "not keeping up; an event was dropped");
+            }
+        }
+    }
 }
 
 fn broken(hook: &Hook, why: &str) -> String {
     warn(hook, why);
     format!(
         "refused: the before-hook `{}` failed ({why}); the user has to fix it \
-         in ~/.pi/settings.toml",
+         where it is configured",
         hook.command
     )
 }
@@ -120,9 +306,13 @@ mod tests {
     use super::*;
     use agent::Hooks;
 
-    fn hook(when: HookWhen, command: &str) -> Hook {
+    fn shell(ctx: &Ctx, hooks: Vec<Hook>) -> Arc<dyn Hooks> {
+        of(&hooks, &ctx.workspace)
+    }
+
+    fn hook(on: HookOn, command: &str) -> Hook {
         Hook {
-            when,
+            on: vec![on],
             tools: vec!["bash".into()],
             command: command.into(),
         }
@@ -133,13 +323,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
         let args = json!({ "command": "rm -rf /" });
-        let hooks = Shell(vec![
-            hook(
-                HookWhen::Before,
-                "grep -q 'rm -rf' && { echo no rm; exit 2; }; exit 0",
-            ),
-            hook(HookWhen::After, "echo checked"),
-        ]);
+        let hooks = shell(
+            &ctx,
+            vec![
+                hook(
+                    HookOn::ToolBefore,
+                    "grep -q 'rm -rf' && { echo no rm; exit 2; }; exit 0",
+                ),
+                hook(HookOn::ToolAfter, "echo checked"),
+            ],
+        );
 
         let refused = hooks.before("bash", &args, &ctx).await.unwrap_err();
         assert!(refused.contains("no rm"), "{refused}");
@@ -155,11 +348,49 @@ mod tests {
             .await;
         assert_eq!(note.as_deref(), Some("[hook] checked"));
 
-        let broken = Shell(vec![hook(HookWhen::Before, "exit 3")]);
+        let broken = shell(&ctx, vec![hook(HookOn::ToolBefore, "exit 3")]);
         let refused = broken.before("bash", &safe, &ctx).await.unwrap_err();
         assert!(
             refused.contains("failed"),
             "a broken guard refuses: {refused}"
         );
+    }
+
+    // Watching is off the loop: nothing waits on it, so only a test sees
+    // whether the event got there, and as one line of the agreed shape.
+    #[tokio::test]
+    async fn a_watching_hook_hears_its_event_and_not_the_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let mut end = hook(HookOn::TurnEnd, "cat >> heard");
+        end.tools.clear();
+        let hooks = shell(&ctx, vec![end]);
+
+        hooks.saw(&Event::TextDelta("hi".into()));
+        hooks.saw(&Event::TurnStart { turn: 1 });
+        hooks.saw(&Event::TurnEnd {
+            usage: llm::stream::Usage {
+                output: 7,
+                ..Default::default()
+            },
+            text: "done".into(),
+            generating: None,
+        });
+
+        let heard = dir.path().join("heard");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let written = || std::fs::read_to_string(&heard).is_ok_and(|s| s.ends_with('\n'));
+        while !written() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let said = std::fs::read_to_string(&heard).unwrap();
+        let lines: Vec<Value> = said
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 1, "{said}");
+        assert_eq!(lines[0]["event"], "turn.end");
+        assert_eq!(lines[0]["usage"]["output"], 7);
+        assert_eq!(lines[0]["text"], "done");
     }
 }

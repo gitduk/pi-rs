@@ -111,6 +111,7 @@ impl Subagent {
         let patch = Arc::make_mut(&mut child);
         patch.registry = std::mem::take(&mut patch.registry).without(Self::NAME);
         patch.system = format!("{prompt}{standing}");
+        patch.hooks = Arc::new(agent::GatesOnly(patch.hooks.clone()));
         let agent = Agent {
             model: parent.model.clone(),
             brief: child,

@@ -281,7 +281,7 @@ async fn main() -> Result<ExitCode> {
         let out = tui::Tui::new(core, key_map, drivers)?.run().await;
         // Subagents handed their transcripts to a background save; wait
         // for those to land before the runtime goes with them.
-        archive::flush().await;
+        settle().await;
         if let Some(why) = journal::failure() {
             eprintln!("journal stopped recording: {why}");
         }
@@ -354,7 +354,7 @@ async fn main() -> Result<ExitCode> {
 
     // A stopped run is the one whose subagents were cut short with a save
     // in flight.
-    archive::flush().await;
+    settle().await;
     if let Some(why) = journal::failure() {
         eprintln!("journal stopped recording: {why}");
     }
@@ -376,4 +376,11 @@ async fn main() -> Result<ExitCode> {
     }
     outcome?;
     Ok(ExitCode::SUCCESS)
+}
+
+// What leaving waits on: subagent transcripts still being saved, and the
+// last events of a run still with the hooks that watch them.
+async fn settle() {
+    archive::flush().await;
+    core::hooks::flush().await;
 }

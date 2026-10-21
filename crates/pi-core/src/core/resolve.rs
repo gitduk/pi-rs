@@ -346,7 +346,7 @@ pub fn resolve(
             summarize: prompt_files.prompt("summarize").to_string(),
             effort,
             approver: std::sync::Arc::new(agent::Ceiling(tier)),
-            hooks: crate::core::hooks::of(&config.hooks),
+            hooks: crate::core::hooks::of(&config.hooks, workspace),
         }),
         subagent_deadline: config
             .subagent_deadline

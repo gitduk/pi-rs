@@ -100,7 +100,9 @@ impl Tally {
             // A retry sends a second one for the same turn: the count it
             // carries replaces the abandoned attempt's rather than joining it.
             agent::Event::Usage(usage) => self.turn = *usage,
-            agent::Event::TurnEnd { usage, generating } => {
+            agent::Event::TurnEnd {
+                usage, generating, ..
+            } => {
                 self.settled.add(usage, self.pricing.cost(usage));
                 self.turn = Usage::default();
                 if let Some(took) = generating {
@@ -311,6 +313,7 @@ mod tests {
 
         t.on(&agent::Event::TurnEnd {
             usage: usage(100, 30),
+            text: String::new(),
             generating: Some(Duration::from_secs(2)),
         });
         t.on(&agent::Event::TurnStart { turn: 2 });
@@ -332,6 +335,7 @@ mod tests {
         t.on(&agent::Event::TurnStart { turn: 1 });
         t.on(&agent::Event::TurnEnd {
             usage: usage(8_400, 390),
+            text: String::new(),
             generating: None,
         });
         t.on(&agent::Event::Done {

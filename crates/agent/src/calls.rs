@@ -6,11 +6,10 @@ use std::sync::Arc;
 
 use llm::message::{ToolCall, ToolResult};
 use llm::stream::{InvalidToolArgs, Usage};
-use tokio::sync::mpsc::UnboundedSender;
 use tool::{Concurrency, Ctx, ToolError, ToolOutput};
 use tracing::Instrument as _;
 
-use crate::event::say;
+use crate::event::Voice;
 use crate::session::Drawn;
 use crate::{Agent, Decision, Event};
 
@@ -33,7 +32,7 @@ impl Agent {
         calls: &[ToolCall],
         bad: &HashMap<String, InvalidToolArgs>,
         ctx: &Ctx,
-        tx: &UnboundedSender<Event>,
+        voice: &Voice,
         spent: &mut Usage,
     ) -> (Vec<(ToolResult, Drawn)>, bool) {
         let mut actions: Vec<Action> = calls
@@ -92,24 +91,18 @@ impl Agent {
         for (call, action) in calls.iter().zip(&actions) {
             match action {
                 Action::Reject(why) => {
-                    say(
-                        tx,
-                        Event::ToolDenied {
-                            id: call.id.clone(),
-                            name: call.name.clone(),
-                            reason: why.clone(),
-                        },
-                    );
+                    voice.say(Event::ToolDenied {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        reason: why.clone(),
+                    });
                 }
                 Action::Run(_) => {
-                    say(
-                        tx,
-                        Event::ToolStart {
-                            id: call.id.clone(),
-                            name: call.name.clone(),
-                            args: call.args.clone(),
-                        },
-                    );
+                    voice.say(Event::ToolStart {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        args: call.args.clone(),
+                    });
                 }
             }
         }
@@ -126,7 +119,7 @@ impl Agent {
                             Drawn::default(),
                         ),
                         Action::Run(t) => {
-                            let ctx = &with_progress(ctx, call, tx);
+                            let ctx = &with_progress(ctx, call, voice);
                             let mut output =
                                 tool::output::gated(t.as_ref(), call.args.clone(), ctx).await;
                             if let Ok(out) = &mut output
@@ -140,7 +133,7 @@ impl Agent {
                                 let note = tool::output::bound(ToolOutput::text(note), ctx);
                                 out.content.extend(note.content);
                             }
-                            landed(call, output, tx)
+                            landed(call, output, voice)
                         }
                     }
                 }
@@ -191,25 +184,18 @@ enum Landed {
 }
 
 // The call's own context, its progress said as events under its id.
-fn with_progress(ctx: &Ctx, call: &ToolCall, tx: &UnboundedSender<Event>) -> Ctx {
-    let (id, tx) = (call.id.clone(), tx.clone());
+fn with_progress(ctx: &Ctx, call: &ToolCall, voice: &Voice) -> Ctx {
+    let (id, voice) = (call.id.clone(), voice.clone());
     ctx.clone().with_progress(Arc::new(move |text| {
-        say(
-            &tx,
-            Event::ToolProgress {
-                id: id.clone(),
-                text,
-            },
-        )
+        voice.say(Event::ToolProgress {
+            id: id.clone(),
+            text,
+        })
     }))
 }
 
 // A call's output as its result, its end said as it lands.
-fn landed(
-    call: &ToolCall,
-    output: Result<ToolOutput, ToolError>,
-    tx: &UnboundedSender<Event>,
-) -> Landed {
+fn landed(call: &ToolCall, output: Result<ToolOutput, ToolError>, voice: &Voice) -> Landed {
     match output {
         Err(ToolError::Cancelled) => Landed::Stopped,
         Err(e) => {
@@ -221,16 +207,13 @@ fn landed(
             }
             // The pending live line draws from this same text, so a rebuild's
             // equality check sees one source, not a live/rebuilt mismatch.
-            say(
-                tx,
-                Event::ToolEnd {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    is_error: true,
-                    warned: false,
-                    preview: body.clone(),
-                },
-            );
+            voice.say(Event::ToolEnd {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                is_error: true,
+                warned: false,
+                preview: body.clone(),
+            });
             Landed::Answered(
                 ToolResult::error(call.id.clone(), &call.name, body.clone()),
                 Drawn {
@@ -240,16 +223,13 @@ fn landed(
             )
         }
         Ok(out) => {
-            say(
-                tx,
-                Event::ToolEnd {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    is_error: false,
-                    warned: out.warned,
-                    preview: out.preview(),
-                },
-            );
+            voice.say(Event::ToolEnd {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                is_error: false,
+                warned: out.warned,
+                preview: out.preview(),
+            });
             let result = ToolResult {
                 call: call.id.clone(),
                 name: call.name.clone(),

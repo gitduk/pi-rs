@@ -4,10 +4,9 @@
 use futures::StreamExt;
 use llm::request::Request;
 use llm::stream::{Accumulator, StreamEvent};
-use tokio::sync::mpsc::UnboundedSender;
 use tool::Ctx;
 
-use crate::event::say;
+use crate::event::Voice;
 use crate::{Agent, AgentError, Event, Retry};
 
 impl Agent {
@@ -20,13 +19,13 @@ impl Agent {
         &self,
         req: &Request,
         ctx: &Ctx,
-        tx: &UnboundedSender<Event>,
+        voice: &Voice,
         retry: &Retry,
         generating: &mut Option<std::time::Duration>,
     ) -> Result<llm::stream::Completion, (AgentError, Option<llm::stream::Completion>)> {
         let mut attempt = 0usize;
         loop {
-            let (err, partial) = match self.attempt(req, ctx, tx, retry, generating).await {
+            let (err, partial) = match self.attempt(req, ctx, voice, retry, generating).await {
                 Ok(done) => return Ok(done),
                 Err(err) => err,
             };
@@ -53,14 +52,11 @@ impl Agent {
 
             attempt += 1;
             let delay = retry.delay(attempt);
-            say(
-                tx,
-                Event::Retrying {
-                    attempt,
-                    delay_ms: delay.as_millis() as u64,
-                    reason: e.to_string(),
-                },
-            );
+            voice.say(Event::Retrying {
+                attempt,
+                delay_ms: delay.as_millis() as u64,
+                reason: e.to_string(),
+            });
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
                 _ = ctx.cancel.cancelled() => return Err((AgentError::Cancelled, None)),
@@ -81,7 +77,7 @@ impl Agent {
         &self,
         req: &Request,
         ctx: &Ctx,
-        tx: &UnboundedSender<Event>,
+        voice: &Voice,
         retry: &Retry,
         generating: &mut Option<std::time::Duration>,
     ) -> Result<llm::stream::Completion, (AgentError, Option<llm::stream::Completion>)> {
@@ -121,14 +117,14 @@ impl Agent {
             }
             match &ev {
                 StreamEvent::TextDelta { delta, .. } => {
-                    say(tx, Event::TextDelta(delta.clone()));
+                    voice.say(Event::TextDelta(delta.clone()));
                 }
                 StreamEvent::ReasoningDelta { delta, .. } => {
-                    say(tx, Event::ReasoningDelta(delta.clone()));
+                    voice.say(Event::ReasoningDelta(delta.clone()));
                 }
                 // The one measured number that arrives before the answer does.
                 StreamEvent::MessageStart { usage, .. } => {
-                    say(tx, Event::Usage(*usage));
+                    voice.say(Event::Usage(*usage));
                 }
                 _ => {}
             }
@@ -139,7 +135,7 @@ impl Agent {
         // What the host owed and did not send, said once per session by the
         // reporter. Said here too, not just the log — else it looks ordinary.
         for gap in self.model.transport.gaps() {
-            say(tx, Event::Warning(gap));
+            voice.say(Event::Warning(gap));
         }
 
         Ok(acc.finish())

@@ -620,7 +620,8 @@ mod budget {
             summarize: agent::compaction::SUMMARIZE,
             overhead: 0,
         };
-        let fitted = compactor.compact(&mut s, run, budget, false, &tx).await;
+        let voice = agent::event::Voice::new(tx, Arc::new(agent::NoHooks));
+        let fitted = compactor.compact(&mut s, run, budget, false, &voice).await;
 
         assert!(fitted.changed);
         let after = llm::estimate::tokens(&fitted.context, &spec());

@@ -59,6 +59,9 @@ pub enum Event {
 
     TurnEnd {
         usage: Usage,
+        // The reply's text, whole: what streamed as `TextDelta`s, for whoever
+        // wants the turn's answer without collecting them.
+        text: String,
         // How long the model streamed its reply, first piece to last; `None`
         // when nothing streamed. What `usage.output` took to write.
         generating: Option<std::time::Duration>,
@@ -79,11 +82,30 @@ pub enum Event {
     },
 }
 
-/// Says to the user and journals it, in that order, in one call — call this
-/// where the fact occurs, not where the event is consumed, or order drifts.
-pub(crate) fn say(tx: &tokio::sync::mpsc::UnboundedSender<Event>, event: Event) {
-    note(&event);
-    let _ = tx.send(event);
+/// Where a run says what it is doing: the channel the surface drains, and
+/// the hooks that watch it.
+#[derive(Clone)]
+pub struct Voice {
+    tx: tokio::sync::mpsc::UnboundedSender<Event>,
+    hooks: std::sync::Arc<dyn crate::Hooks>,
+}
+
+impl Voice {
+    pub fn new(
+        tx: tokio::sync::mpsc::UnboundedSender<Event>,
+        hooks: std::sync::Arc<dyn crate::Hooks>,
+    ) -> Self {
+        Self { tx, hooks }
+    }
+
+    /// Journals it, hands it to the hooks, says it to the user, in that order,
+    /// in one call — call this where the fact occurs, not where the event is
+    /// consumed, or order drifts.
+    pub(crate) fn say(&self, event: Event) {
+        note(&event);
+        self.hooks.saw(&event);
+        let _ = self.tx.send(event);
+    }
 }
 
 // Deltas are the exception: they are the transcript, they arrive thousands at

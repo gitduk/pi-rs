@@ -80,7 +80,8 @@ pub struct Config {
     /// Your own file only: a checkout's would start programs on entry.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp: BTreeMap<String, McpServer>,
-    /// Commands run around tool calls. Your own file only, like `[mcp]`.
+    /// Commands run on what a run does: around its tool calls, or as it
+    /// says each event. A checkout's are named when pi starts, like `[mcp]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<Hook>,
     /// How many rounds a `/loop` may run before it stops on its own. Defaults
@@ -136,25 +137,41 @@ pub struct Vim {
     pub pair_timeout_ms: u64,
 }
 
-/// A command run around tool calls, handed the call as JSON on stdin.
+/// A command run on events, handed each as JSON on stdin.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Hook {
-    pub when: HookWhen,
-    /// The tools it runs around; empty is every tool.
+    pub on: Vec<HookOn>,
+    /// The tools a `tool.*` event must be about; empty is every tool.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
     /// Run by `sh -c` in the workspace.
     pub command: String,
 }
 
-/// Before a call, where exit 2 refuses it; or after, where what it prints
-/// is added to the result.
+/// What a hook runs on. The two around a call are gates: before one, exit 2
+/// refuses it; after one, what the hook prints is added to the result. The
+/// rest only watch, and nothing they do reaches the run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum HookWhen {
-    Before,
-    After,
+pub enum HookOn {
+    #[serde(rename = "tool.before")]
+    ToolBefore,
+    #[serde(rename = "tool.after")]
+    ToolAfter,
+    #[serde(rename = "tool.denied")]
+    ToolDenied,
+    #[serde(rename = "turn.start")]
+    TurnStart,
+    #[serde(rename = "turn.end")]
+    TurnEnd,
+    #[serde(rename = "compacted")]
+    Compacted,
+    #[serde(rename = "retrying")]
+    Retrying,
+    #[serde(rename = "warning")]
+    Warning,
+    #[serde(rename = "run.done")]
+    RunDone,
 }
 
 /// One MCP server: a command run over stdio, or a URL spoken to over HTTP.

@@ -176,10 +176,15 @@ A server's prompts are commands too: `/<name>:<prompt> [args]` asks the server
 for the prompt's text and sends it, one typed word per argument, the last
 taking the rest.
 
-`[[hooks]]` run a command around tool calls, handed the call as JSON on stdin.
-Before a call, exit 0 lets it run and exit 2 refuses it with what the hook
-printed; a hook that fails or hangs refuses it too. After one, what it printed
-joins the result. `examples/pi.toml` has the shape.
+`[[hooks]]` run a command on events, handed the event as one line of JSON on
+stdin. Around a tool call they are gates: on `tool.before`, exit 0 lets the
+call run and exit 2 refuses it with what the hook printed, and a hook that
+fails or hangs refuses it too; on `tool.after`, what it printed joins the
+result. The other events — `tool.denied`, `turn.start`, `turn.end` (with the
+reply's text), `compacted`, `retrying`, `warning`, `run.done` — are only
+watched: queued off the run, one at a time, nothing they print reaching it. A
+subagent's calls pass the same gates, but its events stay its own.
+`examples/pi.toml` has the shape.
 
 Scripts and skills are read live: one written while pi runs is offered to the
 model from its next turn, and a skill's `/name` answers the next time you type.

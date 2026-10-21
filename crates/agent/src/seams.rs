@@ -6,14 +6,13 @@
 pub use llm::transport::Transport;
 
 use crate::Report;
-use crate::event::Event;
+use crate::event::Voice;
 use crate::session::Session;
 use async_trait::async_trait;
 use llm::message::Message;
 use llm::model::ModelSpec;
 use llm::stream::Usage;
 use serde_json::Value;
-use tokio::sync::mpsc::UnboundedSender;
 use tool::Tier;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -72,7 +71,7 @@ pub struct Working<'a> {
 /// since the loop only ever needs the budget met — so [`Untouched`] qualifies.
 #[async_trait]
 pub trait Compactor: Send + Sync {
-    /// Fit `session` into `budget` tokens if it is over, saying on `tx` what
+    /// Fit `session` into `budget` tokens if it is over, saying on `voice` what
     /// went. `urgent` is a provider that has already refused the request:
     /// holding the working tail back is a preference, fitting is not.
     async fn compact(
@@ -81,9 +80,9 @@ pub trait Compactor: Send + Sync {
         run: Working<'_>,
         budget: usize,
         urgent: bool,
-        tx: &UnboundedSender<Event>,
+        voice: &Voice,
     ) -> Fitted {
-        let _ = (run, budget, urgent, tx);
+        let _ = (run, budget, urgent, voice);
         Fitted {
             context: session.context(),
             changed: false,
