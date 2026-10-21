@@ -182,3 +182,42 @@ pub(super) fn drop_shared_history() {
 
 // Enough to recall from without the file growing without bound.
 pub(super) const HISTORY_KEEP: usize = 1_000;
+
+/// SIGHUP or SIGTERM: the terminal went, or something asked pi to end.
+/// Left unheard, either kills pi outright, and the jobs it started, each in
+/// a group of its own, outlive it.
+#[cfg(unix)]
+pub(super) struct Hangup([tokio::signal::unix::Signal; 2]);
+
+#[cfg(unix)]
+impl Hangup {
+    pub(super) fn new() -> std::io::Result<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Self([
+            signal(SignalKind::hangup())?,
+            signal(SignalKind::terminate())?,
+        ]))
+    }
+
+    pub(super) async fn recv(&mut self) {
+        let [hup, term] = &mut self.0;
+        tokio::select! {
+            _ = hup.recv() => {}
+            _ = term.recv() => {}
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub(super) struct Hangup;
+
+#[cfg(not(unix))]
+impl Hangup {
+    pub(super) fn new() -> std::io::Result<Self> {
+        Ok(Self)
+    }
+
+    pub(super) async fn recv(&mut self) {
+        std::future::pending().await
+    }
+}

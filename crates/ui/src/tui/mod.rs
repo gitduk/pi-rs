@@ -554,6 +554,7 @@ impl Tui {
         let (fetched_tx, mut fetched_rx) = tokio::sync::mpsc::unbounded_channel::<run::Fetched>();
         let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel::<run::Started>();
         let mut tick = tokio::time::interval(status::SPIN);
+        let mut hangup = term::Hangup::new()?;
         let mut looked = std::time::Instant::now();
         // Off while nothing runs, so the interval falls behind; one
         // late tick then ordinary cadence avoids a catch-up spin.
@@ -694,6 +695,11 @@ impl Tui {
                     _ = jobs.changed().notified() => Wake::Nothing,
                     // A different pi installed: the bar says so.
                     _ = update.notified() => Wake::Nothing,
+                    // Left the way `/exit` leaves: runs settled, jobs taken down.
+                    () = hangup.recv() => {
+                        tracing::info!(target: "pi::session", "hung up");
+                        Wake::Leave
+                    }
                     _ = tokio::time::sleep_until(due_back.unwrap_or_else(tokio::time::Instant::now)),
                         if due_back.is_some() => Wake::Nothing,
                     key = self.events.recv() => match key {
