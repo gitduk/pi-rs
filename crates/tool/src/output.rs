@@ -107,6 +107,10 @@ impl Capture {
             Ok(opened) => self.file = Some(opened),
             Err(why) => self.give_up(why),
         }
+        // The tail is the stream's last bytes, held ones included: a stream
+        // just past the threshold has most of its tail still in `front`.
+        let held = self.front.len().saturating_sub(VIEW);
+        self.tail = self.front[held..].to_vec();
         self.keep_tail(rest);
     }
 
@@ -305,6 +309,24 @@ mod tests {
         assert!(got.text.contains("bytes omitted"), "{got:?}");
         let back = std::fs::read(c.spill_path(&spill.locator).unwrap()).unwrap();
         assert_eq!(back.len(), body.len());
+    }
+
+    // Just past the threshold, the view still ends on the stream's last
+    // `VIEW` bytes, not only on what arrived after the crossing.
+    #[tokio::test]
+    async fn a_stream_just_past_the_threshold_keeps_a_whole_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut body = String::new();
+        for n in 0.. {
+            if body.len() > crate::spill::MAX_OUTPUT + 10 {
+                break;
+            }
+            body.push_str(&format!("line {n}\n"));
+        }
+        let got = take(body.as_bytes(), &ctx(dir.path())).await.unwrap();
+        assert!(got.spill.is_some());
+        let tail = tail_bytes(&body, VIEW);
+        assert!(got.text.ends_with(tail), "{}", tail_bytes(&got.text, 200));
     }
 
     // What fits passes straight through, untouched.
