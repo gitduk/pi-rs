@@ -71,6 +71,9 @@ const NO_TRANSCRIPT: &str = "this checkout has no transcript — /new or /resume
 const NOTHING_TO_REWIND: &str = "nothing to rewind to";
 // The line `esc esc` starts, whose completions are what the user said.
 const REWIND: &str = "/rewind ";
+// The line a bare `/resume` becomes, whose completions are the sessions.
+const RESUME: &str = "/resume ";
+const NO_SESSIONS: &str = "no sessions recorded for this workspace";
 
 // What a `Step::Handled` leaves behind: its lines as the slash page, config
 // changes applied. A free fn since a run in flight calls it mid-borrow.

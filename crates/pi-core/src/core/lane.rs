@@ -26,9 +26,7 @@ use tool::{Ctx, Tool};
 use super::Core;
 use crate::core::meter::{Snapshot, Tally};
 use crate::core::resolve::Resolved;
-use crate::input::commands::session_facts;
 use crate::input::{Rewound, Step, refused};
-use pi_store::icons;
 use pi_store::journal;
 use pi_store::session::{self, Stored};
 use pi_store::settings::Settings;
@@ -970,41 +968,6 @@ impl Core {
             }
             Err(why) => vec![format!("{root}: {why}")],
         }
-    }
-    // The sessions `/resume` can switch to, newest first, the one running
-    // now marked.
-    pub(super) fn resume_listing(&self) -> Vec<String> {
-        let list = self
-            .store
-            .choices(self.lane().checkout.ctx.workspace.root());
-        if list.is_empty() {
-            return vec![
-                "no sessions recorded for this workspace".into(),
-                "one is saved here at the end of every turn".into(),
-            ];
-        }
-        // What a session is known by is its own label — the name the user gave
-        // it, then its first question — never the id.
-        let width = list
-            .iter()
-            .map(|s| unicode_width::UnicodeWidthStr::width(s.label().as_str()))
-            .max()
-            .unwrap_or(0);
-        let facts = session_facts(&list.iter().collect::<Vec<_>>());
-        let mut out: Vec<String> = list
-            .iter()
-            .zip(facts)
-            .map(|(s, facts)| {
-                let mark = if s.id == self.lane().talk.id {
-                    icons::CURRENT_ITEM
-                } else {
-                    " "
-                };
-                format!("{mark} {}  {facts}", pi_store::text::pad(&s.label(), width))
-            })
-            .collect();
-        out.push("/resume <id> switches to one".into());
-        out
     }
     // Switches transcript, name and id; the model does not change — reasoning
     // from a different model is demoted the same way as after `/model`.

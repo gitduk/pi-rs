@@ -444,6 +444,16 @@ impl Ui {
             return Asked::Own(Deed::Nothing);
         }
         let intent = input::read(&line, &self.commands);
+        // Bare, it asks which session: the line's completion of it lists them.
+        if matches!(&intent, Intent::Builtin(Builtin::Resume(id)) if id.is_empty()) {
+            self.seed(super::RESUME);
+            if self.menu().is_empty() {
+                self.editor.clear();
+                self.seeded = None;
+                self.flash(super::NO_SESSIONS);
+            }
+            return Asked::Own(Deed::Nothing);
+        }
         self.submitted = Some(line);
         Asked::Core(intent)
     }

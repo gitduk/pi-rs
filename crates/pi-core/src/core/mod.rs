@@ -334,16 +334,13 @@ impl Core {
                 self.fresh_session();
                 Step::Swap(String::new())
             }
-            Intent::Builtin(Builtin::Resume(name)) => {
-                if name.is_empty() {
-                    Step::Handled(Listing::say(self.resume_listing()))
-                } else {
-                    match self.resume(&name) {
-                        Ok(said) => Step::Swap(notice(said)),
-                        Err(why) => Step::Notice(why),
-                    }
-                }
+            Intent::Builtin(Builtin::Resume(name)) if name.is_empty() => {
+                Step::Notice("/resume takes the id of a session".into())
             }
+            Intent::Builtin(Builtin::Resume(name)) => match self.resume(&name) {
+                Ok(said) => Step::Swap(notice(said)),
+                Err(why) => Step::Notice(why),
+            },
             Intent::Builtin(Builtin::Rewind(id)) => match id.trim().parse() {
                 Ok(id) => {
                     let (rewound, saved) = self.rewind_to(agent::session::EntryId(id));

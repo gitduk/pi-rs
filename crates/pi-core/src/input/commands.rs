@@ -704,7 +704,7 @@ pub fn complete<'a>(
 
 /// Each session's age, rounds and size, every column as wide as its widest
 /// among `sessions`, so the rows shown together line up.
-pub(crate) fn session_facts(sessions: &[&ResumeChoice]) -> Vec<String> {
+fn session_facts(sessions: &[&ResumeChoice]) -> Vec<String> {
     let rows: Vec<[String; 3]> = sessions
         .iter()
         .map(|s| {
