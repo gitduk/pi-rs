@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use crate::core::resolve::Stamp;
+use tool::stamp::Stamp;
 
 // Often enough that an install is noticed before the next prompt goes.
 const POLL: Duration = Duration::from_secs(10);
@@ -154,7 +154,7 @@ fn identity(path: &Path) -> Option<(Stamp, u64)> {
     let inode = std::os::unix::fs::MetadataExt::ino(&meta);
     #[cfg(not(unix))]
     let inode = 0;
-    Some(((target, meta.modified().ok(), meta.len()), inode))
+    Some((tool::stamp::from_meta(target, &meta), inode))
 }
 
 async fn version(path: &Path) -> Option<String> {

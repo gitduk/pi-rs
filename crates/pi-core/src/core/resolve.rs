@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use llm::request::Effort;
+use tool::stamp::Stamp;
 
 use crate::args::Pinned;
 use crate::core::instructions;
@@ -406,9 +407,6 @@ const PI_SKILL: &str = concat!(
     include_str!("../../../../README.md"),
 );
 
-/// A file as last seen: its path, time and size.
-pub type Stamp = (PathBuf, Option<std::time::SystemTime>, u64);
-
 /// The config files a resolve in `root` reads, as they stand now. Missing
 /// ones are left out, so one appearing is a change too.
 pub fn watched(pinned: &Pinned, root: &Path) -> Vec<Stamp> {
@@ -421,13 +419,7 @@ pub fn watched(pinned: &Pinned, root: &Path) -> Vec<Stamp> {
             .or_else(config::global_path),
     );
     paths.extend(config::project_file(root));
-    paths
-        .into_iter()
-        .filter_map(|path| {
-            let meta = std::fs::metadata(&path).ok()?;
-            Some((path, meta.modified().ok(), meta.len()))
-        })
-        .collect()
+    paths.into_iter().filter_map(tool::stamp::of).collect()
 }
 
 /// A file `/edit` offers: where it is, the name it is offered under, and

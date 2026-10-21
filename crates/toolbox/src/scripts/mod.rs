@@ -42,10 +42,10 @@ mod job {
 mod script;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::SystemTime;
+use std::sync::Arc;
 
 use tool::Tool;
+use tool::stamp::{Stamp, Stamped};
 
 use crate::background::JobSink;
 
@@ -59,13 +59,11 @@ pub const SKILL: &str = include_str!("../../skills/pi-extend/SKILL.md");
 /// is asked, parsed again only when a file in it changed.
 pub struct Dir {
     dir: PathBuf,
-    seen: Mutex<Seen>,
+    seen: Stamped<Seen>,
     jobs: Option<Arc<dyn JobSink>>,
 }
 
-#[derive(Default)]
 struct Seen {
-    stamps: Vec<(PathBuf, Option<SystemTime>, u64)>,
     tools: Vec<Arc<dyn Tool>>,
     skipped: Vec<Skip>,
 }
@@ -87,7 +85,7 @@ impl Dir {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self {
             dir: dir.into(),
-            seen: Mutex::default(),
+            seen: Stamped::default(),
             jobs: None,
         }
     }
@@ -96,7 +94,7 @@ impl Dir {
     pub fn with_jobs(&self, jobs: Arc<dyn JobSink>) -> Self {
         Self {
             dir: self.dir.clone(),
-            seen: Mutex::default(),
+            seen: Stamped::default(),
             jobs: Some(jobs),
         }
     }
@@ -107,34 +105,29 @@ impl Dir {
     }
 
     fn fresh<T>(&self, read: impl FnOnce(&Seen) -> T) -> T {
-        let stamps = stamps(&self.dir);
-        let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
-        if seen.stamps != stamps {
-            let (scripts, skipped) = discover_in(&self.dir);
-            let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
-            for script in scripts {
-                tools.push(Arc::new(Script {
-                    jobs: self.jobs.clone(),
-                    ..script
-                }));
-            }
-            // A broken script stands in the list as what is wrong with it: the
-            // model reads the list every turn, so that is where it learns why.
-            for skip in &skipped {
-                tracing::warn!(target: "pi::tools", why = %skip, "script skipped");
-                if let Some(broken) = Broken::of(skip)
-                    && tools.iter().all(|t| t.name() != broken.name)
-                {
-                    tools.push(Arc::new(broken));
-                }
-            }
-            *seen = Seen {
-                stamps,
-                tools,
-                skipped,
-            };
+        self.seen.read(stamps(&self.dir), || self.build(), read)
+    }
+
+    fn build(&self) -> Seen {
+        let (scripts, skipped) = discover_in(&self.dir);
+        let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+        for script in scripts {
+            tools.push(Arc::new(Script {
+                jobs: self.jobs.clone(),
+                ..script
+            }));
         }
-        read(&seen)
+        // A broken script stands in the list as what is wrong with it: the
+        // model reads the list every turn, so that is where it learns why.
+        for skip in &skipped {
+            tracing::warn!(target: "pi::tools", why = %skip, "script skipped");
+            if let Some(broken) = Broken::of(skip)
+                && tools.iter().all(|t| t.name() != broken.name)
+            {
+                tools.push(Arc::new(broken));
+            }
+        }
+        Seen { tools, skipped }
     }
 }
 
@@ -145,7 +138,7 @@ impl tool::Source for Dir {
 }
 
 // What says a script changed without reading it: its name, time and size.
-fn stamps(dir: &Path) -> Vec<(PathBuf, Option<SystemTime>, u64)> {
+fn stamps(dir: &Path) -> Vec<Stamp> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -153,7 +146,7 @@ fn stamps(dir: &Path) -> Vec<(PathBuf, Option<SystemTime>, u64)> {
         .flatten()
         .filter_map(|e| {
             let meta = e.metadata().ok()?;
-            Some((e.path(), meta.modified().ok(), meta.len()))
+            Some(tool::stamp::from_meta(e.path(), &meta))
         })
         .collect();
     out.sort();

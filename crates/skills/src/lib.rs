@@ -5,9 +5,10 @@ pub use load::{Load, instructions};
 use llm::slice::head_bytes;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::SystemTime;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tool::limit::{MAX_BYTES, over_limit};
+use tool::stamp::{Stamp, Stamped};
 
 // One line in the tool catalog: past this, the description costs more than
 // the decision it buys.
@@ -173,25 +174,23 @@ const MAX_DEPTH: usize = 3;
 pub struct Shelf {
     dir: PathBuf,
     builtins: Vec<Skill>,
-    seen: Mutex<Seen>,
+    seen: Stamped<Seen>,
+    builds: AtomicU64,
 }
 
-#[derive(Default)]
 struct Seen {
-    stamps: Option<Vec<Stamp>>,
     found: Arc<Found>,
     tool: Option<Arc<dyn tool::Tool>>,
     generation: u64,
 }
-
-type Stamp = (PathBuf, Option<SystemTime>, u64);
 
 impl Shelf {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self {
             dir: dir.into(),
             builtins: Vec::new(),
-            seen: Mutex::default(),
+            seen: Stamped::default(),
+            builds: AtomicU64::new(0),
         }
     }
 
@@ -209,22 +208,23 @@ impl Shelf {
     fn fresh<T>(&self, read: impl FnOnce(&Seen) -> T) -> T {
         let mut stamps = Vec::new();
         stamp(&self.dir, MAX_DEPTH, &mut stamps);
-        let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
-        if seen.stamps.as_ref() != Some(&stamps) {
-            let mut found = discover(&self.dir);
-            for builtin in &self.builtins {
-                if !found.skills.iter().any(|s| s.name == builtin.name) {
-                    found.skills.push(builtin.clone());
-                }
+        self.seen.read(stamps, || self.build(), read)
+    }
+
+    fn build(&self) -> Seen {
+        let mut found = discover(&self.dir);
+        for builtin in &self.builtins {
+            if !found.skills.iter().any(|s| s.name == builtin.name) {
+                found.skills.push(builtin.clone());
             }
-            found.skills.sort_by(|a, b| a.name.cmp(&b.name));
-            seen.tool = (!found.skills.is_empty())
-                .then(|| Arc::new(Load::new(found.skills.clone())) as Arc<dyn tool::Tool>);
-            seen.found = Arc::new(found);
-            seen.stamps = Some(stamps);
-            seen.generation += 1;
         }
-        read(&seen)
+        found.skills.sort_by(|a, b| a.name.cmp(&b.name));
+        Seen {
+            tool: (!found.skills.is_empty())
+                .then(|| Arc::new(Load::new(found.skills.clone())) as Arc<dyn tool::Tool>),
+            found: Arc::new(found),
+            generation: self.builds.fetch_add(1, Ordering::Relaxed) + 1,
+        }
     }
 }
 
@@ -237,9 +237,8 @@ impl tool::Source for Shelf {
 // Every `SKILL.md` `walk` would read, by path, time and size: what says a
 // skill changed without parsing one.
 fn stamp(dir: &Path, depth: usize, out: &mut Vec<Stamp>) {
-    let file = dir.join("SKILL.md");
-    if let Ok(meta) = std::fs::metadata(&file) {
-        out.push((file, meta.modified().ok(), meta.len()));
+    if let Some(found) = tool::stamp::of(dir.join("SKILL.md")) {
+        out.push(found);
         return;
     }
     if depth == 0 {

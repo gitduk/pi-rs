@@ -33,6 +33,7 @@ pub mod limit;
 pub mod output;
 pub mod registry;
 pub mod spill;
+pub mod stamp;
 pub mod state;
 pub mod workspace;
 

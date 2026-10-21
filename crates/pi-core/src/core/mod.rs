@@ -91,7 +91,7 @@ pub struct Core {
     pub current: usize,
     /// By lane token, the files as they stood when a reload last refused
     /// them, so a broken file is said once rather than once a second.
-    pub refused: std::collections::HashMap<u64, Vec<resolve::Stamp>>,
+    pub refused: std::collections::HashMap<u64, Vec<tool::stamp::Stamp>>,
     /// Where calls that outlive their turn are kept, when a surface serves
     /// them; a run with nothing to come back to keeps no jobs.
     pub jobs: Option<std::sync::Arc<crate::driver::jobs::Table>>,
