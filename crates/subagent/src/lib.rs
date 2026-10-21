@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -349,9 +349,7 @@ impl Subagent {
         });
         // The watchdog: silence for a whole deadline is a wedged call — a
         // hung tool speaks no events. It trips the same token a stop does.
-        let wedged = Arc::new(AtomicBool::new(false));
         let watchdog_stop = stop.clone();
-        let wedged_flag = wedged.clone();
         let deadline = self.deadline;
         let watchdog = tokio::spawn(async move {
             let mut ticking = ticking;
@@ -362,7 +360,6 @@ impl Subagent {
                         // A reset may have raced the trip; trust only the
                         // value read after the sleep came back.
                         if *ticking.borrow() + deadline <= Instant::now() {
-                            wedged_flag.store(true, Ordering::Relaxed);
                             watchdog_stop.cancel();
                             return;
                         }
@@ -431,14 +428,12 @@ impl Subagent {
             Err(AgentError::Cancelled) if ctx.cancel.is_cancelled() => {
                 return Err(ToolError::Cancelled);
             }
-            Err(AgentError::Cancelled) => Some(if wedged.load(Ordering::Relaxed) {
-                format!(
-                    "a call ran {} with no progress",
-                    llm::figures::elapsed(self.deadline)
-                )
-            } else {
-                format!("stopped after {}", llm::figures::elapsed(self.deadline))
-            }),
+            // Our token trips only for the parent's stop, caught just above,
+            // or for the watchdog.
+            Err(AgentError::Cancelled) => Some(format!(
+                "a call ran {} with no progress",
+                llm::figures::elapsed(self.deadline)
+            )),
             Err(why) => {
                 // The child's spend rode home on the collector, but an error
                 // result carries no `.with_spent`: name what went uncounted.
