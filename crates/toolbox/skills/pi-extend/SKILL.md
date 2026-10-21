@@ -108,12 +108,12 @@ is `3` when pi is listening. A script that never writes fd 3 is a plain tool.
 
 | It writes | Meaning |
 |---|---|
-| `{"status": "..."}` | how far it has got: the call's progress, then its row above the bar |
+| `{"status": "..."}` | how far it has got: the call's progress, then, once detached, the job's |
 | `{"detach": "..."}` | the call returns now with this text; the script runs on as a job |
 | `{"result": "..."}` | after detaching: one result, a turn of its own on its checkout |
 | `{"notice": "..."}` | a line on the screen only, which the model never reads: a QR to scan |
 | `{"input": "..."}` | a person's words, sent to the model as written, never run as a command |
-| `{"interrupt": true}` | stop the turn running on its checkout, as esc does |
+| `{"interrupt": true}` | stop the turn running on its checkout, as the user's stop does |
 | `{"follow": true}` | be told of every turn on its checkout from now on, not only those its `input` opened |
 
 For each turn an `input` opened, pi writes back on the same fd
@@ -182,10 +182,10 @@ headers = { Authorization = "$DOCS_AUTHORIZATION" }  # the whole value: "Bearer 
 ```
 
 - `~/.pi/settings.toml` serves everywhere; a project's `.pi.toml` adds servers
-  for that checkout alone, and pi names them under the banner at startup.
+  for that checkout alone, and pi names them at startup.
 - A server that will not start shows up as `<server>__unavailable`, its
-  description saying why; the user's `/mcp` lists every server and its tools,
-  and `/mcp restart` reconnects them.
+  description saying why; the user can list every server with its tools, and
+  reconnect them.
 - Check the server's own documentation for its command and the variables it
   needs. Never write a secret into the file: name the variable with `$`.
 

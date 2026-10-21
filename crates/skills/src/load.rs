@@ -102,7 +102,7 @@ fn sibling_files(dir: &std::path::Path) -> Vec<String> {
 
 /// A skill's body, with the way to reach the files it points at.
 ///
-/// Shared with the surface that runs a skill as a slash command: the model is
+/// Shared with a surface that runs a skill at the user's word: the model is
 /// given the same instructions either way, and the skill tool is how a skill's
 /// own files are reached.
 pub fn instructions(skill: &Skill, text: &str) -> String {

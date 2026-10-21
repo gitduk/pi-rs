@@ -371,8 +371,8 @@ impl Agent {
                 .instrument(span.clone())
                 .await;
             let ids = session.push_previewed(results);
-            // A state update, not a drawing instruction: the renderer derives
-            // the results' rows from these entries through `f_entry`.
+            // A state update, not a drawing instruction: whoever draws derives
+            // the results' rows from these entries itself.
             voice.say(Event::Committed {
                 entries: session.entries_for(&ids).into_iter().cloned().collect(),
             });

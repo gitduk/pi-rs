@@ -183,9 +183,7 @@ pub(crate) const BUILTIN: &[Command] = &[
         "edit the project's .pi.toml, then reload",
         |_, rest| Intent::Builtin(Builtin::Settings(rest)),
     ),
-    Command::builtin("/exit", "", "leave (Ctrl-D does the same)", |_, _| {
-        Intent::Builtin(Builtin::Quit)
-    }),
+    Command::builtin("/exit", "", "leave", |_, _| Intent::Builtin(Builtin::Quit)),
 ];
 
 // The first sentence, where the summary stops being one. How much of it

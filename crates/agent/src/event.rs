@@ -76,7 +76,7 @@ pub enum Event {
         compactions: usize,
     },
     // The transcript gained entries — a state update, not a drawing
-    // instruction: the renderer derives their rows through `f_entry` itself.
+    // instruction: whoever draws derives its rows from them itself.
     Committed {
         entries: Vec<crate::session::Entry>,
     },

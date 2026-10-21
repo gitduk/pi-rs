@@ -49,7 +49,7 @@ struct Server {
     task: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
-/// One server as `/mcp` shows it.
+/// One server, as a person is shown it.
 pub struct Shown {
     pub name: String,
     /// `starting`, `N tools` or `down: why`.

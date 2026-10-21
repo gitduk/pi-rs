@@ -385,7 +385,7 @@ pub struct Session {
 // the transcript alone can't say whose stop it was.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum StopCause {
-    // The user asked the run to stop: a stop, `/stop`, an interrupt.
+    // The user asked the run to stop, however they asked.
     User,
     // It died on its own — an error or a crash — and no more is known.
     Other,
