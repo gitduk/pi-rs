@@ -13,8 +13,8 @@ pub(crate) fn header(path: &str) -> String {
     format!("[{path}]")
 }
 
-/// Content hash for the staleness note: a file that changed underneath the
-/// model since its last view gets a note beside the report.
+/// Content hash for the log: names the version a view was built on, for
+/// when an edit goes wrong.
 pub(crate) fn view_hash(content: &str) -> String {
     format!("{:016X}", tool::stamp::fnv(content.as_bytes()))
 }

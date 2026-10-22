@@ -8,7 +8,7 @@ use super::edits::{self, Applied, Landed};
 const CONTEXT: usize = 3;
 // Changed rows the model is shown before the rest are counted: a window this
 // wide fits what one edit meant. The screen's copy is uncut.
-pub(super) const CHANGED_RUN: usize = 40;
+pub(crate) const CHANGED_RUN: usize = 40;
 // Rows either side of a landing the line diff will align; past that the
 // landing is shown whole, the alignment costing rows squared.
 const DIFF_LINES: usize = 200;

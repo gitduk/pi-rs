@@ -141,6 +141,11 @@ impl Tui {
                 self.ui.say_muted(view, line);
             }
         }
+        if let Some(note) = self.core.lane().drift() {
+            let lane = self.core.lane_mut();
+            let view = front_view(&mut self.views, lane);
+            self.ui.say_note(lane, view, &note);
+        }
         // Lent to the run for the turn's length. Missing only when a panic
         // took the transcript and the archive won't read back.
         let Some(mut carried) = self.take_carried() else {

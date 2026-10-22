@@ -54,7 +54,7 @@ struct Args {
 
 struct Hit {
     path: String,
-    hash: String,
+    text: String,
     lines: Vec<(u64, String)>,
     truncated: bool,
 }
@@ -192,12 +192,11 @@ impl Tool for Grep {
                         );
 
                         if !lines.is_empty() {
-                            // The view hash comes from the same bytes that were searched,
+                            // The view is the same bytes that were searched,
                             // so an edit anchored on it cannot be racing this read.
-                            let hash = crate::rows::view_hash(&text);
                             let _ = tx.send(Ok(Hit {
                                 path: ws.display(entry.path()),
-                                hash,
+                                text: text.into_owned(),
                                 lines,
                                 truncated,
                             }));
@@ -300,7 +299,7 @@ impl Tool for Grep {
             if shown >= limit {
                 break;
             }
-            ctx.note_view(&ctx.workspace.root().join(&h.path), &h.hash);
+            ctx.note_view(&ctx.workspace.root().join(&h.path), &h.text);
             let mut section = format!("{}\n", crate::rows::header(&h.path));
             // Prints addresses without spans: a match is rarely a construct's
             // opening row, and parsing every hit file would cost more than it's worth.

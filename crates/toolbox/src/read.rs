@@ -314,7 +314,7 @@ impl Tool for Read {
         tracing::info!(target: "pi::read", path = %rel, hash = %hash, "read");
         // The numbering shown is current; a window read clears the whole file,
         // not just its own rows — catching an edit built with no read since the last one.
-        ctx.note_view(&path, &hash);
+        ctx.note_view(&path, content);
 
         // A BOM is invisible in a terminal but is a character on line 1:
         // stripped from the view so what the model copies back is what an edit can match.

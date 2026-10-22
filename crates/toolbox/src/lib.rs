@@ -3,6 +3,7 @@ use tool::Registry;
 pub mod background;
 pub mod bash;
 mod blocks;
+pub mod drift;
 pub mod edit;
 pub mod fetch;
 pub mod glob;

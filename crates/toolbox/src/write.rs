@@ -200,7 +200,7 @@ impl Tool for Write {
         let lines = content.lines().count();
         let unit = if lines == 1 { "line" } else { "lines" };
         let hash = crate::rows::view_hash(&content);
-        ctx.note_view(&path, &hash);
+        ctx.note_view(&path, &content);
         // Same split as read: the model's line names the version an edit matches
         // against; the log keeps the hash too, for when an edit goes wrong.
         tracing::info!(target: "pi::write", path = %rel, hash = %hash, "wrote");
@@ -208,6 +208,7 @@ impl Tool for Write {
             &rel,
             &String::from_utf8_lossy(&was.unwrap_or_default()),
             &content,
+            usize::MAX,
         );
         preview.insert_str(preview.find('\n').unwrap_or(preview.len()), note);
         Ok(ToolOutput::text(format!(

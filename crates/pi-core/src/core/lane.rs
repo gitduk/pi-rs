@@ -475,6 +475,12 @@ impl Lane {
         &self.checkout.ctx
     }
 
+    /// The diff of each file the model has seen that changed on disk since,
+    /// told once; see `toolbox::drift`.
+    pub fn drift(&self) -> Option<String> {
+        toolbox::drift::drift(&self.checkout.ctx)
+    }
+
     /// The context runs start from. A run already going keeps its own copy.
     pub fn ctx_mut(&mut self) -> &mut Ctx {
         &mut self.checkout.ctx
@@ -714,6 +720,8 @@ impl Core {
             .ctx
             .clone()
             .with_session(&lane.talk.id, pi_store::spill_root());
+        // What the old session's model saw, this one never did.
+        lane.checkout.ctx.viewed = Default::default();
         let path = self
             .store
             .journal_path(self.lane().root(), &self.lane().talk.id);
@@ -1031,6 +1039,20 @@ mod tests {
 
         core.resume(&left).unwrap();
         assert_eq!(core.lane().spent(), spent, "the saved figure comes back");
+    }
+
+    // A view carried over would let the next session edit unread, and tell
+    // it of changes to a file it never saw.
+    #[test]
+    fn a_new_session_has_seen_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
+        let seen = dir.path().join("a.txt");
+        core.lane().ctx().note_view(&seen, "old");
+        std::fs::write(&seen, "new").unwrap();
+        core.fresh_session();
+        assert!(core.lane().ctx().viewed(&seen).is_none());
+        assert_eq!(core.lane().drift(), None);
     }
 
     // A child's detach would land as a turn on this lane, which the child

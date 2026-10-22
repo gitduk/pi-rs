@@ -241,8 +241,8 @@ pub struct Ctx {
     /// writers to one path otherwise read the same bytes, both succeed, and
     /// one change vanishes without anyone being told.
     pub file_locks: FileLocks,
-    /// The content hash each file's last view was built on. Feeds the
-    /// staleness note and the read-before-edit rule.
+    /// The content each file's last view was built on. Feeds the staleness
+    /// note, the read-before-edit rule, and the diff of what changed since.
     pub viewed: Viewed,
     // Paths this run has changed. Split from a cloned parent's rather than
     // shared: this answers what *this* run did, not what the whole tree got.
@@ -271,8 +271,9 @@ struct Written {
     paths: std::collections::BTreeSet<std::path::PathBuf>,
 }
 
-pub type Viewed =
-    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, String>>>;
+pub type Viewed = std::sync::Arc<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, std::sync::Arc<str>>>,
+>;
 
 impl Ctx {
     pub fn new(workspace: Workspace) -> Self {
@@ -341,17 +342,17 @@ impl Ctx {
         spill::locate(&self.spill_root, locator)
     }
 
-    /// Record the content hash a view of `path` was built on. Feeds the
-    /// staleness note beside an edit's report and the read-before-edit rule.
-    pub fn note_view(&self, path: &std::path::Path, hash: &str) {
+    /// Record the content a view of `path` was built on. Feeds the staleness
+    /// note beside an edit's report and the read-before-edit rule.
+    pub fn note_view(&self, path: &std::path::Path, content: &str) {
         self.viewed
             .lock()
             .expect("viewed poisoned")
-            .insert(path.to_path_buf(), hash.to_string());
+            .insert(path.to_path_buf(), content.into());
     }
 
-    /// The content hash of the last view of `path`, when there was one.
-    pub fn viewed_hash(&self, path: &std::path::Path) -> Option<String> {
+    /// The content of the last view of `path`, when there was one.
+    pub fn viewed(&self, path: &std::path::Path) -> Option<std::sync::Arc<str>> {
         self.viewed
             .lock()
             .expect("viewed poisoned")

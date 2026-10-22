@@ -4,17 +4,18 @@ mod sketch;
 
 use self::edits::{Anchor, Refusal};
 use self::notes::{blank_note, broke_syntax, notes};
-use self::sketch::{CHANGED_RUN, sketch};
+pub(crate) use self::sketch::CHANGED_RUN;
+use self::sketch::sketch;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::rows::view_hash;
 use tool::limit::{MAX_BYTES, over_limit};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
-/// The diff a whole-file write shows: one landing that took every old row.
-pub(crate) fn rewrite_sketch(path: &str, old: &str, new: &str) -> String {
+/// The diff a whole-file write shows: one landing that took every old row,
+/// changed runs cut past `changed_run` rows.
+pub(crate) fn rewrite_sketch(path: &str, old: &str, new: &str, changed_run: usize) -> String {
     let rows = edits::split_bom(new).1.lines().count();
     let applied = edits::Applied {
         content: new.to_string(),
@@ -30,7 +31,7 @@ pub(crate) fn rewrite_sketch(path: &str, old: &str, new: &str) -> String {
         }],
         left_blank: Vec::new(),
     };
-    sketch(path, &applied, usize::MAX)
+    sketch(path, &applied, changed_run)
 }
 
 // What a call that gets the arguments wrong is told, so it resends the call
@@ -287,12 +288,12 @@ impl Tool for Edit {
         })?;
         // Read-before-edit, and the staleness note: both read off the last view
         // of this file, recorded by read/grep/write/edit.
-        let Some(viewed) = ctx.viewed_hash(&real) else {
+        let Some(viewed) = ctx.viewed(&real) else {
             return Err(ToolError::Invalid(format!(
                 "{path}: read it before editing it"
             )));
         };
-        let stale = viewed != view_hash(&content);
+        let stale = *viewed != *content;
 
         // Nothing has touched the disk yet: a refused call leaves no trace.
         let applied =
@@ -311,7 +312,7 @@ impl Tool for Edit {
         crate::write::atomic_write(&real, applied.content.as_bytes()).await?;
         ctx.note_write(&real);
         // The model just saw this change; the note is for outside drift.
-        ctx.note_view(&real, &view_hash(&applied.content));
+        ctx.note_view(&real, &applied.content);
         // What the tool is being asked to do, by shape: the one number that
         // says whether the insert anchors are earning their place.
         let forms = |want: fn(&Anchor) -> bool| edits.iter().filter(|e| want(&e.anchor)).count();
