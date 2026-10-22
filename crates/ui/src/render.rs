@@ -473,24 +473,23 @@ pub fn result_rows(
         p.span_hovered(hovered, &p.theme.muted, clip(head, fits) + &placed),
     ])];
     let diff_lines: Vec<&str> = rest.lines().collect();
-    let footer = |text: &str| Line::from(p.span_hovered(hovered, &p.theme.muted, text));
-    let folded = folds(1 + diff_lines.len());
-    let sketched = folded && shown == Shown::Sketch;
-    let rows = if sketched {
-        &diff_lines[..SKETCH_LIMIT]
-    } else {
-        &diff_lines[..]
-    };
+    let (rows, footer) = sketched(&diff_lines, shown);
     out.extend(sketch_rows(rows, p, room));
-    if sketched {
-        out.push(footer(&format!(
-            "  {} more",
-            diff_lines.len() - SKETCH_LIMIT
-        )));
-    } else if folded && shown == Shown::Open {
-        out.push(footer("  click to collapse"));
-    }
+    out.extend(footer.map(|text| Line::from(p.span_hovered(hovered, &p.theme.muted, text))));
     out
+}
+
+/// What of the lines under a head `shown` lets through, and the footer
+/// that says the rest is folded away or can be folded back.
+pub fn sketched<T>(under: &[T], shown: Shown) -> (&[T], Option<String>) {
+    match shown {
+        Shown::Sketch if folds(1 + under.len()) => (
+            &under[..SKETCH_LIMIT],
+            Some(format!("  {} more", under.len() - SKETCH_LIMIT)),
+        ),
+        Shown::Open if folds(1 + under.len()) => (under, Some("  click to collapse".into())),
+        _ => (under, None),
+    }
 }
 
 /// The rows of a sketch, each under the sign that opens it, and the changed

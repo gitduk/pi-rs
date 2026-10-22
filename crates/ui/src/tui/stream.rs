@@ -266,7 +266,7 @@ impl Ui {
     // `say_kept` as a note, which the model reads before it next speaks.
     pub(super) fn say_note(&self, lane: &mut Lane, view: &mut View, line: &str) {
         let kept = lane.push_note(line);
-        self.draw_kept(view, Row::note_lines(line, &self.paint), kept);
+        self.draw_kept(view, Row::note_lines(line), kept);
     }
 
     fn draw_kept(&self, view: &mut View, rows: Vec<Row>, kept: Option<agent::session::EntryId>) {

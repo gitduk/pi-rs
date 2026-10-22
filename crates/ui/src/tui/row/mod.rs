@@ -6,7 +6,6 @@ use std::cell::RefCell;
 use llm::message::{ToolResult, ToolResultContent};
 use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
 use crate::block;
 use crate::render::named;
@@ -16,11 +15,13 @@ use pi_core::core::resolve::Resolved;
 use pi_store::icons;
 
 mod code;
+mod note;
 mod relayed;
 mod result;
 mod steps;
 
 use code::{Block, Code};
+use note::Note;
 use relayed::Relayed;
 use result::ToolOut;
 use steps::Group;
@@ -103,12 +104,7 @@ enum Kind {
         // Drawn only, never filed: what a tidy takes.
         aside: bool,
     },
-    // A line of a note: the mark (first line) or its blank width as the
-    // lead, so a wrap hangs under the text, not the mark.
-    NoteLine {
-        lead: Line<'static>,
-        body: Line<'static>,
-    },
+    Note(Note),
     // Painted lines that come and go together: the banner, or none at all
     // where a row was that is gone.
     Lines(Vec<Line<'static>>),
@@ -160,6 +156,7 @@ impl Row {
             Kind::Steps(g) => Some(g),
             Kind::Result(r) => Some(r),
             Kind::Relayed(r) => Some(r),
+            Kind::Note(n) => Some(n),
             _ => None,
         }
     }
@@ -169,6 +166,7 @@ impl Row {
             Kind::Steps(g) => Some(g),
             Kind::Result(r) => Some(r),
             Kind::Relayed(r) => Some(r),
+            Kind::Note(n) => Some(n),
             _ => None,
         }
     }
@@ -226,25 +224,13 @@ impl Row {
             .collect()
     }
 
-    /// A note — what the model is told, shown as it reads it — one row per
-    /// line, under a mark of its own so it never reads as reasoning.
-    pub fn note_lines(text: &str, paint: &Paint) -> Vec<Self> {
-        let mark = icons::bar(icons::NOTE_MARK);
-        let indent = " ".repeat(mark.width());
-        text.lines()
-            .enumerate()
-            .map(|(i, l)| {
-                let lead = if i == 0 {
-                    paint.span(&paint.theme.prompt.color, mark.clone())
-                } else {
-                    Span::raw(indent.clone())
-                };
-                Self::new(Kind::NoteLine {
-                    lead: Line::from(lead),
-                    body: Line::from(paint.span(&paint.theme.muted, l)),
-                })
-            })
-            .collect()
+    /// A note — what the model is told, shown as it reads it — as one row,
+    /// or none for a note with no lines.
+    pub fn note_lines(text: &str) -> Vec<Self> {
+        match text.lines().next() {
+            Some(_) => vec![Self::new(Kind::Note(Note::new(text)))],
+            None => Vec::new(),
+        }
     }
 
     /// Fold a repeat into this row, if it is the same notice: the scrollback
@@ -418,6 +404,10 @@ impl Row {
             }
             Kind::Relayed(r) => {
                 r.hover(hovered.is_some());
+                false
+            }
+            Kind::Note(n) => {
+                n.hover(hovered.is_some());
                 false
             }
             _ => false,
@@ -594,11 +584,11 @@ impl Row {
             | Kind::Code(_)
             | Kind::Block(_)
             | Kind::Notice { .. }
-            | Kind::NoteLine { .. }
             | Kind::Said { .. } => 1,
             Kind::Lines(lines) => lines.len(),
             Kind::Result(r) => r.len(),
             Kind::Relayed(r) => r.len(),
+            Kind::Note(n) => n.len(),
             Kind::Steps(g) => g.len(),
         }
     }
@@ -628,7 +618,7 @@ impl Row {
             Kind::Answer(text, _) => (text.clone(), None),
             Kind::Lines(lines) => (lines[i].clone(), None),
             Kind::CodeLine(line) => (line.clone(), Some(Line::from(CODE_INDENT))),
-            Kind::NoteLine { lead, body } => (body.clone(), Some(lead.clone())),
+            Kind::Note(n) => n.line(i, paint),
             Kind::Code(c) => (c.line(paint), None),
             Kind::Block(b) => (b.line(paint, width), None),
             Kind::Notice { text, times, .. } if *times == 1 => (text.clone(), None),
@@ -651,7 +641,7 @@ impl Row {
     /// Whether a wrap of this row shows its border on the first piece only,
     /// blanking it on the rest; the columns it takes stay the same.
     pub fn hangs(&self) -> bool {
-        matches!(self.0, Kind::NoteLine { .. })
+        matches!(self.0, Kind::Note(_))
     }
 
     /// What in line `i` reads as one — a stretch of code, a link, a table's
