@@ -260,10 +260,7 @@ pub fn plan(
         }
     }
 
-    let mut record = Compaction {
-        tokens_before: before,
-        ..Default::default()
-    };
+    let mut record = Compaction::default();
     for it in &items {
         if it.gone {
             record.dropped.push(it.id);
@@ -287,12 +284,11 @@ pub fn plan(
         }
     }
 
-    record.tokens_after = if before > budget {
+    report.after = if before > budget {
         total(&items)
     } else {
         before
     };
-    report.after = record.tokens_after;
     report.still_over = report.after > budget;
     (record, report)
 }

@@ -709,14 +709,7 @@ mod budget {
         let (record, r) =
             agent::compaction::ladder::plan(&s, a.spec(), a.budget(), &agent::Policy::default());
         assert!(!r.touched());
-        assert_eq!(
-            record,
-            agent::session::Compaction {
-                tokens_before: r.before,
-                tokens_after: r.after,
-                ..Default::default()
-            }
-        );
+        assert_eq!(record, agent::session::Compaction::default());
 
         let mut s = Session::with_prompt("hello");
         assert!(a.compact_now(&mut s, None).await.is_none());

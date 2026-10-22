@@ -79,8 +79,6 @@ pub struct Compaction {
     /// when summarizing failed — the entries still go, unsummarized.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
-    pub tokens_before: usize,
-    pub tokens_after: usize,
 }
 
 /// One thing the user side said, kept in both voices: what the model reads,
