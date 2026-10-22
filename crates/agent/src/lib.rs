@@ -43,6 +43,10 @@ const SQUEEZE: f64 = 0.6;
 // Attempts to shrink one turn before giving up on it.
 const MAX_SQUEEZE: usize = 3;
 
+// Times hooks may keep one run from stopping: a hook that never clears
+// would otherwise spend without end.
+const MAX_HOLDS: usize = 3;
+
 /// How long a run has to wind down after its stop token is tripped before it
 /// is dropped where it stands.
 pub const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
@@ -175,17 +179,22 @@ impl Agent {
             tools_bytes = llm::request::defs_bytes(&self.brief.registry.defs()),
             "run start"
         );
-        if let Some(note) = self.brief.hooks.ahead(ctx).await {
-            let id = session.push_note(note);
-            voice.say(Event::Committed {
-                entries: session.entries_for(&[id]).into_iter().cloned().collect(),
-            });
+        let prompt = session
+            .last_prompt()
+            .map_or(String::new(), |p| p.text.clone());
+        if let Some(note) = self.brief.hooks.ahead(&prompt, ctx).await {
+            say_note(session, &voice, note);
         }
         let out = self.turns(session, ctx, &voice, retry).await;
         match &out {
             Ok(_) => {}
             Err(AgentError::Cancelled) => session.close_open(session::STOPPED_CALL),
-            Err(_) => session.close_open(session::DIED_CALL),
+            Err(e) => {
+                session.close_open(session::DIED_CALL);
+                voice.say(Event::Failed {
+                    error: e.to_string(),
+                });
+            }
         }
         out
     }
@@ -209,6 +218,8 @@ impl Agent {
         let mut compactions = 0usize;
         // The provider's count of the run's latest request, against its window.
         let mut held = None;
+        // Times a hook kept the model from stopping.
+        let mut holds = 0usize;
 
         for turn in 1.. {
             voice.say(Event::TurnStart { turn });
@@ -387,12 +398,22 @@ impl Agent {
             );
 
             let calls: Vec<ToolCall> = done.message.tool_calls().cloned().collect();
+            let reply = calls.is_empty().then(|| done.message.text());
             let Message::Assistant { content, .. } = done.message else {
                 unreachable!("the accumulator only ever builds an assistant message")
             };
             session.push_assistant(content);
 
-            if calls.is_empty() {
+            if let Some(reply) = reply {
+                if holds == MAX_HOLDS {
+                    voice.say(Event::Warning(format!(
+                        "hooks kept the run going {MAX_HOLDS} times; it stops here"
+                    )));
+                } else if let Some(why) = self.brief.hooks.hold(&reply, holds, ctx).await {
+                    holds += 1;
+                    say_note(session, voice, why);
+                    continue;
+                }
                 voice.say(Event::Done {
                     turns: turn,
                     usage: totals,
@@ -412,11 +433,7 @@ impl Agent {
                 .instrument(span.clone())
                 .await;
             let ids = session.push_previewed(results);
-            // A state update, not a drawing instruction: whoever draws derives
-            // the results' rows from these entries itself.
-            voice.say(Event::Committed {
-                entries: session.entries_for(&ids).into_iter().cloned().collect(),
-            });
+            say_committed(session, voice, &ids);
             if stopped {
                 return Err(AgentError::Cancelled);
             }
@@ -510,6 +527,20 @@ pub(crate) fn as_sent(mut context: Vec<Message>, spec: &ModelSpec) -> Vec<Messag
         llm::message::blind(&mut context, &spec.model);
     }
     context
+}
+
+// Files a note for the model and hands it to whoever draws.
+fn say_note(session: &mut Session, voice: &Voice, note: String) {
+    let id = session.push_note(note);
+    say_committed(session, voice, &[id]);
+}
+
+// A state update, not a drawing instruction: whoever draws derives the
+// entries' rows from them itself.
+fn say_committed(session: &Session, voice: &Voice, ids: &[session::EntryId]) {
+    voice.say(Event::Committed {
+        entries: session.entries_for(ids).into_iter().cloned().collect(),
+    });
 }
 
 #[cfg(test)]

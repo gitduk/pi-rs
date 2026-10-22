@@ -777,6 +777,11 @@ impl Session {
             .map(|p| p.shown_text().to_string())
     }
 
+    /// What the user last said: a prompt or a `!` command.
+    pub fn last_prompt(&self) -> Option<&Prompt> {
+        self.entries.iter().rev().find_map(Entry::prompt)
+    }
+
     /// The last question the user asked, when there is one to take back.
     ///
     /// Prompts only: a `!` command's output is not something anyone sent, and

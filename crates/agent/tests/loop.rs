@@ -163,9 +163,92 @@ struct Ahead;
 
 #[async_trait]
 impl agent::Hooks for Ahead {
-    async fn ahead(&self, _ctx: &Ctx) -> Option<String> {
-        Some("ran ls".into())
+    async fn ahead(&self, prompt: &str, _ctx: &Ctx) -> Option<String> {
+        (prompt == "go").then(|| "ran ls".into())
     }
+}
+
+// Keeps the run going until it has been held `until` times.
+struct Holds {
+    until: usize,
+    asked: AtomicUsize,
+}
+
+#[async_trait]
+impl agent::Hooks for Holds {
+    async fn hold(&self, reply: &str, held: usize, _ctx: &Ctx) -> Option<String> {
+        assert_eq!(held, self.asked.fetch_add(1, Ordering::SeqCst), "{reply}");
+        (held < self.until).then(|| format!("not yet {held}"))
+    }
+}
+
+fn held_by(until: usize, replies: usize) -> (tempfile::TempDir, Agent, Ctx, Arc<Holds>) {
+    let (dir, mut a, ctx) = harness((0..replies).map(|i| text_turn(&format!("r{i}"))).collect());
+    let hooks = Arc::new(Holds {
+        until,
+        asked: AtomicUsize::new(0),
+    });
+    brief(&mut a).hooks = hooks.clone();
+    (dir, a, ctx, hooks)
+}
+
+#[tokio::test]
+async fn a_hold_keeps_the_run_going_with_its_reason() {
+    let (_d, a, ctx, hooks) = held_by(2, 3);
+    let (session, out, events) = drive(&a, &ctx, "go").await;
+    out.unwrap();
+
+    assert_eq!(hooks.asked.load(Ordering::SeqCst), 3);
+    let view = session.context();
+    let said: Vec<String> = view.iter().map(|m| m.text()).collect();
+    for want in ["not yet 0", "not yet 1", "r2"] {
+        assert!(said.iter().any(|s| s.contains(want)), "{want}: {said:?}");
+    }
+    let done = events.iter().filter(|e| matches!(e, Event::Done { .. }));
+    assert_eq!(done.count(), 1, "said once, when the run really stops");
+}
+
+#[tokio::test]
+async fn a_hook_that_never_clears_stops_holding_at_the_cap() {
+    let (_d, a, ctx, hooks) = held_by(usize::MAX, 10);
+    let (_s, out, events) = drive(&a, &ctx, "go").await;
+    out.unwrap();
+
+    assert_eq!(
+        hooks.asked.load(Ordering::SeqCst),
+        3,
+        "not asked past the cap"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Warning(w) if w.contains("3 times"))),
+        "{events:?}"
+    );
+    assert!(events.iter().any(|e| matches!(e, Event::Done { .. })));
+}
+
+#[tokio::test]
+async fn a_failed_run_says_so_and_a_stopped_one_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let a = tooled(flaky(99, || llm::LlmError::Stream("gone".into())), spec());
+    let mut retry = fast_retry();
+    retry.attempts = 1;
+    let (_s, out, events) = drive_retrying(&a, &ctx, "go", &retry).await;
+    assert!(out.is_err());
+    let failed = |events: &[Event]| {
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Failed { error } if error.contains("gone")))
+    };
+    assert!(failed(&events), "{events:?}");
+
+    let (_d, a, ctx) = harness(vec![text_turn("no")]);
+    ctx.cancel.cancel();
+    let (_s, out, events) = drive(&a, &ctx, "go").await;
+    assert!(matches!(out, Err(AgentError::Cancelled)), "{out:?}");
+    assert!(!events.iter().any(|e| matches!(e, Event::Failed { .. })));
 }
 
 #[tokio::test]

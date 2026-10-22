@@ -172,8 +172,9 @@ pub struct Hook {
 
 /// What a hook runs on. The two around a call are gates: before one, exit 2
 /// refuses it; after one, what the hook prints is added to the result.
-/// `run.start` is waited on too: what it prints is a note to the model. The
-/// rest only watch, and nothing they do reaches the run.
+/// `run.start` is waited on too: what it prints is a note to the model; so is
+/// `run.stop`, where exit 2 keeps the run going. The rest only watch, and
+/// nothing they do reaches the run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum HookOn {
     #[serde(rename = "tool.before")]
@@ -194,8 +195,12 @@ pub enum HookOn {
     Retrying,
     #[serde(rename = "warning")]
     Warning,
+    #[serde(rename = "run.stop")]
+    RunStop,
     #[serde(rename = "run.done")]
     RunDone,
+    #[serde(rename = "run.failed")]
+    RunFailed,
 }
 
 /// One MCP server: a command run over stdio, or a URL spoken to over HTTP.

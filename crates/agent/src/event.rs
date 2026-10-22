@@ -73,6 +73,10 @@ pub enum Event {
         // How many times the transcript was shrunk to fit during this run.
         compactions: usize,
     },
+    // The run ended on an error; a stop the user asked for is not one.
+    Failed {
+        error: String,
+    },
     // The transcript gained entries — a state update, not a drawing
     // instruction: whoever draws derives its rows from them itself.
     Committed {
@@ -114,6 +118,8 @@ pub(crate) fn journal(event: &Event) {
         | Event::ReasoningDelta(_)
         | Event::Usage(_)
         | Event::Committed { .. } => {}
+        // Whoever ran the run journals how it ended.
+        Event::Failed { .. } => {}
         // `TurnEnd`'s count is the size; the loop's "replied" record has the
         // bound it was converted against.
         Event::Context { .. } => {}
