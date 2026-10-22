@@ -1,3 +1,3 @@
 - commit 之前使用 cargo fmt 格式化代码
-- journal 日志记在必经的入口上，不散落在各个功能里：工具走 `agent/src/event.rs` 的 `note()`，后台 job 走 `pi-core/src/driver/jobs.rs` 的 `Table`，用户输入走 TUI 的 `dispatch`/`carry()`。新功能必须经过这些入口；确实要新开入口时，日志加在新入口上。`note()` 等处的 match 不加 `_ =>`，让编译器提醒新变体要不要记日志
+- journal 是会话的排查记录：只记事后排查这个会话用得上、transcript 里又没有的事。入口保证每件事至少记一条；功能内只补入口看不到的事实，不复述入口记过的，状态只在变化时记。入口有：agent 循环的事件走 `agent/src/event.rs` 的 `journal()`，后台 job 走 `pi-core/src/driver/jobs.rs` 的 `Table`，用户输入走 TUI 的 `dispatch`/`carry()`。新功能必须经过这些入口；确实要新开入口时，日志加在新入口上。`journal()` 等处的 match 不加 `_ =>`，让编译器提醒新变体要不要记日志
 - 下层不写上层的知识。写代码、注释、错误信息或工具描述时，一旦提到某样东西（按键、面板、slash 命令名、屏幕、`/jobs` 这类入口、别的 crate 的类型或常量），先看本 crate 的 `Cargo.toml` 有没有依赖它的定义者；没依赖就是隐性耦合，对方一改，这里的文字或逻辑悄悄失效，编译器抓不到。改法：用本层自己的词说（"stop the run"，不说 "press esc"）；或者把这段知识挪到知道它的那层，由上层通过参数、trait、回调注入；跨 crate 共用的数值引用同一个定义，不各抄一份。只有 ui 和 pi 可以知道 TUI

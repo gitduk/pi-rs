@@ -46,12 +46,20 @@ impl Core {
             return None;
         }
         let moved = was.moved(&resolved.prompt_files, &root);
+        // Said as it changes, not on every read.
+        let left_out = resolved.prompt_files.left_out(&root);
+        let left_out = left_out.filter(|now| was.left_out(&root).as_ref() != Some(now));
         let archive = self.archive(root, lane.agent().spec().model.clone());
         let retry = crate::core::retry(&self.config);
         let jobs = self.jobs.clone();
         self.lane_mut()
             .rearm(std::sync::Arc::new(resolved), archive, retry, jobs, |_| {});
-        (!moved.is_empty()).then(|| vec![format!("re-read — {}", moved.join(", "))])
+        let said: Vec<String> = (!moved.is_empty())
+            .then(|| format!("re-read — {}", moved.join(", ")))
+            .into_iter()
+            .chain(left_out)
+            .collect();
+        (!said.is_empty()).then_some(said)
     }
 
     /// The same, with a refusal as `Err`: why nothing was reloaded.

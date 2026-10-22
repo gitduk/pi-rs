@@ -86,6 +86,8 @@ pub struct PromptFiles {
     prompts: Vec<(PathBuf, String)>,
     instructions: Vec<(PathBuf, String)>,
     memory: Vec<(String, String)>,
+    // Memory files past the budget, by name: not in the prompt.
+    left_out: Vec<String>,
     day: String,
 }
 
@@ -109,8 +111,8 @@ impl PromptFiles {
                 Ok((path, text))
             })
             .collect::<Result<_>>()?;
-        let (instructions, memory) = if pinned.no_context_files {
-            (Vec::new(), Vec::new())
+        let (instructions, (memory, left_out)) = if pinned.no_context_files {
+            (Vec::new(), (Vec::new(), Vec::new()))
         } else {
             (
                 instructions::load(root, pi_store::dir().as_deref()).files,
@@ -125,6 +127,7 @@ impl PromptFiles {
             prompts,
             instructions,
             memory,
+            left_out,
             day: day.to_string(),
         })
     }
@@ -158,14 +161,30 @@ impl PromptFiles {
                 .chain(changed(&self.instructions, &now.instructions))
                 .map(|p| instructions::short(p, root)),
         );
-        let memory_dir = pi_store::memory::Memory::default();
-        let main = crate::core::worktree::main_root(root);
-        moved.extend(
-            changed(&self.memory, &now.memory)
-                .map(|name| instructions::short(&memory_dir.path_of(name, &main), root)),
-        );
+        moved.extend(changed(&self.memory, &now.memory).map(|name| memory_path(name, root)));
         moved
     }
+
+    /// What to tell a person of the memory past the budget, if any is: a
+    /// fact the model stops seeing would otherwise look forgotten.
+    pub fn left_out(&self, root: &Path) -> Option<String> {
+        let names: Vec<String> = self.left_out.iter().map(|n| memory_path(n, root)).collect();
+        (!names.is_empty()).then(|| {
+            format!(
+                "memory left out — over the prompt's budget: {}",
+                names.join(", ")
+            )
+        })
+    }
+}
+
+// A memory file named as a person would, from `root`.
+fn memory_path(name: &str, root: &Path) -> String {
+    let main = crate::core::worktree::main_root(root);
+    instructions::short(
+        &pi_store::memory::Memory::default().path_of(name, &main),
+        root,
+    )
 }
 
 // The files that differ between `was` and `now`, added and removed ones included.
@@ -323,13 +342,10 @@ pub fn resolve(
         .iter()
         .map(|(p, _)| instructions::short(p, root))
         .collect();
-    let memory_dir = pi_store::memory::Memory::default();
-    let main = crate::core::worktree::main_root(root);
-    let memory_files = prompt_files
-        .memory
-        .iter()
-        .map(|(name, _)| instructions::short(&memory_dir.path_of(name, &main), root))
+    let memory_files = (prompt_files.memory.iter())
+        .map(|(name, _)| memory_path(name, root))
         .collect();
+    notes.extend(prompt_files.left_out(root));
     // Appended rather than sent as a message: standing instructions don't
     // change within a run, and the system prompt is what a provider caches.
     let standing = crate::core::prompt::Standing {

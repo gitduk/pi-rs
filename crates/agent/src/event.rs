@@ -102,7 +102,7 @@ impl Voice {
     /// in one call — call this where the fact occurs, not where the event is
     /// consumed, or order drifts.
     pub(crate) fn say(&self, event: Event) {
-        note(&event);
+        journal(&event);
         self.hooks.saw(&event);
         let _ = self.tx.send(event);
     }
@@ -110,7 +110,7 @@ impl Voice {
 
 // Deltas are the exception: they are the transcript, they arrive thousands at
 // a time, and the transcript is saved beside the log already.
-fn note(event: &Event) {
+fn journal(event: &Event) {
     match event {
         Event::TextDelta(_)
         | Event::ReasoningDelta(_)

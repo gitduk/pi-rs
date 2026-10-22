@@ -16,23 +16,26 @@ use super::worktree::main_root;
 /// rest is left out rather than the prompt growing without bound.
 const BUDGET: usize = 16 * 1024;
 
-/// The memory files a run in `dir` carries, by name, within the budget.
-/// A line naming a path that is gone is marked, never dropped.
-pub fn kept(memory: &Memory, dir: &Path) -> Vec<(String, String)> {
+/// The memory files a run in `dir` carries, by name, within the budget, and
+/// the names of those past it. A line naming a path that is gone is marked,
+/// never dropped.
+pub fn kept(memory: &Memory, dir: &Path) -> (Vec<(String, String)>, Vec<String>) {
     let root = main_root(dir);
     let mut used = 0;
-    let mut kept = Vec::new();
+    let (mut kept, mut left_out) = (Vec::new(), Vec::new());
     for file in memory.files(&root) {
         if used + file.body.len() > BUDGET {
-            tracing::warn!(target: "pi::memory", file = %file.name, "over the memory budget, left out");
+            left_out.push(file.name);
             continue;
         }
         used += file.body.len();
         kept.push(file);
     }
-    kept.into_iter()
+    let kept = kept
+        .into_iter()
         .map(|f| (f.name, marked(&f.body, &root)))
-        .collect()
+        .collect();
+    (kept, left_out)
 }
 
 // Each line with the backticked paths it names that no longer exist noted

@@ -499,7 +499,6 @@ impl BarScript {
                 None
             }
             Err(why) => {
-                tracing::warn!(target: "pi::bar", %why, "bar script failed");
                 *layout = Layout::default();
                 self.due = Some(Instant::now() + RETRY);
                 let first = !std::mem::replace(&mut self.failing, true);
