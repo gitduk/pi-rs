@@ -173,7 +173,8 @@ pub fn clip(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }
-    let (mut esc, mut used, mut styled) = (None, 0, false);
+    // `end`: just past the last visible non-space, where no escape is open.
+    let (mut esc, mut used, mut styled, mut end) = (None, 0, false, 0);
     for (i, c) in one.char_indices() {
         if escaping(&mut esc, c) {
             styled = true;
@@ -181,9 +182,17 @@ pub fn clip(s: &str, max: usize) -> String {
         }
         used += cols_at(c, used);
         if used >= max {
-            let cut = one[..i].trim_end();
+            // Spaces trimmed, not the escapes after them: a style set
+            // there still has to reach its reset.
+            let mut esc = None;
+            let after: String = (one[end..i].chars())
+                .filter(|&c| escaping(&mut esc, c))
+                .collect();
             let reset = if styled { RESET } else { "" };
-            return format!("{cut}{reset}{}", icons::ELLIPSIS);
+            return format!("{}{after}{reset}{}", &one[..end], icons::ELLIPSIS);
+        }
+        if !c.is_whitespace() {
+            end = i + c.len_utf8();
         }
     }
     one
@@ -284,6 +293,8 @@ mod tests {
         assert_eq!(clip("abcdefg", 6), "abcde…");
         assert_eq!(width(&clip("中文中文中文", 5)), 5);
         assert_eq!(clip("\x1b[31mabcdefg", 6), "\x1b[31mabcde\x1b[0m…");
+        // A space an escape follows is still trailing on screen.
+        assert_eq!(clip("hi \x1b[1mXYZ", 4), "hi\x1b[1m\x1b[0m…");
     }
 
     // One tab rule for every surface: to the next stop, from where it starts.
