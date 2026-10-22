@@ -72,6 +72,44 @@ model already read, and its cached prefix would be lost. `/edit` opens a prompt
 not yet replaced on the built-in's text; saved unchanged, the file is removed,
 so the built-in goes on following pi's updates.
 
+The bar under the input line is laid out by `~/.pi/bar.rs`, a cargo script
+(`cargo +nightly -Zscript`) that reads pi's state as JSON on stdin — `model`,
+`effort`, `tier`, `running`, `root`, `worktree`, `ctx`, `spent`, `alerts`,
+`update`, `released` — and prints a layout:
+[`examples/bar.rs`](examples/bar.rs) is one to start from. Without the file,
+the bar is `tabs`, `model` and `spent` on the left, `update` and `flash` on
+the right. pi reruns it whenever its state changes, and every `refresh`
+seconds if set. A layout is `lines`, each with `left` and `right` items and
+an optional `sep` (a muted ` · ` by default). An item is a part's name;
+`{"part", "style"}` to colour one; `{"text", "style"}`, the script's own; or
+`{"group": [...]}`, items with nothing between them, gone whole when none of
+its parts has anything to say. A style is a theme name (`muted`, `heading`,
+`emphasis`, `code`, `input`, `ok`, `err`, `add`, `del`) or a style as
+`[theme]` writes one. A part with nothing to say drops out with the separator
+before it.
+
+| Part        | Shows                                                     |
+| ----------- | --------------------------------------------------------- |
+| `tabs`      | the checkouts, folded to the room the row leaves          |
+| `flash`     | the answer to the last key, for a moment                  |
+| `model`     | the model                                                 |
+| `effort`    | the thinking effort; absent while off                     |
+| `tier`      | the tool tier                                             |
+| `update`    | a release newer than this pi, or one installed under it   |
+| `spent`     | what the session has cost so far                          |
+| `cost`      | what the last run cost                                    |
+| `elapsed`   | how long the last run took                                |
+| `in_out`    | its tokens in and out                                     |
+| `speed`     | its output tokens per second                              |
+| `cache`     | how much of its input was cached                          |
+| `ctx`       | the context used, against the window                      |
+| `compacted` | how often the session was compacted                       |
+| `queued`    | lines waiting for the run to end                          |
+| `worktree`  | the worktree in front                                     |
+
+From `cost` down, the parts are the status line's, read off the run in flight
+or the one that last ended.
+
 ## Run
 
 ```bash
@@ -143,7 +181,7 @@ refused, and resuming one from another directory moves it here.
   command printed with `output`, or `stop` one. A
   `bash` or `subagent` call with `background`, or a script that detaches,
   leaves the turn free; each result comes back as a turn of its own once the
-  checkout is in front and idle. Those still out are listed above the bar,
+  checkout is in front and idle. Those still out are listed above the input line,
   a click on one shows what it printed, and `/job stop` stops one — the
   model is told before it next speaks. `/job <text>` asks the model to start
   something in the background; `/tool bash command=… background=true` starts

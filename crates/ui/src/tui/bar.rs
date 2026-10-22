@@ -1,4 +1,4 @@
-//! The bar over the input line: rows from the layout, or from the script
+//! The bar under the input line: rows from the layout, or from the script
 //! at `~/.pi/bar.rs`, which the frame never waits on.
 
 use std::path::PathBuf;
