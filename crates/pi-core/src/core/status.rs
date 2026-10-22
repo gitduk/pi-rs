@@ -62,27 +62,23 @@ impl Core {
             ]));
         }
 
-        // The last run's own count when there was one; before any, an estimate.
-        let held = lane.tally().ctx().or_else(|| {
-            let used = llm::estimate::tokens(&lane.session()?.context(), spec);
-            let agent = lane.agent();
-            Some(agent.occupancy(used, agent.window()))
-        });
-        if let Some((used, window)) = held.filter(|&(_, w)| w > 0) {
-            rows.push(Row::new([
-                "context".into(),
-                format!(
-                    "{} / {} ({}%)",
-                    figures::short(used as u64),
-                    figures::size(window as u64),
-                    used * 100 / window
-                ),
-            ]));
-        }
+        // Only the provider's count, which a compaction or a resume voids.
+        let context = match lane.tally().ctx().filter(|&(_, w)| w > 0) {
+            Some((used, window)) => format!(
+                "{} / {} ({}%)",
+                figures::short(used as u64),
+                figures::size(window as u64),
+                used * 100 / window
+            ),
+            None => "counted by the next request".to_string(),
+        };
+        rows.push(Row::new(["context".into(), context]));
         // Behind the usage line's `compacted ×N` and `↓`.
         if let Some(report) = tally.compacted() {
             let line = super::meter::compaction_line(report);
-            let line = line.strip_prefix("compacted ").unwrap_or(&line);
+            let line = line
+                .strip_prefix(&format!("compacted{}", pi_store::icons::PART_SEP))
+                .unwrap_or(&line);
             rows.push(Row::new(["compaction", line]));
         }
         if !tally.refits().is_empty() {
@@ -160,17 +156,6 @@ impl Core {
             rows.push(Row::new(["update".into(), format!("{version} available")]));
         }
         Listing::of(rows)
-    }
-
-    /// What a named lane's transcript occupies now, for the line that says why
-    /// there was nothing to compact. Zero while a run has it.
-    pub fn tokens_now_at(&self, at: usize) -> usize {
-        let Some(lane) = self.lanes.get(at) else {
-            return 0;
-        };
-        lane.session().map_or(0, |s| {
-            llm::estimate::tokens(&s.context(), lane.agent().spec())
-        })
     }
 }
 

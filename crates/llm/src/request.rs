@@ -10,6 +10,11 @@ pub struct ToolDef {
     pub input_schema: Value,
 }
 
+/// The definitions' size as JSON: measured bytes, not a token count.
+pub fn defs_bytes(tools: &[ToolDef]) -> usize {
+    serde_json::to_vec(tools).map_or(0, |v| v.len())
+}
+
 /// Whether to think, and how hard. Every transport says each level, `Off`
 /// included, in its own words. Never store a wire value here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

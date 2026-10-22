@@ -6,21 +6,18 @@ use pi_store::listing::Listing;
 
 impl Core {
     /// The front lane's system prompt and tool definitions, verbatim, each
-    /// headed by what it costs.
+    /// headed by its size.
     pub(super) fn content(&self) -> Listing {
         let brief = &self.lane().agent().brief;
         let tools = brief.registry.defs();
-        let tokens = |n: usize| llm::figures::short(n as u64);
-        let mut lines = vec![format!(
-            "── system · ~{} tokens",
-            tokens(llm::estimate::text(&brief.system))
-        )];
+        let size = |n: usize| pi_store::text::size(n as u64);
+        let mut lines = vec![format!("── system · {}", size(brief.system.len()))];
         lines.extend(brief.system.lines().map(str::to_string));
         lines.push(String::new());
         lines.push(format!(
-            "── tools · {} · ~{} tokens",
+            "── tools · {} · {}",
             tools.len(),
-            tokens(llm::estimate::tool_defs(&tools))
+            size(llm::request::defs_bytes(&tools))
         ));
         for tool in &tools {
             lines.push(String::new());

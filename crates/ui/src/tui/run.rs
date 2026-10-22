@@ -713,13 +713,9 @@ impl Tui {
                 self.ui.paint.span(&self.ui.paint.theme.muted, "stopped"),
             );
         } else if back {
-            let held = self.core.lanes[lane].agent().kept_tokens();
-            let now = self.core.tokens_now_at(lane);
             // `/compact` answered, and there was nothing to do: the answer to
             // a command, not news about the lane.
-            self.notice(format!(
-                "nothing to compact — {now} tokens, all inside the {held} kept as working context"
-            ));
+            self.notice("nothing to compact — all of it is the working context kept".to_string());
         }
         // The pass is over, so the clock stops. What it was driving — the
         // live region — already went with the turn.

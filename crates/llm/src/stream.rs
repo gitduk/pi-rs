@@ -13,6 +13,12 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// The prompt as the provider counted it. Transports report cached tokens
+    /// apart from `input`, so the prompt is all three.
+    pub fn prompt(&self) -> u64 {
+        self.input + self.cache_read + self.cache_write
+    }
+
     /// Fold another call's counters in. Every field, so a counter added to the
     /// struct without being added here is a compile error rather than a number
     /// that quietly stops accumulating.

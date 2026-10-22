@@ -379,6 +379,18 @@ pub struct Session {
     // a rewind that cuts the round it describes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     interrupted: Option<StopCause>,
+    // Not saved: a resumed transcript is measured afresh by its first request.
+    #[serde(skip)]
+    measured: Option<Measured>,
+}
+
+/// The provider's count of a transcript's last request, beside our bound on
+/// it: their ratio turns any bound into `model`'s tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Measured {
+    pub model: String,
+    pub tokens: usize,
+    pub bound: usize,
 }
 
 // Why the most recent run ended before its prompt was answered, if it did:
@@ -621,6 +633,16 @@ impl Session {
     /// The run that just ended was stopped by the user before it answered.
     pub fn note_user_stop(&mut self) {
         self.interrupted = Some(StopCause::User);
+    }
+
+    /// What the provider counted this transcript's last request at, if one
+    /// has been counted since it was loaded.
+    pub fn measured(&self) -> Option<&Measured> {
+        self.measured.as_ref()
+    }
+
+    pub fn set_measured(&mut self, m: Measured) {
+        self.measured = Some(m);
     }
 
     /// Answer every call the last answer left open with `closing`

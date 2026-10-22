@@ -28,7 +28,7 @@ pub fn render(segment: Segment, s: &Snapshot) -> Option<String> {
         // a million-token window reads as 0% for most of a session.
         Segment::Ctx => match s.ctx? {
             (_, 0) => return None,
-            // `↓`: the run resent smaller than estimated; `/status` says why.
+            // `↓`: the run resent smaller than its budget allowed; `/status` says why.
             (used, window) => format!(
                 "ctx {}/{}{}",
                 llm::figures::short(used as u64),

@@ -619,7 +619,6 @@ mod budget {
             wire: llm::meter::Metered::new(&Never, &meter),
             spec: &spec(),
             summarize: agent::compaction::SUMMARIZE,
-            overhead: 0,
         };
         let voice = agent::event::Voice::new(tx, Arc::new(agent::NoHooks));
         let fitted = compactor.compact(&mut s, run, budget, false, &voice).await;

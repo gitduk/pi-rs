@@ -60,10 +60,6 @@ impl Summarizing {
         policy: &Policy,
         focus: Option<&str>,
     ) -> Option<(Report, Usage)> {
-        let on_wire = |s: &session::Session| {
-            llm::estimate::tokens(&crate::as_sent(s.context(), run.spec), run.spec)
-        };
-        let before = on_wire(session);
         let (mut record, mut report) = ladder::plan(session, run.spec, target, policy);
         let mut spent = Usage::default();
         if !record.dropped.is_empty() {
@@ -80,10 +76,6 @@ impl Summarizing {
             return None;
         }
         session.record(record);
-        // Measured as the sender will, the new summary included, so the
-        // report reads in the same tokens as the window it is shown beside.
-        report.before = run.overhead + before;
-        report.after = run.overhead + on_wire(session);
         // Against what the plan fitted, which the images still count in.
         report.still_over = llm::estimate::tokens(&session.context(), run.spec) > budget;
         Some((report, spent))

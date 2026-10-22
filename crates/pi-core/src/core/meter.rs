@@ -26,8 +26,8 @@ pub struct Snapshot {
     pub cached: Option<u64>,
     /// In dollars. Zero is an unpriced model rather than a free run.
     pub cost: f64,
-    /// What a request occupies against the model's window, in tokens.
-    /// Compaction fires short of 100%, at the budget inside the window.
+    /// What the run's last request occupied against the model's window, as
+    /// the provider counted it; `None` until one is counted.
     pub ctx: Option<(usize, usize)>,
     /// Output tokens a second, over the time the model spent streaming them;
     /// `None` until one turn of the run has streamed anything.
@@ -102,11 +102,9 @@ impl Tally {
             agent::Event::Compacted(report) => {
                 self.compactions += 1;
                 self.compacted = Some(*report);
-                // A `/compact` sends no request, so nothing else would say
-                // the window shrank until the next turn.
-                if let Some((_, window)) = self.ctx {
-                    self.ctx = Some((report.after, window));
-                }
+                // The last count is of a transcript that is no longer there;
+                // only the next request's count says what this one occupies.
+                self.ctx = None;
             }
             agent::Event::Refit(why) => self.refits.push(why.clone()),
             agent::Event::Warning(gap) => self.gaps.push(gap.clone()),
@@ -123,7 +121,9 @@ impl Tally {
                     cost: self.pricing.cost(usage),
                 };
                 self.turn = Usage::default();
-                self.ctx = Some(*ctx);
+                if ctx.is_some() {
+                    self.ctx = *ctx;
+                }
                 self.compactions = *compactions;
             }
             _ => {}
@@ -192,10 +192,9 @@ impl Tally {
     }
 }
 
-// Over the same sums `input` and the cost are, so the three agree. Transports
-// report cached tokens apart from `input`, so the prompt is all three.
+// Over the same sums `input` and the cost are, so the three agree.
 fn cached(u: &Usage) -> Option<u64> {
-    let sent = u.input + u.cache_read + u.cache_write;
+    let sent = u.prompt();
     (sent > 0).then(|| u.cache_read * 100 / sent)
 }
 
@@ -234,11 +233,7 @@ pub fn compaction_line(r: &agent::Report) -> String {
     } else {
         String::new()
     };
-    let (before, after) = (
-        llm::figures::short(r.before as u64),
-        llm::figures::short(r.after as u64),
-    );
-    format!("compacted {before} → {after} tokens{detail}{warn}")
+    format!("compacted{detail}{warn}")
 }
 
 // Takes the three pieces rather than a config entry: the running model may
@@ -351,7 +346,7 @@ mod tests {
         t.on(&agent::Event::Done {
             turns: 2,
             usage: usage(8_400, 390),
-            ctx: (72_400, 114_000),
+            ctx: Some((72_400, 114_000)),
             compactions: 1,
         });
         let s = t.snapshot("m", None, None, 0);
@@ -380,7 +375,7 @@ mod tests {
         t.on(&agent::Event::Done {
             turns: 3,
             usage: Usage::default(),
-            ctx: (0, 0),
+            ctx: None,
             compactions: 0,
         });
         let s = t.snapshot("m", None, None, 0);

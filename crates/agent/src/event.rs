@@ -35,9 +35,8 @@ pub enum Event {
     },
     // The transcript was shrunk to fit before this turn was sent.
     Compacted(crate::compaction::ladder::Report),
-    // What the request just sent occupies — system prompt, tools and
-    // transcript — against the model's window. Ours rather than the
-    // provider's; compaction works to a budget inside this window.
+    // What the request just answered occupied — system prompt, tools and
+    // transcript — as the provider counted it, against the model's window.
     Context {
         used: usize,
         window: usize,
@@ -69,9 +68,8 @@ pub enum Event {
     Done {
         turns: usize,
         usage: Usage,
-        // What a request occupied against the model's window, in tokens,
-        // as of the run's end; measured as `Context` is.
-        ctx: (usize, usize),
+        // The run's last `Context`; `None` when the provider counted nothing.
+        ctx: Option<(usize, usize)>,
         // How many times the transcript was shrunk to fit during this run.
         compactions: usize,
     },
@@ -116,7 +114,8 @@ pub(crate) fn journal(event: &Event) {
         | Event::ReasoningDelta(_)
         | Event::Usage(_)
         | Event::Committed { .. } => {}
-        // The loop's own "sending" record carries these two already.
+        // `TurnEnd`'s count is the size; the loop's "replied" record has the
+        // bound it was converted against.
         Event::Context { .. } => {}
         // What it sums up is journaled where it happened.
         Event::ToolProgress { .. } => {}
@@ -144,8 +143,6 @@ pub(crate) fn journal(event: &Event) {
         }
         Event::Compacted(r) => tracing::info!(
             target: "pi::compact",
-            before = r.before,
-            after = r.after,
             summarized = r.summarized,
             "compacted"
         ),

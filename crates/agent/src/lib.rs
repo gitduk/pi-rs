@@ -11,7 +11,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tool::{Ctx, Registry};
 use tracing::Instrument as _;
 
-use crate::session::Session;
+use crate::session::{Measured, Session};
 
 pub mod approval;
 mod calls;
@@ -32,11 +32,12 @@ pub use hooks::{GatesOnly, Hooks, NoHooks};
 pub use retry::Retry;
 pub use seams::{Approver, Archive, Compactor, Decision, Fitted, Untouched, Working};
 
-// Headroom for framing the estimate does not model.
+// Headroom for what the last count could not see: the turn's new entries are
+// converted at the last request's ratio, not their own.
 const SAFETY_MARGIN: usize = 2_000;
 
 // How hard to squeeze after the provider says the request did not fit. Our
-// estimate was wrong by an unknown amount, so the correction is blunt.
+// conversion was wrong by an unknown amount, so the correction is blunt.
 const SQUEEZE: f64 = 0.6;
 
 // Attempts to shrink one turn before giving up on it.
@@ -168,7 +169,12 @@ impl Agent {
     ) -> Result<Usage, AgentError> {
         let voice = Voice::new(tx.clone(), self.brief.hooks.clone());
         // Tool sources are live: what they list now, not when the brief was applied.
-        tracing::info!(target: "pi::loop", overhead = self.overhead(), "run start");
+        tracing::info!(
+            target: "pi::loop",
+            system_bytes = self.brief.system.len(),
+            tools_bytes = llm::request::defs_bytes(&self.brief.registry.defs()),
+            "run start"
+        );
         let out = self.turns(session, ctx, &voice, retry).await;
         match &out {
             Ok(_) => {}
@@ -187,14 +193,16 @@ impl Agent {
     ) -> Result<Usage, AgentError> {
         let mut totals = Usage::default();
 
-        // Our token estimate is a bound, not a measurement. When the provider
-        // says otherwise, this is what carries the correction forward.
+        // The provider's count converts our bound; when a request still does
+        // not fit, this is what carries the correction forward.
         let mut scale = 1.0f64;
         // A window the provider named, which outranks whatever the spec says.
         let mut named_window: Option<usize> = None;
         // Across the whole run, not the turn: a status line that reset this
         // every turn would report "not compacted" for a run that just was.
         let mut compactions = 0usize;
+        // The provider's count of the run's latest request, against its window.
+        let mut held = None;
 
         for turn in 1.. {
             voice.say(Event::TurnStart { turn });
@@ -212,35 +220,39 @@ impl Agent {
             let mut sent;
             // The attempt that answered says how long its reply took to stream.
             let mut generating = None;
-            // Kept for the same reason the transcript is: what the status line
-            // reports as the window's state has to be the request that ran.
-            let mut budget;
-            let mut used;
+            // Kept past the retry loop: the provider's count of the request
+            // that ran is paired with that request's bound and window.
+            let mut window;
+            let mut bound;
 
             let done = loop {
-                let window = named_window.unwrap_or(self.model.spec.context_window as usize);
-                budget = ((self.budget_within(window) as f64) * scale) as usize;
+                window = named_window.unwrap_or(self.model.spec.context_window as usize);
+                let measured = self.count_of(session);
+                let budget = ((self.budget_within(window, measured) as f64) * scale) as usize;
+                // Uncounted, the request goes as it is: only a refusal says it
+                // does not fit, and the squeeze that follows fits it.
+                let fit_to = if measured.is_none() && squeezes == 0 {
+                    usize::MAX
+                } else {
+                    budget
+                };
                 let fitted = self
                     .compactor
-                    .compact(session, self.working(), budget, squeezes > 0, voice)
+                    .compact(session, self.working(), fit_to, squeezes > 0, voice)
                     .instrument(span.clone())
                     .await;
                 totals.add(&fitted.spent);
                 sent = as_sent(fitted.context, &self.model.spec);
                 if fitted.changed {
                     compactions += 1;
+                    held = None;
                 }
-                used = llm::estimate::tokens(&sent, &self.model.spec);
-                let (occupied, window) = self.occupancy(used, window);
-                voice.say(Event::Context {
-                    used: occupied,
-                    window,
-                });
+                bound = self.overhead() + llm::estimate::tokens(&sent, &self.model.spec);
                 tracing::debug!(
                     target: "pi::loop",
                     parent: &span,
                     messages = sent.len(),
-                    estimated = used,
+                    bound,
                     budget,
                     squeezes,
                     scale,
@@ -270,8 +282,9 @@ impl Agent {
                         if llm::classify(&e) == llm::Fault::Overflow && squeezes < MAX_SQUEEZE =>
                     {
                         squeezes += 1;
-                        let named = llm::fault::overflow_limit(&e)
-                            .map(|limit| (limit, self.budget_within(limit)));
+                        let named = llm::fault::overflow_limit(&e).map(|limit| {
+                            (limit, self.budget_within(limit, self.count_of(session)))
+                        });
                         match named {
                             Some((limit, refit)) if refit < budget => {
                                 // Earlier squeezes guessed against the spec's
@@ -315,18 +328,31 @@ impl Agent {
                 text: done.message.text(),
                 generating,
             });
+            let prompt = done.usage.prompt() as usize;
+            // A provider that counted nothing leaves the last count standing.
+            if prompt > 0 {
+                session.set_measured(Measured {
+                    model: self.model.spec.model.clone(),
+                    tokens: prompt,
+                    bound,
+                });
+                held = Some((prompt, window));
+                voice.say(Event::Context {
+                    used: prompt,
+                    window,
+                });
+            }
 
             // Two providers accept an oversized request instead of refusing:
             // one silently, one by truncating — both look like success.
             let window = self.model.spec.context_window as usize;
-            let silently_truncated = done.usage.input as usize > window
+            let silently_truncated = prompt > window
                 || (done.stop == llm::StopReason::MaxTokens && done.usage.output == 0);
             if silently_truncated && scale > SQUEEZE.powi(MAX_SQUEEZE as i32) {
                 scale *= SQUEEZE;
                 voice.say(Event::Refit(format!(
-                    "the provider took {} input tokens against a {window}-token window and \
-                     answered from a truncated prompt; tightening the budget",
-                    done.usage.input
+                    "the provider took {prompt} input tokens against a {window}-token window \
+                     and answered from a truncated prompt; tightening the budget"
                 )));
             }
 
@@ -346,6 +372,7 @@ impl Agent {
                 target: "pi::loop",
                 parent: &span,
                 stop = ?done.stop,
+                bound,
                 text,
                 reasoning,
                 calls = done.message.tool_calls().count(),
@@ -363,12 +390,7 @@ impl Agent {
                 voice.say(Event::Done {
                     turns: turn,
                     usage: totals,
-                    // Re-measured rather than reused: `used` is what went
-                    // out, and the reply landed in the session since.
-                    ctx: self.occupancy(
-                        llm::estimate::tokens(&session.context(), &self.model.spec),
-                        named_window.unwrap_or(self.window()),
-                    ),
+                    ctx: held,
                     compactions,
                 });
                 return Ok(totals);
@@ -410,9 +432,10 @@ impl Agent {
     /// everything but what I'm in the middle of" — and runs even when the
     /// transcript already fits, since the point is a phase ending, not a budget.
     pub async fn compact_now(&self, session: &mut Session, focus: Option<&str>) -> Option<Report> {
+        let budget = self.budget_within(self.window(), self.count_of(session));
         let report = self
             .compactor
-            .compact_now(session, self.working(), self.budget(), focus)
+            .compact_now(session, self.working(), budget, focus)
             .await;
         // No voice to say it through, so journal it as the loop's would be.
         if let Some(r) = report {
@@ -428,43 +451,43 @@ impl Agent {
             wire: self.wire(),
             spec: &self.model.spec,
             summarize: &self.brief.summarize,
-            overhead: self.overhead(),
         }
     }
 
-    /// What rides every request besides the transcript: the system prompt and
-    /// the tool schemas.
-    pub fn overhead(&self) -> usize {
+    // What rides every request besides the transcript, in the bound's units:
+    // the system prompt and the tool schemas.
+    fn overhead(&self) -> usize {
         llm::estimate::text(&self.brief.system)
             + llm::estimate::tool_defs(&self.brief.registry.defs())
     }
 
-    /// What a request carrying `transcript` tokens of it occupies, against
-    /// `window`: the system prompt and tool schemas ride every request, so
-    /// they count with the transcript — the same measure the window is in.
-    pub fn occupancy(&self, transcript: usize, window: usize) -> (usize, usize) {
-        (self.overhead() + transcript, window)
+    // The session's last count, if this model made it: another tokenizer's
+    // ratio says nothing about this one's.
+    fn count_of<'a>(&self, session: &'a Session) -> Option<&'a Measured> {
+        session
+            .measured()
+            .filter(|m| m.model == self.model.spec.model)
     }
 
-    /// The window the spec claims, before any provider has named another.
-    pub fn window(&self) -> usize {
+    // The window the spec claims, before any provider has named another.
+    fn window(&self) -> usize {
         self.model.spec.context_window as usize
     }
 
-    /// What the transcript may occupy. The reply, the system prompt and the
-    /// tool schemas all share the window with it, so each is subtracted before
-    /// the transcript gets to claim what is left.
+    /// What the transcript may occupy before any request has been counted, in
+    /// the bound's units, against the spec's window.
     pub fn budget(&self) -> usize {
-        self.budget_within(self.model.spec.context_window as usize)
+        self.budget_within(self.window(), None)
     }
 
-    // The same accounting against a window the provider named instead of the
-    // one the spec claims.
-    fn budget_within(&self, window: usize) -> usize {
-        let fixed = self.overhead() + self.reply_within(window) + SAFETY_MARGIN;
+    // In the bound's units, converted at the provider's last count; uncounted,
+    // the bound stands in for the count, which it errs above.
+    fn budget_within(&self, window: usize, measured: Option<&Measured>) -> usize {
+        let room = window.saturating_sub(self.reply_within(window) + SAFETY_MARGIN);
+        let room = measured.map_or(room, |m| room * m.bound / m.tokens.max(1));
         // Even an unworkable configuration leaves a floor: stripping the
         // transcript to nothing helps no one.
-        window.saturating_sub(fixed).max(window / 4)
+        room.saturating_sub(self.overhead()).max(room / 4)
     }
 
     // The reply's share of `window`, reserved by the budget and sent as the

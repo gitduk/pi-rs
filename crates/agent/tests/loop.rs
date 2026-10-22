@@ -540,7 +540,7 @@ struct WithSummarizer {
 impl Transport for WithSummarizer {
     async fn stream(
         &self,
-        _spec: &ModelSpec,
+        spec: &ModelSpec,
         req: &Request,
     ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
         let events = if req.tools.is_empty() {
@@ -555,10 +555,12 @@ impl Transport for WithSummarizer {
             text_turn("read a.txt twice; nothing changed on disk")
         } else {
             let i = self.next.fetch_add(1, Ordering::SeqCst);
-            self.turns
+            let turn = self
+                .turns
                 .get(i)
                 .cloned()
-                .unwrap_or_else(|| text_turn("done"))
+                .unwrap_or_else(|| text_turn("done"));
+            common::counted(turn, spec, req)
         };
         Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
     }
@@ -644,6 +646,64 @@ async fn a_summary_on_another_model_still_counts_toward_the_run() {
     );
 }
 
+// Restates what `inner` counted at `ratio` of it: a provider whose tokens run
+// smaller or larger than our bound.
+struct Scaled {
+    inner: Arc<WithSummarizer>,
+    ratio: f64,
+}
+
+#[async_trait]
+impl Transport for Scaled {
+    async fn stream(
+        &self,
+        spec: &ModelSpec,
+        req: &Request,
+    ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
+        let ratio = self.ratio;
+        let events = self.inner.stream(spec, req).await?;
+        Ok(events
+            .map(move |e| {
+                e.map(|mut e| {
+                    if let StreamEvent::Done { usage, .. } = &mut e {
+                        usage.input = (usage.input as f64 * ratio) as u64;
+                    }
+                    e
+                })
+            })
+            .boxed())
+    }
+}
+
+// The bound only says how big a request is relative to the last one; how many
+// tokens that is, and so whether to compact, is the provider's count.
+#[tokio::test]
+async fn the_providers_count_decides_when_to_compact() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "z".repeat(2_000)).unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+
+    let mut spec = spec();
+    spec.context_window = 24_000;
+    spec.max_output_tokens = 2_000;
+    for (ratio, compacts) in [(1.0, true), (0.1, false)] {
+        let wire = Arc::new(Scaled {
+            inner: Arc::new(WithSummarizer {
+                turns: (0..4).map(|i| bulky_turn(&format!("t{i}"))).collect(),
+                next: AtomicUsize::new(0),
+                summaries: AtomicUsize::new(0),
+            }),
+            ratio,
+        });
+        let mut a = tooled(wire, spec.clone());
+        common::compacting(&mut a, None);
+        let (_session, out, events) = drive(&a, &ctx, "read it repeatedly").await;
+        out.unwrap();
+        let compacted = events.iter().any(|e| matches!(e, Event::Compacted(_)));
+        assert_eq!(compacted, compacts, "counted at {ratio} of the bound");
+    }
+}
+
 #[tokio::test]
 async fn dropped_history_comes_back_as_a_summary_on_the_opening_turn() {
     let dir = tempfile::tempdir().unwrap();
@@ -706,7 +766,7 @@ async fn a_summarizer_that_fails_drops_the_history_without_failing_the_turn() {
     impl Transport for Broken {
         async fn stream(
             &self,
-            _: &ModelSpec,
+            spec: &ModelSpec,
             req: &Request,
         ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
             if req.tools.is_empty() {
@@ -718,6 +778,7 @@ async fn a_summarizer_that_fails_drops_the_history_without_failing_the_turn() {
             } else {
                 text_turn("done")
             };
+            let events = common::counted(events, spec, req);
             Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
         }
     }
@@ -1044,14 +1105,10 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
                         .any(|e| matches!(e, Event::Refit(w) if w.contains("2000-token window"))),
                     "{events:?}"
                 );
-                // Reported in the window's own measure: what it left is what
-                // the request that follows occupies.
                 assert!(
-                    events.windows(2).any(|w| matches!(
-                        w,
-                        [Event::Compacted(r), Event::Context { used, .. }]
-                            if r.after == *used && r.after < r.before
-                    )),
+                    events
+                        .iter()
+                        .any(|e| matches!(e, Event::Compacted(r) if r.after < r.before)),
                     "{events:?}"
                 );
             }
@@ -1077,9 +1134,7 @@ impl Transport for Sizes {
         spec: &ModelSpec,
         req: &Request,
     ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
-        let input = llm::estimate::tokens(&req.messages, spec)
-            + req.system_text().map_or(0, llm::estimate::text)
-            + llm::estimate::tool_defs(&req.tools);
+        let input = common::bound(req, spec);
         self.0.lock().unwrap().push((input, req.max_output_tokens));
         Ok(futures::stream::iter(text_turn("ok").into_iter().map(Ok)).boxed())
     }

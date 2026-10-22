@@ -59,9 +59,6 @@ pub struct Working<'a> {
     pub spec: &'a ModelSpec,
     /// The prompt the run's brief writes summaries under.
     pub summarize: &'a str,
-    /// Tokens every request carries besides the transcript, so a report's
-    /// sizes are in the same measure as the window.
-    pub overhead: usize,
 }
 
 /// What a transcript is shrunk by when it outgrows the window.

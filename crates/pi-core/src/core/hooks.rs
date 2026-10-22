@@ -150,10 +150,7 @@ fn watched(event: &Event) -> Option<(HookOn, Option<&str>, Value)> {
                 "generating_ms": generating.map(|d| d.as_millis() as u64),
             }),
         ),
-        Event::Compacted(r) => (
-            HookOn::Compacted,
-            json!({ "before": r.before, "after": r.after, "summarized": r.summarized }),
-        ),
+        Event::Compacted(r) => (HookOn::Compacted, json!({ "summarized": r.summarized })),
         Event::Retrying {
             attempt,
             delay_ms,
@@ -166,14 +163,14 @@ fn watched(event: &Event) -> Option<(HookOn, Option<&str>, Value)> {
         Event::Done {
             turns,
             usage: u,
-            ctx: (used, window),
+            ctx,
             compactions,
         } => (
             HookOn::RunDone,
             json!({
                 "turns": turns,
                 "usage": usage(u),
-                "context": { "used": used, "window": window },
+                "context": ctx.map(|(used, window)| json!({ "used": used, "window": window })),
                 "compactions": compactions,
             }),
         ),

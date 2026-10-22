@@ -5,6 +5,8 @@
 //! struct here rather than drifting apart across files.
 
 use llm::model::{CacheControl, Format, ModelSpec, Pricing};
+use llm::request::Request;
+use llm::stream::StreamEvent;
 use llm::transport::Transport;
 use std::sync::Arc;
 
@@ -39,4 +41,25 @@ pub fn spec() -> ModelSpec {
             ..Default::default()
         },
     }
+}
+
+/// Our bound on the whole request: system prompt, tools and messages.
+#[allow(dead_code)] // not every test binary that includes this module bounds
+pub fn bound(req: &Request, spec: &ModelSpec) -> usize {
+    req.system_text().map_or(0, llm::estimate::text)
+        + llm::estimate::tool_defs(&req.tools)
+        + llm::estimate::tokens(&req.messages, spec)
+}
+
+/// A reply as a provider whose tokenizer is our bound would send it: the
+/// request's size stated on `Done`, as a real wire reports what it took in.
+#[allow(dead_code)] // not every test binary that includes this module counts
+pub fn counted(mut events: Vec<StreamEvent>, spec: &ModelSpec, req: &Request) -> Vec<StreamEvent> {
+    let prompt = bound(req, spec);
+    for e in &mut events {
+        if let StreamEvent::Done { usage, .. } = e {
+            usage.input = prompt as u64;
+        }
+    }
+    events
 }

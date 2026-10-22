@@ -688,7 +688,7 @@ mod tests {
         assert_eq!(u.cache_write, 300);
         assert_eq!(u.input, 100);
         assert_eq!(
-            u.input + u.cache_read + u.cache_write,
+            u.prompt(),
             1_000,
             "the three parts must add back to input_tokens"
         );
