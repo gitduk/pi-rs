@@ -29,7 +29,7 @@ pub(super) fn parse(text: &str) -> Vec<(String, String)> {
             let (key, value) = line.split_once('=')?;
             let key = key.trim();
             let value = value.trim();
-            let value = [b'"', b'\'']
+            let value = b"\"'"
                 .iter()
                 .find_map(|q| {
                     let q = *q as char;

@@ -773,8 +773,8 @@ impl Core {
             }
             _ => from.join(dir),
         };
-        let settings = Settings::load(self.pinned.config.as_deref(), &target).map_err(&failed)?;
-        let config = settings.config().map_err(&failed)?;
+        let settings = Settings::load(self.pinned.config.as_deref(), &target).map_err(failed)?;
+        let config = settings.config().map_err(failed)?;
         let ws = tool::Workspace::new(&target)
             .and_then(|ws| ws.with_write_roots(&config.writable()))
             .map_err(|e| failed(anyhow::anyhow!("{}: {e}", target.display())))?;
@@ -790,7 +790,7 @@ impl Core {
         };
         // Filed under the root it was written in before anything moves.
         if !empty {
-            self.save().map_err(&failed)?;
+            self.save().map_err(failed)?;
         }
 
         let worktree = crate::core::worktree::list(&to).ok().and_then(|trees| {
