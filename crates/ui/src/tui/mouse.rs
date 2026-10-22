@@ -39,7 +39,7 @@ impl Ui {
         let Some(Target::Scrollback(idx, line)) = self.row_targets.get(at) else {
             return 0;
         };
-        let width = self.screen.usable();
+        let width = self.screen.width();
         view.surface
             .scrollback
             .get(*idx)
@@ -49,8 +49,8 @@ impl Ui {
 
     // What row of the job list is at screen row `row`.
     fn job_row_at(&self, row: u16) -> Option<super::call::JobRow> {
-        let bar = self.regions.bar;
-        let at = row.checked_sub(bar.y).filter(|r| *r < bar.height)? as usize;
+        let jobs = self.regions.jobs;
+        let at = row.checked_sub(jobs.y).filter(|r| *r < jobs.height)? as usize;
         self.job_rows.get(at).copied()
     }
 
@@ -67,13 +67,13 @@ impl Ui {
         }
     }
 
-    // The job whose row of the bar is at screen row `row`.
+    // The job whose row of the list is at screen row `row`.
     pub(super) fn job_at(&self, row: u16) -> Option<u64> {
         let Some(super::call::JobRow::Job(id)) = self.job_row_at(row) else {
             return None;
         };
         let job = self.jobs.iter().find(|job| job.id == id)?;
-        let opens = super::call::job_opens(job, self.screen.usable());
+        let opens = super::call::job_opens(job, self.screen.width());
         (self.job_open == Some(id) || opens).then_some(id)
     }
 
@@ -114,7 +114,7 @@ impl Ui {
             .row_of
             .get(row.checked_sub(self.regions.history.y)? as usize)?;
         let row = view.surface.scrollback.get(idx)?;
-        let width = self.screen.usable();
+        let width = self.screen.width();
         let clicked = line;
         let line = row.click_line(line, width)?;
         // A labelled block answers on its label; the rest is text to select.
@@ -178,7 +178,7 @@ impl Ui {
                 None => {}
             },
             _ => {
-                let width = self.screen.usable();
+                let width = self.screen.width();
                 let hit = self.hovered_row(view, col, row);
                 if let Some((idx, code)) =
                     hit.and_then(|(idx, _)| Some((idx, view.surface.scrollback.get(idx)?.code()?)))
@@ -215,28 +215,30 @@ impl Ui {
         }
     }
 
-    // The cell under the pointer, if it is over the transcript or the bar:
-    // the bar's rows count on from the history's full height.
+    // The cell under the pointer, if it is over a row text is selected in.
     fn point(&self, col: u16, row: u16) -> Option<Point> {
         if self.over_menu(row) {
             return None;
         }
-        let (h, b) = (self.regions.history, self.regions.bar);
-        let row = match row.checked_sub(h.y).filter(|r| *r < h.height) {
-            Some(r) => r,
-            None => h.height + row.checked_sub(b.y).filter(|r| *r < b.height)?,
-        };
-        Some(Point {
-            row: row as usize,
-            col: col.saturating_sub(h.x) as usize,
-        })
+        let mut before = 0;
+        for r in self.regions.readable() {
+            if (r.y..r.bottom()).contains(&row) {
+                return Some(Point {
+                    row: (before + row - r.y) as usize,
+                    col: col.saturating_sub(r.x) as usize,
+                });
+            }
+            before += r.height;
+        }
+        None
     }
 
     pub(super) fn on_press(&mut self, view: &mut View, col: u16, row: u16) {
         self.selection = None;
         // Only transcript rows hold text to select; the pending-calls toggle
         // and the like answer the press itself, as they always did.
-        let in_bar = (self.regions.bar.y..self.regions.bar.bottom()).contains(&row);
+        let [_, jobs, bar] = self.regions.readable();
+        let in_bar = [jobs, bar].iter().any(|r| (r.y..r.bottom()).contains(&row));
         let at = self.point(col, row).filter(|_| {
             in_bar
                 || matches!(
@@ -282,20 +284,12 @@ impl Ui {
     }
 
     pub(super) fn on_drag(&mut self, col: u16, row: u16) {
-        let (h, b) = (self.regions.history, self.regions.bar);
-        // Past the edge the drag holds at the edge row; between the two, at
-        // the history's last.
-        let last = if b.height > 0 {
-            b.bottom() - 1
-        } else {
-            h.bottom().saturating_sub(1)
-        };
-        let row = row.clamp(h.y, last);
-        let row = if row >= h.bottom() && row < b.y {
-            h.bottom().saturating_sub(1)
-        } else {
-            row
-        };
+        // Past the edge the drag holds at the edge row; between two stretches,
+        // at the last row of the one above.
+        let row = (self.regions.readable().iter())
+            .rev()
+            .find(|r| r.height > 0 && r.y <= row)
+            .map_or(self.regions.history.y, |r| row.min(r.bottom() - 1));
         let (Some(head), Some(press)) = (self.point(col, row), self.press.as_mut()) else {
             return;
         };
@@ -338,7 +332,7 @@ impl Ui {
     // The stretch under `at` that reads as one — code, a link — and its
     // text, found in the line it belongs to however that wrapped.
     pub(super) fn unit_selection(&self, view: &View, at: Point) -> Option<(Selection, String)> {
-        let width = self.screen.usable();
+        let width = self.screen.width();
         let (line, border, units) = match self.row_targets.get(at.row)? {
             Target::Scrollback(idx, i) => {
                 let row = view.surface.scrollback.get(*idx)?;
@@ -442,7 +436,7 @@ impl Ui {
         let Some(sel) = self.selection else {
             return;
         };
-        let width = self.screen.usable();
+        let width = self.screen.width();
         let rows: Vec<Drawn> = (self.drawn.iter().enumerate())
             .map(|(at, text)| Drawn {
                 text: text.clone(),
@@ -494,6 +488,8 @@ pub(super) enum Target {
     Live(usize),
     // Line `n` of the text the reading page shows.
     Text(usize),
+    // Neither: the room over a page's output, and the rule parting the two.
+    Gap,
 }
 
 // The frame's four regions, laid out once and drawn by name. The only place
@@ -508,10 +504,12 @@ pub(super) struct Regions {
     pub(super) rule: Rect,
     // The completion list.
     pub(super) menu: Rect,
-    // The bar: the checkouts, or the flash that took its row.
-    pub(super) bar: Rect,
-    // The input line, pinned to the bottom.
+    // The background jobs, over the input line.
+    pub(super) jobs: Rect,
+    // The input line, between the conversation and the bar.
     pub(super) editor: Rect,
+    // The bar: the checkouts, or the flash that took its row; the bottom.
+    pub(super) bar: Rect,
 }
 
 // `code` to the clipboard, and what the screen says of it.
@@ -540,24 +538,27 @@ pub(super) fn at_row_name(path: &str, dir: bool) -> String {
 pub(super) const HISTORY_GAP: u16 = 1;
 
 impl Regions {
-    /// The rows each part asks for, as many as `area` holds: input last, so
-    /// the caret sits on the bottom row and the bar reads as history's edge.
-    pub(super) fn layout(area: Rect, menu: usize, bar: usize, editor: usize) -> Self {
-        // A short screen takes from the editor, then the bar; a row of
-        // history and a row to type on stay.
+    /// The rows each part asks for, as many as `area` holds: the input line
+    /// parts the conversation, jobs and all, from the bar under it.
+    pub(super) fn layout(area: Rect, menu: usize, jobs: usize, bar: usize, editor: usize) -> Self {
+        // A short screen takes from the editor, then the jobs, then the bar;
+        // a row of history and a row to type on stay.
         let mut left = (area.height as usize).saturating_sub(1 + HISTORY_GAP as usize);
         let bar = bar.min(left.saturating_sub(1));
         left -= bar;
+        let jobs = jobs.min(left.saturating_sub(1));
+        left -= jobs;
         let editor = editor.min(left);
         left -= editor;
         let chunks = Layout::vertical([
             Constraint::Fill(1),
             Constraint::Length(HISTORY_GAP),
-            Constraint::Length(bar as u16),
+            Constraint::Length(jobs as u16),
             Constraint::Length(editor as u16),
+            Constraint::Length(bar as u16),
         ])
         .split(area);
-        // The list lies over the rows above the bar, as a command's output
+        // The list lies over the rows above the jobs, as a command's output
         // does: nothing under it moves as it grows and shrinks. Half at most,
         // so what it moves the view to stays in sight.
         let menu = menu.min(left.div_ceil(2)) as u16;
@@ -579,8 +580,15 @@ impl Regions {
             gap: chunks[1],
             rule,
             menu,
-            bar: chunks[2],
+            jobs: chunks[2],
             editor: chunks[3],
+            bar: chunks[4],
         }
+    }
+
+    // The rows text is selected in, top to bottom, each numbered on from
+    // the one before.
+    pub(super) fn readable(&self) -> [Rect; 3] {
+        [self.history, self.jobs, self.bar]
     }
 }

@@ -1,5 +1,5 @@
 //! A string found on a page, or on the transcript with no page up: `/`
-//! types it on the bottom row, each key
+//! types it on the input line's row, each key
 //! bringing up the first match from where the view stood, and `n` / `N`
 //! step through the matches once it is in. The keys only ask; the frame
 //! answers, the one place that holds every row a page shows. Matches are
@@ -29,11 +29,12 @@ pub(super) enum Spot {
 }
 
 impl Spot {
-    pub(super) fn of(target: Target) -> Self {
+    pub(super) fn of(target: Target) -> Option<Self> {
         match target {
-            Target::Scrollback(idx, line) => Spot::Row(idx, line),
-            Target::Text(n) => Spot::Text(n),
-            Target::PendingTools(i) | Target::Live(i) => Spot::Live(i),
+            Target::Scrollback(idx, line) => Some(Spot::Row(idx, line)),
+            Target::Text(n) => Some(Spot::Text(n)),
+            Target::PendingTools(i) | Target::Live(i) => Some(Spot::Live(i)),
+            Target::Gap => None,
         }
     }
 }
@@ -181,12 +182,12 @@ impl Ui {
 
     fn place_at(&self, n: usize) -> Option<Place> {
         Some(Place {
-            spot: Spot::of(*self.row_targets.get(n)?),
+            spot: Spot::of(*self.row_targets.get(n)?)?,
             row: *self.row_of.get(n)?,
         })
     }
 
-    // A search on what is up, its prompt on the bottom row.
+    // A search on what is up, its prompt on the input line's row.
     pub(super) fn search_open(&mut self, view: &mut View) {
         let top = self.top_place();
         // Held on a hit at the bottom is not following the newest rows.

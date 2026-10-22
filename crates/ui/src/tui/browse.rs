@@ -86,7 +86,7 @@ impl Ui {
     /// nothing, since dismissing an empty overlay is worse than silence.
     pub(super) fn open_slash(&mut self, content: Listing) {
         if !content.is_empty() {
-            let lines = super::slash::lines(&content, self.screen.usable(), &self.paint);
+            let lines = super::slash::lines(&content, self.screen.width(), &self.paint);
             // From its first line: the draw stops `TOP` at the output's head.
             self.open_page(Page::Slash(lines), super::screen::TOP);
         } else if matches!(self.page(), Some(Page::Slash(_))) {

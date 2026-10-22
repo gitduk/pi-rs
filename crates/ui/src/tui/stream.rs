@@ -228,7 +228,7 @@ impl Ui {
             }
             _ => {
                 self.close(view);
-                if let Some(said) = render::describe(&event, &self.paint, self.screen.usable()) {
+                if let Some(said) = render::describe(&event, &self.paint, self.screen.width()) {
                     view.surface
                         .scrollback
                         .extend(said.into_iter().map(Row::notice));
@@ -291,7 +291,7 @@ impl Ui {
     // Folds freshly committed entries through `f_entry`, retiring the
     // pending live-region lines they supersede — checked for drift.
     pub(super) fn adopt(&self, view: &mut View, entries: &[LogEntry]) {
-        let width = self.screen.usable();
+        let width = self.screen.width();
         for entry in entries {
             if view.surface.tail.is_some_and(|t| entry.id() <= t) {
                 continue;

@@ -171,12 +171,6 @@ fn line_of(cells: &[Cell]) -> Line<'static> {
     Line::from(spans)
 }
 
-/// One short of real width: terminals disagree on whether the last
-/// cell already wrapped, so this keeps every row a hard break.
-pub fn usable(width: u16) -> usize {
-    width.saturating_sub(1).max(1) as usize
-}
-
 /// One view line: how many screen rows it takes at its sized width,
 /// and the text — asked for only by the lines the window actually shows.
 pub trait Piece {
@@ -392,7 +386,7 @@ pub struct Rows<'a>(pub &'a [Line<'a>]);
 
 impl Widget for Rows<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let width = usable(area.width);
+        let width = area.width.max(1) as usize;
         let mut y = area.y;
         for line in self.0 {
             if y >= area.y + area.height {
@@ -517,8 +511,9 @@ impl Screen {
         }
     }
 
-    pub fn usable(&self) -> usize {
-        usable(self.width)
+    /// Columns a row is laid out in: the whole width.
+    pub fn width(&self) -> usize {
+        self.width.max(1) as usize
     }
 
     /// The whole screen at the size last reported.

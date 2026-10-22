@@ -344,9 +344,9 @@ fn a_failing_call_never_joins_the_row() {
 // keeps it, as the rebuild does.
 #[test]
 fn a_failing_call_keeps_where_it_ran() {
-    // One column wider than the rows are read at: the screen's usable width,
-    // so the drift check paints the row at the width it is read back at.
-    let mut ui = test_ui(81, 24);
+    // The rows are read at the screen's width, so the drift check paints the
+    // row at the width it is read back at.
+    let mut ui = test_ui(80, 24);
     let (_dir, mut lane) = a_running_lane();
     let mut view = View::default();
     ui.on_event(

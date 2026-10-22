@@ -133,7 +133,7 @@ pub(super) struct Ui {
     // with a count; a click flips it. Outlives the calls themselves.
     pub(super) live_tools_shown: bool,
     // The front checkout's jobs running or with something to deliver,
-    // drawn over the bar.
+    // drawn over the input line.
     pub(super) jobs: Vec<pi_core::driver::jobs::Job>,
     // Every job of the front checkout, kept ones too, for `/job` to complete.
     pub(super) every_job: Vec<pi_core::driver::jobs::Job>,

@@ -449,7 +449,15 @@ impl Editor {
             }
             used += w;
         }
-        let caret = caret.unwrap_or((rows.len() as u16, (prompt_w + used) as u16));
+        let caret = match caret {
+            Some(caret) => caret,
+            // Past a full row the caret has no column left: it starts the next.
+            None if used >= avail => {
+                rows.push(std::mem::take(&mut row));
+                (rows.len() as u16, prompt_w as u16)
+            }
+            None => (rows.len() as u16, (prompt_w + used) as u16),
+        };
         rows.push(row);
 
         let painted = rows
@@ -711,8 +719,8 @@ mod tests {
         // Width 6 leaves 4 columns after the sigil, as in the plain case;
         // the bang does not eat a column of the body.
         let (rows, caret) = e.view(&paint(), 6);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(caret, (1, 6));
+        assert_eq!(rows.len(), 3);
+        assert_eq!(caret, (2, 2));
     }
 
     #[test]
@@ -743,8 +751,12 @@ mod tests {
         let mut e = typed("abcdefgh");
         // Width 6 leaves 4 columns after the sigil.
         let (rows, caret) = e.view(&paint(), 6);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(caret, (1, 6), "the caret is past the end of the second row");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            caret,
+            (2, 2),
+            "past a full second row, the caret starts a third"
+        );
         e.home();
         assert_eq!(
             e.view(&paint(), 6).1,
