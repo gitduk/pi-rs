@@ -99,6 +99,8 @@ pub(crate) enum Deed {
     Unsend,
     // A job's row clicked: what it said that is not back yet, on a page.
     Job(u64),
+    // Drop the asides: the rows only drawn, never filed.
+    Tidy,
 }
 
 impl Deed {
@@ -110,6 +112,15 @@ impl Deed {
                 Fate::Refused("rewinding needs the transcript this run is writing — esc first")
             }
             _ => Fate::Now,
+        }
+    }
+
+    // Whether the journal keeps it. Clearing the screen is a press made in
+    // passing — the same key clears the line — and explains nothing later.
+    fn journaled(&self) -> bool {
+        match self {
+            Deed::Nothing | Deed::Tidy => false,
+            Deed::External | Deed::Rewind | Deed::Interrupt | Deed::Unsend | Deed::Job(_) => true,
         }
     }
 }
@@ -446,7 +457,7 @@ impl Tui {
     // Deeds the screen keeps for itself: only the surface can move the
     // screen, keyboard, and process, and knows which lane is in front.
     async fn carry(&mut self, deed: Deed) {
-        if deed != Deed::Nothing {
+        if deed.journaled() {
             tracing::info!(target: "pi::session", deed = ?deed, "deed");
         }
         match deed {
@@ -458,6 +469,7 @@ impl Tui {
             Deed::Job(id) => {
                 self.ui.job_open = (self.ui.job_open != Some(id)).then_some(id);
             }
+            Deed::Tidy => self.ui.tidy(front_view(&mut self.views, self.core.lane())),
         }
     }
 
@@ -803,7 +815,7 @@ impl Tui {
                             self.notice(line);
                             let lane = self.core.lane_mut();
                             let view = front_view(&mut self.views, lane);
-                            self.ui.file_note(lane, view, &note);
+                            self.ui.say_note(lane, view, &note);
                         }
                         Said::Transcript(line) => self
                             .ui

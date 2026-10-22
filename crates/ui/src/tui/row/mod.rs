@@ -100,6 +100,8 @@ enum Kind {
     Notice {
         text: Line<'static>,
         times: usize,
+        // Drawn only, never filed: what a tidy takes.
+        aside: bool,
     },
     // A line of a note: the mark (first line) or its blank width as the
     // lead, so a wrap hangs under the text, not the mark.
@@ -177,7 +179,21 @@ impl Row {
         Self::new(Kind::Notice {
             text: line.into(),
             times: 1,
+            aside: false,
         })
+    }
+
+    /// A notice the transcript never gets: gone with a tidy, or a rebuild.
+    pub fn aside(line: impl Into<Line<'static>>) -> Self {
+        Self::new(Kind::Notice {
+            text: line.into(),
+            times: 1,
+            aside: true,
+        })
+    }
+
+    pub fn is_aside(&self) -> bool {
+        matches!(self.0, Kind::Notice { aside: true, .. })
     }
 
     /// Painted lines kept as one row: replaced whole, they leave the rows
@@ -239,7 +255,12 @@ impl Row {
     /// any other kind never folds.
     pub fn repeated(&mut self, line: &Line<'_>) -> bool {
         match &mut self.0 {
-            Kind::Notice { text, times } if *text == *line => {
+            // Only onto an aside: a count on a filed row would outlive a tidy.
+            Kind::Notice {
+                text,
+                times,
+                aside: true,
+            } if *text == *line => {
                 *times += 1;
                 self.1.clear();
                 true
@@ -610,8 +631,8 @@ impl Row {
             Kind::NoteLine { lead, body } => (body.clone(), Some(lead.clone())),
             Kind::Code(c) => (c.line(paint), None),
             Kind::Block(b) => (b.line(paint, width), None),
-            Kind::Notice { text, times } if *times == 1 => (text.clone(), None),
-            Kind::Notice { text, times } => {
+            Kind::Notice { text, times, .. } if *times == 1 => (text.clone(), None),
+            Kind::Notice { text, times, .. } => {
                 // The count wears the muted style whatever the line it trails,
                 // so a repeated warning still reads as one warning.
                 let mut spans = super::screen::spans_of(text);

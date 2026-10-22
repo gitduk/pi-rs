@@ -287,15 +287,14 @@ async fn a_filed_row_moves_the_cursor_an_adopt_goes_by() {
     let drawn = view.surface.scrollback.len();
 
     // The surface lane is running: the transcript is out with the run.
-    tui.ui
-        .file_screen(lane, view, "! the reply came back short");
+    tui.ui.say_kept(lane, view, "! the reply came back short");
     assert_eq!(view.surface.scrollback.len(), drawn + 1, "drawn now");
     assert_eq!(view.surface.tail, None, "with nothing filed to move past");
     assert_eq!(lane.held(), 1, "it is waiting with the lane");
 
     // The run comes home, and the next row can be filed as it is drawn.
     lane.return_session(agent::session::Session::default());
-    tui.ui.file_screen(lane, view, "! settled");
+    tui.ui.say_kept(lane, view, "! settled");
     assert_eq!(
         view.surface.tail,
         lane.session()

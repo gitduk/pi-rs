@@ -23,6 +23,13 @@ impl Scrollback {
     pub(super) fn push(&mut self, row: Row) {
         self.0.push(row);
     }
+
+    // Drops the asides, saying whether there were any.
+    pub(super) fn tidy(&mut self) -> bool {
+        let was = self.0.len();
+        self.0.retain(|r| !r.is_aside());
+        self.0.len() != was
+    }
 }
 
 impl std::ops::Deref for Scrollback {

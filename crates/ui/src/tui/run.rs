@@ -285,7 +285,7 @@ impl Tui {
         };
         let lane = &mut self.core.lanes[at];
         let view = super::view::opened(&mut self.views, lane, &self.ui.paint);
-        self.ui.file_note(lane, view, &note);
+        self.ui.say_note(lane, view, &note);
     }
 
     // Asks an MCP server for a prompt's text off the loop: a slow server

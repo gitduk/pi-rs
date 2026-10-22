@@ -267,6 +267,18 @@ impl Ui {
                     Asked::Own(Deed::Nothing)
                 };
             }
+            // What only the screen holds goes before the line: a notice
+            // landing mid-sentence must not cost the sentence.
+            Some(Action::LineClear)
+                if view
+                    .surface
+                    .scrollback
+                    .iter()
+                    .any(super::row::Row::is_aside) =>
+            {
+                self.disarm();
+                return Asked::Own(Deed::Tidy);
+            }
             Some(Action::LineClear) => {
                 if !self.editor.is_empty() {
                     self.editor.clear();

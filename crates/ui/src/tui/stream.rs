@@ -19,7 +19,7 @@ impl Ui {
     pub(super) fn say(&mut self, view: &mut View, line: impl Into<String>) {
         let text = line.into();
         if text.is_empty() {
-            view.surface.scrollback.push(Row::notice(String::new()));
+            view.surface.scrollback.push(Row::aside(String::new()));
             return;
         }
         for text_line in text.lines().map(str::to_string) {
@@ -43,7 +43,7 @@ impl Ui {
         {
             return;
         }
-        view.surface.scrollback.push(Row::notice(line));
+        view.surface.scrollback.push(Row::aside(line));
     }
 
     // A short answer nobody reads back, for the bar row: no scrollback
@@ -148,17 +148,17 @@ impl Ui {
                 // A run whose segments all had nothing to say leaves no row.
                 let parts = status::parts(&self.status, &snap);
                 if !parts.is_empty() {
-                    // Filed, not just drawn: nothing else holds these numbers,
-                    // so a rebuild could not draw an unfiled row.
+                    // Kept, not just said: nothing else holds these numbers,
+                    // so a rebuild could not draw an aside.
                     let line = parts.join(icons::PART_SEP);
-                    self.file_screen(lane, view, &line);
+                    self.say_kept(lane, view, &line);
                 }
             }
             // What the endpoint left out of the reply just streamed: filed under
             // it, since it is about that reply and stays true of it.
             Event::Warning(w) => {
                 self.close(view);
-                self.file_screen(lane, view, w);
+                self.say_kept(lane, view, w);
             }
             // State, not rows: the usage line marks it, `/status` says why.
             Event::Refit(_) => {}
@@ -167,7 +167,7 @@ impl Ui {
             Event::Compacted(r) => {
                 self.close(view);
                 let line = pi_core::core::meter::compaction_line(r);
-                self.file_screen(lane, view, &line);
+                self.say_kept(lane, view, &line);
             }
             // A call's two events are one line here: start takes a place in
             // the group or live region; end settles it, matched back by id.
@@ -256,22 +256,22 @@ impl Ui {
             .fold_previous(&mut view.surface.scrollback);
     }
 
-    // Files this lane's row and draws it now, so a rebuild draws the same
-    // thing; moves the tail cursor here so a later adopt won't redraw it.
-    pub(super) fn file_screen(&self, lane: &mut Lane, view: &mut View, line: &str) {
-        let filed = lane.push_screen(line);
-        self.draw_filed(view, Row::notice_lines(line, &self.paint), filed);
+    // `say`, kept in the transcript (an `Entry::Screen`) so a rebuild draws
+    // it too; the tail moves here so a later adopt won't draw it twice.
+    pub(super) fn say_kept(&self, lane: &mut Lane, view: &mut View, line: &str) {
+        let kept = lane.push_screen(line);
+        self.draw_kept(view, Row::notice_lines(line, &self.paint), kept);
     }
 
-    // `file_screen` for a note the model reads as well.
-    pub(super) fn file_note(&self, lane: &mut Lane, view: &mut View, line: &str) {
-        let filed = lane.push_note(line);
-        self.draw_filed(view, Row::note_lines(line, &self.paint), filed);
+    // `say_kept` as a note, which the model reads before it next speaks.
+    pub(super) fn say_note(&self, lane: &mut Lane, view: &mut View, line: &str) {
+        let kept = lane.push_note(line);
+        self.draw_kept(view, Row::note_lines(line, &self.paint), kept);
     }
 
-    fn draw_filed(&self, view: &mut View, rows: Vec<Row>, filed: Option<agent::session::EntryId>) {
+    fn draw_kept(&self, view: &mut View, rows: Vec<Row>, kept: Option<agent::session::EntryId>) {
         view.surface.scrollback.extend(rows);
-        if let Some(id) = filed {
+        if let Some(id) = kept {
             view.surface.tail = Some(id);
         }
     }
@@ -347,7 +347,21 @@ impl Ui {
         let folded = view.surface.folds.folded;
         view.surface = Surface::from(session, &self.paint, folded, root);
         view.drawn = true;
-        // A page held to a transcript row: those rows are new ones now.
+        self.rows_moved();
+    }
+
+    // The asides gone from the screen, the line left as typed.
+    pub(super) fn tidy(&mut self, view: &mut View) {
+        if view.surface.scrollback.tidy() {
+            view.surface.top = None;
+            view.surface.scroll = 0;
+            self.rows_moved();
+        }
+    }
+
+    // What holds a row by its index lets go: the rows are new ones now.
+    fn rows_moved(&mut self) {
+        // A page held to a transcript row.
         if let Some(read) = &mut self.read
             && read.top.is_some_and(|a| !matches!(a.spot, Spot::Text(_)))
         {
