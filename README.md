@@ -218,7 +218,8 @@ taking the rest.
 stdin. Around a tool call they are gates: on `tool.before`, exit 0 lets the
 call run and exit 2 refuses it with what the hook printed, and a hook that
 fails or hangs refuses it too; on `tool.after`, what it printed joins the
-result. The other events — `tool.denied`, `turn.start`, `turn.end` (with the
+result. `run.start` is waited on before the run's first request, and what it
+prints on exit 0 is a note to the model. The other events — `tool.denied`, `turn.start`, `turn.end` (with the
 reply's text), `compacted`, `retrying`, `warning`, `run.done` — are only
 watched: queued off the run, one at a time, nothing they print reaching it. A
 subagent's calls pass the same gates, but its events stay its own.

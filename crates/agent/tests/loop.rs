@@ -159,6 +159,42 @@ fn tool_results(msgs: &[Message]) -> Vec<&llm::message::ToolResult> {
         .collect()
 }
 
+struct Ahead;
+
+#[async_trait]
+impl agent::Hooks for Ahead {
+    async fn ahead(&self, _ctx: &Ctx) -> Option<String> {
+        Some("ran ls".into())
+    }
+}
+
+#[tokio::test]
+async fn what_a_hook_says_ahead_reaches_the_first_request() {
+    let (_d, mut a, ctx) = harness(vec![text_turn("ok")]);
+    brief(&mut a).hooks = Arc::new(Ahead);
+    let (session, out, events) = drive(&a, &ctx, "go").await;
+    out.unwrap();
+
+    let noted = |m: &Message| {
+        matches!(m, Message::User { content }
+        if content.iter().any(|c| matches!(c, UserContent::Text(t) if t.text == "ran ls")))
+    };
+    assert!(
+        session.context().iter().any(noted),
+        "{:?}",
+        session.context()
+    );
+    let drawn = events
+        .iter()
+        .position(|e| matches!(e, Event::Committed { .. }));
+    let drawn = drawn.expect("the note is committed");
+    let asked = events
+        .iter()
+        .position(|e| matches!(e, Event::TurnStart { .. }));
+    let asked = asked.expect("a turn ran");
+    assert!(drawn < asked, "said before the first turn: {events:?}");
+}
+
 #[tokio::test]
 async fn every_call_gets_a_result_even_when_nothing_runs() {
     let (_d, a, ctx) = harness(vec![

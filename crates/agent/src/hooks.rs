@@ -1,5 +1,6 @@
 //! What runs around each tool call — before it, a chance to refuse it; after
-//! it, a note added to its result — and what watches every event a run says.
+//! it, a note added to its result — what a run is told as it starts, and
+//! what watches every event a run says.
 
 use std::sync::Arc;
 
@@ -24,6 +25,11 @@ pub trait Hooks: Send + Sync {
         _out: &ToolOutput,
         _ctx: &Ctx,
     ) -> Option<String> {
+        None
+    }
+
+    /// A note for the model, filed before the run's first request.
+    async fn ahead(&self, _ctx: &Ctx) -> Option<String> {
         None
     }
 

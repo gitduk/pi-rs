@@ -148,7 +148,9 @@ max_output_tokens = 128_000
 # {"tool", "args", "workspace"} ("result" too, after): before a call, exit 0
 # lets it run and exit 2 refuses it with what the hook printed; any other exit,
 # or no answer in 30s, refuses it as a broken hook. After one, what it printed
-# is added to the result. Every other event is only watched: {"event",
+# is added to the result. `run.start` is waited on before a run's first
+# request, given {"event", "workspace"}; what it prints on exit 0 is a note to
+# the model, so print only what is new. Every other event is only watched: {"event",
 # "workspace", …its fields}, queued and run one at a time, only a failure
 # journaled, never seen by the run. Those events are tool.denied, turn.start,
 # turn.end (the reply's text with it), compacted, retrying, warning and
@@ -161,6 +163,10 @@ max_output_tokens = 128_000
 # [[hooks]]
 # on      = ["run.done"]
 # command = "notify-send pi 'run done'"
+#
+# [[hooks]]
+# on      = ["run.start"]
+# command = "~/.pi/hooks/recent-commands.sh"
 
 # MCP servers, each one's tools offered as `<name>__<tool>`. A value that is
 # `$NAME` reads pi's environment.

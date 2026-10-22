@@ -175,6 +175,12 @@ impl Agent {
             tools_bytes = llm::request::defs_bytes(&self.brief.registry.defs()),
             "run start"
         );
+        if let Some(note) = self.brief.hooks.ahead(ctx).await {
+            let id = session.push_note(note);
+            voice.say(Event::Committed {
+                entries: session.entries_for(&[id]).into_iter().cloned().collect(),
+            });
+        }
         let out = self.turns(session, ctx, &voice, retry).await;
         match &out {
             Ok(_) => {}

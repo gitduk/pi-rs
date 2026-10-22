@@ -1,8 +1,9 @@
 //! `[[hooks]]`: shell commands run on what a run does, each handed the event
 //! as JSON on stdin. Around a tool call they are gates: before one, exit 2
 //! refuses it and what the hook printed is the reason; after one, what it
-//! printed joins the result. Every other event they only watch, queued off
-//! the loop: each hook runs its events one at a time, in the order said.
+//! printed joins the result. As a run starts they are waited on, and what
+//! they print is a note to the model. Every other event they only watch,
+//! queued off the loop: each hook runs its events one at a time, in order.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -89,7 +90,12 @@ impl Shell {
             return Some(queues);
         }
         let runtime = tokio::runtime::Handle::try_current().ok()?;
-        let gate = |on: &HookOn| matches!(on, HookOn::ToolBefore | HookOn::ToolAfter);
+        let gate = |on: &HookOn| {
+            matches!(
+                on,
+                HookOn::ToolBefore | HookOn::ToolAfter | HookOn::RunStart
+            )
+        };
         let started = (self.hooks.iter())
             .map(|hook| {
                 if hook.on.iter().all(gate) {
@@ -231,6 +237,26 @@ impl agent::Hooks for Shell {
             match run(hook, &input, ctx).await {
                 Ok((_, said)) if !said.is_empty() => notes.push(format!("[hook] {said}")),
                 Ok(_) => {}
+                Err(why) => warn(hook, &why),
+            }
+        }
+        (!notes.is_empty()).then(|| notes.join("\n"))
+    }
+
+    async fn ahead(&self, ctx: &Ctx) -> Option<String> {
+        let hooks: Vec<&Hook> = self.on(HookOn::RunStart, None).map(|(_, h)| h).collect();
+        if hooks.is_empty() {
+            return None;
+        }
+        let input = json!({ "event": HookOn::RunStart, "workspace": ctx.workspace.root() });
+        let input = format!("{input}\n").into_bytes();
+        let mut notes = Vec::new();
+        for hook in hooks {
+            match run(hook, &input, ctx).await {
+                Ok((0, said)) if !said.is_empty() => notes.push(format!("[hook] {said}")),
+                Ok((0, _)) => {}
+                // A failure's words are for whoever fixes the hook, not the model.
+                Ok((code, said)) => warn(hook, &format!("exit {code}: {said}")),
                 Err(why) => warn(hook, &why),
             }
         }
@@ -389,5 +415,22 @@ mod tests {
         assert_eq!(lines[0]["event"], "turn.end");
         assert_eq!(lines[0]["usage"]["output"], 7);
         assert_eq!(lines[0]["text"], "done");
+    }
+
+    #[tokio::test]
+    async fn a_run_start_hook_tells_the_model_only_what_a_success_printed() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let mut said = hook(HookOn::RunStart, "grep -q '\"run.start\"' && echo ran ls");
+        let mut quiet = hook(HookOn::RunStart, "true");
+        let mut failed = hook(HookOn::RunStart, "echo broken; exit 1");
+        for h in [&mut said, &mut quiet, &mut failed] {
+            h.tools.clear();
+        }
+        let hooks = shell(&ctx, vec![said, quiet, failed]);
+        assert_eq!(hooks.ahead(&ctx).await.as_deref(), Some("[hook] ran ls"));
+
+        let none = shell(&ctx, vec![hook(HookOn::TurnEnd, "echo no")]);
+        assert_eq!(none.ahead(&ctx).await, None);
     }
 }

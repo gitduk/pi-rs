@@ -171,7 +171,8 @@ pub struct Hook {
 }
 
 /// What a hook runs on. The two around a call are gates: before one, exit 2
-/// refuses it; after one, what the hook prints is added to the result. The
+/// refuses it; after one, what the hook prints is added to the result.
+/// `run.start` is waited on too: what it prints is a note to the model. The
 /// rest only watch, and nothing they do reaches the run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum HookOn {
@@ -179,6 +180,8 @@ pub enum HookOn {
     ToolBefore,
     #[serde(rename = "tool.after")]
     ToolAfter,
+    #[serde(rename = "run.start")]
+    RunStart,
     #[serde(rename = "tool.denied")]
     ToolDenied,
     #[serde(rename = "turn.start")]
