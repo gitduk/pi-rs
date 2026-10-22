@@ -119,15 +119,15 @@ enum Own {
 
 impl<'de> Deserialize<'de> for Part {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let v = Value::deserialize(d)?;
-        let own = match Own::deserialize(v.clone()) {
+        use serde::de::IntoDeserializer;
+        let name = String::deserialize(d)?;
+        let named = || name.as_str().into_deserializer();
+        let own = match Own::deserialize(named()) {
             Ok(own) => own,
-            Err(not_own) => {
-                return Segment::deserialize(v)
-                    .map(Part::Status)
-                    .map_err(|not_status| {
-                        D::Error::custom(format!("{not_own}; nor a status part: {not_status}"))
-                    });
+            Err::<_, serde::de::value::Error>(_) => {
+                return Segment::deserialize(named()).map(Part::Status).map_err(
+                    |_: serde::de::value::Error| D::Error::unknown_variant(&name, &PART_NAMES),
+                );
             }
         };
         Ok(match own {
@@ -140,6 +140,46 @@ impl<'de> Deserialize<'de> for Part {
             Own::Spent => Part::Spent,
         })
     }
+}
+
+// Every name a part answers to, pi's own first: a script sees one list,
+// not which of two enums it missed.
+static PART_NAMES: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock::new(|| {
+    let own = variants::<Own>();
+    let status = variants::<Segment>().iter().filter(|n| !own.contains(n));
+    own.iter().chain(status).copied().collect()
+});
+
+// The names serde reads `T`'s variants by, taken from its derive so a new
+// variant can't be missing from an error's list.
+fn variants<T: for<'de> Deserialize<'de>>() -> &'static [&'static str] {
+    struct Grab<'a>(&'a mut &'static [&'static str]);
+    impl<'de> Deserializer<'de> for Grab<'_> {
+        type Error = serde::de::value::Error;
+        fn deserialize_any<V: serde::de::Visitor<'de>>(
+            self,
+            _: V,
+        ) -> Result<V::Value, Self::Error> {
+            Err(Self::Error::custom("not an enum"))
+        }
+        fn deserialize_enum<V: serde::de::Visitor<'de>>(
+            self,
+            _: &'static str,
+            variants: &'static [&'static str],
+            _: V,
+        ) -> Result<V::Value, Self::Error> {
+            *self.0 = variants;
+            Err(Self::Error::custom("only the names were wanted"))
+        }
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf option unit unit_struct newtype_struct seq tuple
+            tuple_struct map struct identifier ignored_any
+        }
+    }
+    let mut names: &'static [&'static str] = &[];
+    let _ = T::deserialize(Grab(&mut names));
+    names
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -303,7 +343,10 @@ mod tests {
         let tabs = parse(r#"{"lines":[{"left":[{"group":["tabs"]}]}]}"#).unwrap_err();
         assert!(tabs.contains("not `tabs`"), "{tabs}");
         let clock = parse(r#"{"lines":[{"left":["clock"]}]}"#).unwrap_err();
-        assert!(clock.contains("nor a status part"), "{clock}");
+        assert!(clock.contains("unknown variant `clock`"), "{clock}");
+        // One list, pi's own and the status line's, `model` named once.
+        assert!(clock.contains("`spent`, `elapsed`"), "{clock}");
+        assert_eq!(clock.matches("`model`").count(), 1, "{clock}");
     }
 
     #[test]
