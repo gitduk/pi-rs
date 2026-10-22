@@ -436,10 +436,10 @@ fn a_panel_dims_the_transcript_under_it() {
     assert!(!dimmed(&ui), "the panel closed");
 }
 
-// A found line comes up under the preview's pinned head, `n` / `N` step
-// round the lines holding it, and esc puts the view back where `/` found it.
+// A found line comes up midway under the preview's pinned head, `n` / `N`
+// step round the lines holding it, and esc puts the view back where `/` found it.
 #[test]
-fn a_search_brings_each_line_holding_it_to_the_top() {
+fn a_search_brings_each_line_holding_it_to_the_middle() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let mut ui = vim_ui_at(30, 12);
     let (_dir, lane) = a_running_lane();
@@ -453,14 +453,20 @@ fn a_search_brings_each_line_holding_it_to_the_top() {
         ui.key(&lane, view, event, false);
         ui.flush(&lane, view);
         assert_eq!(ui.drawn[0].trim_end(), "line 0", "the head stays pinned");
-        ui.drawn[1].trim_end().to_string()
+        current_hit(ui).map_or(String::new(), |(_, line)| line)
     };
     let key = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
     ui.flush(&lane, &mut view);
-    assert_eq!(press(&mut ui, &mut view, typed('/')), "line 1");
+    press(&mut ui, &mut view, typed('/'));
+    assert_eq!(
+        ui.drawn[1].trim_end(),
+        "line 1",
+        "nothing typed, nothing moved"
+    );
     assert_eq!(press(&mut ui, &mut view, typed('4')), "line 4");
+    let row = current_hit(&ui).map_or(0, |(row, _)| row as u16);
     let reversed = |ui: &crate::tui::Ui, col| {
-        ui.screen.test_buffer()[(col, 1)]
+        ui.screen.test_buffer()[(col, row)]
             .modifier
             .contains(ratatui::style::Modifier::REVERSED)
     };
@@ -475,14 +481,15 @@ fn a_search_brings_each_line_holding_it_to_the_top() {
     assert_eq!(count(&ui).as_deref(), Some("2/20"));
     assert_eq!(press(&mut ui, &mut view, typed('N')), "line 4");
     // Past the first, round to the last, which the bottom of the page holds.
-    let bottom = press(&mut ui, &mut view, typed('N'));
-    assert!(ui.drawn.iter().any(|r| r.starts_with("line 94")));
+    assert_eq!(press(&mut ui, &mut view, typed('N')), "line 94");
     assert_eq!(count(&ui).as_deref(), Some("20/20"));
-    assert_eq!(press(&mut ui, &mut view, typed('/')), bottom);
+    let bottom = ui.drawn[1].clone();
+    press(&mut ui, &mut view, typed('/'));
+    assert_eq!(ui.drawn[1], bottom, "a fresh `/` leaves the view");
     press(&mut ui, &mut view, typed('x'));
-    // The row the search took comes back, and the page is still at its end.
+    // The row the search took comes back, the view where this `/` found it.
     press(&mut ui, &mut view, key(KeyCode::Esc));
-    assert!(ui.drawn.iter().any(|r| r.starts_with("line 99")));
+    assert_eq!(ui.drawn[1], bottom);
     assert!(ui.read.is_some(), "esc leaves the query, not the page");
 }
 
@@ -603,21 +610,18 @@ fn a_step_after_moving_the_view_goes_from_the_view() {
     let mut ui = vim_ui();
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
+    // Filler first: a hit centred on its jump is not on the view `gg` gives.
+    let filler = (0..30).map(|_| "filler".to_string());
     ui.preview(
-        (0..100)
-            .map(|i| Line::from(format!("line {i}")).into())
+        (filler.chain((0..100).map(|i| format!("line {i}"))))
+            .map(|l| Line::from(l).into())
             .collect(),
     );
-    // The count as the one frame after the key drew it, not as kept.
     let press = |ui: &mut crate::tui::Ui, view: &mut View, event| {
         ui.key(&lane, view, event, false);
         ui.flush(&lane, view);
-        let buf = ui.screen.test_buffer();
-        let bottom = buf.area.height - 1;
-        let row: String = (0..buf.area.width)
-            .map(|x| buf[(x, bottom)].symbol())
-            .collect();
-        row.split_whitespace().nth(1).map(str::to_string)
+        ui.search_prompt()
+            .map(|(_, count)| count.trim().to_string())
     };
     ui.flush(&lane, &mut view);
     press(&mut ui, &mut view, typed('/'));
@@ -744,7 +748,7 @@ fn a_top_row_in_the_stream_holds_as_it_grows_and_lands() {
     assert_eq!(ui.drawn[0], top, "as it landed");
 }
 
-// A hit in the answer still streaming comes up top, and stays there as
+// A hit in the answer still streaming comes up midway, and stays there as
 // the answer grows under it; esc then goes back to the newest rows.
 #[test]
 fn a_search_hit_in_the_stream_holds_as_it_grows() {
@@ -759,10 +763,12 @@ fn a_search_hit_in_the_stream_holds_as_it_grows() {
         ui.key(&lane, &mut view, typed(c), false);
     }
     ui.flush(&lane, &mut view);
-    assert_eq!(ui.drawn[0].trim(), "said 3", "the hit came up");
+    let came = current_hit(&ui).expect("the hit came up");
+    assert_eq!(came.1, "said 3");
+    assert!(came.0 > 0, "midway, not on top");
     view.surface.stream.text.push_str("said 21\n\nsaid 22\n\n");
     ui.flush(&lane, &mut view);
-    assert_eq!(ui.drawn[0].trim(), "said 3", "and stayed as it grew");
+    assert_eq!(current_hit(&ui), Some(came), "and stayed as it grew");
     // `/` found the view on the newest rows: esc goes back to them, grown.
     let esc = crate::tui::TermEvent::Key(crossterm::event::KeyEvent::new(
         crossterm::event::KeyCode::Esc,
@@ -862,10 +868,10 @@ fn a_double_click_takes_a_cell_of_a_wide_table() {
     assert_eq!(ui.unit_selection(&view, at).unwrap().1, "---");
 }
 
-// Typing lists the lines holding the query, one row per line however often
-// it holds it; moving down the list moves the view, and Enter keeps it there.
+// Typing lists every hit, a line holding two listed twice; moving down the
+// list moves the view, and Enter keeps it there.
 #[test]
-fn the_search_lists_its_lines_and_enter_keeps_the_pick() {
+fn the_search_lists_its_hits_and_enter_keeps_the_pick() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let mut ui = vim_ui_at(40, 16);
     let (_dir, lane) = a_running_lane();
@@ -880,28 +886,31 @@ fn the_search_lists_its_lines_and_enter_keeps_the_pick() {
     let key = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
     let mut press = |ui: &mut crate::tui::Ui, event| {
         ui.key(&lane, &mut view, event, false);
-        // The list is laid out the frame after the answer.
-        ui.flush(&lane, &mut view);
+        // The list is laid out on the frame that answers.
         ui.flush(&lane, &mut view);
     };
     press(&mut ui, typed('/'));
     for c in "cat".chars() {
         press(&mut ui, typed(c));
     }
-    let listed: Vec<(String, String)> = (ui.menu().iter())
-        .map(|m| (m.show().to_string(), m.help().to_string()))
-        .collect();
+    let listed: Vec<String> = (ui.menu().iter()).map(|m| m.show().to_string()).collect();
+    assert_eq!(listed, ["a cat", "cat and cat", "cat and cat", "the cat"]);
+    press(&mut ui, key(KeyCode::Down));
+    let followed = current_hit(&ui);
     assert_eq!(
-        listed,
-        [
-            ("a cat".into(), String::new()),
-            ("cat and cat".into(), "×2".into()),
-            ("the cat".into(), String::new()),
-        ]
+        followed.as_ref().map(|(_, line)| line.as_str()),
+        Some("cat and cat"),
+        "the view followed"
     );
     press(&mut ui, key(KeyCode::Down));
-    assert_eq!(ui.drawn[1].trim_end(), "cat and cat", "the view followed");
+    let count = ui.search_prompt().map(|(_, count)| count);
+    assert_eq!(count.as_deref(), Some("  3/4"), "the line's second hit");
     press(&mut ui, key(KeyCode::Enter));
     assert!(ui.menu().is_empty(), "the list went with the typing");
-    assert_eq!(ui.drawn[1].trim_end(), "cat and cat", "and the pick stayed");
+    let stayed = current_hit(&ui).map(|(_, line)| line);
+    assert_eq!(
+        stayed.as_deref(),
+        Some("cat and cat"),
+        "and the pick stayed"
+    );
 }

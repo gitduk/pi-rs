@@ -503,7 +503,7 @@ fn turning_the_keys_off_drops_the_mode_rather_than_parking_it() {
 }
 
 // `/` in Normal searches the transcript where it stands: no page opens, a
-// hit comes up top, `n` steps, and letting the search go puts the view back.
+// hit comes up, `n` steps, and letting the search go puts the view back.
 #[test]
 fn slash_in_normal_searches_the_transcript() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -521,7 +521,7 @@ fn slash_in_normal_searches_the_transcript() {
     let press = |ui: &mut crate::tui::Ui, view: &mut View, event| {
         ui.key(&lane, view, event, false);
         ui.flush(&lane, view);
-        ui.drawn[0].trim().to_string()
+        super::harness::current_hit(ui).map_or(String::new(), |(_, line)| line)
     };
     press(&mut ui, &mut view, typed('/'));
     assert!(ui.read.is_none(), "no page: the transcript itself");
@@ -529,7 +529,8 @@ fn slash_in_normal_searches_the_transcript() {
         press(&mut ui, &mut view, typed(c));
     }
     // None below the top line: round to the first.
-    assert_eq!(ui.drawn[0].trim(), "answer 1");
+    let first = super::harness::current_hit(&ui).map(|(_, line)| line);
+    assert_eq!(first.as_deref(), Some("answer 1"));
     press(&mut ui, &mut view, enter);
     assert_eq!(press(&mut ui, &mut view, typed('n')), "answer 10");
     press(&mut ui, &mut view, esc);

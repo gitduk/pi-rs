@@ -173,3 +173,17 @@ pub(super) fn tab(mark: crate::tui::Mark, name: &str) -> crate::tui::Tab {
 pub(super) fn bar(ui: &crate::tui::Ui, width: usize) -> String {
     ratatui::text::Line::from(ui.tabs_strip(width)).to_string()
 }
+
+// The row the view's hit is marked on, and its text.
+pub(super) fn current_hit(ui: &crate::tui::Ui) -> Option<(usize, String)> {
+    let here = ui.rat_style(&ui.paint.theme.match_current);
+    let buf = ui.screen.test_buffer();
+    let marked = |y| {
+        (0..buf.area.width).any(|x| {
+            let cell = &buf[(x, y)];
+            Some(cell.fg) == here.fg && cell.modifier.contains(ratatui::style::Modifier::REVERSED)
+        })
+    };
+    let y = (0..buf.area.height).find(|&y| marked(y))? as usize;
+    Some((y, ui.drawn[y].trim().to_string()))
+}

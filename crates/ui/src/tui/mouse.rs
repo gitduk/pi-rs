@@ -96,10 +96,10 @@ impl Ui {
             .copied()
     }
 
-    // Whether `row` is under the list, which lies over the history there.
+    // Whether `row` is under the list or its rule, which lie over the history.
     fn over_menu(&self, row: u16) -> bool {
         let menu = self.regions.menu;
-        (menu.y..menu.y + menu.height).contains(&row)
+        (menu.y - self.regions.rule.height..menu.y + menu.height).contains(&row)
     }
 
     /// The scrollback row and line under the cursor, if the cursor is over
@@ -504,6 +504,8 @@ pub(super) struct Regions {
     pub(super) history: Rect,
     // The blank row under it, which says what is below once scrolled up.
     pub(super) gap: Rect,
+    // The row over the completion list, which parts it from the transcript.
+    pub(super) rule: Rect,
     // The completion list.
     pub(super) menu: Rect,
     // The bar: the checkouts, or the flash that took its row.
@@ -537,9 +539,6 @@ pub(super) fn at_row_name(path: &str, dir: bool) -> String {
 /// a panel or the bar — so its last line never reads as part of them.
 pub(super) const HISTORY_GAP: u16 = 1;
 
-// The most rows a list over the editor shows; the rest scroll.
-const MENU_ROWS: usize = 10;
-
 impl Regions {
     /// The rows each part asks for, as many as `area` holds: input last, so
     /// the caret sits on the bottom row and the bar reads as history's edge.
@@ -559,17 +558,27 @@ impl Regions {
         ])
         .split(area);
         // The list lies over the rows above the bar, as a command's output
-        // does: nothing under it moves as it grows and shrinks. A few rows,
-        // and half at most, so what it moves the view to stays in sight.
-        let menu = menu.min(MENU_ROWS).min(left.div_ceil(2)) as u16;
+        // does: nothing under it moves as it grows and shrinks. Half at most,
+        // so what it moves the view to stays in sight.
+        let menu = menu.min(left.div_ceil(2)) as u16;
+        let menu = Rect {
+            y: chunks[2].y - menu,
+            height: menu,
+            ..chunks[2]
+        };
+        let rule = match menu.height > 0 && menu.y > area.y {
+            true => Rect {
+                y: menu.y - 1,
+                height: 1,
+                ..menu
+            },
+            false => Rect::default(),
+        };
         Self {
             history: chunks[0],
             gap: chunks[1],
-            menu: Rect {
-                y: chunks[2].y - menu,
-                height: menu,
-                ..chunks[2]
-            },
+            rule,
+            menu,
             bar: chunks[2],
             editor: chunks[3],
         }

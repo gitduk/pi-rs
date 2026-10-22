@@ -189,6 +189,25 @@ pub fn clip(s: &str, max: usize) -> String {
     one
 }
 
+/// Plain `s` from at most `keep` columns before byte `at` on, the `…` that
+/// marks a cut counted among them. `at` must lie on a char boundary.
+pub fn clip_left(s: &str, at: usize, keep: usize) -> String {
+    let before = &s[..at];
+    if width(before) <= keep {
+        return s.to_string();
+    }
+    let mut used = width(icons::ELLIPSIS);
+    let mut from = at;
+    for (i, c) in before.char_indices().rev() {
+        used += cols_at(c, 0);
+        if used > keep {
+            break;
+        }
+        from = i;
+    }
+    format!("{}{}", icons::ELLIPSIS, &s[from..])
+}
+
 /// Where `query` is in `text`, as byte ranges: the one way a typed query is
 /// looked for. Smart case: a capital in the query asks for an exact match;
 /// otherwise ASCII is folded, which keeps the byte offsets. Empty finds none.

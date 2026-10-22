@@ -29,6 +29,7 @@ pub const NOTE_MARK: &str = "≡"; // a fact filed for the model to read; nothin
 pub const FAIL_MARK: &str = "✘"; // a failure, a denial, a refused edit
 pub const UNOPENED_MARK: &str = "○"; // a checkout on the bar that no lane has open
 pub const COMPACT_RULE: &str = "───"; // the dashes a compaction banner wears
+pub const MENU_RULE: &str = "─"; // the line parting a list from the transcript over it
 
 pub const CURRENT_ITEM: &str = "●"; // the current row in `/model` and `/resume`
 

@@ -2,7 +2,6 @@
 //! `/rewind`: what they offer and how they read. `keys` drives them.
 use super::Ui;
 use super::mouse::at_row_name;
-use super::view::View;
 use pi_core::core;
 use pi_core::input::commands::{Candidate, Choice};
 use pi_store::keys::Action;
@@ -127,10 +126,8 @@ impl Ui {
         self.editor.splice(start, end, &token);
     }
 
-    // The menu's rows as ratatui list items. The selected row is styled by
-    // the list itself; everything else sits muted.
-    // Every row muted but `picked`, which is bright and wears the mark and the
-    // theme's `menu.selected` on its name; its band is the list's to draw.
+    // Every row muted but `picked`: the mark, `menu.selected` on its name (a
+    // found line's stays plain), and the list's band.
     pub(super) fn menu_items(
         &self,
         menu: &[MenuEntry],
@@ -146,6 +143,16 @@ impl Ui {
         menu.iter()
             .enumerate()
             .map(|(at, c)| {
+                if let (MenuEntry::Hit { show, k }, Some(query)) = (c, query) {
+                    let room = width.saturating_sub(MENU_MARK.width());
+                    let text = found_text(show, *k, query, room);
+                    let line = if at == picked {
+                        Line::from(vec![Span::styled(MENU_MARK, mark), text.into()])
+                    } else {
+                        Line::from(Span::styled(format!("  {text}"), muted))
+                    };
+                    return ListItem::new(super::search::marked(line, query, None, look, look));
+                }
                 let show = c.show();
                 // Only a command word carries an argument hint to set apart; a
                 // message or a file name is whole, spaces and all.
@@ -175,18 +182,12 @@ impl Ui {
                         rest.into(),
                     ])
                 };
-                // A found line marks the query as the transcript does.
-                ListItem::new(match (c, query) {
-                    (MenuEntry::Hit { .. }, Some(query)) => {
-                        super::search::marked(line, query, None, look)
-                    }
-                    _ => line,
-                })
+                ListItem::new(line)
             })
             .collect()
     }
 
-    pub(super) fn step_menu(&mut self, view: &mut View, action: Action) {
+    pub(super) fn step_menu(&mut self, action: Action) {
         let n = self.menu().len().saturating_sub(1);
         let at = self.picked.unwrap_or(n).min(n);
         self.picked = Some(if action == Action::MenuNext {
@@ -195,7 +196,7 @@ impl Ui {
             at.saturating_sub(1)
         });
         // A search's list moves the view with it.
-        self.search_follow(view);
+        self.search_follow();
     }
 }
 
@@ -225,10 +226,10 @@ pub(super) enum MenuEntry {
         // As a `Candidate`'s: Enter takes it only once moved to.
         picked_only: bool,
     },
-    // A line the query is found on; its note says how often, past once.
+    // A hit: the row it is on, and which of that row's matches it is.
     Hit {
         show: String,
-        note: String,
+        k: usize,
     },
 }
 
@@ -245,13 +246,26 @@ impl MenuEntry {
         match self {
             MenuEntry::Completion(c) => &c.help,
             MenuEntry::File { path, .. } => path,
-            MenuEntry::Hit { note, .. } => note,
+            MenuEntry::Hit { .. } => "",
         }
     }
 }
 
 // What heads the picked row of a menu, in the prompt's colour.
 const MENU_MARK: &str = "› ";
+
+// A hit as the list shows it in `room` columns: its whole row, cut on the
+// left only as far as keeps the hit from running off the right.
+fn found_text(show: &str, k: usize, query: &str, room: usize) -> String {
+    let hit = pi_store::text::found(show, query).get(k).cloned();
+    let text = match hit {
+        Some(r) if pi_store::text::width(&show[..r.end]) > room => {
+            pi_store::text::clip_left(show, r.start, room / 2)
+        }
+        _ => show.to_string(),
+    };
+    pi_store::text::clip(&text, room)
+}
 
 // What workspace-dependent completions answer with, read lazily: opening
 // every archive and forking git upfront was a noticeable startup pause.

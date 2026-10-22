@@ -20,51 +20,16 @@ use crate::render;
 use crate::status;
 use pi_store::icons;
 
+// Rows kept between the pick and the list's edge while it scrolls, so what
+// comes next is in sight before the pick reaches it.
+const MENU_PADDING: usize = 2;
+
 impl Ui {
     pub(super) fn flush(&mut self, lane: &Lane, view: &mut View) {
-        let menu = self.menu();
         let width = self.screen.usable();
         let alone = matches!(self.page(), Some(Page::Preview(_)));
         let slash = matches!(self.page(), Some(Page::Slash(_)));
         let text = self.page_lines();
-        let hovered_job = self.pointer.and_then(|(_, row)| {
-            (self.job_at(row).map(call::JobRow::Job))
-                .or(self.earlier_at(row).map(call::JobRow::Earlier))
-                .or(self.fold_at(row).then_some(call::JobRow::Fold))
-        });
-        let open = (self.job_open, self.job_body.as_str());
-        let (mut bar, job_rows) = call::job_lines(
-            &self.jobs,
-            hovered_job,
-            open,
-            self.jobs_all,
-            &self.paint,
-            width,
-        );
-        self.job_rows = job_rows;
-        let jobs = bar.len();
-        bar.extend(self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width));
-        // Counted from the bar region's top, which the job rows lead.
-        if let Some((at, ..)) = &mut self.flash_hit {
-            *at += jobs;
-        }
-        // A query being typed has the line's row; otherwise the line keeps it,
-        // a page up or not.
-        let (input, caret) = match self.search_line().filter(|_| self.search_typing()) {
-            Some((line, col)) => (vec![line], (0, col)),
-            None => self.editor.view(&self.paint, width),
-        };
-        let area = self.screen.area();
-        let regions = Regions::layout(area, menu.len(), bar.len(), input.len());
-        bar.truncate(regions.bar.height as usize);
-        let menu_h = regions.menu.height as usize;
-        // A paste taller than the terminal keeps the caret's row in view.
-        let editor_h = regions.editor.height as usize;
-        let editor_top = (caret.0 as usize + 1).saturating_sub(editor_h);
-        let mut input_view: Vec<Line<'static>> =
-            input.into_iter().skip(editor_top).take(editor_h).collect();
-        let caret_in_view = (caret.0 as usize).saturating_sub(editor_top);
-        let hist_view = regions.history.height as usize;
         // The group live calls fold into, when it's the last scrollback
         // row: theirs to draw, so the live block leaves them alone.
         let last = view.surface.scrollback.len().checked_sub(1);
@@ -95,6 +60,8 @@ impl Ui {
             self.live(lane, view, row_holds, now)
         };
 
+        // What the keys asked is answered before anything is laid out, so the
+        // list, the bar and the line are drawn as the answer left them.
         if self.search_due() {
             let laid: Vec<Laid> = ScrollbackRows::new(transcript(view, alone), &self.paint, width)
                 .indexed()
@@ -117,19 +84,52 @@ impl Ui {
                 )
                 .collect();
             self.search_answer(view, &laid);
-            // The count the answer moved, on the row laid out before it: one
-            // row either way, so only what it says changes.
-            if let Some((line, _)) = self.search_line()
-                && input_view.len() == 1
-            {
-                input_view = vec![line];
-            }
         }
+        let hovered_job = self.pointer.and_then(|(_, row)| {
+            (self.job_at(row).map(call::JobRow::Job))
+                .or(self.earlier_at(row).map(call::JobRow::Earlier))
+                .or(self.fold_at(row).then_some(call::JobRow::Fold))
+        });
+        let open = (self.job_open, self.job_body.as_str());
+        let (mut bar, job_rows) = call::job_lines(
+            &self.jobs,
+            hovered_job,
+            open,
+            self.jobs_all,
+            &self.paint,
+            width,
+        );
+        self.job_rows = job_rows;
+        let jobs = bar.len();
+        bar.extend(self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width));
+        // Counted from the bar region's top, which the job rows lead.
+        if let Some((at, ..)) = &mut self.flash_hit {
+            *at += jobs;
+        }
+        // A query being typed has the line's row; otherwise the line keeps it,
+        // a page up or not.
+        let (input, caret) = match self.search_line().filter(|_| self.search_typing()) {
+            Some((line, col)) => (vec![line], (0, col)),
+            None => self.editor.view(&self.paint, width),
+        };
+        let menu = self.menu();
+        let area = self.screen.area();
+        let regions = Regions::layout(area, menu.len(), bar.len(), input.len());
+        bar.truncate(regions.bar.height as usize);
+        // A paste taller than the terminal keeps the caret's row in view.
+        let editor_h = regions.editor.height as usize;
+        let editor_top = (caret.0 as usize + 1).saturating_sub(editor_h);
+        let input_view: Vec<Line<'static>> =
+            input.into_iter().skip(editor_top).take(editor_h).collect();
+        let caret_in_view = (caret.0 as usize).saturating_sub(editor_top);
+        let hist_view = regions.history.height as usize;
         let most = self.most(&text, hist_view, width);
+        self.search_land(view, &regions);
         let (scroll, top) = {
             let (scroll, top) = self.window_mut(view);
             (*scroll, *top)
         };
+        let menu_h = regions.menu.height as usize;
         // A line a click answers on is lit under the pointer, as a fold's
         // own line is.
         let lit = self.lit_text();
@@ -223,6 +223,7 @@ impl Ui {
         self.search_settle();
         // The query marked on the rows a search reads, a slash page's own.
         let look = self.rat_style(&self.paint.theme.matched);
+        let here = self.rat_style(&self.paint.theme.match_current);
         let rows = match self.search_query() {
             Some((query, at)) => {
                 let places = self.row_targets.iter().zip(&self.row_of);
@@ -235,7 +236,7 @@ impl Ui {
                         let current = at
                             .filter(|h| Spot::of(*target) == h.at.spot && r == h.at.row)
                             .map(|h| h.k);
-                        search::marked(row, query, current, look)
+                        search::marked(row, query, current, look, here)
                     })
                     .collect()
             }
@@ -322,8 +323,14 @@ impl Ui {
                     .with_offset(self.menu_top.min(menu.len() - menu_h))
                     .with_selected(Some(picked));
                 frame.render_widget(ratatui::widgets::Clear, regions.menu);
+                let rule = icons::MENU_RULE.repeat(regions.rule.width as usize);
+                let rule = Line::from(self.paint.span(&self.paint.theme.muted, &rule));
+                frame.render_widget(ratatui::widgets::Clear, regions.rule);
+                frame.render_widget(rule, regions.rule);
                 frame.render_stateful_widget(
-                    List::new(items).highlight_style(cursor),
+                    List::new(items)
+                        .highlight_style(cursor)
+                        .scroll_padding(MENU_PADDING),
                     regions.menu,
                     &mut state,
                 );

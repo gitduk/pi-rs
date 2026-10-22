@@ -353,9 +353,7 @@ impl Ui {
                 Some(MenuEntry::Hit { .. }) => self.search_accept(),
                 None => {}
             },
-            Some(action @ (Action::MenuNext | Action::MenuPrevious)) => {
-                self.step_menu(view, action)
-            }
+            Some(action @ (Action::MenuNext | Action::MenuPrevious)) => self.step_menu(action),
             Some(Action::MenuDismiss) => {
                 if self.seeded.take().as_deref() == Some(self.editor.text()) {
                     self.editor.clear();

@@ -14,7 +14,7 @@ use super::Ui;
 use super::browse::Page;
 use super::editor::Editor;
 use super::menu::MenuEntry;
-use super::mouse::Target;
+use super::mouse::{Regions, Target};
 use super::screen;
 use super::select;
 use super::view::View;
@@ -107,19 +107,18 @@ pub(super) struct Search {
     shown: Option<Place>,
     // A jump made, its view's top for the frame after it to record.
     placed: bool,
-    // The lines holding the query, in page order, as the list offers them.
+    // Every hit, in page order, as the list offers them.
     lines: Vec<Found>,
 }
 
-// A line holding the query: its first hit, and how many it holds.
+// A hit as the list offers it.
 struct Found {
     hit: Hit,
-    // Which laid line it is, and which of every hit its first is.
+    // Which laid line it is on, and which of every hit it is.
     line: usize,
     first: usize,
-    // The row its first hit is on, as drawn, and how often it holds one.
+    // The row it is on, as drawn.
     show: String,
-    count: usize,
 }
 
 impl Search {
@@ -263,6 +262,24 @@ impl Ui {
         Some(format!("/{}", &query.text()[..query.cursor()]))
     }
 
+    // A jump made since the last frame lands its hit midway down what the
+    // list leaves in sight; the frame after holds the top this one drew.
+    pub(super) fn search_land(&mut self, view: &mut View, regions: &Regions) {
+        let Some(hit) = (self.search.as_ref())
+            .filter(|s| s.placed)
+            .and_then(|s| s.at)
+        else {
+            return;
+        };
+        let covered =
+            (regions.rule.height + regions.menu.height).saturating_sub(regions.gap.height);
+        let shown = regions.history.height.saturating_sub(covered);
+        *self.window_mut(view).1 = Some(Anchor {
+            spot: hit.at.spot,
+            rows: hit.at.row as isize - (shown / 2) as isize,
+        });
+    }
+
     // Whether the query is still being typed: the caret is on its row.
     pub(super) fn search_typing(&self) -> bool {
         self.search.as_ref().is_some_and(|s| s.typing)
@@ -335,16 +352,13 @@ impl Ui {
         true
     }
 
-    // The lines holding the query, while it is typed: the list over it.
+    // Every hit, while the query is typed: the list over it.
     pub(super) fn search_menu(&self) -> Vec<MenuEntry> {
         match self.search.as_deref() {
             Some(s) if s.typing => (s.lines.iter())
                 .map(|f| MenuEntry::Hit {
                     show: f.show.clone(),
-                    note: match f.count {
-                        1 => String::new(),
-                        n => pi_store::text::times(n),
-                    },
+                    k: f.hit.k,
                 })
                 .collect(),
             _ => Vec::new(),
@@ -359,8 +373,8 @@ impl Ui {
         self.picked = None;
     }
 
-    // The list moved: the view goes to the line it is on now.
-    pub(super) fn search_follow(&mut self, view: &mut View) {
+    // The list moved: the view goes to its hit, as the frame lands it.
+    pub(super) fn search_follow(&mut self) {
         let picked = self.picked;
         let Some(search) = self.search.as_mut().filter(|s| s.typing) else {
             return;
@@ -370,7 +384,6 @@ impl Ui {
         };
         let (hit, line, first) = (found.hit, found.line, found.first);
         search.bring(hit, line, first);
-        *self.window_mut(view).1 = Some(Anchor::from(hit.at));
     }
 
     // A paste while the query is typed: its first line goes on the query,
@@ -493,17 +506,11 @@ impl Ui {
             }
             if let Want::Typed { .. } = want {
                 search.lines = found_lines(&hits, laid);
-                // The list picks the line the view was brought to.
-                listed = Some(next.map(|h| {
-                    (search.lines.iter())
-                        .rposition(|f| f.first <= h)
-                        .unwrap_or(0)
-                }));
+                // The list picks the hit the view was brought to.
+                listed = Some(next);
             }
-            top = Some((
-                search.at.map(|h| Anchor::from(h.at)).or(search.back()),
-                search.newest,
-            ));
+            // A hit is landed by the frame, which knows what is in sight.
+            top = search.at.is_none().then(|| (search.back(), search.newest));
             let entered = matches!(want, Want::Typed { entered: true } | Want::Step { .. });
             if search.at.is_none() && entered {
                 missed = Some(search.query.text().to_string());
@@ -514,14 +521,10 @@ impl Ui {
         }
         if let Some(query) = missed {
             self.flash(format!("not found: {query}"));
-            // The bar was laid out before this: the next frame says it.
-            self.redraw = true;
         }
         if let Some(picked) = listed {
             self.picked = picked;
             self.menu_top = 0;
-            // The list was laid out before this too.
-            self.redraw = true;
         }
     }
 
@@ -540,52 +543,44 @@ impl Ui {
     }
 }
 
-// Every hit, grouped by the laid line it is on, in page order.
+// Every hit, each the list's own row, in page order.
 fn found_lines(hits: &[(usize, usize, usize)], laid: &[Laid]) -> Vec<Found> {
-    let mut lines: Vec<Found> = Vec::new();
-    for (p, &(i, r, k)) in hits.iter().enumerate() {
-        match lines.last_mut() {
-            Some(f) if f.line == i => f.count += 1,
-            _ => lines.push(Found {
-                hit: Hit {
-                    at: Place {
-                        spot: laid[i].spot,
-                        row: r,
-                    },
-                    k,
+    (hits.iter().enumerate())
+        .map(|(p, &(i, r, k))| Found {
+            hit: Hit {
+                at: Place {
+                    spot: laid[i].spot,
+                    row: r,
                 },
-                line: i,
-                first: p,
-                // A row a line wrapped onto is marked as the rest of one.
-                show: match r {
-                    0 => laid[i].rows[r].trim().to_string(),
-                    _ => format!("{} {}", pi_store::icons::ELLIPSIS, laid[i].rows[r].trim()),
-                },
-                count: 1,
-            }),
-        }
-    }
-    lines
+                k,
+            },
+            line: i,
+            first: p,
+            // A row a line wrapped onto is marked as the rest of one.
+            show: match r {
+                0 => laid[i].rows[r].trim().to_string(),
+                _ => format!("{}{}", pi_store::icons::ELLIPSIS, laid[i].rows[r].trim()),
+            },
+        })
+        .collect()
 }
 
 /// A drawn row with each place `query` is found in it worn as `look`, the
-/// `current`-th reversed as well. A muted row's dim does not reach it.
+/// `current`-th as `here`. A muted row's dim does not reach them.
 pub(super) fn marked(
     line: Line<'static>,
     query: &str,
     current: Option<usize>,
     look: Style,
+    here: Style,
 ) -> Line<'static> {
-    let look = Style::new().remove_modifier(Modifier::DIM).patch(look);
+    let lift = |s| Style::new().remove_modifier(Modifier::DIM).patch(s);
+    let (look, here) = (lift(look), lift(here));
     found_in(&screen::plain(&line), query)
         .into_iter()
         .enumerate()
         .fold(line, |line, (k, (from, to))| {
-            let mark = if Some(k) == current {
-                look.add_modifier(Modifier::REVERSED)
-            } else {
-                look
-            };
+            let mark = if Some(k) == current { here } else { look };
             select::modified(line, from, to, mark)
         })
 }
