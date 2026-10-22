@@ -167,6 +167,8 @@ impl Agent {
         retry: &Retry,
     ) -> Result<Usage, AgentError> {
         let voice = Voice::new(tx.clone(), self.brief.hooks.clone());
+        // Tool sources are live: what they list now, not when the brief was applied.
+        tracing::info!(target: "pi::loop", overhead = self.overhead(), "run start");
         let out = self.turns(session, ctx, &voice, retry).await;
         match &out {
             Ok(_) => {}
@@ -408,9 +410,15 @@ impl Agent {
     /// everything but what I'm in the middle of" — and runs even when the
     /// transcript already fits, since the point is a phase ending, not a budget.
     pub async fn compact_now(&self, session: &mut Session, focus: Option<&str>) -> Option<Report> {
-        self.compactor
+        let report = self
+            .compactor
             .compact_now(session, self.working(), self.budget(), focus)
-            .await
+            .await;
+        // No voice to say it through, so journal it as the loop's would be.
+        if let Some(r) = report {
+            event::journal(&Event::Compacted(r));
+        }
+        report
     }
 
     /// The model and wire for whatever needs both — the compactor writes
@@ -424,9 +432,9 @@ impl Agent {
         }
     }
 
-    // What rides every request besides the transcript: the system prompt and
-    // the tool schemas.
-    fn overhead(&self) -> usize {
+    /// What rides every request besides the transcript: the system prompt and
+    /// the tool schemas.
+    pub fn overhead(&self) -> usize {
         llm::estimate::text(&self.brief.system)
             + llm::estimate::tool_defs(&self.brief.registry.defs())
     }

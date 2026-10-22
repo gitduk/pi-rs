@@ -40,12 +40,17 @@ impl Core {
             self.surface,
         ) {
             Ok(r) => r,
-            Err(e) => return Some(vec![format!("prompt files not re-read — {e:#}")]),
+            Err(e) => {
+                let why = format!("{e:#}");
+                tracing::warn!(target: "pi::session", error = %why, "prompt files not re-read");
+                return Some(vec![format!("prompt files not re-read — {why}")]);
+            }
         };
         if *resolved.prompt_files == *was {
             return None;
         }
         let moved = was.moved(&resolved.prompt_files, &root);
+        tracing::info!(target: "pi::session", moved = %moved.join(", "), "prompt files re-read");
         // Said as it changes, not on every read.
         let left_out = resolved.prompt_files.left_out(&root);
         let left_out = left_out.filter(|now| was.left_out(&root).as_ref() != Some(now));

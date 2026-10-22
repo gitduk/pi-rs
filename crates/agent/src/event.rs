@@ -110,7 +110,7 @@ impl Voice {
 
 // Deltas are the exception: they are the transcript, they arrive thousands at
 // a time, and the transcript is saved beside the log already.
-fn journal(event: &Event) {
+pub(crate) fn journal(event: &Event) {
     match event {
         Event::TextDelta(_)
         | Event::ReasoningDelta(_)

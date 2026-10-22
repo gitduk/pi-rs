@@ -136,7 +136,14 @@ impl Core {
             .chain(was.iter().filter(|s| !now.iter().any(|n| n.0 == s.0)))
             .map(|(path, ..)| crate::core::instructions::short(path, &root))
             .collect();
-        match self.try_reload() {
+        let reloaded = self.try_reload();
+        tracing::info!(
+            target: "pi::session",
+            moved = %moved.join(", "),
+            refused = reloaded.as_ref().err().map(String::as_str),
+            "config changed on disk"
+        );
+        match reloaded {
             Ok(mut said) => {
                 self.refused.remove(&token);
                 said.insert(0, format!("reloaded — {}", moved.join(", ")));
@@ -188,6 +195,7 @@ impl Core {
         self.in_force();
         said.sort();
         said.dedup();
+        tracing::info!(target: "pi::session", said = %said.join("; "), "skills changed on disk");
         Some(said)
     }
 
