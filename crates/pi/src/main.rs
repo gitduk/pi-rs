@@ -70,7 +70,8 @@ fn restart(
 ) -> Result<ExitCode> {
     let launcher = core::update::launcher().context("cannot tell which pi to start again")?;
     let mut cmd = std::process::Command::new(launcher);
-    cmd.args(pi_core::args::restart(&lanes, front, &flags));
+    cmd.args(pi_core::args::restart(&lanes, front, &flags))
+        .env(UPDATED_FROM, env!("CARGO_PKG_VERSION"));
     let id = lanes[front].1.as_deref();
     tracing::info!(target: "pi::session", path = %launcher.display(), session = ?id, lanes = lanes.len(), "restarting");
     #[cfg(unix)]
@@ -79,6 +80,15 @@ fn restart(
     let e = std::io::Error::from(std::io::ErrorKind::Unsupported);
     let again = id.map_or("pi".to_string(), |id| format!("pi --resume {id}"));
     Err(e).with_context(|| format!("cannot start {} — run `{again}`", launcher.display()))
+}
+
+// What a restart into this pi says it did, from the version it left.
+fn updated(from: Option<&str>) -> Option<String> {
+    let now = env!("CARGO_PKG_VERSION");
+    Some(match from? {
+        was if was == now => format!("restarted into a new build of v{now}"),
+        was => format!("updated to v{now} from v{was}"),
+    })
 }
 
 // Renders a one-shot run's events by printing them. Its own task so a slow
@@ -101,8 +111,21 @@ fn paint(
     })
 }
 
-#[tokio::main]
-async fn main() -> Result<ExitCode> {
+// The version a pi restarting into this one ran, for this one to say so.
+// The environment, not a flag: an older pi would refuse a flag it lacks.
+const UPDATED_FROM: &str = "PI_UPDATED_FROM";
+
+fn main() -> Result<ExitCode> {
+    let updated_from = std::env::var(UPDATED_FROM).ok();
+    // SAFETY: no other thread exists yet to read the environment.
+    unsafe { std::env::remove_var(UPDATED_FROM) };
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(updated_from))
+}
+
+async fn run(updated_from: Option<String>) -> Result<ExitCode> {
     let args = std::sync::Arc::new(Args::parse());
     let prompt = read_prompt(&args)?;
     let within = || format!("cannot use {} as a workspace", args.cwd);
@@ -186,7 +209,10 @@ async fn main() -> Result<ExitCode> {
         // Said under the banner: printed here, they would wait behind the
         // screen and surface only at exit, after the session they were for.
         let said = dialled.warning.iter().chain(&dialled.assumed).cloned();
-        resolved.notes.splice(0..0, said);
+        resolved.notes.splice(
+            0..0,
+            updated(updated_from.as_deref()).into_iter().chain(said),
+        );
     } else {
         // Ahead of the quiet check on purpose: see `Dialled::warning`.
         if let Some(warning) = &dialled.warning {
