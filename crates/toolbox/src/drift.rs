@@ -159,8 +159,13 @@ mod tests {
             dir.path().join("theirs.txt"),
             dir.path().join("gone.txt"),
         );
+        // Backdated, so the command's write moves mtime even on a coarse clock.
+        let past = SystemTime::now() - std::time::Duration::from_secs(10);
         for p in [&ran, &theirs, &gone] {
             std::fs::write(p, "old\n").unwrap();
+            (std::fs::File::options().write(true).open(p).unwrap())
+                .set_modified(past)
+                .unwrap();
             ctx.note_view(p, "old\n");
         }
         std::fs::write(&theirs, "user\n").unwrap();
