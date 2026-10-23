@@ -373,22 +373,22 @@ impl Editor {
         if start == 0 {
             return false;
         }
-        let col = self.cursor - start;
+        let col = cols(&self.text[start..self.cursor]);
         let prev = self.text[..start - 1].rfind('\n').map_or(0, |i| i + 1);
-        self.cursor = floor_boundary(&self.text, (prev + col).min(start - 1));
+        self.cursor = prev + at_col(&self.text[prev..start - 1], col);
         true
     }
 
     fn caret_down(&mut self) -> bool {
         let start = self.line_start();
-        let col = self.cursor - start;
+        let col = cols(&self.text[start..self.cursor]);
         let Some(nl) = self.text[self.cursor..].find('\n').map(|i| self.cursor + i) else {
             return false;
         };
         let next_end = self.text[nl + 1..]
             .find('\n')
             .map_or(self.text.len(), |i| nl + 1 + i);
-        self.cursor = floor_boundary(&self.text, (nl + 1 + col).min(next_end));
+        self.cursor = nl + 1 + at_col(&self.text[nl + 1..next_end], col);
         true
     }
 
@@ -510,13 +510,24 @@ pub fn decode(body: &str) -> Vec<String> {
         .collect()
 }
 
-// The nearest char boundary at or below `i`, so a column landing inside a
-// multi-byte character does not split it.
-fn floor_boundary(s: &str, mut i: usize) -> usize {
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
+// Columns `line` spans, counted the way `view` lays it out.
+fn cols(line: &str) -> usize {
+    line.chars()
+        .fold(0, |used, c| used + pi_store::text::cols_at(c, used))
+}
+
+// Where in `line` the caret lands for column `col`: on the character that
+// covers it, or at the end of a line too short to reach it.
+fn at_col(line: &str, col: usize) -> usize {
+    let mut used = 0;
+    for (i, c) in line.char_indices() {
+        let w = pi_store::text::cols_at(c, used);
+        if used + w > col {
+            return i;
+        }
+        used += w;
     }
-    i
+    line.len()
 }
 
 #[cfg(test)]
@@ -610,6 +621,22 @@ mod tests {
         // Still the same buffer: Up moved within it instead of recalling.
         assert_eq!(m.text, "one\ntwo");
         assert!(m.cursor < 4);
+    }
+
+    // Up and Down keep the column on screen, not the byte count: 中 is two
+    // columns and three bytes.
+    #[test]
+    fn up_and_down_keep_the_column_across_wide_characters() {
+        let mut e = typed("中文中文\nabcdefgh");
+        e.cursor = e.text.len() - 2;
+        e.up();
+        assert_eq!(&e.text[..e.cursor], "中文中");
+        e.down();
+        assert_eq!(&e.text[e.cursor..], "gh");
+        e.cursor = e.text.len() - 3;
+        e.up();
+        // Column 5 falls inside the third 中: the caret sits on it.
+        assert_eq!(&e.text[..e.cursor], "中文");
     }
 
     // The first line has nothing above it to walk, so Up hands over to
