@@ -165,9 +165,16 @@ pub fn arm(
     jobs: Option<Arc<crate::driver::jobs::Table>>,
 ) -> Arc<Resolved> {
     let jobs = jobs.map(|table| Arc::new(crate::driver::jobs::Jobs::new(table)));
+    // Hooks ask where jobs are kept, a child's gates as the lane's do.
+    let ask: Arc<dyn toolbox::background::Ask> = match &jobs {
+        Some(jobs) => jobs.clone(),
+        None => Arc::new(toolbox::background::NoOne),
+    };
+    let mut brief = resolved.brief.clone();
+    Arc::make_mut(&mut brief).hooks = resolved.hooks.arm(ask);
     let mut subagent = Subagent::prompted(
         agent,
-        resolved.brief.clone(),
+        brief.clone(),
         archive,
         resolved.prompt_files.prompt("subagent"),
         &resolved.standing,
@@ -180,16 +187,10 @@ pub fn arm(
     if let Some(jobs) = &jobs {
         subagent = subagent.with_background(jobs.clone());
     }
-    // A fresh `Arc`, since the child holds the old one: it runs on the
-    // registry it came from, and only the lane's copy carries the tool.
-    let mut brief = resolved.brief.clone();
+    // Changed from here on a fresh `Arc`, since the child holds this one: it
+    // runs on the registry it came from, and only the lane's copy carries the tool.
     if subagent.tier().under(resolved.ceiling) {
         Arc::make_mut(&mut brief).registry.offer(Arc::new(subagent));
-    }
-    // The lane's copy only: a child's turn never ends where the user can pick.
-    let choose = crate::core::choose::Choose;
-    if choose.tier().under(resolved.ceiling) {
-        Arc::make_mut(&mut brief).registry.offer(Arc::new(choose));
     }
     // The lane's copy only: a child never hears the user, whose words are
     // the only ones memory keeps.
@@ -241,6 +242,7 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
             approver: Arc::new(agent::Ceiling(tool::Tier::Exec)),
             hooks: Arc::new(agent::NoHooks),
         }),
+        hooks: Default::default(),
         subagent_deadline: None,
         standing: standing.into(),
         ceiling: tool::Tier::Exec,

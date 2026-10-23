@@ -171,17 +171,6 @@ refused, and resuming one from another directory moves it here.
 
 `read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `subagent` `memory`, plus:
 
-- `choose`: the model puts a question to you, up to 9 options under it, each
-  the line you would send to pick it — words for the model, or a command such
-  as `/compact`. It opens just over the input and holds the keyboard: `j`/`k`
-  move, `enter` or a digit sends one as if typed, `q` or `esc` closes it, and
-  any other key does nothing. `i` hands you the line to write your own
-  answer, which closes the question once sent; emptying the line returns
-  you to the options. With
-  `multiple`, `space` or a digit marks several, and `enter` sends the marked
-  ones as one prompt, a line each; those options are words, never commands.
-  The model's turn ends with the question, and nothing waits on your pick.
-
 - One tool per tool of each MCP server in `[mcp.<name>]`, offered as
   `<name>__<tool>` once the server has listed them. `command` and `args` run
   one over stdio, `url` reaches one over Streamable HTTP. A server that will
@@ -213,11 +202,27 @@ refused, and resuming one from another directory moves it here.
   person's line, sent to the model as written, never run as a command,
   `notice` for a line on the screen the model never reads, `choose` with
   `options` to ask a question as the `choose` tool does (stopping the job
-  takes it back), and `interrupt` to stop the checkout's turn. A turn an input opened is told back on fd 3: `started`, then its
-  whole `reply`.
-  [`examples/tools/`](examples/tools/) has four to copy: `search`; `judge`,
+  takes it back), and `interrupt` to stop the checkout's turn. A turn an
+  input opened is told back on fd 3: `started`, then its whole `reply`.
+  `choose` works before a detach too, where pi answers it with one line on
+  fd 3: `{"asked": true}` once it is up, or an `error` saying why not. There
+  `"answer": "back"` keeps the pick from going out: it comes down fd 3 as
+  `{"answer": "<option>"}`, your own words if you wrote some, or
+  `{"answer": null}` when you closed it — for a script that waits on you,
+  such as one that asks before letting a command run.
+
+  A question has up to 9 options, each the line you would send to pick it —
+  words for the model, or a command such as `/compact`. It opens just over
+  the input and holds the keyboard: `j`/`k` move, `enter` or a digit sends
+  one, `q` or `esc` closes it, and any other key does nothing. `i` hands you
+  the line to write your own answer, which closes the question once sent;
+  emptying the line returns you to the options. With `multiple`, `space` or
+  a digit marks several, and `enter` sends the marked ones as one prompt, a
+  line each; those options are words, never commands.
+  [`examples/tools/`](examples/tools/) has five to copy: `search`; `judge`,
   which reads its key from there; `later`, a prompt the model leaves itself
-  for after a delay or on a period; and `wechat`, which bridges the session
+  for after a delay or on a period; `choose`, through which the model puts
+  you a question and ends its turn; and `wechat`, which bridges the session
   to a WeChat chat — ask for it, scan the QR the first time, and what you
   send from the phone arrives as turns, `/stop` included. It is a cargo
   script, `wechat.rs`, so it needs nightly cargo and builds on first use.
@@ -238,6 +243,9 @@ The other events — `tool.denied`, `turn.start`, `turn.end` (with the reply's
 text), `compacted`, `retrying`, `warning`, `run.done`, `run.failed` (with the
 error; a stop you asked for is not one) — are only watched: queued off the run, one at a time, nothing they print reaching it. A
 subagent's calls pass the same gates, but its events stay its own.
+A hook has fd 3 as a script does, so it can `choose` with `"answer": "back"`
+and wait on you, as long as you take: `examples/hooks/ask-first` holds a
+`bash` call that cannot be taken back until you allow it.
 `examples/pi.toml` has the shape.
 
 Scripts and skills are read live: one written while pi runs is offered to the

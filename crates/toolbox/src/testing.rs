@@ -15,12 +15,34 @@ pub(crate) struct Sink {
     pub(crate) stop: Mutex<Option<CancellationToken>>,
     pub(crate) told: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Told>>>,
     pub(crate) output: Arc<Mutex<Option<Peek>>>,
+    // Where the answer to the question last asked with `back` goes.
+    pub(crate) answer: Mutex<Option<tokio::sync::oneshot::Sender<Option<String>>>>,
 }
 
 struct Handle {
     said: Arc<Mutex<Vec<String>>>,
     ended: Arc<Notify>,
     output: Arc<Mutex<Option<Peek>>>,
+}
+
+impl crate::background::Ask for Sink {
+    fn ask(
+        &self,
+        _root: std::path::PathBuf,
+        asker: &str,
+        asked: crate::background::Asked,
+    ) -> Result<Option<crate::background::Answer>, String> {
+        self.said
+            .lock()
+            .unwrap()
+            .push(format!("ask {asker} {}", asked.question));
+        if !asked.back {
+            return Ok(None);
+        }
+        let (to, answer) = tokio::sync::oneshot::channel();
+        *self.answer.lock().unwrap() = Some(to);
+        Ok(Some(answer))
+    }
 }
 
 impl crate::background::JobSink for Sink {
@@ -64,11 +86,12 @@ impl JobHandle for Handle {
     fn notice(&self, text: String) {
         self.said.lock().unwrap().push(format!("notice {text}"));
     }
-    fn choose(&self, question: String, options: Vec<String>, _multiple: bool) {
-        self.said
-            .lock()
-            .unwrap()
-            .push(format!("choose {question}: {}", options.join(" | ")));
+    fn choose(&self, asked: crate::background::Asked) {
+        self.said.lock().unwrap().push(format!(
+            "choose {}: {}",
+            asked.question,
+            asked.options.join(" | ")
+        ));
     }
     fn interrupt(&self) {
         self.said.lock().unwrap().push("interrupt".into());

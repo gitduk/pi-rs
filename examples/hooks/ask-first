@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+# A `tool.before` hook for `bash`: a command that cannot be taken back runs
+# only once you allow it. pi shows the question over the input and waits.
+#
+#   [[hooks]]
+#   on      = ["tool.before"]
+#   tools   = ["bash"]
+#   command = "~/.pi/hooks/ask-first"
+import json
+import os
+import re
+import sys
+
+RISKY = [
+    r"\brm\s+(-\w*[rf]\w*\s+)+",
+    r"\bgit\s+push\b.*\s(--force|-f)\b",
+    r"\bgit\s+(reset\s+--hard|clean\s+-\w*f)",
+    r"\bdd\s+.*\bof=",
+    r"\bmkfs\b",
+]
+
+
+def main():
+    call = json.load(sys.stdin)
+    command = (call.get("args") or {}).get("command") or ""
+    if not any(re.search(p, command) for p in RISKY):
+        return 0
+    asked = {
+        "choose": f"Allow: {command.splitlines()[0][:120]}",
+        "options": ["allow", "deny"],
+        "answer": "back",
+    }
+    # A socket, so no "r+": that wants a file it can seek. One end each way.
+    fd = int(os.environ["PI_EVENTS_FD"])
+    with os.fdopen(os.dup(fd), "w", buffering=1) as to_pi:
+        to_pi.write(json.dumps(asked) + "\n")
+    with os.fdopen(os.dup(fd), "r") as from_pi:
+        said = json.loads(from_pi.readline() or "{}")
+    if said.get("answer") == "allow":
+        return 0
+    why = said.get("error") or said.get("answer") or "closed without an answer"
+    print(f"the user did not allow it: {why}")
+    return 2
+
+
+sys.exit(main())

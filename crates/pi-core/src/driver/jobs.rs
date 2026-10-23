@@ -5,8 +5,12 @@
 //!
 //! What comes back goes only when the lane is free and nothing typed is
 //! waiting. Nothing here outlives this process; past it, use cron.
+//!
+//! The questions such calls put to the person pass through here too, jobs'
+//! and those of calls still in their turn alike: numbered, held until the
+//! surface takes them, and withdrawn once their asker is gone.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
@@ -15,12 +19,13 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
-use toolbox::background::{JobHandle, JobSink, Peek, Rerun, Told};
+use toolbox::background::{Answer, Ask, Asked, JobHandle, JobSink, Peek, Rerun, Told};
 
-use crate::core::choose::{Asker, Question};
+use crate::core::question::{Asker, Question};
 
 // Screen lines a job may have waiting before the oldest give way.
 const MAX_NOTICES: usize = 200;
@@ -41,8 +46,35 @@ pub struct Table {
 struct Inner {
     next_id: u64,
     items: Vec<Item>,
-    // Jobs stopped since last asked: a question already taken from one is void.
+    next_question: u64,
+    // Questions a call still in its turn put, by checkout, not yet taken.
+    asked: Vec<(PathBuf, Question)>,
+    // Where the answer to each question asked with `back` goes.
+    answers: HashMap<u64, oneshot::Sender<Option<String>>>,
+    // Questions whose asker is gone since last asked: void wherever they went.
     withdrawn: Vec<u64>,
+}
+
+impl Inner {
+    // Questions whose asker stopped waiting: void, shown or not.
+    fn sweep(&mut self) {
+        let gone: Vec<u64> = (self.answers.iter())
+            .filter(|(_, to)| to.is_closed())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &gone {
+            self.answers.remove(id);
+        }
+        self.asked.retain(|(_, q)| !gone.contains(&q.id));
+        self.withdrawn.extend(gone);
+    }
+
+    // `question` numbered, so an answer or a withdrawal can name it.
+    fn number(&mut self, mut question: Question) -> Question {
+        self.next_question += 1;
+        question.id = self.next_question;
+        question
+    }
 }
 
 struct Item {
@@ -70,6 +102,8 @@ struct Item {
     notices: VecDeque<String>,
     // A question it put to the person, not yet taken; a newer one replaces it.
     question: Option<Question>,
+    // Its latest question's id, taken or not, withdrawn when it stops.
+    asked: Option<u64>,
     // Reads the latest of what it printed; None for one that keeps none.
     output: Option<Peek>,
     // How it runs again. One that has it is kept once it ends, to be
@@ -315,15 +349,34 @@ impl Table {
         self.take(root, |i| std::mem::take(&mut i.notices))
     }
 
-    /// The lines `root`'s jobs asked the person to run since last asked.
+    /// The questions put at `root` since last asked: by its jobs, then by
+    /// calls still in their turn.
     pub fn take_questions(&self, root: &Path) -> Vec<Question> {
-        self.take(root, |i| i.question.take())
+        let mut taken = self.take(root, |i| i.question.take());
+        let mut inner = self.lock();
+        inner.sweep();
+        let (here, elsewhere) = std::mem::take(&mut inner.asked)
+            .into_iter()
+            .partition(|(at, _)| at == root);
+        inner.asked = elsewhere;
+        taken.extend(here.into_iter().map(|(_, q)| q));
+        taken
     }
 
-    /// Jobs stopped or started over since last asked, whose questions,
-    /// wherever they went, no longer stand.
+    /// The ids of questions whose asker has gone since last asked — a job
+    /// stopped or started over, a call that waited and is waiting no more.
     pub fn take_withdrawn(&self) -> Vec<u64> {
-        std::mem::take(&mut self.lock().withdrawn)
+        let mut inner = self.lock();
+        inner.sweep();
+        std::mem::take(&mut inner.withdrawn)
+    }
+
+    /// The person's answer to question `id`, for the asker waiting on it;
+    /// `None` when they closed it. Nothing when no one waits.
+    pub fn answer(&self, id: u64, picked: Option<String>) {
+        if let Some(to) = self.lock().answers.remove(&id) {
+            let _ = to.send(picked);
+        }
     }
 
     // What `root`'s jobs kept for the surface, taken; a job it was all that
@@ -349,6 +402,10 @@ impl Table {
             Told::Reply(text) => tracing::info!(
                 target: "pi::job", job = id, chars = text.chars().count(), reply = %text, "told reply"
             ),
+            Told::Asked => tracing::info!(target: "pi::job", job = id, "told asked"),
+            Told::Answer(answer) => {
+                tracing::info!(target: "pi::job", job = id, ?answer, "told answer")
+            }
         }
         if let Some(to) = self
             .lock()
@@ -477,6 +534,7 @@ impl Table {
             .ok_or_else(|| format!("no job #{id} here"))?;
         let item = &mut inner.items[at];
         let what = item.description.clone();
+        let asked = item.asked.take();
         match (&item.phase, item.rerun.is_some()) {
             (Phase::Over { .. }, true) => return Err(format!("#{id} ({what}) is not running")),
             (Phase::Running { stop }, true) => {
@@ -495,7 +553,7 @@ impl Table {
                 tracing::info!(target: "pi::job", job = id, "stopped and forgotten");
             }
         }
-        inner.withdrawn.push(id);
+        inner.withdrawn.extend(asked);
         drop(inner);
         self.changed.notify_one();
         Ok(what)
@@ -532,7 +590,8 @@ impl Table {
             table: self.clone(),
         });
         let what = item.description.clone();
-        inner.withdrawn.push(id);
+        let asked = item.asked.take();
+        inner.withdrawn.extend(asked);
         drop(inner);
         tracing::info!(target: "pi::job", job = id, "restarting");
         self.changed.notify_one();
@@ -620,11 +679,12 @@ impl Table {
                 if let Phase::Running { stop } = &i.phase {
                     stop.cancel();
                 }
-                withdrawn.push(i.id);
+                withdrawn.extend(i.asked);
             }
             !gone
         });
         inner.withdrawn.extend(withdrawn);
+        inner.asked.retain(|(at, _)| !at.starts_with(root));
         let gone = had - inner.items.len();
         drop(inner);
         self.changed.notify_one();
@@ -660,6 +720,7 @@ impl Table {
             interrupt: false,
             notices: VecDeque::new(),
             question: None,
+            asked: None,
             output: None,
             rerun: None,
             run: 0,
@@ -698,6 +759,30 @@ impl Jobs {
 
     pub fn new(table: Arc<Table>) -> Self {
         Self { table }
+    }
+}
+
+impl Ask for Jobs {
+    fn ask(&self, root: PathBuf, asker: &str, asked: Asked) -> Result<Option<Answer>, String> {
+        let from = Asker::Tool {
+            name: asker.to_string(),
+        };
+        let question = Question::of(from, &asked)?;
+        let mut inner = self.table.lock();
+        let question = inner.number(question);
+        tracing::info!(
+            target: "pi::job", tool = asker, question = question.id, back = asked.back,
+            text = %question.text, options = ?question.options, "ask"
+        );
+        let answer = asked.back.then(|| {
+            let (to, answer) = oneshot::channel();
+            inner.answers.insert(question.id, to);
+            answer
+        });
+        inner.asked.push((root, question));
+        drop(inner);
+        self.table.changed.notify_one();
+        Ok(answer)
     }
 }
 
@@ -779,20 +864,33 @@ impl JobHandle for Handle {
         });
     }
 
-    fn choose(&self, question: String, options: Vec<String>, multiple: bool) {
-        self.table.update(self.id, self.run, |i| {
-            let from = Asker::Job {
-                id: i.id,
-                name: i.name(),
-            };
-            match Question::new(from, &question, &options, multiple) {
-                Ok(q) => {
-                    tracing::info!(target: "pi::job", job = i.id, question = %q.text, options = ?q.options, "choose");
-                    i.question = Some(q);
-                }
-                Err(why) => tracing::warn!(target: "pi::job", job = i.id, %why, "a question dropped"),
+    fn choose(&self, asked: Asked) {
+        let mut inner = self.table.lock();
+        let Some(at) = (inner.items.iter()).position(|i| i.id == self.id && i.run == self.run)
+        else {
+            return;
+        };
+        let item = &inner.items[at];
+        let from = Asker::Job {
+            id: item.id,
+            name: item.name(),
+        };
+        let question = match Question::of(from, &asked) {
+            Ok(q) => inner.number(q),
+            Err(why) => {
+                tracing::warn!(target: "pi::job", job = self.id, %why, "a question dropped");
+                return;
             }
-        });
+        };
+        tracing::info!(
+            target: "pi::job", job = self.id, question = question.id, text = %question.text,
+            options = ?question.options, "choose"
+        );
+        let item = &mut inner.items[at];
+        item.asked = Some(question.id);
+        item.question = Some(question);
+        drop(inner);
+        self.table.changed.notify_one();
     }
 
     fn interrupt(&self) {
@@ -1002,19 +1100,27 @@ mod tests {
         assert!(table.take_notices(Path::new("/checkout")).is_empty());
     }
 
+    fn asked(question: &str, options: &[&str], back: bool) -> Asked {
+        Asked {
+            question: question.into(),
+            options: options.iter().map(|o| o.to_string()).collect(),
+            multiple: false,
+            back,
+        }
+    }
+
     // Said and gone: what a job leaves for the screen outlives its exit.
     #[tokio::test]
     async fn a_question_outlives_its_job_and_a_newer_one_replaces_it() {
         let table = Arc::new(Table::default());
         let job = start(&table, Path::new("/checkout"), "judge");
-        let lines = |l: &[&str]| l.iter().map(|o| o.to_string()).collect::<Vec<_>>();
-        job.choose("a new task?".into(), lines(&["/new"]), false);
-        job.choose("a long one?".into(), lines(&["/compact", "go on"]), false);
-        job.choose(
-            "hidden?".into(),
-            lines(&["/compact\nand what was not shown"]),
+        job.choose(asked("a new task?", &["/new"], false));
+        job.choose(asked("a long one?", &["/compact", "go on"], false));
+        job.choose(asked(
+            "hidden?",
+            &["/compact\nand what was not shown"],
             false,
-        );
+        ));
         job.notice("judged".into());
         job.end();
         assert!(table.take_questions(Path::new("/elsewhere")).is_empty());
@@ -1043,11 +1149,58 @@ mod tests {
     async fn stopping_a_job_withdraws_what_it_asked() {
         let table = Arc::new(Table::default());
         let job = start(&table, Path::new("/checkout"), "judge");
-        job.choose("new?".into(), vec!["/new".into()], false);
-        assert_eq!(table.take_questions(Path::new("/checkout")).len(), 1);
+        job.choose(asked("new?", &["/new"], false));
+        let taken = table.take_questions(Path::new("/checkout"));
         table.stop(Path::new("/checkout"), job.id()).unwrap();
-        assert_eq!(table.take_withdrawn(), [job.id()]);
+        assert_eq!(table.take_withdrawn(), [taken[0].id]);
         assert!(table.take_withdrawn().is_empty());
+    }
+
+    // A call in its turn asks: the answer reaches it, once; an asker that
+    // stopped waiting has its question withdrawn, never answered.
+    #[tokio::test]
+    async fn an_answer_goes_back_to_the_call_that_waits_on_it() {
+        let table = Arc::new(Table::default());
+        let jobs = Jobs::new(table.clone());
+        let root = PathBuf::from("/checkout");
+        let mut answer = jobs
+            .ask(
+                root.clone(),
+                "guard",
+                asked("run rm -rf?", &["allow", "deny"], true),
+            )
+            .unwrap()
+            .expect("it waits");
+        let fire = jobs
+            .ask(root.clone(), "choose", asked("which?", &["a"], false))
+            .unwrap();
+        assert!(
+            fire.is_none(),
+            "one that goes out as typed waits on nothing"
+        );
+        let taken = table.take_questions(&root);
+        assert_eq!(taken.len(), 2);
+        assert!(taken[0].back && !taken[1].back);
+        assert_eq!(
+            taken[0].from,
+            Asker::Tool {
+                name: "guard".into()
+            }
+        );
+        assert_ne!(taken[0].id, taken[1].id);
+        table.answer(taken[0].id, Some("deny".into()));
+        assert_eq!(answer.try_recv(), Ok(Some("deny".into())));
+        table.answer(taken[0].id, Some("allow".into()));
+
+        let gone = jobs.ask(root.clone(), "guard", asked("again?", &["yes"], true));
+        drop(gone);
+        let left = table.take_questions(&root);
+        assert!(left.is_empty(), "withdrawn before it was ever shown");
+        assert_eq!(table.take_withdrawn().len(), 1);
+        assert!(
+            jobs.ask(root, "guard", asked("?", &[], true)).is_err(),
+            "one that cannot be put says why"
+        );
     }
 
     #[tokio::test]

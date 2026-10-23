@@ -7,7 +7,6 @@
 pub mod archive;
 pub mod bar;
 pub mod bash;
-pub mod choose;
 pub mod content;
 pub mod dial;
 pub mod hooks;
@@ -17,6 +16,7 @@ pub mod mcp;
 pub mod memory;
 pub mod meter;
 pub mod prompt;
+pub mod question;
 pub mod resolve;
 pub mod settings;
 pub mod status;

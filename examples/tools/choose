@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+# ---
+# description = "Put a question to the user with a few options to pick from, when the decision is theirs: which approach, whether to go on, what to do next. Write each option as the exact message the user would send to pick it: words addressed to you, or a pi command such as `/compact <focus>` or `/model <name>`, which runs as if they typed it. Put the one you recommend first. With `multiple`, they may pick several, which reach you together as one message, a line each; then no option may be a command. The call returns at once; end your turn after it. The user's pick, or whatever they write instead, arrives as their next message."
+# [args]
+# question = "One short sentence."
+# options = "Up to 9 options, one per line, each the one-line message that picks it."
+# multiple = "optional: `true` to let several be picked, sent together; words only, no commands"
+# ---
+# The question goes to pi on fd 3 and the call ends: pi answers each `choose`
+# with one line, `{"asked": true}` once it is up, or an `error` saying why not.
+import json
+import os
+import sys
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+def main():
+    try:
+        call = json.load(sys.stdin)
+    except ValueError:
+        fail("no call on stdin")
+    options = call.get("options")
+    # The schema says a string, a line each; a model may still send a list.
+    if isinstance(options, str):
+        options = [o for o in options.splitlines() if o.strip()]
+    if not isinstance(options, list):
+        fail("`options` is one option per line")
+    multiple = call.get("multiple") in (True, "true")
+    fd = os.environ.get("PI_EVENTS_FD")
+    if fd is None:
+        fail("not run by pi: there is no one here to ask")
+    asked = {
+        "choose": call.get("question") or "",
+        "options": options,
+        "multiple": multiple,
+    }
+    # A socket, so no "r+": that wants a file it can seek. One end each way.
+    with os.fdopen(os.dup(int(fd)), "w", buffering=1) as to_pi:
+        to_pi.write(json.dumps(asked) + "\n")
+    with os.fdopen(os.dup(int(fd)), "r") as from_pi:
+        said = json.loads(from_pi.readline() or "{}")
+    if not said.get("asked"):
+        fail(f"not put to the user: {said.get('error', 'pi gave no answer')}")
+    print(f"Put to the user with {len(options)} options. End your turn now.")
+
+
+main()

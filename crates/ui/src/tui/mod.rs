@@ -101,6 +101,11 @@ pub(crate) enum Deed {
     Job(u64),
     // Drop the asides: the rows only drawn, never filed.
     Tidy,
+    // The person's answer to a question its asker waits on, or none.
+    Answer {
+        question: u64,
+        picked: Option<String>,
+    },
 }
 
 impl Deed {
@@ -119,7 +124,8 @@ impl Deed {
     // passing — the same key clears the line — and explains nothing later.
     fn journaled(&self) -> bool {
         match self {
-            Deed::Nothing | Deed::Tidy => false,
+            // An answer is journaled where it was picked, with what was picked.
+            Deed::Nothing | Deed::Tidy | Deed::Answer { .. } => false,
             Deed::External | Deed::Rewind | Deed::Interrupt | Deed::Unsend | Deed::Job(_) => true,
         }
     }
@@ -470,6 +476,7 @@ impl Tui {
                 self.ui.job_open = (self.ui.job_open != Some(id)).then_some(id);
             }
             Deed::Tidy => self.ui.tidy(front_view(&mut self.views, self.core.lane())),
+            Deed::Answer { question, picked } => self.drivers.jobs().answer(question, picked),
         }
     }
 
@@ -622,9 +629,9 @@ impl Tui {
                 }
             }
             // Before what is new: a job started over may already ask again.
-            for job in jobs.take_withdrawn() {
+            for question in jobs.take_withdrawn() {
                 for view in self.views.values_mut() {
-                    view.withdraw(job);
+                    view.withdraw(question);
                 }
             }
             for question in jobs.take_questions(self.core.lane().root()) {

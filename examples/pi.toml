@@ -161,7 +161,7 @@ max_output_tokens = 128_000
 # [[hooks]]
 # on      = ["tool.before"]
 # tools   = ["bash"]
-# command = "~/.pi/hooks/guard.sh"
+# command = "~/.pi/hooks/ask-first"   # examples/hooks/: asks you first
 #
 # [[hooks]]
 # on      = ["run.done"]

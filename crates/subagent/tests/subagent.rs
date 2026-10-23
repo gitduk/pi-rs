@@ -691,6 +691,17 @@ impl toolbox::background::JobSink for Host {
     }
 }
 
+impl toolbox::background::Ask for Host {
+    fn ask(
+        &self,
+        _root: std::path::PathBuf,
+        _asker: &str,
+        _asked: toolbox::background::Asked,
+    ) -> Result<Option<toolbox::background::Answer>, String> {
+        Err("no one to ask".into())
+    }
+}
+
 impl toolbox::background::JobHandle for Host {
     fn id(&self) -> u64 {
         4
@@ -701,7 +712,7 @@ impl toolbox::background::JobHandle for Host {
     }
     fn input(&self, _text: String) {}
     fn notice(&self, _text: String) {}
-    fn choose(&self, _question: String, _options: Vec<String>, _multiple: bool) {}
+    fn choose(&self, _asked: toolbox::background::Asked) {}
     fn interrupt(&self) {}
     fn watch(&self, _output: toolbox::background::Peek) {}
     fn follow(&self) {}

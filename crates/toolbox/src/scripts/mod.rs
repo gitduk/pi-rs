@@ -19,7 +19,7 @@ mod job {
     use std::time::Duration;
     use tool::{Ctx, ToolError};
 
-    use crate::background::JobSink;
+    use crate::background::{Ask, JobSink};
 
     pub enum Ran {
         Exited(crate::process::Exited),
@@ -38,7 +38,21 @@ mod job {
             .await
             .map(Ran::Exited)
     }
+
+    pub async fn run_asking(
+        _name: &str,
+        cmd: tokio::process::Command,
+        input: Vec<u8>,
+        timeout: Duration,
+        ctx: &Ctx,
+        _asks: &dyn Ask,
+    ) -> Result<crate::process::Exited, ToolError> {
+        crate::process::run(cmd, Some(input), timeout, ctx).await
+    }
 }
+/// A command run with fd 3 open to say what a script says, asking included,
+/// within its turn.
+pub use job::run_asking;
 mod script;
 
 use std::path::{Path, PathBuf};
@@ -529,7 +543,7 @@ mod tests {
         let (found, skipped) = discover_in(&dir);
         assert!(skipped.is_empty(), "{skipped:?}");
         let names: Vec<_> = found.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["judge", "later", "search", "wechat"]);
+        assert_eq!(names, ["choose", "judge", "later", "search", "wechat"]);
         let example = std::fs::read_to_string(dir.join(".env.example")).unwrap();
         let named: Vec<_> = env::parse(&example).into_iter().map(|(k, _)| k).collect();
         assert_eq!(named, ["TYPESAFE_API_KEY"], "what judge reads");

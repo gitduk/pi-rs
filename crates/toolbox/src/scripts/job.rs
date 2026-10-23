@@ -16,11 +16,11 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedReadHalf;
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::process::{Child, Command};
-use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
 use tool::{Ctx, ToolError};
 
-use crate::background::{JobHandle, JobSink, Told};
+use crate::background::{Answer, Ask, Asked, JobHandle, JobSink, NoOne, Told};
 
 use crate::process::{Exited, Group, MAX_RUN, Streams, detach, reap, spawn};
 
@@ -43,11 +43,7 @@ enum Said {
     Input(String),
     Notice(String),
     // A question, and the lines that answer it.
-    Choose {
-        question: String,
-        options: Vec<String>,
-        multiple: bool,
-    },
+    Choose(Asked),
     Interrupt,
     Follow,
 }
@@ -56,12 +52,99 @@ enum Said {
 /// detaches, a timeout or the turn's cancellation take the whole group.
 pub async fn run(
     name: &str,
-    mut cmd: Command,
+    cmd: Command,
     input: Vec<u8>,
     timeout: Duration,
     ctx: &Ctx,
     jobs: Option<&dyn JobSink>,
 ) -> Result<Ran, ToolError> {
+    let asks = jobs.map_or(&NoOne as &dyn Ask, |sink| sink as &dyn Ask);
+    let leaving = match turn(name, cmd, input, timeout, ctx, asks).await? {
+        Turn::Exited(exited) => return Ok(Ran::Exited(exited)),
+        Turn::Leaving(leaving) => leaving,
+    };
+    let Some(sink) = jobs else {
+        let why = "asked to go on in the background, which this run cannot keep: \
+                   nothing here would bring its results back";
+        return Err(leaving.refused(name, why).await);
+    };
+    let Leaving {
+        said,
+        child,
+        fd3,
+        streams,
+        told,
+    } = leaving;
+    let stop = CancellationToken::new();
+    let job = sink.start(
+        ctx.workspace.root().to_path_buf(),
+        name.to_string(),
+        stop.clone(),
+        Some(told.clone()),
+    );
+    job.watch(streams.peek());
+    let id = job.id();
+    // Owned before the task is first polled: a shutdown that drops it unrun
+    // still takes what the script started.
+    let group = child.id().map(Group);
+    let name = name.to_string();
+    tokio::spawn(async move {
+        let _group = group;
+        go_on(name, child, fd3, streams, job, stop, told).await;
+    });
+    Ok(Ran::Detached { said, id })
+}
+
+/// `run`, for a command that may ask the person through `asks` but never
+/// leave its turn.
+pub async fn run_asking(
+    name: &str,
+    cmd: Command,
+    input: Vec<u8>,
+    timeout: Duration,
+    ctx: &Ctx,
+    asks: &dyn Ask,
+) -> Result<Exited, ToolError> {
+    match turn(name, cmd, input, timeout, ctx, asks).await? {
+        Turn::Exited(exited) => Ok(exited),
+        Turn::Leaving(leaving) => Err(leaving.refused(name, "cannot leave its turn").await),
+    }
+}
+
+// How a script's turn ended: by its exit, or by asking to go on past it.
+enum Turn {
+    Exited(Exited),
+    Leaving(Leaving),
+}
+
+// What a script asking to go on still holds, for whoever ran it to keep
+// as a job or refuse.
+struct Leaving {
+    said: String,
+    child: Child,
+    fd3: Fd3,
+    streams: Streams,
+    told: UnboundedSender<Told>,
+}
+
+impl Leaving {
+    // Not kept: the script and all it started are taken down.
+    async fn refused(self, name: &str, why: &str) -> ToolError {
+        reap(self.child.id()).await;
+        ToolError::Invalid(format!("{name} {why}"))
+    }
+}
+
+// The script's turn, from its start to its exit or its asking to go on. Its
+// questions go to `asks`; what to do with one that goes on is the caller's.
+async fn turn(
+    name: &str,
+    mut cmd: Command,
+    input: Vec<u8>,
+    timeout: Duration,
+    ctx: &Ctx,
+    asks: &dyn Ask,
+) -> Result<Turn, ToolError> {
     let (ours, theirs) = std::os::unix::net::UnixStream::pair()?;
     let fd = theirs.as_raw_fd();
     // SAFETY: only async-signal-safe calls between fork and exec.
@@ -107,49 +190,47 @@ pub async fn run(
         skipping: false,
         open: true,
     };
+    // One writer from the start: an answer may come back before any detach.
+    let (told, hear) = unbounded_channel();
+    tokio::spawn(tell(write, hear));
 
     let limit = timeout.min(MAX_RUN);
     let deadline = tokio::time::sleep(limit);
     tokio::pin!(deadline);
+    // Waiting on the person is not running long: the clock stops until the
+    // answer, then starts over.
+    let mut waiting: Option<Answer> = None;
     loop {
         tokio::select! {
             // What was said before an exit is read before the exit is seen.
             biased;
             said = fd3.next() => match said {
                 Said::Status(text) => ctx.progress(text),
-                Said::Detach(text) => {
-                        let Some(sink) = jobs else {
-                            reap(group).await;
-                            return Err(ToolError::Invalid(format!(
-                                "{name} asked to go on in the background, which this run \
-                                 cannot keep: nothing here would bring its results back"
-                            )));
-                        };
-                        let stop = CancellationToken::new();
-                        let (told, hear) = unbounded_channel();
-                        let job = sink.start(
-                            ctx.workspace.root().to_path_buf(),
-                            name.to_string(),
-                            stop.clone(),
-                            Some(told),
-                        );
-                        job.watch(streams.peek());
-                        tokio::spawn(tell(write, hear));
-                        let id = job.id();
-                        // Owned before the task is first polled: a shutdown that
-                    // drops it unrun still takes what the script started.
-                    let group = child.id().map(Group);
-                    let name = name.to_string();
-                    tokio::spawn(async move {
-                        let _group = group;
-                        go_on(name, child, fd3, streams, job, stop).await;
-                    });
-                        return Ok(Ran::Detached { said: text, id });
+                Said::Detach(said) => {
+                    return Ok(Turn::Leaving(Leaving { said, child, fd3, streams, told }));
+                }
+                // Each answered by one line: the answer, that it is up, or why not.
+                Said::Choose(asked) => {
+                    let root = ctx.workspace.root().to_path_buf();
+                    let put = match waiting {
+                        Some(_) if asked.back => {
+                            Err("one question at a time: the last is not answered yet".into())
+                        }
+                        _ => asks.ask(root, name, asked),
+                    };
+                    match put {
+                        Ok(Some(answer)) => waiting = Some(answer),
+                        Ok(None) => {
+                            let _ = told.send(Told::Asked);
+                        }
+                        Err(why) => {
+                            let _ = told.send(Told::Answer(Err(why)));
+                        }
                     }
+                }
                 Said::Result(_)
                 | Said::Input(_)
                 | Said::Notice(_)
-                | Said::Choose { .. }
                 | Said::Interrupt
                 | Said::Follow => tracing::warn!(
                     target: "pi::scripts", script = name, "said before detach, dropped"
@@ -160,9 +241,14 @@ pub async fn run(
             (status, (stdout, stderr)) = async {
                 (child.wait().await, streams.captured().await)
             } => {
-                return Ok(Ran::Exited(Exited { status: status?, stdout, stderr }));
+                return Ok(Turn::Exited(Exited { status: status?, stdout, stderr }));
             }
-            () = &mut deadline => {
+            picked = async { waiting.as_mut().expect("guarded").await }, if waiting.is_some() => {
+                waiting = None;
+                let _ = told.send(Told::Answer(Ok(picked.ok().flatten())));
+                deadline.as_mut().reset(tokio::time::Instant::now() + limit);
+            }
+            () = &mut deadline, if waiting.is_none() => {
                 reap(group).await;
                 return Err(ToolError::Timeout { ms: limit.as_millis() as u64 });
             }
@@ -182,6 +268,7 @@ async fn go_on(
     mut streams: Streams,
     job: std::sync::Arc<dyn JobHandle>,
     stop: CancellationToken,
+    told: UnboundedSender<Told>,
 ) {
     let group = child.id();
     let status: std::io::Result<ExitStatus> = loop {
@@ -192,11 +279,12 @@ async fn go_on(
                 Said::Result(text) => job.result(text),
                 Said::Input(text) => job.input(text),
                 Said::Notice(text) => job.notice(text),
-                Said::Choose {
-                    question,
-                    options,
-                    multiple,
-                } => job.choose(question, options, multiple),
+                // A job outlives its turn: nothing is kept to bring an answer back.
+                Said::Choose(asked) if asked.back => {
+                    let why = "a question asked after detach cannot have its answer back";
+                    let _ = told.send(Told::Answer(Err(why.into())));
+                }
+                Said::Choose(asked) => job.choose(asked),
                 Said::Interrupt => job.interrupt(),
                 Said::Follow => job.follow(),
                 Said::Detach(_) => {}
@@ -231,13 +319,16 @@ async fn go_on(
     job.end();
 }
 
-// What the host tells a detached script, in order, on its own task: a script
-// that never reads fd 3 fills the socket and stalls only this.
+// What the host tells a script, in order, on its own task: a script that
+// never reads fd 3 fills the socket and stalls only this.
 async fn tell(mut to: OwnedWriteHalf, mut hear: UnboundedReceiver<Told>) {
     while let Some(told) = hear.recv().await {
         let line = match told {
             Told::Started => serde_json::json!({ "started": true }),
             Told::Reply(text) => serde_json::json!({ "reply": text }),
+            Told::Asked => serde_json::json!({ "asked": true }),
+            Told::Answer(Ok(picked)) => serde_json::json!({ "answer": picked }),
+            Told::Answer(Err(why)) => serde_json::json!({ "answer": null, "error": why }),
         };
         if to.write_all(format!("{line}\n").as_bytes()).await.is_err() {
             return;
@@ -307,11 +398,13 @@ fn parse(line: &str) -> Option<Said> {
         .filter_map(|o| o.as_str().map(str::to_string))
         .collect();
         let multiple = v.get("multiple").and_then(Value::as_bool) == Some(true);
-        return Some(Said::Choose {
+        let back = v.get("answer").and_then(Value::as_str) == Some("back");
+        return Some(Said::Choose(Asked {
             question,
             options,
             multiple,
-        });
+            back,
+        }));
     }
     text("detach")
         .map(Said::Detach)
@@ -557,6 +650,58 @@ echo 'all done'"#,
         assert!(result.contains("check the build"), "{said:?}");
     }
 
+    // The shipped `choose` asks on fd 3 and hears it is up, or why not; a
+    // copy once failed on the socket at its first read, which parsing never saw.
+    #[tokio::test]
+    async fn the_shipped_choose_asks_and_says_what_became_of_it() {
+        let Ok(python) = which("python3") else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let choose =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/tools/choose");
+        let ctx = ctx(dir.path());
+        let input = br#"{"question": "which first?", "options": "fix parse.rs\nadd tests"}"#;
+        let cmd = || {
+            let mut cmd = Command::new(&python);
+            cmd.arg(&choose).current_dir(dir.path());
+            cmd
+        };
+        let sink = Sink::default();
+        let Ran::Exited(done) = run(
+            "choose",
+            cmd(),
+            input.to_vec(),
+            5 * SECOND,
+            &ctx,
+            Some(&sink),
+        )
+        .await
+        .unwrap() else {
+            panic!("it ended in its turn")
+        };
+        assert!(done.status.success(), "{}", done.stderr.text);
+        assert!(
+            done.stdout.text.contains("Put to the user with 2 options"),
+            "{}",
+            done.stdout.text
+        );
+        assert_eq!(sink.said.lock().unwrap()[..], ["ask choose which first?"]);
+
+        let Ran::Exited(refused) = run("choose", cmd(), input.to_vec(), 5 * SECOND, &ctx, None)
+            .await
+            .unwrap()
+        else {
+            panic!("it ended in its turn")
+        };
+        assert!(!refused.status.success());
+        assert!(
+            refused.stderr.text.contains("not put to the user"),
+            "{}",
+            refused.stderr.text
+        );
+    }
+
     fn which(program: &str) -> Result<std::path::PathBuf, ()> {
         std::env::var_os("PATH")
             .and_then(|paths| {
@@ -565,6 +710,48 @@ echo 'all done'"#,
                     .find(|path| path.is_file())
             })
             .ok_or(())
+    }
+
+    // A call in its turn asks and waits, as long as the person takes: the
+    // answer comes down fd 3, and a host that cannot ask says so there.
+    #[tokio::test]
+    async fn a_question_asked_in_the_turn_has_its_answer_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        let ctx = ctx(dir.path());
+        let body = r#"echo '{"choose":"run it?","options":["allow","deny"],"answer":"back"}' >&3
+read -r a <&3
+printf '%s\n' "$a" > heard"#;
+        let ran = {
+            let sink = sink.clone();
+            let ctx = ctx.clone();
+            let cmd = script(dir.path(), body);
+            tokio::spawn(
+                async move { run("guard", cmd, Vec::new(), SECOND, &ctx, Some(&*sink)).await },
+            )
+        };
+        let deadline = std::time::Instant::now() + 5 * SECOND;
+        let to = loop {
+            if let Some(to) = sink.answer.lock().unwrap().take() {
+                break to;
+            }
+            assert!(std::time::Instant::now() < deadline, "never asked");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(sink.said.lock().unwrap()[0], "ask guard run it?");
+        // Past its one-second limit: the clock stood while the person thought.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        to.send(Some("deny".into())).unwrap();
+        assert!(matches!(ran.await.unwrap().unwrap(), Ran::Exited(_)));
+        let heard = std::fs::read_to_string(dir.path().join("heard")).unwrap();
+        assert_eq!(heard, "{\"answer\":\"deny\"}\n");
+
+        let cmd = script(dir.path(), body);
+        run("guard", cmd, Vec::new(), 5 * SECOND, &ctx, None)
+            .await
+            .unwrap();
+        let heard = std::fs::read_to_string(dir.path().join("heard")).unwrap();
+        assert!(heard.starts_with("{\"answer\":null,\"error\":"), "{heard}");
     }
 
     // A person's line and a stop go up; what the host tells of the turn

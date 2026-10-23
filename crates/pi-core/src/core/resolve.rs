@@ -23,6 +23,9 @@ pub struct Resolved {
     /// What the agent runs on: the tools, the prompt, the ceiling, the effort.
     /// A subagent derives its own from this one.
     pub brief: std::sync::Arc<agent::Briefing>,
+    /// The config's hooks, which the brief carries once armed: before then
+    /// its hooks can ask no one.
+    pub hooks: crate::core::hooks::Declared,
     /// The tail of the prompt that belongs to the run rather than to the
     /// assistant: the workspace anchor, what the run is, and the
     /// instructions files. Kept apart because the subagent has its own prompt but the same
@@ -360,6 +363,7 @@ pub fn resolve(
     .render();
     system.push_str(&standing);
 
+    let hooks = crate::core::hooks::Declared::new(&config.hooks, workspace);
     Ok(Resolved {
         brief: std::sync::Arc::new(agent::Briefing {
             registry: registry.within(tier),
@@ -367,8 +371,9 @@ pub fn resolve(
             summarize: prompt_files.prompt("summarize").to_string(),
             effort,
             approver: std::sync::Arc::new(agent::Ceiling(tier)),
-            hooks: crate::core::hooks::of(&config.hooks, workspace),
+            hooks: hooks.arm(std::sync::Arc::new(toolbox::background::NoOne)),
         }),
+        hooks,
         subagent_deadline: config
             .subagent_deadline
             .map(|s| std::time::Duration::from_secs(s.max(1))),
@@ -669,7 +674,6 @@ mod tests {
                 skills::Load::NAME,
                 subagent::Subagent::NAME,
                 crate::driver::jobs::Jobs::NAME,
-                crate::core::choose::Choose::NAME,
             ]
             .map(String::from),
         );

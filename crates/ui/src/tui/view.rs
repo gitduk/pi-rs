@@ -12,9 +12,9 @@ use super::row::Row;
 use super::scrollback::{Folds, Scrollback, scrollback_from};
 use crate::render::Paint;
 use pi_core::core::Core;
-use pi_core::core::choose::{Asker, Question};
 use pi_core::core::lane::Lane;
 use pi_core::core::meter::Snapshot;
+use pi_core::core::question::Question;
 use pi_core::core::resolve::Resolved;
 use pi_core::driver::Origin;
 use pi_core::input::Intent;
@@ -78,8 +78,6 @@ pub struct Surface {
 // Cost tally lives on the lane, outliving this screen.
 #[derive(Default)]
 pub struct State {
-    // `choose` calls in flight, by id: their question is put once they end well.
-    pub(super) asking: Vec<(String, Question)>,
     // Calls in flight, plus ended calls not yet adopted: parked until the
     // commit checks them, `abandon_tools` files the rest.
     pub(super) tools: Vec<RunTool>,
@@ -208,18 +206,21 @@ pub(super) fn opened<'a>(views: &'a mut Views, lane: &Lane, paint: &Paint) -> &'
 impl View {
     // Asking again is a change of mind: only an asker's latest stands, and
     // where its last one stood, so the question in front stays in front.
+    // One an asker waits on is never replaced: it would wait for good.
     pub(super) fn ask(&mut self, question: Question) {
-        self.change_questions(|qs| match qs.iter_mut().find(|q| q.from == question.from) {
-            Some(q) => *q = question,
-            None => qs.push_back(question),
+        self.change_questions(|qs| {
+            let stale =
+                (qs.iter_mut()).find(|q| q.from == question.from && !q.back && !question.back);
+            match stale {
+                Some(q) => *q = question,
+                None => qs.push_back(question),
+            }
         });
     }
 
-    // A stopped job's questions no longer stand.
-    pub(super) fn withdraw(&mut self, job: u64) {
-        self.change_questions(|qs| {
-            qs.retain(|q| !matches!(q.from, Asker::Job { id, .. } if id == job));
-        });
+    // A question whose asker is gone no longer stands.
+    pub(super) fn withdraw(&mut self, question: u64) {
+        self.change_questions(|qs| qs.retain(|q| q.id != question));
     }
 
     // The front question taken off, and the options at `picks`, if any were

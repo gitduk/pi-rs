@@ -8,7 +8,6 @@ use super::{Asked, Deed, Ui};
 use crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
-use pi_core::core::choose::Asker;
 use pi_core::core::lane::Lane;
 use pi_core::input::Builtin;
 use pi_core::input::{self, Intent};
@@ -45,8 +44,12 @@ impl Ui {
         if writing {
             // Their own words sent are the answer; a line emptied hands the
             // keyboard back to the question.
-            if self.submitted.is_some() {
-                self.answer(view, &[]);
+            let back = view.questions.front().is_some_and(|q| q.back);
+            // To an asker that waits, their words go back instead of out.
+            if let Some(own) = self.submitted.take_if(|_| back) {
+                return self.answer(view, &[], Some(own));
+            } else if self.submitted.is_some() {
+                self.answer(view, &[], None);
             } else if self.editor.is_empty() {
                 view.writing = false;
             }
@@ -76,20 +79,24 @@ impl Ui {
         self.read.is_some() || self.search.is_some()
     }
 
-    // The front question let go, sending the options at `picks` as if typed.
-    fn answer(&mut self, view: &mut View, picks: &[usize]) -> Asked {
+    // The front question let go, with the options at `picks`, or the
+    // person's `own` words, as its answer.
+    fn answer(&mut self, view: &mut View, picks: &[usize], own: Option<String>) -> Asked {
         self.disarm();
-        let Some((question, line)) = view.answer(picks) else {
+        let Some((question, picked)) = view.answer(picks) else {
             return Asked::Own(Deed::Nothing);
         };
-        let job = match question.from {
-            Asker::Job { id, .. } => Some(id),
-            Asker::Model => None,
-        };
-        tracing::info!(target: "pi::session", job, ?picks, "question answered");
-        match line {
-            Some(line) => self.run_line(line),
-            None => Asked::Own(Deed::Nothing),
+        tracing::info!(
+            target: "pi::session", question = question.id, from = ?question.from, ?picks,
+            "question answered"
+        );
+        match (question.back, own.or(picked)) {
+            (true, picked) => Asked::Own(Deed::Answer {
+                question: question.id,
+                picked,
+            }),
+            (false, Some(line)) => self.run_line(line),
+            (false, None) => Asked::Own(Deed::Nothing),
         }
     }
 
@@ -174,7 +181,7 @@ impl Ui {
                     true => vec![view.picked],
                     false => view.checked.iter().copied().collect(),
                 };
-                return self.answer(view, &picks);
+                return self.answer(view, &picks, None);
             }
             // A digit names its option; one past the last names none. Where
             // several may be picked, it toggles rather than sends.
@@ -194,7 +201,7 @@ impl Ui {
                     return Asked::Own(Deed::Nothing);
                 };
                 if !multiple {
-                    return self.answer(view, &[at]);
+                    return self.answer(view, &[at], None);
                 }
                 view.picked = at;
                 view.toggle(at);
@@ -213,7 +220,7 @@ impl Ui {
                 self.disarm();
                 return Asked::Own(Deed::Nothing);
             }
-            Some(Action::QuestionDecline) => return self.answer(view, &[]),
+            Some(Action::QuestionDecline) => return self.answer(view, &[], None),
             Some(Action::AppCancel) => return self.cancel(view, running),
             Some(Action::AppQuit) => return Asked::Core(Intent::Builtin(Builtin::Quit)),
             // A stray key must not close a question, nor type under it.

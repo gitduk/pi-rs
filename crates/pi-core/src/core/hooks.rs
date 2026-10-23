@@ -16,6 +16,7 @@ use pi_store::config::{Hook, HookOn};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tool::{Ctx, ToolOutput};
+use toolbox::background::Ask;
 
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -46,9 +47,29 @@ pub async fn flush() {
     .await;
 }
 
+/// The hooks a config declares for a workspace, not yet told where their
+/// questions go: that is known only once a lane is armed.
+#[derive(Clone, Default)]
+pub struct Declared(Option<(Vec<Hook>, tool::Workspace)>);
+
+impl Declared {
+    pub fn new(hooks: &[Hook], workspace: &tool::Workspace) -> Self {
+        Self((!hooks.is_empty()).then(|| (hooks.to_vec(), workspace.clone())))
+    }
+
+    /// The hooks, their questions put through `ask`.
+    pub fn arm(&self, ask: Arc<dyn Ask>) -> Arc<dyn agent::Hooks> {
+        match &self.0 {
+            Some((hooks, workspace)) => of(hooks, workspace, ask),
+            None => Arc::new(agent::NoHooks),
+        }
+    }
+}
+
 /// The hooks a config names, or none at all when it names none. Watching
-/// hooks run in `workspace`, as the gates run in their call's.
-pub fn of(hooks: &[Hook], workspace: &tool::Workspace) -> Arc<dyn agent::Hooks> {
+/// hooks run in `workspace`, as the gates run in their call's. A hook may
+/// put a question to the person through `ask` and wait on it.
+fn of(hooks: &[Hook], workspace: &tool::Workspace, ask: Arc<dyn Ask>) -> Arc<dyn agent::Hooks> {
     if hooks.is_empty() {
         return Arc::new(agent::NoHooks);
     }
@@ -56,11 +77,14 @@ pub fn of(hooks: &[Hook], workspace: &tool::Workspace) -> Arc<dyn agent::Hooks> 
         hooks: hooks.to_vec(),
         ctx: Ctx::new(workspace.clone()),
         queues: OnceLock::new(),
+        ask,
     })
 }
 
 struct Shell {
     hooks: Vec<Hook>,
+    // Where a hook's questions go.
+    ask: Arc<dyn Ask>,
     // What watching hooks run under: the workspace, and no stop of a run's.
     ctx: Ctx,
     // One per hook that watches anything, so a slow one holds up only its
@@ -108,7 +132,7 @@ impl Shell {
                     return None;
                 }
                 let (tx, rx) = mpsc::channel(QUEUE);
-                runtime.spawn(watch(rx, hook.clone(), self.ctx.clone()));
+                runtime.spawn(watch(rx, hook.clone(), self.ctx.clone(), self.ask.clone()));
                 Some(tx)
             })
             .collect();
@@ -119,10 +143,10 @@ impl Shell {
 }
 
 // Runs what was queued for `hook`, one at a time, until the hooks are replaced.
-async fn watch(mut rx: mpsc::Receiver<Vec<u8>>, hook: Hook, ctx: Ctx) {
+async fn watch(mut rx: mpsc::Receiver<Vec<u8>>, hook: Hook, ctx: Ctx, ask: Arc<dyn Ask>) {
     while let Some(input) = rx.recv().await {
         let hook = &hook;
-        match ran(hook, &input, &ctx).await {
+        match ran(hook, &input, &ctx, &*ask).await {
             Some((0, _)) | None => {}
             Some((code, said)) => warn(hook, &format!("exit {code}: {said}")),
         }
@@ -206,7 +230,7 @@ impl agent::Hooks for Shell {
         }
         let input = line(&json!({ "tool": tool, "args": args, "workspace": ctx.workspace.root() }));
         for hook in hooks {
-            match run(hook, &input, ctx).await {
+            match run(hook, &input, ctx, &*self.ask).await {
                 Ok((0, _)) => {}
                 Ok((2, said)) => {
                     let said = if said.is_empty() {
@@ -236,7 +260,7 @@ impl agent::Hooks for Shell {
             "workspace": ctx.workspace.root(),
             "result": out.flatten(),
         }));
-        notes(hooks, &input, ctx, |_| true).await
+        notes(hooks, &input, ctx, &*self.ask, |_| true).await
     }
 
     async fn ahead(&self, prompt: &str, ctx: &Ctx) -> Option<String> {
@@ -250,7 +274,7 @@ impl agent::Hooks for Shell {
             "prompt": prompt,
         }));
         // A failure's words are for whoever fixes the hook, not the model.
-        notes(hooks, &input, ctx, |code| code == 0).await
+        notes(hooks, &input, ctx, &*self.ask, |code| code == 0).await
     }
 
     async fn hold(&self, reply: &str, held: usize, ctx: &Ctx) -> Option<String> {
@@ -265,7 +289,7 @@ impl agent::Hooks for Shell {
             "held": held,
         }));
         for hook in hooks {
-            match ran(hook, &input, ctx).await {
+            match ran(hook, &input, ctx, &*self.ask).await {
                 Some((0, _)) | None => {}
                 Some((2, said)) if said.is_empty() => return Some("[hook] not done yet".into()),
                 Some((2, said)) => return Some(format!("[hook] {said}")),
@@ -317,11 +341,12 @@ async fn notes(
     hooks: Vec<&Hook>,
     input: &[u8],
     ctx: &Ctx,
+    ask: &dyn Ask,
     kept: fn(i32) -> bool,
 ) -> Option<String> {
     let mut notes = Vec::new();
     for hook in hooks {
-        match ran(hook, input, ctx).await {
+        match ran(hook, input, ctx, ask).await {
             Some((code, said)) if kept(code) => {
                 if !said.is_empty() {
                     notes.push(format!("[hook] {said}"));
@@ -335,8 +360,8 @@ async fn notes(
 }
 
 // `run`, with a hook that could not be run journaled and passed over.
-async fn ran(hook: &Hook, input: &[u8], ctx: &Ctx) -> Option<(i32, String)> {
-    run(hook, input, ctx)
+async fn ran(hook: &Hook, input: &[u8], ctx: &Ctx, ask: &dyn Ask) -> Option<(i32, String)> {
+    run(hook, input, ctx, ask)
         .await
         .map_err(|why| warn(hook, &why))
         .ok()
@@ -355,14 +380,14 @@ fn warn(hook: &Hook, why: &str) {
     tracing::warn!(target: "pi::hooks", command = %hook.command, %why, "hook failed");
 }
 
-// The hook's exit code and what it printed, stdout then stderr. Run like a
-// tool's child: its own group, bounded output, and a stop ends it.
-async fn run(hook: &Hook, input: &[u8], ctx: &Ctx) -> Result<(i32, String), String> {
+// The hook's exit code and what it printed, stdout then stderr. Run as a
+// script runs in its turn: fd 3 for its questions, and a stop ends it.
+async fn run(hook: &Hook, input: &[u8], ctx: &Ctx, ask: &dyn Ask) -> Result<(i32, String), String> {
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg("-c")
         .arg(&hook.command)
         .current_dir(ctx.workspace.root());
-    let exited = toolbox::process::run(cmd, Some(input.to_vec()), WAIT, ctx)
+    let exited = toolbox::scripts::run_asking("hook", cmd, input.to_vec(), WAIT, ctx, ask)
         .await
         .map_err(|e| e.to_string())?;
     let said = [&exited.stdout.text, &exited.stderr.text]
@@ -380,7 +405,7 @@ mod tests {
     use agent::Hooks;
 
     fn shell(ctx: &Ctx, hooks: Vec<Hook>) -> Arc<dyn Hooks> {
-        of(&hooks, &ctx.workspace)
+        of(&hooks, &ctx.workspace, Arc::new(toolbox::background::NoOne))
     }
 
     fn hook(on: HookOn, command: &str) -> Hook {
@@ -389,6 +414,100 @@ mod tests {
             tools: vec!["bash".into()],
             command: command.into(),
         }
+    }
+
+    // Answers every question with `picked` at once, as a person might.
+    struct Says(&'static str);
+
+    impl toolbox::background::Ask for Says {
+        fn ask(
+            &self,
+            _root: std::path::PathBuf,
+            asker: &str,
+            asked: toolbox::background::Asked,
+        ) -> Result<Option<toolbox::background::Answer>, String> {
+            assert_eq!(asker, "hook");
+            assert!(asked.back, "a gate waits on its answer");
+            let (to, answer) = tokio::sync::oneshot::channel();
+            let _ = to.send(Some(self.0.to_string()));
+            Ok(Some(answer))
+        }
+    }
+
+    // A gate that asks before letting a call run: the person's answer, read
+    // off fd 3, decides it; with no one to ask it hears why and refuses.
+    #[tokio::test]
+    async fn a_gate_asks_the_person_and_their_answer_decides() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let guard = hook(
+            HookOn::ToolBefore,
+            r#"echo '{"choose":"run it?","options":["allow","deny"],"answer":"back"}' >&3
+read -r a <&3
+case "$a" in *'"allow"'*) exit 0;; *) echo "the user said no: $a"; exit 2;; esac"#,
+        );
+        let args = json!({ "command": "rm -rf build" });
+        let asking = |says| {
+            of(
+                std::slice::from_ref(&guard),
+                &ctx.workspace,
+                Arc::new(Says(says)),
+            )
+        };
+        assert!(asking("allow").before("bash", &args, &ctx).await.is_ok());
+        let refused = asking("deny")
+            .before("bash", &args, &ctx)
+            .await
+            .unwrap_err();
+        assert!(refused.contains("the user said no"), "{refused}");
+        let alone = shell(&ctx, vec![guard.clone()])
+            .before("bash", &args, &ctx)
+            .await;
+        assert!(
+            alone
+                .unwrap_err()
+                .contains("nothing here can put a question")
+        );
+    }
+
+    // The shipped example, run as configured: what it lets through, what it
+    // asks about, and how the answer decides.
+    #[tokio::test]
+    async fn the_shipped_ask_first_asks_only_about_what_cannot_be_undone() {
+        if std::process::Command::new("python3")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let script =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/hooks/ask-first");
+        let gate = hook(HookOn::ToolBefore, &format!("python3 {}", script.display()));
+        let asking = |says| {
+            of(
+                std::slice::from_ref(&gate),
+                &ctx.workspace,
+                Arc::new(Says(says)),
+            )
+        };
+        let call = |command: &str| json!({ "command": command });
+        // `Says` would fail the test if asked: a plain command is never asked about.
+        let quiet = shell(&ctx, vec![gate.clone()]);
+        assert!(quiet.before("bash", &call("ls -la"), &ctx).await.is_ok());
+        assert!(
+            asking("allow")
+                .before("bash", &call("rm -rf build"), &ctx)
+                .await
+                .is_ok()
+        );
+        let refused = asking("deny")
+            .before("bash", &call("git push --force"), &ctx)
+            .await
+            .unwrap_err();
+        assert!(refused.contains("did not allow it: deny"), "{refused}");
     }
 
     #[tokio::test]

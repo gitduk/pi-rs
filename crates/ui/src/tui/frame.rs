@@ -18,7 +18,7 @@ use super::search::{self, Anchor, Laid, Spot};
 use super::view::{StreamKind, View, snapshot};
 use crate::render;
 use crate::status;
-use pi_core::core::choose::{Asker, Question};
+use pi_core::core::question::Question;
 use pi_store::icons;
 
 // Rows kept between the pick and the list's edge while it scrolls, so what
@@ -606,12 +606,8 @@ impl Ui {
             self.paint
                 .span(&theme.muted, format!("{} ", icons::QUESTION_MARK)),
         ];
-        if let Asker::Job { name, .. } = &question.from {
-            head.push(
-                self.paint
-                    .span(&theme.muted, format!("{name}{}", icons::PART_SEP)),
-            );
-        }
+        let asker = format!("{}{}", question.from.name(), icons::PART_SEP);
+        head.push(self.paint.span(&theme.muted, asker));
         head.push(self.paint.span(&theme.emphasis, question.text.clone()));
         // While it holds the keyboard, which keys do what: none goes unsaid.
         if holds {
