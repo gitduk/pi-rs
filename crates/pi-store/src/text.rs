@@ -43,6 +43,20 @@ impl Escape {
         }
     }
 
+    // The state after a C1 control that opens a sequence on its own — the
+    // 8-bit spelling of `ESC [`, `ESC ]` and the rest.
+    fn after_c1(c: char) -> Option<Self> {
+        let kind = match c {
+            '\u{9b}' | '\u{8f}' => Kind::Control,
+            '\u{90}' | '\u{98}' | '\u{9d}' | '\u{9e}' | '\u{9f}' => Kind::Str,
+            _ => return None,
+        };
+        Some(Self {
+            kind: Some(kind),
+            st: false,
+        })
+    }
+
     pub fn closed(&mut self, c: char) -> bool {
         let Some(kind) = &self.kind else {
             // `[` and `O` are also final bytes by the range test, so they
@@ -62,7 +76,7 @@ impl Escape {
             Kind::Control => ('\x40'..='\x7e').contains(&c),
             Kind::Bare => ('\x30'..='\x7e').contains(&c),
             Kind::Str => {
-                let closed = c == '\x07' || (self.st && c == '\\');
+                let closed = c == '\x07' || c == '\u{9c}' || (self.st && c == '\\');
                 self.st = c == '\x1b';
                 closed
             }
@@ -128,7 +142,8 @@ pub fn escaping(esc: &mut Option<Escape>, c: char) -> bool {
         *esc = Some(Escape::new());
         return true;
     }
-    false
+    *esc = Escape::after_c1(c);
+    esc.is_some()
 }
 
 /// Display columns of one line by `cols_at`, escapes taking none.
@@ -343,6 +358,16 @@ mod tests {
         let s = "AAAAA\x1b[31mBBBBB";
         assert_eq!(clip_left(s, s.len(), 8), "…AA\x1b[31mBBBBB");
         assert_eq!(clip_left("abcdef", 6, 4), "…def");
+    }
+
+    // A C1 control opens a sequence as its `ESC` spelling does.
+    #[test]
+    fn a_c1_sequence_is_an_escape() {
+        assert_eq!(width("\u{9b}31mab"), 2);
+        assert_eq!(screen_line("\u{9b}31mred\u{9b}0m"), "red");
+        assert_eq!(screen_line("\u{9d}8;;http://x\u{9c}link"), "link");
+        assert_eq!(screen_line("\x1b]8;;http://x\u{9c}link"), "link");
+        assert_eq!(clip("\u{9b}1mabcdefg", 4), "\u{9b}1mabc\x1b[0m…");
     }
 
     // Whole text with more after it takes the same mark a cut would.
