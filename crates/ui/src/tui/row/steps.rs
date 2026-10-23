@@ -3,7 +3,7 @@
 
 use ratatui::text::{Line, Span};
 
-use super::{Fold, Opening, clipped, count};
+use super::{Fold, Opening, count};
 use crate::render::{self, Paint};
 use crate::tui::browse::PageLine;
 use crate::tui::{THINKING, screen};
@@ -252,7 +252,7 @@ impl Head {
         let text = if open {
             self.text.clone()
         } else {
-            let text = clipped(&self.text, self.room(width), self.more);
+            let text = pi_store::text::clip_more(&self.text, self.room(width), self.more);
             format!("{text}{}", self.tail)
         };
         // The mark and the text are spans of their own, so hover bolds

@@ -173,29 +173,51 @@ pub fn clip(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }
-    // `end`: just past the last visible non-space, where no escape is open.
-    let (mut esc, mut used, mut styled, mut end) = (None, 0, false, 0);
+    let (mut esc, mut used) = (None, 0);
     for (i, c) in one.char_indices() {
         if escaping(&mut esc, c) {
-            styled = true;
             continue;
         }
         used += cols_at(c, used);
         if used >= max {
-            // Spaces trimmed, not the escapes after them: a style set
-            // there still has to reach its reset.
-            let mut esc = None;
-            let after: String = (one[end..i].chars())
-                .filter(|&c| escaping(&mut esc, c))
-                .collect();
-            let reset = if styled { RESET } else { "" };
-            return format!("{}{after}{reset}{}", &one[..end], icons::ELLIPSIS);
-        }
-        if !c.is_whitespace() {
-            end = i + c.len_utf8();
+            return marked(&one[..i]);
         }
     }
     one
+}
+
+/// `clip`, with the `…` also owed when `more` follows a line that fits whole:
+/// the mark sits on the text, never apart from it.
+pub fn clip_more(s: &str, max: usize, more: bool) -> String {
+    let cut = clip(s, max);
+    if !more || cut != s {
+        return cut;
+    }
+    match width(s) < max {
+        true => marked(s),
+        false => clip(s, max.saturating_sub(1)),
+    }
+}
+
+// `s` closed by `…`, trailing spaces trimmed but not the escapes among them:
+// a style set there still has to reach its reset.
+fn marked(s: &str) -> String {
+    // `end`: just past the last visible non-space, where no escape is open.
+    let (mut esc, mut styled, mut end) = (None, false, 0);
+    for (i, c) in s.char_indices() {
+        if escaping(&mut esc, c) {
+            styled = true;
+        } else if !c.is_whitespace() {
+            end = i + c.len_utf8();
+        }
+    }
+    let mut esc = None;
+    let after: String = s[end..]
+        .chars()
+        .filter(|&c| escaping(&mut esc, c))
+        .collect();
+    let reset = if styled { RESET } else { "" };
+    format!("{}{after}{reset}{}", &s[..end], icons::ELLIPSIS)
 }
 
 /// Plain `s` from at most `keep` columns before byte `at` on, the `…` that
@@ -205,9 +227,14 @@ pub fn clip_left(s: &str, at: usize, keep: usize) -> String {
     if width(before) <= keep {
         return s.to_string();
     }
+    // Escapes found going forward: walked backward, `\x1b[31m` reads as `m13[`.
+    let mut esc = None;
+    let shown: Vec<(usize, char)> = (before.char_indices())
+        .filter(|&(_, c)| !escaping(&mut esc, c))
+        .collect();
     let mut used = width(icons::ELLIPSIS);
     let mut from = at;
-    for (i, c) in before.char_indices().rev() {
+    for &(i, c) in shown.iter().rev() {
         used += cols_at(c, 0);
         if used > keep {
             break;
@@ -295,6 +322,24 @@ mod tests {
         assert_eq!(clip("\x1b[31mabcdefg", 6), "\x1b[31mabcde\x1b[0m…");
         // A space an escape follows is still trailing on screen.
         assert_eq!(clip("hi \x1b[1mXYZ", 4), "hi\x1b[1m\x1b[0m…");
+    }
+
+    // A left cut lands on visible text, never inside an escape.
+    #[test]
+    fn a_left_clip_steps_over_escapes() {
+        let s = "AAAAA\x1b[31mBBBBB";
+        assert_eq!(clip_left(s, s.len(), 8), "…AA\x1b[31mBBBBB");
+        assert_eq!(clip_left("abcdef", 6, 4), "…def");
+    }
+
+    // Whole text with more after it takes the same mark a cut would.
+    #[test]
+    fn more_marks_whole_text_as_a_cut_does() {
+        assert_eq!(clip_more("abc", 6, false), "abc");
+        assert_eq!(clip_more("abc ", 6, true), "abc…");
+        assert_eq!(clip_more("done \x1b[32m", 8, true), "done\x1b[32m\x1b[0m…");
+        assert_eq!(clip_more("abcdef", 6, true), "abcd…");
+        assert_eq!(clip_more("abcdefg", 6, true), "abcde…");
     }
 
     // One tab rule for every surface: to the next stop, from where it starts.

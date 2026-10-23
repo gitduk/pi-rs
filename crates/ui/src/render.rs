@@ -870,12 +870,7 @@ pub fn placed(place: Option<&str>) -> String {
 pub fn summarize(args: &serde_json::Value) -> String {
     let v = asked(args);
     let first = v.lines().next().unwrap_or_default();
-    let line = clip(first, 80);
-    if first.len() < v.trim_end().len() && !line.ends_with(icons::ELLIPSIS) {
-        format!("{line}{}", icons::ELLIPSIS)
-    } else {
-        line
-    }
+    pi_store::text::clip_more(first, 80, first.len() < v.trim_end().len())
 }
 
 #[cfg(test)]

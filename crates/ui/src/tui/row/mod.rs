@@ -791,20 +791,6 @@ fn tilde(path: &std::path::Path) -> String {
     }
 }
 
-// `text` in `room` columns, closed by `…` when any of it was cut or `more`
-// follows it: the mark sits on the text, never apart from it.
-fn clipped(text: &str, room: usize, more: bool) -> String {
-    let cut = pi_store::text::clip(text, room);
-    if !more || cut != text {
-        return cut;
-    }
-    // Whole, but `more` still owes its mark a column.
-    match pi_store::text::width(text) < room {
-        true => format!("{}{}", text.trim_end(), icons::ELLIPSIS),
-        false => pi_store::text::clip(text, room.saturating_sub(1)),
-    }
-}
-
 // A badge copies its block, as an answer's does; a block's line is
 // indented as an answer's is, standing on its own.
 impl From<crate::render::Rendered> for PageLine {
