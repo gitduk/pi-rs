@@ -133,7 +133,12 @@ impl Ui {
         picked: usize,
         width: usize,
     ) -> Vec<ListItem<'static>> {
-        let head = pi_store::text::widest(menu.iter().map(|c| c.show()));
+        // ratatui draws an escape's tail as text, so the list gets it as the
+        // screen would show it; a hit's row was drawn once already.
+        let shown: Vec<String> = (menu.iter())
+            .map(|c| pi_store::text::screen_line(c.show()))
+            .collect();
+        let head = pi_store::text::widest(shown.iter().map(String::as_str));
         let muted = self.rat_style(&self.paint.theme.muted);
         let mark = self.rat_style(&self.paint.theme.prompt.color);
         let chosen = self.rat_style(&self.paint.theme.menu.selected);
@@ -152,7 +157,7 @@ impl Ui {
                     };
                     return ListItem::new(super::search::marked(line, query, None, look, look));
                 }
-                let show = c.show();
+                let show = shown[at].as_str();
                 // Only a command word carries an argument hint to set apart; a
                 // message or a file name is whole, spaces and all.
                 let (name, args) = match c {
@@ -172,7 +177,8 @@ impl Ui {
                 let used = pi_store::text::width(MENU_MARK)
                     + pi_store::text::width(name)
                     + pi_store::text::width(&lead);
-                let help = pi_store::text::clip(c.help(), width.saturating_sub(used));
+                let help = pi_store::text::screen_line(c.help());
+                let help = pi_store::text::clip(&help, width.saturating_sub(used));
                 let rest = format!("{lead}{help}");
                 let line = if at != picked {
                     Line::from(Span::styled(format!("  {name}{rest}"), muted))

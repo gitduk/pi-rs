@@ -601,6 +601,40 @@ fn a_paste_goes_on_the_query() {
     assert_eq!(ui.search_prompt().map(|(q, _)| q).as_deref(), Some("/one"));
 }
 
+// Pasted as the rows it searches were drawn: an escape's tail would never match.
+#[test]
+fn a_pasted_escape_does_not_reach_the_query() {
+    let mut ui = vim_ui_at(30, 12);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    ui.preview(vec![Line::from("head").into()]);
+    ui.flush(&lane, &mut view);
+    ui.key(&lane, &mut view, typed('/'), false);
+    let paste = crate::tui::TermEvent::Paste("\x1b[31mone\x1b[0m".into());
+    ui.key(&lane, &mut view, paste, false);
+    assert_eq!(ui.search_prompt().map(|(q, _)| q).as_deref(), Some("/one"));
+}
+
+// ratatui draws the menu, and it prints an escape's tail as text.
+#[test]
+fn a_menu_entry_shows_no_escape_tail() {
+    use ratatui::widgets::Widget;
+    let ui = test_ui(40, 12);
+    let entry = crate::tui::menu::MenuEntry::Completion(pi_core::input::commands::Candidate {
+        show: "\x1b[31mred\x1b[0m".into(),
+        line: "red".into(),
+        help: "\x1b[1mbold\x1b[0m".into(),
+        more: false,
+        picked_only: false,
+    });
+    let items = ui.menu_items(&[entry], 0, 40);
+    let area = ratatui::layout::Rect::new(0, 0, 40, 1);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    ratatui::widgets::List::new(items).render(area, &mut buf);
+    let row: String = (0..40).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+    assert_eq!(row.trim_end(), "› red  bold");
+}
+
 // A view moved off the hit steps from where it is: `gg n` is the first
 // hit, `G N` the last, not the ones beside the hit left behind.
 #[test]

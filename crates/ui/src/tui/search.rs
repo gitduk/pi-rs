@@ -394,8 +394,8 @@ impl Ui {
             && search.typing
         {
             let line = text.lines().next().unwrap_or_default();
-            let line: String = line.chars().filter(|c| !c.is_control()).collect();
-            search.query.insert_str(&line);
+            // As the rows searched were drawn: escapes gone, tabs as spaces.
+            search.query.insert_str(&pi_store::text::screen_line(line));
             search.want = Some(Want::Typed { entered: false });
         }
     }
