@@ -179,9 +179,17 @@ impl Accumulator {
             StreamEvent::BlockStart { index, kind } => {
                 self.blocks.entry(index).or_default().kind = Some(kind);
             }
-            StreamEvent::TextDelta { index, delta }
-            | StreamEvent::ToolArgsDelta { index, delta } => {
+            StreamEvent::TextDelta { index, delta } => {
                 self.blocks.entry(index).or_default().text.push_str(&delta);
+            }
+            // Arguments for a call whose start the wire dropped (it said so):
+            // folded as text they would read as the model's words.
+            StreamEvent::ToolArgsDelta { index, delta } => {
+                if let Some(b) = self.blocks.get_mut(&index)
+                    && matches!(b.kind, Some(BlockKind::ToolCall { .. }))
+                {
+                    b.text.push_str(&delta);
+                }
             }
             StreamEvent::ReasoningDelta { index, delta } => {
                 let b = self.blocks.entry(index).or_default();
@@ -346,6 +354,23 @@ mod tests {
         // The one the deltas filled in, not the empty repeat.
         assert_eq!(calls[0].args["path"], "a.txt");
         assert_eq!(done.stop, StopReason::ToolUse);
+    }
+
+    // A call whose start was lost leaves its arguments with nowhere to go;
+    // they must not surface as prose.
+    #[test]
+    fn arguments_without_their_call_are_not_text() {
+        let mut a = acc();
+        a.push(StreamEvent::ToolArgsDelta {
+            index: 0,
+            delta: "{\"path\": \"a.rs\"}".into(),
+        });
+        a.push(StreamEvent::BlockEnd { index: 0 });
+        let done = a.finish();
+        let Message::Assistant { content } = &done.message else {
+            panic!("assistant")
+        };
+        assert!(content.is_empty(), "{content:?}");
     }
 
     fn acc() -> Accumulator {
