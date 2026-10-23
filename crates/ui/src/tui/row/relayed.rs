@@ -4,7 +4,7 @@
 use ratatui::text::Line;
 
 use super::steps::STEP_INDENT;
-use super::{CODE_INDENT, Fold, Opening, count};
+use super::{CODE_INDENT, Fold, Opening, clip_beside, count};
 use crate::render::{self, Paint};
 use crate::tui::browse::PageLine;
 use pi_store::icons;
@@ -77,8 +77,7 @@ impl Relayed {
         };
         let now = agent::session::now();
         let tail = format!("{lines}{}{}", icons::PART_SEP, render::clock(self.at, now));
-        let room = width.saturating_sub(2 + pi_store::text::width(&tail) + 1);
-        let text = pi_store::text::clip(&self.label, room.max(8));
+        let text = clip_beside(&self.label, 2, &tail, width);
         Line::from(vec![
             paint.span_hovered(hovered, &paint.theme.prompt.color, icons::RELAYED_MARK),
             paint.span_hovered(hovered, &paint.theme.muted, format!(" {text}{tail}")),

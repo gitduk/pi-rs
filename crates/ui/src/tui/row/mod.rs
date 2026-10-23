@@ -618,7 +618,7 @@ impl Row {
             Kind::Answer(text, _) => (text.clone(), None),
             Kind::Lines(lines) => (lines[i].clone(), None),
             Kind::CodeLine(line) => (line.clone(), Some(Line::from(CODE_INDENT))),
-            Kind::Note(n) => n.line(i, paint),
+            Kind::Note(n) => n.line(i, paint, width),
             Kind::Code(c) => (c.line(paint), None),
             Kind::Block(b) => (b.line(paint, width), None),
             Kind::Notice { text, times, .. } if *times == 1 => (text.clone(), None),
@@ -779,6 +779,12 @@ fn tool_start_line(name: &str, summary: &str) -> String {
 
 pub(super) use llm::figures::count;
 
+// `text` cut to one row beside a `lead` wide mark and the `tail` after it.
+fn clip_beside(text: &str, lead: usize, tail: &str, width: usize) -> String {
+    let room = width.saturating_sub(lead + pi_store::text::width(tail) + 1);
+    pi_store::text::clip(text, room.max(8))
+}
+
 // The home directory as `~`: the banner has no workspace to shorten against.
 fn tilde(path: &std::path::Path) -> String {
     match pi_core::core::instructions::home()
@@ -827,5 +833,36 @@ mod height_tests {
         assert_eq!(row.line_height(0, &paint, 2), 3, "abcdef wraps to three");
         assert_eq!(row.line_height(1, &paint, 2), 1);
         assert_eq!(row.line_height(0, &paint, 80), 1);
+    }
+
+    // Closed, a note is its first line and a count of the rest; a click
+    // there opens it whole.
+    #[test]
+    fn a_note_shows_its_first_line_until_opened() {
+        let paint = Paint::new(false);
+        let mut row = Row::note_lines("head\none\ntwo").remove(0);
+        assert_eq!(row.len(), 1);
+        let text = |row: &Row, i| row.line(i, &paint, 80).0.to_string();
+        assert!(
+            text(&row, 0).starts_with("head · 2 lines"),
+            "{}",
+            text(&row, 0)
+        );
+        assert_eq!(row.click_line(0, 80), Some(0));
+        assert!(row.toggle_at(0, 80));
+        assert_eq!(row.len(), 3);
+        assert_eq!(text(&row, 0), "head");
+        assert_eq!(text(&row, 2), "two");
+        assert_eq!(row.click_line(1, 80), None);
+
+        let lone = Row::note_lines("just this").remove(0);
+        assert_eq!(text(&lone, 0), "just this");
+        assert_eq!(lone.click_line(0, 80), None);
+
+        let long = Row::note_lines(&"word ".repeat(40)).remove(0);
+        assert_eq!(long.click_line(0, 40), Some(0), "cut, so it opens");
+        let (head, body) = long.opening(0, &paint, 40).unwrap();
+        assert!(head.to_string().ends_with("word "), "uncut: {head}");
+        assert!(body.is_empty());
     }
 }
