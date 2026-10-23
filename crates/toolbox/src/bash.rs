@@ -71,7 +71,10 @@ impl Tool for Bash {
         let preview = first_line(&args.command).to_string();
         let (command, cwd) = prepare(args, self.tier(), ctx).await?;
 
-        let ran = run(&command, &cwd, timeout, ctx).await?;
+        let before = crate::drift::before(ctx);
+        let ran = run(&command, &cwd, timeout, ctx).await;
+        crate::drift::absorb(ctx, before);
+        let ran = ran?;
         let mut body = ran.body;
         if ran.code != 0 {
             body.push_str(&format!("exit {}\n", ran.code));

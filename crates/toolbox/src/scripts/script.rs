@@ -177,7 +177,9 @@ impl Tool for Script {
             .envs(shared.iter().map(|(k, v)| (k, v)))
             .envs(self.env(&args, &shared));
         let input = serde_json::to_vec(&args).unwrap_or_default();
-        let exited = match super::job::run(
+        // A detach ends the foreground: what the job writes after it is drift.
+        let before = crate::drift::before(ctx);
+        let ran = super::job::run(
             &self.name,
             command,
             input,
@@ -185,8 +187,9 @@ impl Tool for Script {
             ctx,
             self.jobs.as_deref(),
         )
-        .await?
-        {
+        .await;
+        crate::drift::absorb(ctx, before);
+        let exited = match ran? {
             super::job::Ran::Exited(exited) => exited,
             super::job::Ran::Detached { said, id } => {
                 return Ok(ToolOutput::text(format!(

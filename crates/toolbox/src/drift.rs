@@ -2,8 +2,9 @@
 //! speaks rather than when an edit trips over it.
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use tool::Ctx;
 use tool::limit::{MAX_BYTES, over_limit};
@@ -14,13 +15,8 @@ use crate::edit::{CHANGED_RUN, rewrite_sketch};
 /// is told once, the view moving to what is on disk now. A file deleted, or
 /// grown past the read limit, is told and forgotten: it is to be read again.
 pub fn drift(ctx: &Ctx) -> Option<String> {
-    // A copy, so the reads run without holding the lock every view takes.
-    let mut seen: Vec<(_, Arc<str>)> = (ctx.viewed.lock().expect("viewed poisoned").iter())
-        .map(|(path, was)| (path.clone(), was.clone()))
-        .collect();
-    seen.sort_by(|a, b| a.0.cmp(&b.0));
     let mut told = Vec::new();
-    for (path, was) in seen {
+    for (path, was) in seen(ctx) {
         let rel = ctx.workspace.display(&path);
         match on_disk(&path) {
             Ok(Disk::Text(now)) if *was == *now => {}
@@ -39,7 +35,61 @@ pub fn drift(ctx: &Ctx) -> Option<String> {
             Err(_) => {}
         }
     }
-    (!told.is_empty()).then(|| format!("changed since you last saw them:\n{}", told.join("\n")))
+    (!told.is_empty()).then(|| {
+        let files = llm::figures::count(told.len(), "file");
+        format!(
+            "{files} changed since you last saw them:\n{}",
+            told.join("\n")
+        )
+    })
+}
+
+/// Each viewed file's modified time before a command the model ran, so
+/// what the command changed can be told apart from what changed around it.
+pub struct Before(Vec<(PathBuf, Arc<str>, Option<SystemTime>)>);
+
+pub fn before(ctx: &Ctx) -> Before {
+    Before(
+        (seen(ctx).into_iter())
+            .map(|(path, was)| {
+                let at = modified(&path);
+                (path, was, at)
+            })
+            .collect(),
+    )
+}
+
+/// Move the view of each file the command touched to what is on disk: the
+/// model made the change, so it is no drift to tell. A file changed before
+/// the command ran is left for `drift`.
+pub fn absorb(ctx: &Ctx, before: Before) {
+    for (path, was, at) in before.0 {
+        if modified(&path) == at {
+            continue;
+        }
+        let now = match on_disk(&path) {
+            Ok(Disk::Text(now)) => Some(now.into()),
+            Ok(Disk::Over(_)) => None,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => continue,
+        };
+        tracing::info!(target: "pi::drift", path = %ctx.workspace.display(&path), "absorbed");
+        settle(ctx, &path, &was, now);
+    }
+}
+
+// A copy of the views, so the reads run without holding the lock every view
+// takes; in path order, so what is told reads the same each time.
+fn seen(ctx: &Ctx) -> Vec<(PathBuf, Arc<str>)> {
+    let mut seen: Vec<_> = (ctx.viewed.lock().expect("viewed poisoned").iter())
+        .map(|(path, was)| (path.clone(), was.clone()))
+        .collect();
+    seen.sort_by(|a, b| a.0.cmp(&b.0));
+    seen
+}
+
+fn modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 enum Disk {
@@ -92,11 +142,39 @@ mod tests {
         std::fs::write(&a, "one\n2\n").unwrap();
         std::fs::remove_file(&b).unwrap();
         let told = drift(&ctx).unwrap();
+        assert!(told.starts_with("2 files changed"), "{told}");
         assert!(told.contains("a.txt +1 -1"), "{told}");
         assert!(told.contains("-2 two") && told.contains("+2 2"), "{told}");
         assert!(told.contains("b.txt deleted"), "{told}");
         assert_eq!(drift(&ctx), None);
         assert!(ctx.viewed(&b).is_none());
+    }
+
+    #[test]
+    fn what_a_command_changed_is_absorbed_what_came_before_is_told() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let (ran, theirs, gone) = (
+            dir.path().join("ran.txt"),
+            dir.path().join("theirs.txt"),
+            dir.path().join("gone.txt"),
+        );
+        for p in [&ran, &theirs, &gone] {
+            std::fs::write(p, "old\n").unwrap();
+            ctx.note_view(p, "old\n");
+        }
+        std::fs::write(&theirs, "user\n").unwrap();
+
+        let before = before(&ctx);
+        std::fs::write(&ran, "model\n").unwrap();
+        std::fs::remove_file(&gone).unwrap();
+        absorb(&ctx, before);
+
+        assert_eq!(ctx.viewed(&ran).as_deref(), Some("model\n"));
+        assert!(ctx.viewed(&gone).is_none());
+        let told = drift(&ctx).unwrap();
+        assert!(told.starts_with("1 file changed"), "{told}");
+        assert!(told.contains("theirs.txt"), "{told}");
     }
 
     #[test]
