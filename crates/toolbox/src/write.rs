@@ -5,30 +5,29 @@ use std::path::{Path, PathBuf};
 
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
-/// Drop a `[path]` header if the content opens with one.
-pub fn undecorate(content: &str) -> &str {
+/// Drop the `[rel]` header if the content opens with the one `rel`'s views print.
+pub fn undecorate<'a>(content: &'a str, rel: &str) -> &'a str {
     let mut rest = content;
     if let Some((first, tail)) = rest.split_once('\n')
-        && is_header(first)
+        && is_header(first, rel)
     {
         rest = tail;
     }
     rest
 }
 
-fn is_header(line: &str) -> bool {
+// Only the file's own path: `[package]` opening a TOML is content, not a view.
+fn is_header(line: &str, rel: &str) -> bool {
     let line = line.trim_end();
-    let Some(inner) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) else {
-        return false;
-    };
-    match inner.rsplit_once('#') {
-        // Old sessions still carry this tag shape; stripped for compatibility.
-        Some((path, tag)) => {
-            !path.is_empty() && tag.len() == 4 && tag.chars().all(|c| c.is_ascii_hexdigit())
-        }
-        // The header `rows` prints: just the path.
-        None => !inner.is_empty(),
+    if line == crate::rows::header(rel) {
+        return true;
     }
+    // Old sessions still carry a `#hex` tag after the path.
+    (line.strip_prefix('[').and_then(|l| l.strip_suffix(']')))
+        .and_then(|inner| inner.rsplit_once('#'))
+        .is_some_and(|(path, tag)| {
+            path == rel && tag.len() == 4 && tag.chars().all(|c| c.is_ascii_hexdigit())
+        })
 }
 
 fn numbered_throughout(text: &str) -> bool {
@@ -85,8 +84,8 @@ struct Args {
 /// The numbered format invites pasting it straight back, silently corrupting
 /// a file. Both tests stay strict — a lone header, every line numbered — so
 /// real content that merely resembles them survives untouched.
-pub fn clean(content: &str) -> String {
-    let body = undecorate(content);
+pub fn clean(content: &str, rel: &str) -> String {
+    let body = undecorate(content, rel);
     if numbered_throughout(body) {
         strip_numbers(body)
     } else {
@@ -161,7 +160,7 @@ impl Tool for Write {
         let rel = ctx.workspace.display(&path);
         let _guard = ctx.lock_file(&path).await;
 
-        let content = clean(&args.content);
+        let content = clean(&args.content, &rel);
 
         if tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_dir()) {
             return Err(ToolError::Invalid(format!("{rel} is a directory")));

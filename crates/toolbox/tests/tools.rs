@@ -249,6 +249,27 @@ async fn the_parse_gate_leaves_files_it_has_no_standing_to_refuse() {
     .await;
 }
 
+// A pasted view loses its own header; a line that only looks like one stays.
+#[tokio::test]
+async fn write_drops_only_the_header_of_the_file_it_writes() {
+    let (_d, c) = ctx();
+    let root = c.workspace.root().to_path_buf();
+    let toml = "[package]\nname = \"x\"\n";
+    let args = json!({ "path": "Cargo.toml", "content": toml });
+    run(&toolbox::write::Write, args, &c).await;
+    assert_eq!(
+        std::fs::read_to_string(root.join("Cargo.toml")).unwrap(),
+        toml
+    );
+
+    let args = json!({ "path": "a.txt", "content": "[a.txt]\n1:one\n2:two\n" });
+    run(&toolbox::write::Write, args, &c).await;
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "one\ntwo\n"
+    );
+}
+
 // The second edit anchors on content the first put there; content anchors
 // cannot go stale, so no false staleness note and no demand for a reread.
 #[tokio::test]
