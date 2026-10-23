@@ -434,11 +434,7 @@ impl Core {
         // By containment rather than equality: a run started in a subdirectory
         // is still in that checkout, and it is the one to mark.
         let at = holding(&trees, here).map(|t| t.path.clone());
-        let width = trees
-            .iter()
-            .map(|t| unicode_width::UnicodeWidthStr::width(t.name.as_str()))
-            .max()
-            .unwrap_or(0);
+        let width = pi_store::text::widest(trees.iter().map(|t| t.name.as_str()));
         let mut out: Vec<String> = trees
             .iter()
             .map(|t| {

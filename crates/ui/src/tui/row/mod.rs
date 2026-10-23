@@ -743,11 +743,7 @@ impl Row {
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.clone())),
         );
-        let width = facts
-            .iter()
-            .map(|(label, _)| pi_store::text::width(label))
-            .max()
-            .unwrap_or(0);
+        let width = pi_store::text::widest(facts.iter().map(|(label, _)| *label));
         let muted = |line: &str| Line::from(paint.span(&paint.theme.muted, line));
         let fact = |label: &str, value: &str| {
             muted(&format!("{}  {value}", pi_store::text::pad(label, width)))

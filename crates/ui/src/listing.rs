@@ -1,7 +1,5 @@
 //! A listing as lines: the columns lined up.
 
-use unicode_width::UnicodeWidthStr;
-
 use pi_store::icons;
 use pi_store::listing::Listing;
 use pi_store::text;
@@ -18,13 +16,11 @@ pub fn lines(listing: &Listing) -> Vec<String> {
 /// Rows as `lines` lays them, cut after the padded first cell: what wraps is
 /// the rest, under its own column. A prose row's head is empty.
 pub fn split(listing: &Listing) -> Vec<(String, String)> {
-    let width = listing
-        .rows
-        .iter()
-        .filter(|r| r.cells.len() > 1)
-        .map(|r| UnicodeWidthStr::width(r.cells[0].as_str()))
-        .max()
-        .unwrap_or(0);
+    let width = text::widest(
+        (listing.rows.iter())
+            .filter(|r| r.cells.len() > 1)
+            .map(|r| r.cells[0].as_str()),
+    );
     listing
         .rows
         .iter()

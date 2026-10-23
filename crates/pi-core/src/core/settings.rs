@@ -182,11 +182,7 @@ impl Core {
     pub(super) fn edit(&self, name: &str) -> Step {
         let files = resolve::editable(&self.pinned, self.lane().root());
         if name.is_empty() {
-            let width = files
-                .iter()
-                .map(|f| pi_store::text::width(&f.name))
-                .max()
-                .unwrap_or(0);
+            let width = pi_store::text::widest(files.iter().map(|f| f.name.as_str()));
             let mut lines: Vec<String> = files
                 .iter()
                 .map(|f| format!("{}  {}", pi_store::text::pad(&f.name, width), f.note))
@@ -363,10 +359,7 @@ impl Core {
                 "see examples/pi.toml for what a [models.<name>] entry looks like".into(),
             ];
         }
-        let width = (choices.iter())
-            .map(|c| pi_store::text::width(&c.name))
-            .max()
-            .unwrap_or(0);
+        let width = pi_store::text::widest(choices.iter().map(|c| c.name.as_str()));
         choices
             .iter()
             .map(|c| {

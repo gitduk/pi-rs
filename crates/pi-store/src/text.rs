@@ -295,6 +295,11 @@ fn bare(s: &str) -> String {
         .collect()
 }
 
+/// The widest of `cells` as `pad` measures them: the column it lines them up to.
+pub fn widest<'a>(cells: impl IntoIterator<Item = &'a str>) -> usize {
+    cells.into_iter().map(width).max().unwrap_or(0)
+}
+
 /// Pad a string to a display width with trailing spaces, so a column of
 /// mixed-width (CJK) text lines up where `{:width$}` would only count chars.
 pub fn pad(s: &str, width: usize) -> String {
@@ -322,6 +327,14 @@ mod tests {
         assert_eq!(clip("\x1b[31mabcdefg", 6), "\x1b[31mabcde\x1b[0m…");
         // A space an escape follows is still trailing on screen.
         assert_eq!(clip("hi \x1b[1mXYZ", 4), "hi\x1b[1m\x1b[0m…");
+    }
+
+    // Measured by the rule `pad` fills by, or the column it pads to is off.
+    #[test]
+    fn widest_measures_as_pad_fills() {
+        assert_eq!(widest(["ab", "中文", "\x1b[1mxyz"]), 4);
+        assert_eq!(widest([]), 0);
+        assert_eq!(width(&pad("\x1b[1mx", widest(["中文"]))), 4);
     }
 
     // A left cut lands on visible text, never inside an escape.

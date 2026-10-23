@@ -1923,7 +1923,6 @@ dependencies = [
  "tool",
  "toolbox",
  "tracing",
- "unicode-width",
 ]
 
 [[package]]
