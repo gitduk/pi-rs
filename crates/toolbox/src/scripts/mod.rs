@@ -543,10 +543,17 @@ mod tests {
         let (found, skipped) = discover_in(&dir);
         assert!(skipped.is_empty(), "{skipped:?}");
         let names: Vec<_> = found.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["choose", "judge", "later", "search", "wechat"]);
+        assert_eq!(
+            names,
+            ["choose", "judge", "later", "search", "telegram", "wechat"]
+        );
         let example = std::fs::read_to_string(dir.join(".env.example")).unwrap();
         let named: Vec<_> = env::parse(&example).into_iter().map(|(k, _)| k).collect();
-        assert_eq!(named, ["TYPESAFE_API_KEY"], "what judge reads");
+        assert_eq!(
+            named,
+            ["TYPESAFE_API_KEY", "TELEGRAM_BOT_TOKEN"],
+            "what judge and telegram read"
+        );
     }
 
     // A script sees what `.env` sets, and an argument of the same name cannot

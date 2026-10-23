@@ -219,13 +219,17 @@ refused, and resuming one from another directory moves it here.
   emptying the line returns you to the options. With `multiple`, `space` or
   a digit marks several, and `enter` sends the marked ones as one prompt, a
   line each; those options are words, never commands.
-  [`examples/tools/`](examples/tools/) has five to copy: `search`; `judge`,
+  [`examples/tools/`](examples/tools/) has six to copy: `search`; `judge`,
   which reads its key from there; `later`, a prompt the model leaves itself
   for after a delay or on a period; `choose`, through which the model puts
-  you a question and ends its turn; and `wechat`, which bridges the session
+  you a question and ends its turn; `wechat`, which bridges the session
   to a WeChat chat — ask for it, scan the QR the first time, and what you
-  send from the phone arrives as turns, `/stop` included. It is a cargo
-  script, `wechat.rs`, so it needs nightly cargo and builds on first use.
+  send from the phone arrives as turns, `/stop` included; and `telegram`,
+  the same over a Telegram bot: put a token from @BotFather in `.env` as
+  `TELEGRAM_BOT_TOKEN`, open the link or QR it shows the first time, and
+  only the account that opened it is heard (delete `~/.pi/telegram.json` to
+  pair another). Both are cargo scripts, `wechat.rs` and `telegram.rs`, so
+  they need nightly cargo and build on first use.
 
 A server's prompts are commands too: `/<name>:<prompt> [args]` asks the server
 for the prompt's text and sends it, one typed word per argument, the last
