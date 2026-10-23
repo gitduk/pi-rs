@@ -70,11 +70,11 @@ impl Core {
     /// The same, with a refusal as `Err`: why nothing was reloaded.
     pub fn try_reload(&mut self) -> Result<Vec<String>, String> {
         let root = self.lane().root().to_path_buf();
-        if let Err(e) = self.settings.reread(self.pinned.config.as_deref(), &root) {
-            return Err(format!("nothing reloaded — {}", refused("reload", e)));
-        }
+        // Held apart until adopted: a reload refused leaves the files in force.
+        let settings = Settings::load(self.pinned.config.as_deref(), &root)
+            .map_err(|e| format!("nothing reloaded — {}", refused("reload", e)))?;
         let before = self.lane().resolved().endpoint.clone();
-        let mut said = self.rebuilt()?;
+        let mut said = self.rebuilt(Some(settings))?;
         // What the run stands on is shown once, so a moved endpoint is said here.
         // An edit needs no such line: it names the value it wrote.
         let after = &self.lane().resolved().endpoint;
@@ -165,11 +165,10 @@ impl Core {
         );
         Ok(notes)
     }
-    // Recompute the config from the file trees and adopt it, saying why when
-    // nothing could be adopted.
-    fn rebuilt(&mut self) -> Result<Vec<String>, String> {
-        let config = self
-            .settings
+    // Recompute the config from the file trees — `settings`', else those in
+    // force — and adopt it, saying why when nothing could be adopted.
+    fn rebuilt(&mut self, settings: Option<Settings>) -> Result<Vec<String>, String> {
+        let config = (settings.as_ref().unwrap_or(&self.settings))
             .config()
             .map_err(|e| format!("nothing reloaded — {}", refused("settings", e)))?;
         // `write_roots` widen the workspace, so it is built again from them.
@@ -177,7 +176,7 @@ impl Core {
             .and_then(|ws| ws.with_write_roots(&config.writable()))
             .map_err(|e| format!("nothing reloaded — {}", refused("reload", e.into())))?;
         let prompt_files = self.lane().resolved().prompt_files.clone();
-        self.adopt(config, workspace, None, Some(prompt_files))
+        self.adopt(config, workspace, settings, Some(prompt_files))
     }
     /// `/edit`: bare, the files it offers; with a name, that file to open.
     pub(super) fn edit(&self, name: &str) -> Step {
@@ -338,7 +337,7 @@ impl Core {
             return vec![format!("unknown effort `{arg}` — /effort {levels}")];
         };
         let was = self.pinned.effort.replace(level);
-        let mut said = match self.rebuilt() {
+        let mut said = match self.rebuilt(None) {
             Ok(said) => said,
             Err(why) => {
                 self.pinned.effort = was;

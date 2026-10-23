@@ -50,12 +50,6 @@ impl Settings {
         ))
     }
 
-    /// Re-read both files.
-    pub fn reread(&mut self, at: Option<&str>, root: &Path) -> Result<()> {
-        *self = Self::load(at, root)?;
-        Ok(())
-    }
-
     /// The config in force: the files, then the environment.
     pub fn config(&self) -> Result<crate::config::Config> {
         crate::config::Config::in_force(self.file.clone())
