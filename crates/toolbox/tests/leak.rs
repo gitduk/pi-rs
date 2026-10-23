@@ -45,3 +45,23 @@ async fn a_timeout_takes_the_whole_process_group() {
         "grandchild {pid} outlived the timeout"
     );
 }
+
+// Field 6 of /proc/PID/stat is the session: a leader of its own has no
+// terminal, so a `/dev/tty` reader fails instead of stopping the run.
+#[tokio::test]
+async fn a_command_runs_in_a_session_of_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let out = toolbox::bash::Bash
+        .execute(
+            json!({
+                "cwd": ".",
+                "command": "read -r _ _ _ _ _ sid _ < /proc/$$/stat; [ \"$sid\" = \"$$\" ] && echo leader",
+            }),
+            &c,
+        )
+        .await
+        .unwrap()
+        .flatten();
+    assert!(out.contains("leader"), "{out}");
+}

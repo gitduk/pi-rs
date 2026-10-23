@@ -41,10 +41,10 @@ pub async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    // Its own process group, so a timeout takes the whole tree. Killing the
-    // child alone leaves everything it started running.
+    // Its own group, so a timeout takes the whole tree. Killing the child
+    // alone leaves everything it started running.
     #[cfg(unix)]
-    cmd.process_group(0);
+    detach(&mut cmd);
 
     let mut child = spawn(&mut cmd)?;
     let group = child.id();
@@ -92,6 +92,21 @@ pub async fn run(
         stdout: out.finish(),
         stderr: err.finish(),
     })
+}
+
+/// A session of its own: its own group, and no terminal to open, so a
+/// `/dev/tty` reader fails at once instead of stopping on SIGTTOU.
+#[cfg(unix)]
+pub(crate) fn detach(cmd: &mut Command) {
+    // SAFETY: setsid is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 }
 
 /// Start `cmd`. A vanished working directory fails as a bare ENOENT, which

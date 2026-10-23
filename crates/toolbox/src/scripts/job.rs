@@ -21,7 +21,7 @@ use tool::{Ctx, ToolError};
 
 use crate::background::{JobHandle, JobSink, Told};
 
-use crate::process::{Exited, Group, MAX_RUN, Streams, reap, spawn};
+use crate::process::{Exited, Group, MAX_RUN, Streams, detach, reap, spawn};
 
 /// The variable naming the descriptor, so a script can tell pi is listening.
 pub const FD_VAR: &str = "PI_EVENTS_FD";
@@ -77,8 +77,8 @@ pub async fn run(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .process_group(0);
+        .kill_on_drop(true);
+    detach(&mut cmd);
     let mut child = spawn(&mut cmd)?;
     // Ours alone from here, or its end never reads EOF.
     drop(theirs);

@@ -209,7 +209,7 @@ fn launch(command: &str, cwd: &std::path::Path, ctx: &Ctx) -> Result<Launched, T
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     #[cfg(unix)]
-    cmd.process_group(0);
+    crate::process::detach(&mut cmd);
     let mut child = crate::process::spawn(&mut cmd)?;
     let group = child.id();
     let streams = crate::process::Streams::of(&mut child, ctx);
