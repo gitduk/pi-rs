@@ -3,7 +3,6 @@
 //! user asked for.
 
 use ratatui::text::Line;
-use unicode_width::UnicodeWidthStr;
 
 use super::screen;
 use crate::listing;
@@ -25,7 +24,7 @@ fn rows(content: &Listing, width: usize) -> Vec<(String, String)> {
     listing::split(content)
         .into_iter()
         .flat_map(|(head, rest)| {
-            let indent = UnicodeWidthStr::width(head.as_str());
+            let indent = pi_store::text::width(&head);
             // A column too wide to leave the rest half the row wraps whole.
             if indent == 0 || indent * 2 > width {
                 return words(&(head + &rest), width)

@@ -33,10 +33,7 @@ fn a_flash_stands_beside_the_bar_rather_than_over_it() {
     // Too narrow for both: the flash keeps half the row, cut with its `…`.
     let row = plain(&ui.bar_lines(&facts("a-rather-long-model-name"), &Default::default(), 30)[0]);
     assert!(row.ends_with('…'), "{row:?}");
-    assert!(
-        unicode_width::UnicodeWidthStr::width(row.as_str()) <= 30,
-        "{row:?}"
-    );
+    assert!(pi_store::text::width(&row) <= 30, "{row:?}");
 }
 
 // The reason (often a whole error body) lands as a row of its own; any

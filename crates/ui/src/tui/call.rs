@@ -6,7 +6,6 @@ use std::time::Instant;
 use llm::message::ToolResult;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
-use unicode_width::UnicodeWidthStr;
 
 use super::row::{self, PendingTool, Row};
 use super::scrollback::{Folds, Scrollback};
@@ -253,7 +252,7 @@ fn job_row(job: &Job, width: usize) -> ([String; 3], bool) {
         "" => String::new(),
         last => format!("{}{last}", icons::PART_SEP),
     };
-    let w = |s: &str| UnicodeWidthStr::width(s);
+    let w = pi_store::text::width;
     let avail = room.saturating_sub(w(&tail));
     let out = w(&last).min((avail / 2).max(avail.saturating_sub(w(&head))));
     let left = avail - out;

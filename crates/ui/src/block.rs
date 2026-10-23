@@ -3,8 +3,6 @@
 
 use std::borrow::Cow;
 
-use unicode_width::UnicodeWidthChar;
-
 /// A stretch of an answer: markdown, or a block drawn per width.
 pub enum Piece<'a> {
     Text(&'a str),
@@ -162,11 +160,7 @@ pub fn draw(source: &str, width: Option<usize>) -> Drawn {
         // A quoted label (`A["x"]`) keeps its quotes in the box; a space each
         // keeps the box's width.
         .replace('"', " ");
-    let needs = drawn
-        .lines()
-        .map(unicode_width::UnicodeWidthStr::width)
-        .max()
-        .unwrap_or(0);
+    let needs = pi_store::text::widest(drawn.lines());
     match width {
         Some(has) if needs > has => Drawn::Wide { needs, has },
         _ => Drawn::Fits(drawn),
@@ -183,7 +177,7 @@ fn squeeze(s: &str) -> String {
             filler = false;
             continue;
         }
-        filler = c.width() == Some(2);
+        filler = pi_store::text::cols_at(c, 0) == 2;
         out.push(c);
     }
     out

@@ -3607,7 +3607,6 @@ dependencies = [
  "toolbox",
  "tracing",
  "tui-markdown",
- "unicode-width",
 ]
 
 [[package]]

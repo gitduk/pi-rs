@@ -10,7 +10,6 @@ use pi_store::session::Store;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::ListItem;
-use unicode_width::UnicodeWidthStr;
 
 impl Ui {
     // What the line could become: a completion while a command word is typed.
@@ -134,7 +133,7 @@ impl Ui {
         picked: usize,
         width: usize,
     ) -> Vec<ListItem<'static>> {
-        let head = menu.iter().map(|c| c.show().width()).max().unwrap_or(0);
+        let head = pi_store::text::widest(menu.iter().map(|c| c.show()));
         let muted = self.rat_style(&self.paint.theme.muted);
         let mark = self.rat_style(&self.paint.theme.prompt.color);
         let chosen = self.rat_style(&self.paint.theme.menu.selected);
@@ -144,7 +143,7 @@ impl Ui {
             .enumerate()
             .map(|(at, c)| {
                 if let (MenuEntry::Hit { show, k }, Some(query)) = (c, query) {
-                    let room = width.saturating_sub(MENU_MARK.width());
+                    let room = width.saturating_sub(pi_store::text::width(MENU_MARK));
                     let text = found_text(show, *k, query, room);
                     let line = if at == picked {
                         Line::from(vec![Span::styled(MENU_MARK, mark), text.into()])
@@ -167,10 +166,12 @@ impl Ui {
                 } else {
                     format!(" {args}")
                 };
-                let pad = head.saturating_sub(show.width());
+                let pad = head.saturating_sub(pi_store::text::width(show));
                 let lead = format!("{args}{}  ", " ".repeat(pad));
                 // Cut where the menu ends, marked, not mid-word at its edge.
-                let used = MENU_MARK.width() + name.width() + lead.width();
+                let used = pi_store::text::width(MENU_MARK)
+                    + pi_store::text::width(name)
+                    + pi_store::text::width(&lead);
                 let help = pi_store::text::clip(c.help(), width.saturating_sub(used));
                 let rest = format!("{lead}{help}");
                 let line = if at != picked {

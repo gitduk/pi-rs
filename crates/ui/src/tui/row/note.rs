@@ -2,7 +2,6 @@
 //! its own so it never reads as reasoning; a long one folds as a result does.
 
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
 use super::{Fold, Opening};
 use crate::render::{self, Paint};
@@ -47,7 +46,7 @@ impl Note {
         let mark = icons::bar(icons::NOTE_MARK);
         let lead = match i {
             0 => paint.span(&paint.theme.prompt.color, mark),
-            _ => Span::raw(" ".repeat(mark.width())),
+            _ => Span::raw(" ".repeat(pi_store::text::width(&mark))),
         };
         let (under, footer) = self.under();
         let body = match i {

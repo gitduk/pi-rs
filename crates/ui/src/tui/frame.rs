@@ -377,7 +377,7 @@ impl Ui {
 
     fn search_line(&self) -> Option<(Line<'static>, u16)> {
         let (query, count) = self.search_prompt()?;
-        let col = unicode_width::UnicodeWidthStr::width(self.search_caret()?.as_str()) as u16;
+        let col = pi_store::text::width(&self.search_caret()?) as u16;
         let line = Line::from(vec![
             query.into(),
             self.paint.span(&self.paint.theme.muted, count),
