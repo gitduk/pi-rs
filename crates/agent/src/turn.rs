@@ -89,25 +89,29 @@ impl Agent {
         let idle = retry.idle;
 
         let wire = self.wire();
+        // Biased, cancel first: a stop asked for must win over a reply that is
+        // already buffered, which an unbiased pick loses half the time.
         let mut stream = tokio::select! {
+            biased;
+            _ = ctx.cancel.cancelled() => return Err((AgentError::Cancelled, None)),
             r = leashed(idle, wire.stream(&self.model.spec, req)) => match r {
                 Ok(r) => r.map_err(|e| (AgentError::from(e), None))?,
                 Err(e) => return Err((AgentError::Llm(e), None)),
             },
-            _ = ctx.cancel.cancelled() => return Err((AgentError::Cancelled, None)),
         };
 
         loop {
             let next = tokio::select! {
+                biased;
+                _ = ctx.cancel.cancelled() => {
+                    return Err((AgentError::Cancelled, Some(acc.finish())));
+                }
                 n = leashed(idle, stream.next()) => match n {
                     Ok(n) => n,
                     // A provider that stops sending mid-stream would otherwise
                     // hold the turn open until the user gives up.
                     Err(e) => return Err((AgentError::Llm(e), None)),
                 },
-                _ = ctx.cancel.cancelled() => {
-                    return Err((AgentError::Cancelled, Some(acc.finish())));
-                }
             };
             let Some(ev) = next else { break };
             let ev = match ev {
