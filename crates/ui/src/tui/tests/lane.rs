@@ -257,6 +257,40 @@ async fn a_stopped_run_does_not_tell_the_model_a_request_was_cancelled() {
     );
 }
 
+// A stopped turn gets no `Done`, so its ending keeps the status line instead;
+// a `!` never had one to keep.
+#[tokio::test]
+async fn a_stopped_turn_keeps_its_status_line_and_a_stopped_bang_does_not() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let last_row = |kind: crate::tui::run::Kind| {
+        let dir = dir.path().to_path_buf();
+        async move {
+            let mut tui = surface(&dir);
+            tui.ui.status = vec![Segment::Elapsed];
+            let token = tui.core.lanes[0].token();
+            view_at(&mut tui.views, token).state.started = Some(std::time::Instant::now());
+            tui.settle(crate::tui::run::Done {
+                token,
+                kind,
+                ran: Some((
+                    agent::session::Session::new(),
+                    Err(agent::AgentError::Cancelled),
+                )),
+            })
+            .await;
+            drawn_rows(view_at(&mut tui.views, token))
+                .pop()
+                .expect("a row for the ending")
+        }
+    };
+
+    let turn = last_row(crate::tui::run::Kind::Turn).await;
+    assert!(turn.starts_with("stopped · "), "{turn:?}");
+
+    let bang = last_row(crate::tui::run::Kind::Bash { lines: Vec::new() }).await;
+    assert_eq!(bang.trim(), "stopped");
+}
+
 // A flash is transient: it is not part of the transcript, and it is
 // dropped by the clock, not by whoever set it — who is long gone by then.
 #[test]

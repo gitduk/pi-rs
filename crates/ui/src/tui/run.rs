@@ -16,6 +16,7 @@ use super::view::{front_view, tail_of, view_at};
 use super::{NO_TRANSCRIPT, Tui};
 use pi_core::core;
 use pi_core::driver::{Ended, Origin};
+use pi_store::icons;
 
 // A tool `/tool` started, back from its call.
 pub(super) struct Started {
@@ -663,7 +664,7 @@ impl Tui {
             .turn_ended(token, &how, self.core.lanes[lane].ctx(), cap);
 
         let ok = out.is_ok();
-        self.close_run(lane, out);
+        self.close_run(lane, out, was_turn);
         if lane == self.core.current {
             if unsend && let Some(id) = self.core.lane().last_ask() {
                 self.rewind_turn(id);
@@ -753,24 +754,43 @@ impl Tui {
     }
 
     // Draw the end of a run into its lane's view, on screen or not.
-    pub(super) fn close_run(&mut self, lane: usize, out: Result<llm::stream::Usage, AgentError>) {
-        let view = view_at(&mut self.views, self.core.lanes[lane].token());
+    pub(super) fn close_run(
+        &mut self,
+        lane: usize,
+        out: Result<llm::stream::Usage, AgentError>,
+        was_turn: bool,
+    ) {
+        let on = &mut self.core.lanes[lane];
+        let view = view_at(&mut self.views, on.token());
         self.ui.close(view);
         // A cancelled run's calls got no `ToolEnd`; their animated rows
         // need to reach scrollback before the next flush freezes them.
         self.ui.abandon_tools(view);
+        // Only `Done` keeps a turn's status line; a turn ending otherwise
+        // keeps it here, read before the clock stops.
+        let parts = match was_turn {
+            true => crate::status::parts(&self.ui.status, &super::view::snapshot(on, view)),
+            false => Vec::new(),
+        };
         view.state.started = None;
         view.state.retry = None;
         match out {
             Ok(_) => {}
-            Err(AgentError::Cancelled) => {
+            Err(AgentError::Cancelled) if parts.is_empty() => {
                 let stopped = Line::from(self.ui.paint.span(&self.ui.paint.theme.muted, "stopped"));
                 self.ui.say_line(view, stopped);
+            }
+            Err(AgentError::Cancelled) => {
+                let line = format!("stopped{}{}", icons::PART_SEP, parts.join(icons::PART_SEP));
+                self.ui.say_kept(on, view, &line);
             }
             Err(e) => {
                 let mark = self.ui.paint.span(&self.ui.paint.theme.status.err, "error");
                 let rest = Span::from(format!(" {e}"));
                 self.ui.say_line(view, Line::from(vec![mark, rest]));
+                if !parts.is_empty() {
+                    self.ui.say_kept(on, view, &parts.join(icons::PART_SEP));
+                }
             }
         }
     }
