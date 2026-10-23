@@ -16,19 +16,22 @@ impl Keys {
     /// `normal.` is on everyone that needed telling apart.
     pub fn listing(&self) -> Listing {
         Listing::of(BINDINGS.iter().map(|b| {
-            let mut keys: Vec<String> = self
-                .who
-                .iter()
-                .filter(|(_, id)| **id == b.id)
-                .map(|((_, c), _)| show_chord(*c))
-                .collect();
-            keys.sort();
-            let row = Row::new([b.id.to_string(), keys.join(", ")]);
+            let row = Row::new([b.id.to_string(), self.keys_of(b.id).join(", ")]);
             match b.note.is_empty() {
                 true => row,
                 false => row.noting(b.note),
             }
         }))
+    }
+
+    /// The keys bound to `id` now, as a config writes them, sorted.
+    pub fn keys_of(&self, id: &str) -> Vec<String> {
+        let mut keys: Vec<String> = (self.who.iter())
+            .filter(|(_, bound)| **bound == id)
+            .map(|((_, c), _)| show_chord(*c))
+            .collect();
+        keys.sort();
+        keys
     }
 }
 

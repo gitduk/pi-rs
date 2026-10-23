@@ -10,6 +10,7 @@ use crate::render;
 use crate::status;
 use agent::Event;
 use agent::session::Entry as LogEntry;
+use pi_core::core::choose::{Choose, Question};
 use pi_core::core::lane::Lane;
 use pi_store::icons;
 use ratatui::text::Line;
@@ -173,6 +174,11 @@ impl Ui {
             // the group or live region; end settles it, matched back by id.
             Event::ToolStart { id, name, args, .. } => {
                 self.close(view);
+                if name == Choose::NAME
+                    && let Ok(question) = Question::of_call(args)
+                {
+                    view.state.asking.push((id.clone(), question));
+                }
                 let place = view.surface.folds.ask(id, args, lane.root());
                 view.state.tools.push(RunTool {
                     id: id.clone(),
@@ -197,6 +203,12 @@ impl Ui {
                 preview,
             } => {
                 self.close(view);
+                if let Some(at) = view.state.asking.iter().position(|(a, _)| a == id) {
+                    let (_, question) = view.state.asking.remove(at);
+                    if !*is_error {
+                        view.ask(question);
+                    }
+                }
                 // Parked until the entry commits; adoption checks it against
                 // what the entry derives to.
                 if let Some(t) = view.state.tools.iter_mut().find(|t| t.id == *id) {
@@ -279,6 +291,8 @@ impl Ui {
     // A run that ended without answering a call leaves its row dangling
     // (the call's own end event is never sent), so file the start line.
     pub(super) fn abandon_tools(&mut self, view: &mut View) {
+        // A `choose` that never ended asked nothing.
+        view.state.asking.clear();
         for t in std::mem::take(&mut view.state.tools) {
             view.surface.folds.take_asked(&t.id);
             let row = t

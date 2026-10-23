@@ -437,3 +437,300 @@ async fn the_esc_that_closed_a_command_page_is_not_half_a_rewind() {
         );
     }
 }
+
+// A question `choose` put is answered in a press or two: the highlighted
+// option or a numbered one goes as if typed; `q` or esc closes it.
+#[tokio::test]
+async fn a_question_is_answered_by_its_options_or_closed() {
+    use agent::Event;
+    use pi_core::core::choose::{Asker, Choose, Question};
+    use serde_json::json;
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let token = tui.core.lanes[0].token();
+    let call = |tui: &mut crate::tui::Tui, id: &str, failed: bool| {
+        let view = view_at(&mut tui.views, token);
+        let lane = &mut tui.core.lanes[0];
+        let args = json!({ "question": "tests failed, now what?", "options": ["/compact", "fix parse.rs"] });
+        tui.ui.on_event(
+            lane,
+            view,
+            Event::ToolStart {
+                id: id.into(),
+                name: Choose::NAME.into(),
+                args,
+            },
+        );
+        let end = Event::ToolEnd {
+            id: id.into(),
+            name: Choose::NAME.into(),
+            is_error: failed,
+            warned: false,
+            preview: String::new(),
+        };
+        tui.ui.on_event(lane, view_at(&mut tui.views, token), end);
+    };
+    let press = |tui: &mut crate::tui::Tui, event| {
+        let lane = tui.core.lane();
+        tui.ui
+            .key(lane, view_at(&mut tui.views, token), event, false)
+    };
+    let waiting = |tui: &mut crate::tui::Tui| view_at(&mut tui.views, token).questions.len();
+    let shown = |tui: &mut crate::tui::Tui| -> Vec<String> {
+        let view = view_at(&mut tui.views, token);
+        let question = view.questions.front().expect("a question up").clone();
+        (tui.ui
+            .question_lines(
+                &question,
+                &view.checked,
+                !view.writing && tui.ui.line_bare(),
+                80,
+            )
+            .iter())
+        .map(|r| r.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect()
+    };
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let key = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+
+    call(&mut tui, "c1", true);
+    assert_eq!(waiting(&mut tui), 0, "a call that failed asks nothing");
+    call(&mut tui, "c2", false);
+    assert_eq!(
+        shown(&mut tui),
+        [
+            "? tests failed, now what? · j/k move · enter send · i write · q close",
+            "  1 /compact",
+            "  2 fix parse.rs"
+        ]
+    );
+
+    press(&mut tui, typed('j'));
+    let asked = press(&mut tui, key(KeyCode::Enter));
+    // Read as the line is: this surface knows no commands, so it is a prompt.
+    assert!(
+        matches!(&asked, Asked::Core(Intent::Prompt(p)) if p == "fix parse.rs"),
+        "{asked:?}"
+    );
+    assert_eq!(
+        tui.ui.took_submit().as_deref(),
+        Some("fix parse.rs"),
+        "sent as typed"
+    );
+    assert_eq!(waiting(&mut tui), 0);
+
+    call(&mut tui, "c3", false);
+    assert!(matches!(
+        press(&mut tui, typed('9')),
+        Asked::Own(Deed::Nothing)
+    ));
+    assert_eq!(waiting(&mut tui), 1, "no ninth option, nothing picked");
+    press(&mut tui, typed('1'));
+    assert_eq!(tui.ui.took_submit().as_deref(), Some("/compact"));
+    assert!(tui.ui.editor.is_empty(), "the digit never reached the line");
+
+    call(&mut tui, "c4", false);
+    assert!(matches!(
+        press(&mut tui, key(KeyCode::Esc)),
+        Asked::Own(Deed::Nothing)
+    ));
+    assert_eq!(waiting(&mut tui), 0);
+    assert!(tui.ui.took_submit().is_none());
+
+    // A stray key neither closes it nor types under it; `q` closes it.
+    call(&mut tui, "c5", false);
+    for stray in ['x', 'y', ' '] {
+        assert!(matches!(
+            press(&mut tui, typed(stray)),
+            Asked::Own(Deed::Nothing)
+        ));
+    }
+    assert!(tui.ui.editor.is_empty(), "nothing typed under it");
+    assert_eq!(waiting(&mut tui), 1, "and still up");
+    press(&mut tui, typed('q'));
+    assert_eq!(waiting(&mut tui), 0);
+    assert!(tui.ui.took_submit().is_none());
+
+    // `i` hands the line back: their own words sent close the question, and
+    // a line emptied again returns to it. The caret says which has the keys.
+    call(&mut tui, "c7", false);
+    let drawn = |tui: &mut crate::tui::Tui| {
+        let lane = tui.core.lane();
+        tui.ui.flush(lane, view_at(&mut tui.views, token));
+        tui.ui.question_holds
+    };
+    assert!(drawn(&mut tui), "the question holds the keyboard");
+    press(&mut tui, typed('i'));
+    assert!(!drawn(&mut tui), "the line has it back");
+    assert!(
+        !shown(&mut tui)[0].contains("send"),
+        "no keys offered while writing"
+    );
+    press(&mut tui, typed('o'));
+    press(&mut tui, key(KeyCode::Backspace));
+    assert!(
+        tui.ui.asking(view_at(&mut tui.views, token)),
+        "back at the question"
+    );
+    press(&mut tui, typed('i'));
+    for c in "no".chars() {
+        press(&mut tui, typed(c));
+    }
+    assert_eq!(tui.ui.editor.text(), "no", "letters type while writing");
+    let asked = press(&mut tui, key(KeyCode::Enter));
+    assert!(
+        matches!(&asked, Asked::Core(Intent::Prompt(p)) if p == "no"),
+        "{asked:?}"
+    );
+    assert_eq!(waiting(&mut tui), 0, "their own answer closes it");
+    tui.ui.took_submit();
+
+    tui.ui.editor.insert_str("x");
+    call(&mut tui, "c6", false);
+    press(&mut tui, typed('1'));
+    assert_eq!(
+        tui.ui.editor.text(),
+        "x1",
+        "a line being typed keeps its digit"
+    );
+    assert!(
+        !shown(&mut tui)[0].contains("send"),
+        "no keys offered that would type"
+    );
+
+    // One asker, one question: asking again replaces; a stopped job's goes.
+    let job = |text: &str| {
+        let from = Asker::Job {
+            id: 7,
+            name: "judge #7".into(),
+        };
+        Question::new(from, text, &["/new".into()], false).unwrap()
+    };
+    let view = view_at(&mut tui.views, token);
+    view.ask(job("first?"));
+    view.ask(job("second?"));
+    assert_eq!(view.questions.len(), 2, "the model's and the job's");
+    assert_eq!(view.questions[1].text, "second?", "replaced where it stood");
+    assert_eq!(
+        view.questions[0].from,
+        Asker::Model,
+        "the front stays in front"
+    );
+    view.withdraw(7);
+    assert_eq!(view.questions.len(), 1);
+    assert_eq!(view.questions[0].from, Asker::Model);
+
+    // Asked again with fewer options, the highlight starts over.
+    view.questions.clear();
+    let three = Question::new(
+        Asker::Model,
+        "which?",
+        &["a".into(), "b".into(), "c".into()],
+        false,
+    );
+    view.ask(three.unwrap());
+    view.picked = 2;
+    view.ask(Question::new(Asker::Model, "which?", &["a".into()], false).unwrap());
+    assert_eq!(view.picked, 0);
+}
+
+// Where several may be picked, picks are gathered and sent together as one
+// prompt, a line each; with none gathered, enter sends the highlighted one.
+#[tokio::test]
+async fn several_picks_go_together_as_one_prompt() {
+    use agent::Event;
+    use pi_core::core::choose::Choose;
+    use serde_json::json;
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let token = tui.core.lanes[0].token();
+    let call = |tui: &mut crate::tui::Tui, id: &str, options: serde_json::Value| {
+        let args = json!({ "question": "which first?", "options": options, "multiple": true });
+        let lane = &mut tui.core.lanes[0];
+        let start = Event::ToolStart {
+            id: id.into(),
+            name: Choose::NAME.into(),
+            args,
+        };
+        tui.ui.on_event(lane, view_at(&mut tui.views, token), start);
+        let end = Event::ToolEnd {
+            id: id.into(),
+            name: Choose::NAME.into(),
+            is_error: false,
+            warned: false,
+            preview: String::new(),
+        };
+        tui.ui.on_event(lane, view_at(&mut tui.views, token), end);
+    };
+    let press = |tui: &mut crate::tui::Tui, event| {
+        let lane = tui.core.lane();
+        tui.ui
+            .key(lane, view_at(&mut tui.views, token), event, false)
+    };
+    let shown = |tui: &mut crate::tui::Tui| -> Vec<String> {
+        let view = view_at(&mut tui.views, token);
+        let question = view.questions.front().expect("a question up").clone();
+        (tui.ui
+            .question_lines(
+                &question,
+                &view.checked,
+                !view.writing && tui.ui.line_bare(),
+                80,
+            )
+            .iter())
+        .map(|r| r.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect()
+    };
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let enter = || crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    call(&mut tui, "c0", json!(["fix it", "/compact"]));
+    assert!(
+        view_at(&mut tui.views, token).questions.is_empty(),
+        "no command among several"
+    );
+
+    call(
+        &mut tui,
+        "c1",
+        json!(["fix parse.rs", "add tests", "update docs"]),
+    );
+    press(&mut tui, typed(' '));
+    press(&mut tui, typed('3'));
+    assert_eq!(
+        shown(&mut tui),
+        [
+            "? which first? · j/k move · space mark · enter send · i write · q close",
+            "  1 [x] fix parse.rs",
+            "  2 [ ] add tests",
+            "  3 [x] update docs",
+        ]
+    );
+    assert!(
+        tui.ui.took_submit().is_none(),
+        "a digit gathers, it does not send"
+    );
+    let asked = press(&mut tui, enter());
+    assert!(
+        matches!(&asked, Asked::Core(Intent::Prompt(p)) if p == "fix parse.rs\nupdate docs"),
+        "{asked:?}"
+    );
+
+    call(&mut tui, "c2", json!(["fix parse.rs", "add tests"]));
+    press(&mut tui, typed(' '));
+    press(&mut tui, typed(' '));
+    assert!(
+        view_at(&mut tui.views, token).checked.is_empty(),
+        "space twice is out again"
+    );
+    press(
+        &mut tui,
+        crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+    );
+    press(&mut tui, enter());
+    assert_eq!(
+        tui.ui.took_submit().as_deref(),
+        Some("add tests"),
+        "none gathered: the highlighted"
+    );
+}

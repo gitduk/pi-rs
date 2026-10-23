@@ -263,6 +263,11 @@ pub fn expand(commands: &[Command], line: &str) -> Option<Result<String, String>
     Some(expanded(skill_for(commands, &word)?, &args))
 }
 
+/// Whether `line` reaches the model as written, naming no command to run.
+pub fn plain(line: &str) -> bool {
+    command_word(line).is_none() && bash_command(line).is_none()
+}
+
 // `!` alone is prose; `!cmd` runs `cmd`. `!!cmd` keeps its second bang:
 // shell grammar reads `! cmd` as negating the exit code.
 fn bash_command(line: &str) -> Option<&str> {

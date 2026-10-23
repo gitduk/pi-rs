@@ -40,6 +40,9 @@ pub trait JobHandle: Send + Sync {
     fn input(&self, text: String);
     /// A line for the person, never the model: a code to scan, say.
     fn notice(&self, text: String);
+    /// A question for the person, each option the line that picks it;
+    /// with `multiple`, several may be picked.
+    fn choose(&self, question: String, options: Vec<String>, multiple: bool);
     /// Stop whatever runs where the job was started, as the user's stop would.
     fn interrupt(&self);
     /// Where the latest of what it prints can be read while it runs.

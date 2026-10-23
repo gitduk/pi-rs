@@ -2,6 +2,7 @@
 //! settled rows, the stream still writing them, the queue of what arrived while
 //! nobody was looking, and the map from a lane's token to its screen.
 
+use std::collections::{BTreeSet, VecDeque};
 use std::time::Instant;
 
 use agent::session::EntryId;
@@ -11,6 +12,7 @@ use super::row::Row;
 use super::scrollback::{Folds, Scrollback, scrollback_from};
 use crate::render::Paint;
 use pi_core::core::Core;
+use pi_core::core::choose::{Asker, Question};
 use pi_core::core::lane::Lane;
 use pi_core::core::meter::Snapshot;
 use pi_core::core::resolve::Resolved;
@@ -38,6 +40,14 @@ pub struct View {
     // The half-typed line parked when the surface last left this lane,
     // waiting in the view to come back to the editor with it.
     pub(super) draft: String,
+    // Questions put to the user here, the front one shown and answered first.
+    pub(super) questions: VecDeque<Question>,
+    // The front question's highlighted option.
+    pub(super) picked: usize,
+    // The front question's options picked so far, where several may be.
+    pub(super) checked: BTreeSet<usize>,
+    // The front question set aside while the user writes their own answer.
+    pub(super) writing: bool,
 }
 
 // What the screen shows: the settled rows, the stream still completing them,
@@ -68,6 +78,8 @@ pub struct Surface {
 // Cost tally lives on the lane, outliving this screen.
 #[derive(Default)]
 pub struct State {
+    // `choose` calls in flight, by id: their question is put once they end well.
+    pub(super) asking: Vec<(String, Question)>,
     // Calls in flight, plus ended calls not yet adopted: parked until the
     // commit checks them, `abandon_tools` files the rest.
     pub(super) tools: Vec<RunTool>,
@@ -194,6 +206,54 @@ pub(super) fn opened<'a>(views: &'a mut Views, lane: &Lane, paint: &Paint) -> &'
 }
 
 impl View {
+    // Asking again is a change of mind: only an asker's latest stands, and
+    // where its last one stood, so the question in front stays in front.
+    pub(super) fn ask(&mut self, question: Question) {
+        self.change_questions(|qs| match qs.iter_mut().find(|q| q.from == question.from) {
+            Some(q) => *q = question,
+            None => qs.push_back(question),
+        });
+    }
+
+    // A stopped job's questions no longer stand.
+    pub(super) fn withdraw(&mut self, job: u64) {
+        self.change_questions(|qs| {
+            qs.retain(|q| !matches!(q.from, Asker::Job { id, .. } if id == job));
+        });
+    }
+
+    // The front question taken off, and the options at `picks`, if any were
+    // picked, as one line each.
+    pub(super) fn answer(&mut self, picks: &[usize]) -> Option<(Question, Option<String>)> {
+        let mut taken = None;
+        self.change_questions(|qs| taken = qs.pop_front());
+        let question = taken?;
+        let lines: Vec<&str> = (picks.iter())
+            .filter_map(|&at| question.options.get(at).map(String::as_str))
+            .collect();
+        let line = (!lines.is_empty()).then(|| lines.join("\n"));
+        Some((question, line))
+    }
+
+    // Where several may be picked, the option at `at` in or out.
+    pub(super) fn toggle(&mut self, at: usize) {
+        if !self.checked.remove(&at) {
+            self.checked.insert(at);
+        }
+    }
+
+    // The highlight belongs to the front question: a new front, even from
+    // the same asker, starts at the top.
+    fn change_questions(&mut self, change: impl FnOnce(&mut VecDeque<Question>)) {
+        let front = self.questions.front().cloned();
+        change(&mut self.questions);
+        if self.questions.front() != front.as_ref() {
+            self.picked = 0;
+            self.checked.clear();
+            self.writing = false;
+        }
+    }
+
     /// A lane nobody has said anything in yet: the banner naming what it
     /// stands on, and everything else empty.
     pub fn opening(resolved: &Resolved, paint: &Paint) -> Self {

@@ -146,6 +146,11 @@ pub fn escaping(esc: &mut Option<Escape>, c: char) -> bool {
     esc.is_some()
 }
 
+/// `s` with every run of whitespace, newlines included, one space.
+pub fn collapsed(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Display columns of one line by `cols_at`, escapes taking none.
 pub fn width(s: &str) -> usize {
     let mut esc = None;

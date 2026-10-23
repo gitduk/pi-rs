@@ -64,6 +64,12 @@ impl JobHandle for Handle {
     fn notice(&self, text: String) {
         self.said.lock().unwrap().push(format!("notice {text}"));
     }
+    fn choose(&self, question: String, options: Vec<String>, _multiple: bool) {
+        self.said
+            .lock()
+            .unwrap()
+            .push(format!("choose {question}: {}", options.join(" | ")));
+    }
     fn interrupt(&self) {
         self.said.lock().unwrap().push("interrupt".into());
     }

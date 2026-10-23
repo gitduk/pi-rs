@@ -171,6 +171,17 @@ refused, and resuming one from another directory moves it here.
 
 `read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `subagent` `memory`, plus:
 
+- `choose`: the model puts a question to you, up to 9 options under it, each
+  the line you would send to pick it — words for the model, or a command such
+  as `/compact`. It opens just over the input and holds the keyboard: `j`/`k`
+  move, `enter` or a digit sends one as if typed, `q` or `esc` closes it, and
+  any other key does nothing. `i` hands you the line to write your own
+  answer, which closes the question once sent; emptying the line returns
+  you to the options. With
+  `multiple`, `space` or a digit marks several, and `enter` sends the marked
+  ones as one prompt, a line each; those options are words, never commands.
+  The model's turn ends with the question, and nothing waits on your pick.
+
 - One tool per tool of each MCP server in `[mcp.<name>]`, offered as
   `<name>__<tool>` once the server has listed them. `command` and `args` run
   one over stdio, `url` reaches one over Streamable HTTP. A server that will
@@ -200,8 +211,9 @@ refused, and resuming one from another directory moves it here.
   its progress, `detach` to end the call and run on as a job, then `result`
   for each turn it sends back (its stdout at exit is the last), `input` for a
   person's line, sent to the model as written, never run as a command,
-  `notice` for a line on the screen the model never reads, and `interrupt`
-  to stop the checkout's turn. A turn an input opened is told back on fd 3: `started`, then its
+  `notice` for a line on the screen the model never reads, `choose` with
+  `options` to ask a question as the `choose` tool does (stopping the job
+  takes it back), and `interrupt` to stop the checkout's turn. A turn an input opened is told back on fd 3: `started`, then its
   whole `reply`.
   [`examples/tools/`](examples/tools/) has four to copy: `search`; `judge`,
   which reads its key from there; `later`, a prompt the model leaves itself

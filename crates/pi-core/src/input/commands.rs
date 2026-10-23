@@ -192,11 +192,7 @@ pub(crate) fn gist(description: &str) -> String {
     let end = (description.match_indices('.'))
         .find(|(at, _)| description[at + 1..].starts_with(char::is_whitespace))
         .map_or(description.len(), |(at, _)| at);
-    description[..end]
-        .trim_end_matches('.')
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    pi_store::text::collapsed(description[..end].trim_end_matches('.'))
 }
 
 /// What a slash answers to: the built-ins and the surface's `words`, then one

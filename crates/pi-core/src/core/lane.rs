@@ -186,6 +186,11 @@ pub fn arm(
     if subagent.tier().under(resolved.ceiling) {
         Arc::make_mut(&mut brief).registry.offer(Arc::new(subagent));
     }
+    // The lane's copy only: a child's turn never ends where the user can pick.
+    let choose = crate::core::choose::Choose;
+    if choose.tier().under(resolved.ceiling) {
+        Arc::make_mut(&mut brief).registry.offer(Arc::new(choose));
+    }
     // The lane's copy only: a child never hears the user, whose words are
     // the only ones memory keeps.
     if resolved.remembers && tool::Tier::Write.under(resolved.ceiling) {

@@ -49,6 +49,8 @@ pub(super) struct Ui {
     // The list's first shown row, kept across frames: rebuilt from zero, the
     // window would pin the highlight to its bottom edge.
     pub(super) menu_top: usize,
+    // The same for a question's options.
+    pub(super) question_top: usize,
     // The line `picked` and `menu_top` were set against: both are positions
     // in the list it grew, so another line starts over.
     pub(super) picked_for: Option<String>,
@@ -91,6 +93,8 @@ pub(super) struct Ui {
     pub(super) vim: Option<pi_store::keys::Mode>,
     pub(super) insert_cursor: pi_store::config::Cursor,
     pub(super) normal_cursor: pi_store::config::Cursor,
+    // A question holds the keyboard, which the caret shows as Normal's.
+    pub(super) question_holds: bool,
     // The segments the status line shows, in the order the config named them.
     pub(super) status: Vec<Segment>,
     // What the bar says, in ring order. Rebuilt before every draw.
@@ -237,6 +241,7 @@ impl Ui {
             bang_prompt,
             picked: None,
             menu_top: 0,
+            question_top: 0,
             picked_for: None,
             dismissed_at: None,
             seeded: None,
@@ -250,6 +255,7 @@ impl Ui {
             vim: None,
             insert_cursor: pi_store::config::Cursor::Default,
             normal_cursor: pi_store::config::Cursor::Default,
+            question_holds: false,
             spinner: 0,
             status: default_parts(),
             tabs: Vec::new(),

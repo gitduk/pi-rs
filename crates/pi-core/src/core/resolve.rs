@@ -639,10 +639,7 @@ mod tests {
         forms: &[&str],
     ) -> Vec<String> {
         // Aligned columns (`tier   = "exec"`) read as one space.
-        let said: Vec<String> = said
-            .iter()
-            .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
-            .collect();
+        let said: Vec<String> = said.iter().map(|t| pi_store::text::collapsed(t)).collect();
         names
             .into_iter()
             .filter(|name| {
@@ -672,6 +669,7 @@ mod tests {
                 skills::Load::NAME,
                 subagent::Subagent::NAME,
                 crate::driver::jobs::Jobs::NAME,
+                crate::core::choose::Choose::NAME,
             ]
             .map(String::from),
         );

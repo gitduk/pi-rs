@@ -26,6 +26,7 @@ pub const CALL_FRAMES: [&str; 12] = ["·", "✢", "*", "✶", "✻", "✽", "✽
 pub const DONE_MARK: &str = "✔"; // a tool row that finished well
 pub const RELAYED_MARK: &str = "◆"; // a turn pi sent for the model: a `later`, a subagent's answer
 pub const NOTE_MARK: &str = "≡"; // a fact filed for the model to read; nothing ran
+pub const QUESTION_MARK: &str = "?"; // a question over the input, its options under it
 pub const FAIL_MARK: &str = "✘"; // a failure, a denial, a refused edit
 pub const UNOPENED_MARK: &str = "○"; // a checkout on the bar that no lane has open
 pub const COMPACT_RULE: &str = "───"; // the dashes a compaction banner wears

@@ -7,6 +7,7 @@
 pub mod archive;
 pub mod bar;
 pub mod bash;
+pub mod choose;
 pub mod content;
 pub mod dial;
 pub mod hooks;

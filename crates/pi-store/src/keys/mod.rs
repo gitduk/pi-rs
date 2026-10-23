@@ -30,6 +30,9 @@ pub enum Mode {
 /// the menu claims never reaches the editor underneath it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum When {
+    // A question's options over an empty line: they hold the keyboard
+    // until one is sent or the question is closed.
+    Question,
     // Something is being read — a page up over the transcript, or a search
     // on it: `esc` lets it go before it can reach the run.
     Page,
@@ -58,6 +61,8 @@ pub enum Surface {
     // The line, a completion list over it: the list's keys first, and
     // letters still type, to narrow it.
     Completion,
+    // The line, empty, with a question's options over it.
+    Question,
 }
 
 /// Which layers are up when a key is pressed. One value rather than three
@@ -110,6 +115,17 @@ pub enum Action {
     MenuNext,
     MenuPrevious,
     MenuDismiss,
+    // A question's options: moved through, one sent as if typed, or let go.
+    QuestionNext,
+    QuestionPrevious,
+    QuestionAccept,
+    // The option a digit numbers; any other key picks the highlighted one.
+    QuestionPick,
+    // Where several may be picked: the highlighted one in or out.
+    QuestionToggle,
+    // The keyboard back to the line, to answer in one's own words.
+    QuestionWrite,
+    QuestionDecline,
     RunInterrupt,
     Rewind,
     // The page up searched, or the transcript with none: the query typed
@@ -320,6 +336,55 @@ const BINDINGS: &[Binding] = &[
         when: W::Menu,
         keys: &["esc"],
         note: "until the next keystroke",
+    },
+    Binding {
+        id: "question.next",
+        action: A::QuestionNext,
+        when: W::Question,
+        keys: &["j", "down", "ctrl+n"],
+        note: "",
+    },
+    Binding {
+        id: "question.previous",
+        action: A::QuestionPrevious,
+        when: W::Question,
+        keys: &["k", "up", "ctrl+p"],
+        note: "",
+    },
+    Binding {
+        id: "question.accept",
+        action: A::QuestionAccept,
+        when: W::Question,
+        keys: &["enter"],
+        note: "sends the highlighted option as if typed",
+    },
+    Binding {
+        id: "question.pick",
+        action: A::QuestionPick,
+        when: W::Question,
+        keys: &["1", "2", "3", "4", "5", "6", "7", "8", "9"],
+        note: "the option of that number",
+    },
+    Binding {
+        id: "question.toggle",
+        action: A::QuestionToggle,
+        when: W::Question,
+        keys: &["space"],
+        note: "where several may be picked; a digit then toggles too",
+    },
+    Binding {
+        id: "question.write",
+        action: A::QuestionWrite,
+        when: W::Question,
+        keys: &["i"],
+        note: "type your own answer; sending it closes the question, emptying the line returns",
+    },
+    Binding {
+        id: "question.decline",
+        action: A::QuestionDecline,
+        when: W::Question,
+        keys: &["q", "esc"],
+        note: "closes it unanswered; any other key does nothing while it is up",
     },
     Binding {
         id: "run.interrupt",
@@ -879,6 +944,7 @@ impl Keys {
 fn live(layers: Layers) -> Vec<When> {
     let mut live = match layers.surface {
         Surface::Completion => vec![When::Menu],
+        Surface::Question => vec![When::Question],
         Surface::Editor => Vec::with_capacity(8),
     };
     // `menu.dismiss`, `page.close` and `run.interrupt` all claim `esc`:
@@ -1132,6 +1198,43 @@ mod tests {
         }
     }
 
+    // Each press answers only while a question is up; without one, the same
+    // keys type, send and stop as ever.
+    #[test]
+    fn a_question_takes_its_keys_and_lends_them_back() {
+        let k = Keys::default();
+        let asked = Layers {
+            surface: Surface::Question,
+            run: true,
+            ..Layers::default()
+        };
+        for (key, action) in [
+            ("down", Action::QuestionNext),
+            ("up", Action::QuestionPrevious),
+            ("enter", Action::QuestionAccept),
+            ("3", Action::QuestionPick),
+            ("space", Action::QuestionToggle),
+            ("esc", Action::QuestionDecline),
+        ] {
+            assert_eq!(k.action(press(key), asked), Some(action), "`{key}`");
+        }
+        assert_eq!(k.action(press("j"), asked), Some(Action::QuestionNext));
+        assert_eq!(k.action(press("q"), asked), Some(Action::QuestionDecline));
+        assert_eq!(k.action(press("i"), asked), Some(Action::QuestionWrite));
+        assert_eq!(
+            k.action(press("y"), asked),
+            None,
+            "a letter not bound is nothing"
+        );
+        let free = Layers {
+            surface: Surface::Editor,
+            ..asked
+        };
+        assert_eq!(k.action(press("3"), free), None);
+        assert_eq!(k.action(press("esc"), free), Some(Action::RunInterrupt));
+        assert_eq!(k.action(press("ctrl+t"), asked), Some(Action::ThinkFold));
+    }
+
     #[test]
     fn the_normal_layer_takes_nothing_away() {
         // The premise the whole table rests on: Normal binds only bare
@@ -1149,10 +1252,10 @@ mod tests {
                     Chord::Two(a, p) => (Some(a), p),
                 };
                 let insert = Layers {
-                    surface: if b.when == W::Menu {
-                        Surface::Completion
-                    } else {
-                        Surface::Editor
+                    surface: match b.when {
+                        W::Menu => Surface::Completion,
+                        W::Question => Surface::Question,
+                        _ => Surface::Editor,
                     },
                     run: b.when == W::Run,
                     mode: Mode::Insert,

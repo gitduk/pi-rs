@@ -20,6 +20,8 @@ use tokio_util::sync::CancellationToken;
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 use toolbox::background::{JobHandle, JobSink, Peek, Rerun, Told};
 
+use crate::core::choose::{Asker, Question};
+
 // Screen lines a job may have waiting before the oldest give way.
 const MAX_NOTICES: usize = 200;
 // How long a restart waits for the last run to let go before giving up.
@@ -39,6 +41,8 @@ pub struct Table {
 struct Inner {
     next_id: u64,
     items: Vec<Item>,
+    // Jobs stopped since last asked: a question already taken from one is void.
+    withdrawn: Vec<u64>,
 }
 
 struct Item {
@@ -64,6 +68,8 @@ struct Item {
     interrupt: bool,
     // Lines for the screen, not yet shown.
     notices: VecDeque<String>,
+    // A question it put to the person, not yet taken; a newer one replaces it.
+    question: Option<Question>,
     // Reads the latest of what it printed; None for one that keeps none.
     output: Option<Peek>,
     // How it runs again. One that has it is kept once it ends, to be
@@ -89,6 +95,16 @@ impl Item {
         matches!(self.phase, Phase::Running { .. })
     }
 
+    // Stopped, with nothing left for the lane or the screen, and no way to
+    // start over: nothing here is anyone's any more.
+    fn spent(&self) -> bool {
+        !self.running()
+            && self.waiting.is_empty()
+            && self.notices.is_empty()
+            && self.question.is_none()
+            && self.rerun.is_none()
+    }
+
     fn state(&self) -> State {
         match self.phase {
             Phase::Running { .. } => State::Running,
@@ -104,6 +120,12 @@ impl Item {
         self.waiting.clear();
         self.dropped = 0;
         self.notices.clear();
+        self.question = None;
+    }
+
+    // The job as a person reads it: `judge #3`.
+    fn name(&self) -> String {
+        format!("{} #{}", self.description, self.id)
     }
 
     fn due(&self, text: &str) -> Due {
@@ -115,7 +137,7 @@ impl Item {
                 "This turn is a result of background job #{id} ({name}), which you \
                  started; the user did not just type it."
             ),
-            label: format!("{name} #{id} {first}"),
+            label: format!("{} {first}", self.name()),
             text: text.to_string(),
         }
     }
@@ -163,7 +185,7 @@ fn each(ids: &[u64], act: impl Fn(u64) -> Result<String, String>) -> (Vec<String
 // A job that has stopped with nothing left to say leaves, unless it can
 // be started over.
 fn settle(items: &mut Vec<Item>, at: usize) {
-    if !items[at].running() && items[at].waiting.is_empty() && items[at].rerun.is_none() {
+    if items[at].spent() {
         items.remove(at);
     }
 }
@@ -290,12 +312,34 @@ impl Table {
 
     /// The screen lines `root`'s jobs left since last asked, oldest first.
     pub fn take_notices(&self, root: &Path) -> Vec<String> {
-        self.lock()
-            .items
-            .iter_mut()
+        self.take(root, |i| std::mem::take(&mut i.notices))
+    }
+
+    /// The lines `root`'s jobs asked the person to run since last asked.
+    pub fn take_questions(&self, root: &Path) -> Vec<Question> {
+        self.take(root, |i| i.question.take())
+    }
+
+    /// Jobs stopped or started over since last asked, whose questions,
+    /// wherever they went, no longer stand.
+    pub fn take_withdrawn(&self) -> Vec<u64> {
+        std::mem::take(&mut self.lock().withdrawn)
+    }
+
+    // What `root`'s jobs kept for the surface, taken; a job it was all that
+    // held leaves with it.
+    fn take<T, I: IntoIterator<Item = T>>(
+        &self,
+        root: &Path,
+        from: impl FnMut(&mut Item) -> I,
+    ) -> Vec<T> {
+        let mut inner = self.lock();
+        let taken = (inner.items.iter_mut())
             .filter(|i| i.root == root)
-            .flat_map(|i| std::mem::take(&mut i.notices))
-            .collect()
+            .flat_map(from)
+            .collect();
+        inner.items.retain(|i| !i.spent());
+        taken
     }
 
     /// Tell job `id` about a turn its input opened, if it is still here.
@@ -451,6 +495,7 @@ impl Table {
                 tracing::info!(target: "pi::job", job = id, "stopped and forgotten");
             }
         }
+        inner.withdrawn.push(id);
         drop(inner);
         self.changed.notify_one();
         Ok(what)
@@ -487,6 +532,7 @@ impl Table {
             table: self.clone(),
         });
         let what = item.description.clone();
+        inner.withdrawn.push(id);
         drop(inner);
         tracing::info!(target: "pi::job", job = id, "restarting");
         self.changed.notify_one();
@@ -566,6 +612,7 @@ impl Table {
     pub fn drop_under(&self, root: &Path) -> usize {
         let mut inner = self.lock();
         let had = inner.items.len();
+        let mut withdrawn = Vec::new();
         inner.items.retain(|i| {
             let gone = i.root.starts_with(root);
             if gone {
@@ -573,9 +620,11 @@ impl Table {
                 if let Phase::Running { stop } = &i.phase {
                     stop.cancel();
                 }
+                withdrawn.push(i.id);
             }
             !gone
         });
+        inner.withdrawn.extend(withdrawn);
         let gone = had - inner.items.len();
         drop(inner);
         self.changed.notify_one();
@@ -610,6 +659,7 @@ impl Table {
             follows: false,
             interrupt: false,
             notices: VecDeque::new(),
+            question: None,
             output: None,
             rerun: None,
             run: 0,
@@ -726,6 +776,22 @@ impl JobHandle for Handle {
                 i.notices.pop_front();
             }
             i.notices.push_back(text);
+        });
+    }
+
+    fn choose(&self, question: String, options: Vec<String>, multiple: bool) {
+        self.table.update(self.id, self.run, |i| {
+            let from = Asker::Job {
+                id: i.id,
+                name: i.name(),
+            };
+            match Question::new(from, &question, &options, multiple) {
+                Ok(q) => {
+                    tracing::info!(target: "pi::job", job = i.id, question = %q.text, options = ?q.options, "choose");
+                    i.question = Some(q);
+                }
+                Err(why) => tracing::warn!(target: "pi::job", job = i.id, %why, "a question dropped"),
+            }
         });
     }
 
@@ -934,6 +1000,54 @@ mod tests {
         assert!(table.take_notices(Path::new("/elsewhere")).is_empty());
         assert_eq!(table.take_notices(Path::new("/checkout")), ["scan this"]);
         assert!(table.take_notices(Path::new("/checkout")).is_empty());
+    }
+
+    // Said and gone: what a job leaves for the screen outlives its exit.
+    #[tokio::test]
+    async fn a_question_outlives_its_job_and_a_newer_one_replaces_it() {
+        let table = Arc::new(Table::default());
+        let job = start(&table, Path::new("/checkout"), "judge");
+        let lines = |l: &[&str]| l.iter().map(|o| o.to_string()).collect::<Vec<_>>();
+        job.choose("a new task?".into(), lines(&["/new"]), false);
+        job.choose("a long one?".into(), lines(&["/compact", "go on"]), false);
+        job.choose(
+            "hidden?".into(),
+            lines(&["/compact\nand what was not shown"]),
+            false,
+        );
+        job.notice("judged".into());
+        job.end();
+        assert!(table.take_questions(Path::new("/elsewhere")).is_empty());
+        let taken = table.take_questions(Path::new("/checkout"));
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].text, "a long one?");
+        assert_eq!(taken[0].options, ["/compact", "go on"]);
+        assert!(
+            matches!(&taken[0].from, Asker::Job { name, .. } if name.starts_with("judge #")),
+            "{:?}",
+            taken[0].from
+        );
+        assert!(table.take_questions(Path::new("/checkout")).is_empty());
+        assert_eq!(table.take_notices(Path::new("/checkout")), ["judged"]);
+        assert!(
+            table.jobs(Path::new("/checkout")).is_empty(),
+            "spent, so gone"
+        );
+        assert!(
+            table.take_withdrawn().is_empty(),
+            "ending is not withdrawing"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopping_a_job_withdraws_what_it_asked() {
+        let table = Arc::new(Table::default());
+        let job = start(&table, Path::new("/checkout"), "judge");
+        job.choose("new?".into(), vec!["/new".into()], false);
+        assert_eq!(table.take_questions(Path::new("/checkout")).len(), 1);
+        table.stop(Path::new("/checkout"), job.id()).unwrap();
+        assert_eq!(table.take_withdrawn(), [job.id()]);
+        assert!(table.take_withdrawn().is_empty());
     }
 
     #[tokio::test]

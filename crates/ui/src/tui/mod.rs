@@ -621,6 +621,15 @@ impl Tui {
                     self.ui.say(view, line.to_string());
                 }
             }
+            // Before what is new: a job started over may already ask again.
+            for job in jobs.take_withdrawn() {
+                for view in self.views.values_mut() {
+                    view.withdraw(job);
+                }
+            }
+            for question in jobs.take_questions(self.core.lane().root()) {
+                front_view(&mut self.views, self.core.lane()).ask(question);
+            }
             let root = self.core.lane().root();
             self.ui.every_job = jobs.jobs(root);
             self.ui.jobs = (self.ui.every_job.iter())

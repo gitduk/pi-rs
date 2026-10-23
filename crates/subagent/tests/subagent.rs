@@ -701,6 +701,7 @@ impl toolbox::background::JobHandle for Host {
     }
     fn input(&self, _text: String) {}
     fn notice(&self, _text: String) {}
+    fn choose(&self, _question: String, _options: Vec<String>, _multiple: bool) {}
     fn interrupt(&self) {}
     fn watch(&self, _output: toolbox::background::Peek) {}
     fn follow(&self) {}
