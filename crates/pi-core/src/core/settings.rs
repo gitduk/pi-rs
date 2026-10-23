@@ -184,12 +184,12 @@ impl Core {
         if name.is_empty() {
             let width = files
                 .iter()
-                .map(|f| f.name.chars().count())
+                .map(|f| pi_store::text::width(&f.name))
                 .max()
                 .unwrap_or(0);
             let mut lines: Vec<String> = files
                 .iter()
-                .map(|f| format!("{:width$}  {}", f.name, f.note))
+                .map(|f| format!("{}  {}", pi_store::text::pad(&f.name, width), f.note))
                 .collect();
             lines.push("/edit <file> opens one in $EDITOR".into());
             return Step::Handled(pi_store::listing::Listing::say(lines));
@@ -363,7 +363,10 @@ impl Core {
                 "see examples/pi.toml for what a [models.<name>] entry looks like".into(),
             ];
         }
-        let width = choices.iter().map(|c| c.name.len()).max().unwrap_or(0);
+        let width = (choices.iter())
+            .map(|c| pi_store::text::width(&c.name))
+            .max()
+            .unwrap_or(0);
         choices
             .iter()
             .map(|c| {
@@ -372,7 +375,7 @@ impl Core {
                 } else {
                     " "
                 };
-                format!("{mark} {:width$}  {}", c.name, c.note)
+                format!("{mark} {}  {}", pi_store::text::pad(&c.name, width), c.note)
             })
             .collect()
     }

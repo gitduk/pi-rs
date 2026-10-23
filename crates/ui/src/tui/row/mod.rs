@@ -745,11 +745,13 @@ impl Row {
         );
         let width = facts
             .iter()
-            .map(|(label, _)| label.len())
+            .map(|(label, _)| pi_store::text::width(label))
             .max()
             .unwrap_or(0);
         let muted = |line: &str| Line::from(paint.span(&paint.theme.muted, line));
-        let fact = |label: &str, value: &str| muted(&format!("{label:width$}  {value}"));
+        let fact = |label: &str, value: &str| {
+            muted(&format!("{}  {value}", pi_store::text::pad(label, width)))
+        };
         Self::lines(
             std::iter::once(muted(icons::VERSION_BANNER))
                 .chain(facts.iter().map(|(label, value)| fact(label, value)))
