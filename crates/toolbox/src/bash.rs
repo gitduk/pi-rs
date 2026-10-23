@@ -14,11 +14,16 @@ struct Args {
     command: String,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    #[serde(default = "workspace_root")]
     cwd: String,
 }
 
-// Said when `cwd` is missing: the refusal is how a call learns it is required.
-const ARGS_HINT: &str = "bash takes `command` and `cwd`; `cwd` is \".\" for the workspace root";
+// Optional: a required cwd was still left out, and each miss cost a turn.
+fn workspace_root() -> String {
+    ".".to_string()
+}
+
+const ARGS_HINT: &str = "bash takes `command`, plus `cwd` to run anywhere but the workspace root";
 
 pub struct Bash;
 
@@ -47,9 +52,9 @@ impl Tool for Bash {
             "properties": {
                 "command": { "type": "string" },
                 "timeout_ms": { "type": "integer", "description": "Default 120000, max 600000." },
-                "cwd": { "type": "string", "description": "Where the command runs: \".\" for the workspace root, else a workspace-relative or absolute directory." },
+                "cwd": { "type": "string", "description": "Where the command runs, as a workspace-relative or absolute directory; omit it for the workspace root." },
             },
-            "required": ["command", "cwd"],
+            "required": ["command"],
             "additionalProperties": false,
         })
     }

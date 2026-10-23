@@ -105,20 +105,16 @@ async fn a_zero_timeout_is_not_an_instant_kill() {
     assert!(out.contains("hi"), "{out}");
 }
 
-// Required so every call says where it runs; a silent default would let a
-// call drift back to prefixing `cd`.
 #[tokio::test]
-async fn bash_without_cwd_is_refused_with_what_to_pass() {
-    let (_d, c) = ctx();
-    let err = toolbox::bash::Bash
-        .execute(json!({ "command": "true" }), &c)
+async fn bash_without_cwd_runs_in_the_workspace_root() {
+    let (d, c) = ctx();
+    let out = toolbox::bash::Bash
+        .execute(json!({ "command": "pwd" }), &c)
         .await
-        .unwrap_err();
-    assert!(matches!(err, ToolError::Invalid(_)), "{err}");
-    assert!(
-        err.to_string().contains("\".\" for the workspace root"),
-        "{err}"
-    );
+        .unwrap()
+        .flatten();
+    let root = d.path().canonicalize().unwrap();
+    assert!(out.lines().any(|l| l == root.to_str().unwrap()), "{out}");
 }
 
 // The gate the loop checks before a call is made.
