@@ -570,7 +570,7 @@ impl Ui {
         };
         let normal = self.vim == Some(pi_store::keys::Mode::Normal);
         let (next, previous, close) = match normal {
-            true => ("menu.down", "menu.up", "menu.quit"),
+            true => ("menu.next.vim", "menu.previous.vim", "menu.dismiss.vim"),
             false => ("menu.next", "menu.previous", "menu.dismiss"),
         };
         let moves = [key(next), key(previous)]

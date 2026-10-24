@@ -302,10 +302,7 @@ impl Ui {
                 }
                 return Asked::Own(Deed::Interrupt);
             }
-            // Only from an empty line: with text on it, `esc esc` is nothing.
-            Some(Action::Rewind) if self.editor.is_empty() => {
-                return Asked::Own(Deed::Rewind);
-            }
+            Some(Action::Rewind) => return Asked::Own(Deed::Rewind),
             Some(action @ (Action::LaneNext | Action::LanePrev)) => {
                 let forward = action == Action::LaneNext;
                 return match self.step_checkout(lane, forward) {
@@ -316,21 +313,11 @@ impl Ui {
                     }
                 };
             }
-            // The session is what a press would replace, so it takes two,
-            // and only with nothing on the line.
-            Some(Action::SessionNew) if self.editor.is_empty() => {
-                return Asked::Core(Intent::Builtin(Builtin::New));
-            }
-            Some(Action::AppExit) => {
-                // No `running` check: leaving is one intent whatever is in
-                // flight, and `admit` gives it one answer.
-                return if self.editor.is_empty() {
-                    Asked::Core(Intent::Builtin(Builtin::Quit))
-                } else {
-                    self.editor.delete();
-                    Asked::Own(Deed::Nothing)
-                };
-            }
+            // The session is what a press would replace, so it takes two.
+            Some(Action::SessionNew) => return Asked::Core(Intent::Builtin(Builtin::New)),
+            // No `running` check: leaving is one intent whatever is in
+            // flight, and `admit` gives it one answer.
+            Some(Action::AppExit) => return Asked::Core(Intent::Builtin(Builtin::Quit)),
             // What only the screen holds goes before the line: a notice
             // landing mid-sentence must not cost the sentence.
             Some(Action::LineClear)

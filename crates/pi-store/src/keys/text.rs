@@ -4,22 +4,24 @@
 //! Second half of `mod.rs`: that says what the table is, this says how a key
 //! is spelled in it — the config file's side, and the `/keys` listing's.
 
-use super::{BINDINGS, Chord, Key, Keys, Mods, Press};
+use super::{BINDINGS, Chord, Key, Keys, Mode, Mods, On, Press, When};
 use crate::listing::{Listing, Row};
 use anyhow::{Result, bail};
 
 impl Keys {
     /// What is bound right now: the id it is rebound by, the keys that reach
-    /// it, and what it does.
-    ///
-    /// No cell says which mode a binding belongs to, because the ids do:
-    /// `normal.` is on everyone that needed telling apart.
+    /// it, and when and what it does.
     pub fn listing(&self) -> Listing {
         Listing::of(BINDINGS.iter().map(|b| {
             let row = Row::new([b.id.to_string(), self.keys_of(b.id).join(", ")]);
-            match b.note.is_empty() {
+            let note = [live_when(b.when), b.note.to_string()]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(": ");
+            match note.is_empty() {
                 true => row,
-                false => row.noting(b.note),
+                false => row.noting(&note),
             }
         }))
     }
@@ -33,6 +35,28 @@ impl Keys {
         keys.sort();
         keys
     }
+}
+
+// When a binding is live, as `/keys` says it; nothing for the line in
+// either mode. Insert goes unsaid: with vim off it is the only mode.
+fn live_when(when: When) -> String {
+    let on = match when.on {
+        On::List => "over a list",
+        On::Page => "over a page or a search",
+        On::Run => "while a turn runs",
+        On::Line => "",
+        On::App => "anywhere",
+    };
+    let mode = match when.mode {
+        Some(Mode::Normal) => "in Normal",
+        Some(Mode::Insert) | None => "",
+    };
+    let empty = if when.empty { "on an empty line" } else { "" };
+    [mode, empty, on]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 // A chord written the way a config would write it: presses apart by a space.

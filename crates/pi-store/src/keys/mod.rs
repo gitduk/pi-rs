@@ -1,9 +1,11 @@
 //! What a key press means, and where that is written down.
 //!
-//! The namespace is the object acted on (`edit.*`, `move.*`, `menu.*`), and,
-//! following from that, it decides *when* a binding is live — so two actions
-//! may share a key as long as they are never live together: `up` is
-//! `menu.previous` while a list is open, `history.older` when it is not.
+//! The namespace is the object acted on (`edit.*`, `move.*`, `menu.*`); a
+//! `.vim` id is the modal key for what the id before it does. When a binding
+//! is live is said apart from its name, by what it acts on, the mode and
+//! whether the line is empty — so two actions may share a key as long as
+//! they are never live together: `up` is `menu.previous` while a list is
+//! open, `history.older` when it is not.
 
 mod text;
 
@@ -26,31 +28,68 @@ pub enum Mode {
     Normal,
 }
 
-/// When a binding is consulted. `action` tries these nearest-first, so a key
-/// the menu claims never reaches the editor underneath it.
+/// What a binding acts on, nearest the person first: a key a list claims
+/// never reaches the page, the run or the line under it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum When {
-    // Something is being read — a page up over the transcript, or a search
-    // on it: `esc` lets it go before it can reach the run.
+pub enum On {
+    // A list over the line: what it completes, or a question's options.
+    List,
+    // Something being read: a page over the transcript, or a search on it.
     Page,
-    // A list's keys, over the line: what it completes, or a question's
-    // options, shown even on an empty line.
-    Menu,
-    // Normal with a list up: nothing types, so the bare letters move it.
-    NormalMenu,
-    // A turn is in flight.
+    // The turn in flight.
     Run,
-    // Only in that mode.
-    Mode(Mode),
-    // Normal with nothing on the line and something read: the line has
-    // nothing to move through, so its movement keys move what is read.
-    NormalPage,
-    // In both modes: moving, sending, scrolling — what the line is for,
-    // not how its text is written.
-    Editor,
+    // The line: moving, editing, sending, scrolling.
+    Line,
     // Whatever has the keyboard: the stop and the way out.
     App,
 }
+
+/// When a binding is live: what it acts on, narrowed to one mode or to an
+/// empty line when the key means something else otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct When {
+    pub on: On,
+    pub mode: Option<Mode>,
+    pub empty: bool,
+}
+
+impl When {
+    const fn on(on: On) -> Self {
+        Self {
+            on,
+            mode: None,
+            empty: false,
+        }
+    }
+
+    const fn insert(self) -> Self {
+        Self {
+            mode: Some(Mode::Insert),
+            ..self
+        }
+    }
+
+    const fn normal(self) -> Self {
+        Self {
+            mode: Some(Mode::Normal),
+            ..self
+        }
+    }
+
+    // Only with nothing on the line, where the key has nothing else to do.
+    const fn empty(self) -> Self {
+        Self {
+            empty: true,
+            ..self
+        }
+    }
+}
+
+const LIST: When = When::on(On::List);
+const PAGE: When = When::on(On::Page);
+const RUN: When = When::on(On::Run);
+const LINE: When = When::on(On::Line);
+const APP: When = When::on(On::App);
 
 /// What is over the line, which picks the set of keys read: the line's own
 /// layers, under a completion list's when one is up.
@@ -71,8 +110,8 @@ pub struct Layers {
     pub run: bool,
     /// The mode. Vim off is Insert here: the caller never enters Normal.
     pub mode: Mode,
-    /// Whether the line has anything on it. Read only in Normal, by the keys
-    /// that command the history instead when there is nothing to command.
+    /// Whether the line has nothing on it, which the keys bound to an empty
+    /// line read: there they mean something the line has no use for.
     pub line_empty: bool,
     /// Whether something is being read: a page up over the transcript, or a
     /// search on it.
@@ -174,520 +213,519 @@ struct Binding {
 }
 
 use Action as A;
-use When as W;
 
 const BINDINGS: &[Binding] = &[
     Binding {
         id: "edit.insert.newline",
         action: A::InsertNewline,
-        when: W::Mode(Mode::Insert),
+        when: LINE.insert(),
         keys: &["alt+enter", "ctrl+j", "shift+enter"],
         note: "",
     },
     Binding {
         id: "edit.delete.char-back",
         action: A::DeleteCharBack,
-        when: W::Mode(Mode::Insert),
+        when: LINE.insert(),
         keys: &["backspace", "ctrl+h"],
         note: "",
     },
     Binding {
         id: "edit.delete.char-forward",
         action: A::DeleteCharForward,
-        when: W::Mode(Mode::Insert),
-        keys: &["delete"],
+        when: LINE.insert(),
+        keys: &["delete", "ctrl+d"],
         note: "",
     },
     Binding {
         id: "edit.delete.word-back",
         action: A::DeleteWordBack,
-        when: W::Mode(Mode::Insert),
+        when: LINE.insert(),
         keys: &["ctrl+w", "alt+backspace", "ctrl+backspace"],
         note: "",
     },
     Binding {
         id: "edit.delete.to-line-end",
         action: A::DeleteToLineEnd,
-        when: W::Mode(Mode::Insert),
+        when: LINE.insert(),
         keys: &["ctrl+k"],
         note: "",
     },
     Binding {
         id: "edit.delete.to-line-start",
         action: A::DeleteToLineStart,
-        when: W::Mode(Mode::Insert),
+        when: LINE.insert(),
         keys: &["ctrl+u"],
         note: "",
     },
     Binding {
         id: "move.char.left",
         action: A::MoveCharLeft,
-        when: W::Editor,
+        when: LINE,
         keys: &["left"],
         note: "",
     },
     Binding {
         id: "move.char.right",
         action: A::MoveCharRight,
-        when: W::Editor,
+        when: LINE,
         keys: &["right"],
         note: "",
     },
     Binding {
         id: "move.word.left",
         action: A::MoveWordLeft,
-        when: W::Editor,
+        when: LINE,
         keys: &["alt+left", "ctrl+left", "alt+b"],
         note: "",
     },
     Binding {
         id: "move.word.right",
         action: A::MoveWordRight,
-        when: W::Editor,
+        when: LINE,
         keys: &["alt+right", "ctrl+right", "alt+f"],
         note: "",
     },
     Binding {
         id: "move.line.start",
         action: A::MoveLineStart,
-        when: W::Editor,
+        when: LINE,
         keys: &["home", "ctrl+a"],
         note: "",
     },
     Binding {
         id: "move.line.end",
         action: A::MoveLineEnd,
-        when: W::Editor,
+        when: LINE,
         keys: &["end", "ctrl+e"],
         note: "",
     },
     Binding {
         id: "history.older",
         action: A::HistoryOlder,
-        when: W::Editor,
+        when: LINE,
         keys: &["up"],
         note: "or up a line, within a multi-line prompt",
     },
     Binding {
         id: "history.newer",
         action: A::HistoryNewer,
-        when: W::Editor,
+        when: LINE,
         keys: &["down"],
         note: "or down a line, within a multi-line prompt",
     },
     Binding {
         id: "line.submit",
         action: A::LineSubmit,
-        when: W::Editor,
+        when: LINE,
         keys: &["enter"],
         note: "with a list up, sends the highlighted one, or the marked ones; reaches the run in flight; a command waits for it",
     },
     Binding {
         id: "line.clear",
         action: A::LineClear,
-        when: W::Editor,
+        when: LINE,
         keys: &["ctrl+l"],
         note: "",
     },
     Binding {
         id: "session.new",
         action: A::SessionNew,
-        when: W::Editor,
+        when: LINE.empty(),
         keys: &["ctrl+l ctrl+l"],
-        note: "with nothing on the line; this one kept on disk",
+        note: "this one kept on disk",
     },
     Binding {
         id: "menu.accept",
         action: A::MenuAccept,
-        when: W::Menu,
+        when: LIST,
         keys: &["tab"],
         note: "takes the highlighted one and goes on: onto the line, or marked where several may be picked",
     },
     Binding {
         id: "menu.next",
         action: A::MenuNext,
-        when: W::Menu,
+        when: LIST,
         keys: &["down", "ctrl+n", "ctrl+j"],
         note: "",
     },
     Binding {
         id: "menu.previous",
         action: A::MenuPrevious,
-        when: W::Menu,
+        when: LIST,
         keys: &["up", "ctrl+p", "ctrl+k"],
         note: "",
     },
     Binding {
         id: "menu.dismiss",
         action: A::MenuDismiss,
-        when: W::Menu,
+        when: LIST,
         keys: &["esc"],
         note: "until the next keystroke; a question's list closes the question unanswered",
     },
     Binding {
-        id: "menu.down",
+        id: "menu.next.vim",
         action: A::MenuNext,
-        when: W::NormalMenu,
+        when: LIST.normal(),
         keys: &["j"],
         note: "",
     },
     Binding {
-        id: "menu.up",
+        id: "menu.previous.vim",
         action: A::MenuPrevious,
-        when: W::NormalMenu,
+        when: LIST.normal(),
         keys: &["k"],
         note: "",
     },
     Binding {
-        id: "menu.quit",
+        id: "menu.dismiss.vim",
         action: A::MenuDismiss,
-        when: W::NormalMenu,
+        when: LIST.normal(),
         keys: &["q"],
         note: "",
     },
     Binding {
         id: "run.interrupt",
         action: A::RunInterrupt,
-        when: W::Run,
+        when: RUN,
         keys: &["esc"],
         note: "before the model answers, it takes the prompt back to the editor",
     },
     Binding {
         id: "conversation.rewind",
         action: A::Rewind,
-        when: W::Editor,
+        when: LINE.empty(),
         keys: &["esc esc"],
-        note: "with an empty line, to go back to something you said",
+        note: "to go back to something you said",
     },
     Binding {
         id: "view.scroll-up",
         action: A::ScrollPageUp,
-        when: W::Editor,
+        when: LINE,
         keys: &["pageup", "ctrl+b"],
         note: "",
     },
     Binding {
         id: "view.scroll-down",
         action: A::ScrollPageDown,
-        when: W::Editor,
+        when: LINE,
         keys: &["pagedown", "ctrl+f"],
         note: "",
     },
     Binding {
         id: "view.search",
         action: A::Search,
-        when: W::Editor,
+        when: LINE,
         keys: &["ctrl+s"],
         note: "the page up, or the transcript",
     },
     Binding {
         id: "app.exit",
         action: A::AppExit,
-        when: W::Editor,
+        when: LINE.empty(),
         keys: &["ctrl+d"],
-        note: "only when the line is empty",
+        note: "",
     },
     Binding {
         id: "app.cancel",
         action: A::AppCancel,
-        when: W::App,
+        when: APP,
         keys: &["ctrl+c"],
         note: "stops the run in flight, closing whatever is over the editor",
     },
     Binding {
         id: "app.quit",
         action: A::AppQuit,
-        when: W::App,
+        when: APP,
         keys: &["ctrl+c ctrl+c"],
         note: "",
     },
     Binding {
         id: "think.fold",
         action: A::ThinkFold,
-        when: W::Editor,
+        when: LINE,
         keys: &["ctrl+t"],
         note: "the last group of calls and reasoning in full, or on one line",
     },
     Binding {
         id: "think.fold-all",
         action: A::ThinkFoldAll,
-        when: W::Editor,
+        when: LINE,
         keys: &["ctrl+shift+t", "alt+t"],
         note: "every group of calls and reasoning, the last one included",
     },
     // Normal mode from here down: every key is a bare character, since this
     // layer only adds atop `Editor`. `normal.` prefixes an id only where needed.
     Binding {
-        id: "normal.lane.prev",
+        id: "lane.prev",
         action: A::LanePrev,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["H"],
         note: "the previous checkout, opening it if it is not",
     },
     Binding {
-        id: "normal.lane.next",
+        id: "lane.next",
         action: A::LaneNext,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["L"],
         note: "the next checkout, opening it if it is not",
     },
     // The window, where the lowercase pair moves through recall instead.
     Binding {
-        id: "normal.view.scroll-half-up",
+        id: "view.scroll-half-up",
         action: A::ScrollHalfUp,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["K"],
         note: "half a window back, as ctrl+b does",
     },
     Binding {
-        id: "normal.view.scroll-half-down",
+        id: "view.scroll-half-down",
         action: A::ScrollHalfDown,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["J"],
         note: "half a window on, as ctrl+f does",
     },
     Binding {
-        id: "normal.search",
+        id: "view.search.vim",
         action: A::Search,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["/"],
         note: "the page up, or the transcript",
     },
     Binding {
-        id: "normal.move.char.left",
+        id: "move.char.left.vim",
         action: A::MoveCharLeft,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["h"],
         note: "",
     },
     Binding {
-        id: "normal.move.char.right",
+        id: "move.char.right.vim",
         action: A::MoveCharRight,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["l"],
         note: "",
     },
     Binding {
-        id: "normal.move.word.next",
+        id: "move.word.next",
         action: A::MoveWordNext,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["w"],
         note: "the start of the next word",
     },
     Binding {
-        id: "normal.move.word.end",
+        id: "move.word.right.vim",
         action: A::MoveWordRight,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["e"],
         note: "the end of this one",
     },
     Binding {
-        id: "normal.move.word.back",
+        id: "move.word.left.vim",
         action: A::MoveWordLeft,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["b"],
         note: "",
     },
     Binding {
-        id: "normal.move.line.start",
+        id: "move.line.start.vim",
         action: A::MoveLineStart,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["0"],
         note: "",
     },
     Binding {
-        id: "normal.move.line.end",
+        id: "move.line.end.vim",
         action: A::MoveLineEnd,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["$"],
         note: "",
     },
     Binding {
-        id: "normal.move.line.first-non-blank",
+        id: "move.line.first-non-blank",
         action: A::MoveLineFirstNonBlank,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["^"],
         note: "",
     },
     Binding {
-        id: "normal.move.buffer.end",
+        id: "move.buffer.end",
         action: A::MoveBufferEnd,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["G"],
         note: "the history's end when the line is empty",
     },
     Binding {
-        id: "normal.move.buffer.start",
+        id: "move.buffer.start",
         action: A::MoveBufferStart,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["g g"],
         note: "the history's start when the line is empty",
     },
     Binding {
-        id: "normal.delete.line",
+        id: "edit.delete.line",
         action: A::DeleteLine,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["d d"],
         note: "",
     },
     Binding {
-        id: "normal.history.older",
+        id: "history.older.vim",
         action: A::HistoryOlder,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["k"],
         note: "the line above, or the previous prompt when there is none",
     },
     Binding {
-        id: "normal.history.newer",
+        id: "history.newer.vim",
         action: A::HistoryNewer,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["j"],
         note: "",
     },
     Binding {
-        id: "normal.delete.char-forward",
+        id: "edit.delete.char-forward.vim",
         action: A::DeleteCharForward,
-        when: W::Mode(Mode::Normal),
-        keys: &["x"],
+        when: LINE.normal(),
+        keys: &["x", "ctrl+d"],
         note: "",
     },
     Binding {
-        id: "normal.delete.char-back",
+        id: "edit.delete.char-back.vim",
         action: A::DeleteCharBack,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["X"],
         note: "",
     },
     Binding {
-        id: "normal.delete.to-line-end",
+        id: "edit.delete.to-line-end.vim",
         action: A::DeleteToLineEnd,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["D"],
         note: "",
     },
     Binding {
-        id: "normal.change.char",
+        id: "edit.change.char",
         action: A::ChangeChar,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["s"],
         note: "the character under the caret, then Insert",
     },
     Binding {
-        id: "normal.change.to-line-end",
+        id: "edit.change.to-line-end",
         action: A::ChangeToLineEnd,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["C"],
         note: "to the end of the line, then Insert",
     },
     Binding {
-        id: "normal.change.line",
+        id: "edit.change.line",
         action: A::ChangeLine,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["S", "c c"],
         note: "the whole line, then Insert",
     },
     Binding {
-        id: "normal.open.below",
+        id: "edit.open.below",
         action: A::OpenLineBelow,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["o"],
         note: "a new line under the caret's, then Insert",
     },
     Binding {
-        id: "normal.open.above",
+        id: "edit.open.above",
         action: A::OpenLineAbove,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["O"],
         note: "a new line over it, then Insert",
     },
     Binding {
         id: "edit.paste.image",
         action: A::PasteImage,
-        when: W::Mode(Mode::Insert),
+        when: LINE.insert(),
         keys: &["ctrl+v"],
         note: "the clipboard's image, saved under ~/.pi/images",
     },
     Binding {
-        id: "normal.edit.external",
+        id: "edit.external",
         action: A::EditExternally,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["E"],
         note: "the line in $VISUAL/$EDITOR, and back",
     },
     Binding {
         id: "mode.normal",
         action: A::ModeNormal,
-        when: W::Mode(Mode::Insert),
+        when: LINE.insert(),
         keys: &["j k"],
         note: "typed quickly; the j comes back off the line",
     },
     Binding {
         id: "mode.insert",
         action: A::ModeInsert,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["i"],
         note: "",
     },
     Binding {
         id: "mode.insert.after",
         action: A::ModeInsertAfter,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["a"],
         note: "past the caret",
     },
     Binding {
         id: "mode.insert.line-start",
         action: A::ModeInsertLineStart,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["I"],
         note: "",
     },
     Binding {
         id: "mode.insert.line-end",
         action: A::ModeInsertLineEnd,
-        when: W::Mode(Mode::Normal),
+        when: LINE.normal(),
         keys: &["A"],
         note: "",
     },
     Binding {
         id: "page.close",
         action: A::PageClose,
-        when: W::Page,
+        when: PAGE,
         keys: &["esc"],
         note: "a command's output, a preview, or a search on the transcript",
     },
     Binding {
         id: "page.down",
         action: A::ScrollLineDown,
-        when: W::NormalPage,
+        when: PAGE.normal().empty(),
         keys: &["j"],
         note: "",
     },
     Binding {
         id: "page.up",
         action: A::ScrollLineUp,
-        when: W::NormalPage,
+        when: PAGE.normal().empty(),
         keys: &["k"],
         note: "",
     },
     Binding {
-        id: "page.quit",
+        id: "page.close.vim",
         action: A::PageClose,
-        when: W::NormalPage,
+        when: PAGE.normal().empty(),
         keys: &["q"],
         note: "",
     },
     Binding {
         id: "page.search-next",
         action: A::PageSearchNext,
-        when: W::NormalPage,
+        when: PAGE.normal().empty(),
         keys: &["n"],
         note: "",
     },
     Binding {
         id: "page.search-prev",
         action: A::PageSearchPrev,
-        when: W::NormalPage,
+        when: PAGE.normal().empty(),
         keys: &["N"],
         note: "",
     },
@@ -829,7 +867,7 @@ impl Keys {
         // App keys are meant wherever the keyboard is; a nearer layer's default
         // on one would leave it dead on the line, so that default yields.
         let app_claimed: Vec<Chord> = (who.keys())
-            .filter(|(when, _)| *when == When::App)
+            .filter(|(when, _)| when.on == On::App)
             .map(|(_, chord)| *chord)
             .collect();
         // Defaults fill what the user hasn't claimed; one landing on an
@@ -840,7 +878,7 @@ impl Keys {
             }
             for spec in b.keys {
                 let chord = chord(spec).map_err(|e| anyhow::anyhow!("{}: {e}", b.id))?;
-                if b.when != When::App && app_claimed.contains(&chord) {
+                if b.when.on != On::App && app_claimed.contains(&chord) {
                     continue;
                 }
                 if let Some(other) = who.get(&(b.when, chord)) {
@@ -908,30 +946,33 @@ impl Keys {
     }
 }
 
-// The layers consulted for `layers`, innermost first.
+// What is live for `layers`, nearest first. Within what a key acts on, one
+// narrowed to the empty line comes first, then one narrowed to the mode:
+// a key that names the empty line wins over one that holds either way.
 fn live(layers: Layers) -> Vec<When> {
-    let mut live = match layers.surface {
-        Surface::Completion if layers.mode == Mode::Normal => vec![When::Menu, When::NormalMenu],
-        Surface::Completion => vec![When::Menu],
-        Surface::Editor => Vec::with_capacity(8),
-    };
-    // `menu.dismiss`, `page.close` and `run.interrupt` all claim `esc`:
-    // each press takes away the nearest, the next reaches the one under.
-    if layers.page {
-        live.push(When::Page);
-    }
-    if layers.run {
-        live.push(When::Run);
-    }
-    // The line's own layer first: a key that names the empty line wins
-    // over the layer that holds whether or not there is one.
-    if layers.mode == Mode::Normal && layers.line_empty && layers.page {
-        live.push(When::NormalPage);
-    }
-    live.push(When::Mode(layers.mode));
-    live.push(When::Editor);
-    live.push(When::App);
-    live
+    let up = [
+        (On::List, layers.surface == Surface::Completion),
+        (On::Page, layers.page),
+        (On::Run, layers.run),
+        (On::Line, true),
+        (On::App, true),
+    ];
+    let (mode, empty) = (Some(layers.mode), layers.line_empty);
+    (up.into_iter().filter(|(_, up)| *up))
+        .flat_map(|(on, _)| {
+            [
+                empty.then_some(When { on, mode, empty }),
+                empty.then_some(When::on(on).empty()),
+                Some(When {
+                    on,
+                    mode,
+                    empty: false,
+                }),
+                Some(When::on(on)),
+            ]
+        })
+        .flatten()
+        .collect()
 }
 
 #[cfg(test)]
@@ -1075,13 +1116,37 @@ mod tests {
             ),
             Some(Action::MenuDismiss)
         );
+        let empty = Layers {
+            line_empty: true,
+            ..Layers::default()
+        };
         assert_eq!(
-            k.hit(Some(press("esc")), press("esc"), Layers::default()),
+            k.hit(Some(press("esc")), press("esc"), empty),
             Some(Hit {
                 action: Action::Rewind,
                 pair: true
             })
         );
+        assert_eq!(
+            k.hit(Some(press("esc")), press("esc"), Layers::default()),
+            None,
+            "with text on the line, nothing to go back for"
+        );
+        // `ctrl+d` leaves from an empty line, and deletes on one with text,
+        // in either mode.
+        for mode in [Mode::Insert, Mode::Normal] {
+            let empty = Layers { mode, ..empty };
+            assert_eq!(k.action(press("ctrl+d"), empty), Some(Action::AppExit));
+            let typed = Layers {
+                line_empty: false,
+                ..empty
+            };
+            assert_eq!(
+                k.action(press("ctrl+d"), typed),
+                Some(Action::DeleteCharForward),
+                "{mode:?}"
+            );
+        }
     }
 
     // `menu.dismiss` and `run.interrupt` share one key. Read from the table,
@@ -1196,7 +1261,7 @@ mod tests {
         for b in BINDINGS {
             // Both halves of Normal: about what it does to pre-vim bindings,
             // not the modal keys themselves.
-            if matches!(b.when, W::Mode(_) | W::NormalPage | W::NormalMenu | W::Page) {
+            if b.when.mode.is_some() || b.when.on == On::Page {
                 continue;
             }
             for spec in b.keys {
@@ -1205,13 +1270,13 @@ mod tests {
                     Chord::Two(a, p) => (Some(a), p),
                 };
                 let insert = Layers {
-                    surface: match b.when {
-                        W::Menu => Surface::Completion,
+                    surface: match b.when.on {
+                        On::List => Surface::Completion,
                         _ => Surface::Editor,
                     },
-                    run: b.when == W::Run,
+                    run: b.when.on == On::Run,
                     mode: Mode::Insert,
-                    line_empty: false,
+                    line_empty: b.when.empty,
                     page: false,
                 };
                 assert_eq!(
