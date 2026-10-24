@@ -857,6 +857,15 @@ impl Keys {
     }
 
     /// What this press means on its own, given what is on screen.
+    /// Whether `press` may be the first of a pair live in `layers`: what it
+    /// does on its own the press after it may yet take back.
+    pub fn opens_pair(&self, press: Press, layers: Layers) -> bool {
+        let live = live(layers);
+        (self.map.keys()).any(|(w, chord)| {
+            matches!(chord, Chord::Two(first, _) if *first == press) && live.contains(w)
+        })
+    }
+
     pub fn action(&self, press: Press, layers: Layers) -> Option<Action> {
         self.hit(None, press, layers).map(|h| h.action)
     }

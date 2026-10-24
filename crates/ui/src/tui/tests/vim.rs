@@ -606,3 +606,45 @@ fn a_page_borrows_normal_and_gives_it_back() {
     assert!(ui.read.is_none());
     assert_eq!(ui.vim, Some(Mode::Insert));
 }
+
+// A key that may be the first of a pair stays off the list until the pair
+// is made or its time is up, so `jk` leaves a question's options as they
+// were; any other key narrows them at once.
+#[test]
+fn a_key_that_may_open_a_pair_holds_off_the_list() {
+    use pi_core::core::question::{Asker, Question};
+    let mut ui = vim_ui();
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    let from = Asker::Tool {
+        name: "choose".into(),
+    };
+    let options = ["alpha".to_string(), "beta".to_string()];
+    ui.sync_questions(vec![
+        Question::new(from, "which?", &options, false).unwrap(),
+    ]);
+    let listed = |ui: &mut crate::tui::Ui| ui.menu().len();
+    assert_eq!(listed(&mut ui), 2);
+    ui.list.picked = Some(0);
+
+    ui.key(&lane, &mut view, typed('j'), false);
+    assert_eq!(ui.editor.text(), "j", "it types");
+    assert_eq!(listed(&mut ui), 2, "but the list holds");
+    ui.key(&lane, &mut view, typed('k'), false);
+    assert_eq!(ui.vim, Some(Mode::Normal));
+    assert_eq!(listed(&mut ui), 2);
+    assert_eq!(ui.list.picked, Some(0), "the highlight where it was");
+
+    ui.vim = Some(Mode::Insert);
+    ui.key(&lane, &mut view, typed('l'), false);
+    assert_eq!(listed(&mut ui), 1, "a key opening no pair narrows at once");
+
+    ui.editor.clear();
+    ui.key(&lane, &mut view, typed('j'), false);
+    let last = ui.last_press.as_mut().expect("a press");
+    last.at = last
+        .at
+        .checked_sub(std::time::Duration::from_secs(10))
+        .expect("a past");
+    assert_eq!(listed(&mut ui), 0, "its time up, the j counts");
+}

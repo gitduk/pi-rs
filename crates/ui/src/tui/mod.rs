@@ -685,6 +685,8 @@ impl Tui {
                 wake
             } else if !waiting || running {
                 let bar_due = self.bar.due().map(tokio::time::Instant::from_std);
+                // A character held off the list shows in it once no pair took it back.
+                let held = self.ui.held().map(tokio::time::Instant::from_std);
                 // Only while the lane is free: a prompt due under a run would
                 // wake this loop again and again with nothing it may do.
                 let jobs = self.drivers.jobs();
@@ -715,6 +717,8 @@ impl Tui {
                     }
                     _ = tokio::time::sleep_until(bar_due.unwrap_or_else(tokio::time::Instant::now)),
                         if bar_due.is_some() => Wake::Nothing,
+                    _ = tokio::time::sleep_until(held.unwrap_or_else(tokio::time::Instant::now)),
+                        if held.is_some() => Wake::Nothing,
                     // Something was left, cancelled or finished: look again.
                     _ = jobs.changed().notified() => Wake::Nothing,
                     // A different pi installed: the bar says so.

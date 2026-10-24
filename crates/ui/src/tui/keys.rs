@@ -96,11 +96,12 @@ impl Ui {
         };
         let press = press_of(&key);
         let now = Instant::now();
+        // Read against what is shown, a held character still off the list.
+        let layers = self.layers(running);
         let last = self.last_press.take();
         let prev = last
             .filter(|l| now.duration_since(l.at) < self.pair_window_after(l.press))
             .map(|l| l.press);
-        let layers = self.layers(running);
         let hit = self.keys.hit(prev, press, layers);
         if let Some(h) = hit
             && h.pair
@@ -116,6 +117,7 @@ impl Ui {
                 press,
                 at: now,
                 typed: false,
+                opens: self.keys.opens_pair(press, layers),
             });
         }
         let action = hit.map(|h| h.action);
@@ -163,6 +165,14 @@ impl Ui {
 
     // How long `press` waits for the second of a pair. A bare character is
     // also text, so its pairs must come quickly or typing would trip them.
+    // Until when the character the last press typed may still be taken
+    // back by the press after it, if it may.
+    pub(super) fn held(&self) -> Option<Instant> {
+        let last = self.last_press.as_ref().filter(|l| l.typed && l.opens)?;
+        let until = last.at + self.pair_window_after(last.press);
+        (Instant::now() < until).then_some(until)
+    }
+
     fn pair_window_after(&self, press: Press) -> std::time::Duration {
         if press.is_bare() {
             self.pair_window

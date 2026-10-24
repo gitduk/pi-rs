@@ -155,6 +155,8 @@ pub(super) struct LastPress {
     pub(super) at: Instant,
     // It put a character on the line, which a pair it starts takes back.
     pub(super) typed: bool,
+    // It may be the first of a pair, so the press after it may take it back.
+    pub(super) opens: bool,
 }
 
 // What to call a checkout: the root answers to its directory name (as

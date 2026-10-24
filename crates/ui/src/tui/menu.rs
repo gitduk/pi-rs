@@ -22,14 +22,15 @@ impl Ui {
         if self.search_typing() {
             return self.search_menu();
         }
-        self.list.follow(self.editor.text());
-        if self.list.dismissed_at.as_deref() == Some(self.editor.text()) {
+        let (line, cursor) = self.list_line();
+        let text = line.as_str();
+        self.list.follow(text);
+        if self.list.dismissed_at.as_deref() == Some(text) {
             return Vec::new();
         }
         // A path token outranks the word completions: the filesystem holds
         // the answer, not the command tables.
         use pi_core::input::complete as path;
-        let (text, cursor) = (self.editor.text(), self.editor.cursor());
         // `/cd`'s argument is read first, `~/` and all: only a directory
         // is somewhere to go there.
         let found = (path::cd_prefix(text, cursor).map(|t| (t, Path::Cd)))
@@ -68,14 +69,14 @@ impl Ui {
         }
         // A question's options before the words they would complete: one may
         // be a command, taken onto the line to send.
-        let picks = self.picks();
+        let picks = self.picks(text);
         if !picks.is_empty() {
             return picks;
         }
         self.lists.catch_up();
         // Bottom-up: the best match belongs on the row right above the input.
         pi_core::input::commands::complete(
-            self.editor.text(),
+            text,
             &self.commands,
             &self.choices,
             pi_core::input::commands::Front {
@@ -93,14 +94,29 @@ impl Ui {
         .collect()
     }
 
+    // The line as its list reads it, with the caret: a character that may be
+    // the first of a pair stays off it until the pair is made or its time is
+    // up, so the list does not jump for a key that takes itself back.
+    fn list_line(&self) -> (String, usize) {
+        let (text, cursor) = (self.editor.text(), self.editor.cursor());
+        let held = self.held().and(text[..cursor].chars().next_back());
+        match held {
+            Some(c) => {
+                let at = cursor - c.len_utf8();
+                (format!("{}{}", &text[..at], &text[cursor..]), at)
+            }
+            None => (text.to_string(), cursor),
+        }
+    }
+
     // The first question's options the line narrows to — by their words or
     // their number — all of them on an empty line, the first nearest it.
-    fn picks(&self) -> Vec<MenuEntry> {
+    fn picks(&self, line: &str) -> Vec<MenuEntry> {
         // Not over a page or a search: Normal's bare letters are theirs.
         let Some(question) = self.questions.first().filter(|_| !self.reading()) else {
             return Vec::new();
         };
-        let typed = self.editor.text().trim().to_lowercase();
+        let typed = line.trim().to_lowercase();
         (question.options.iter().enumerate())
             .filter(|(at, option)| {
                 typed.is_empty()
