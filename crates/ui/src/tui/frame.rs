@@ -16,7 +16,7 @@ use super::row::{PendingTool, Row, count};
 use super::screen::{self, Rows};
 use super::scrollback::{Piece, ScrollbackRows, body};
 use super::search::{self, Anchor, Laid, Spot};
-use super::view::{StreamKind, View, snapshot};
+use super::view::{Doing, StreamKind, View, snapshot};
 use crate::render;
 use crate::status;
 use pi_core::core::question::{Asker, Question};
@@ -93,7 +93,7 @@ impl Ui {
                 .or(self.earlier_at(row).map(call::JobRow::Earlier))
                 .or(self.fold_at(row).then_some(call::JobRow::Fold))
         });
-        let open = (self.job_open, self.job_body.as_str());
+        let open = self.job_open.as_ref();
         let (mut jobs, job_rows) = call::job_lines(
             &self.jobs,
             hovered_job,
@@ -532,14 +532,16 @@ impl Ui {
 
         if lane.is_running() {
             let mut parts = status::parts(&self.status, &snapshot(lane, view));
-            if view.state.compacting {
-                parts.insert(0, format!("compacting{}", icons::ELLIPSIS));
-            }
-            // A stopping run says so; an ordinary one needs no word — its
-            // ticking clock already says the turn is on.
-            parts.extend(view.state.retry.clone());
-            if view.state.stopping {
-                parts.push(format!("stopping{}", icons::ELLIPSIS));
+            if let Some(work) = &view.state.work {
+                if matches!(work.doing, Doing::Compact) {
+                    parts.insert(0, format!("compacting{}", icons::ELLIPSIS));
+                }
+                // A stopping run says so; an ordinary one needs no word — its
+                // ticking clock already says the turn is on.
+                parts.extend(work.retry.clone());
+                if work.stopping {
+                    parts.push(format!("stopping{}", icons::ELLIPSIS));
+                }
             }
             // `status = []` asks for no line, and a blank row is not none.
             if !parts.is_empty() {

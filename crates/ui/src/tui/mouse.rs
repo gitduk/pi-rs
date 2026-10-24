@@ -74,7 +74,8 @@ impl Ui {
         };
         let job = self.jobs.iter().find(|job| job.id == id)?;
         let opens = super::call::job_opens(job, self.screen.width());
-        (self.job_open == Some(id) || opens).then_some(id)
+        let open = self.job_open.as_ref().is_some_and(|o| o.id == id);
+        (open || opens).then_some(id)
     }
 
     /// The flash under screen cell (`col`, `row`), and whether the bar cut
@@ -152,7 +153,8 @@ impl Ui {
             return;
         }
         if self.earlier_at(row).is_some() {
-            let whole = pi_store::listing::Listing::say(self.job_body.lines().map(str::to_string));
+            let body = self.job_open.as_ref().map_or("", |o| o.body.as_str());
+            let whole = pi_store::listing::Listing::say(body.lines().map(str::to_string));
             self.open_slash(whole);
             return;
         }

@@ -382,7 +382,6 @@ impl Subagent {
         );
         // The token ends the run — the watchdog or a stop — unwinding like a
         // stop; one ignoring it is dropped after STOP_GRACE.
-        let started = Instant::now();
         let ran = {
             let mut run = std::pin::pin!(
                 self.agent
@@ -402,7 +401,6 @@ impl Subagent {
                 None => Err(AgentError::Unstopped),
             }
         };
-        let took = started.elapsed();
         watchdog.abort();
         // The collector ends when the last sender goes, and `run` held one.
         drop(tx);
@@ -498,7 +496,7 @@ impl Subagent {
         // run counts it — the surface never had a handle to drain.
         Ok(
             ToolOutput::text(answer(&heard, cut.as_deref(), lost, &wrote, check.as_ref()))
-                .with_preview(sketch(&args.description, &heard, took))
+                .with_preview(sketch(&args.description, &heard))
                 .with_spent(heard.spent),
         )
     }
@@ -506,12 +504,8 @@ impl Subagent {
 
 // The finished-call line: job, then its cost in brackets. The job leads
 // because several children run at once, so a bare cost names none of them.
-fn sketch(description: &str, heard: &Heard, took: Duration) -> String {
-    let spent = format!(
-        "{} · {}",
-        llm::figures::elapsed(took),
-        llm::figures::slash(heard.spent.input, heard.spent.output)
-    );
+fn sketch(description: &str, heard: &Heard) -> String {
+    let spent = llm::figures::slash(heard.spent.input, heard.spent.output);
     // Flattened, not trusted: this row is written one line at a time, and a
     // newline in it would stair-step everything drawn after.
     let job = description.replace('\n', " ");

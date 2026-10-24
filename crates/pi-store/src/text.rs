@@ -11,20 +11,20 @@ use crate::icons;
 pub const RESET: &str = "\x1b[0m";
 
 pub struct Escape {
-    // What shape it is, once the first character has said. `None` until then.
-    kind: Option<Kind>,
-    // Inside a control string: the last character was `\x1b`, so a `\` now
-    // closes it.
-    st: bool,
+    kind: Kind,
 }
 
+// What shape the sequence is, once its first character has said.
 enum Kind {
+    // Nothing after the `\x1b` yet.
+    Start,
     // `ESC [`, `ESC O` — parameters and intermediates, then a byte in
     // 0x40-0x7e.
     Control,
     // `ESC P/X/]/^/_` (DCS/SOS/OSC/PM/APC): arbitrary text closed by BEL
     // or ST (`ESC \`), not by a byte range — content may contain those bytes.
-    Str,
+    // `st`: the last character was `\x1b`, so a `\` now closes it.
+    Str { st: bool },
     // A bare `ESC` with an intermediate byte, ending on a byte in 0x30-0x7e
     // — wider than a control sequence's, which is where `ESC 7` lives.
     Bare,
@@ -37,10 +37,7 @@ impl Escape {
     /// The state directly after an `\x1b`. Feed it every character that
     /// follows; it answers true on the one that closes the sequence.
     pub fn new() -> Self {
-        Self {
-            kind: None,
-            st: false,
-        }
+        Self { kind: Kind::Start }
     }
 
     // The state after a C1 control that opens a sequence on its own — the
@@ -48,36 +45,31 @@ impl Escape {
     fn after_c1(c: char) -> Option<Self> {
         let kind = match c {
             '\u{9b}' | '\u{8f}' => Kind::Control,
-            '\u{90}' | '\u{98}' | '\u{9d}' | '\u{9e}' | '\u{9f}' => Kind::Str,
+            '\u{90}' | '\u{98}' | '\u{9d}' | '\u{9e}' | '\u{9f}' => Kind::Str { st: false },
             _ => return None,
         };
-        Some(Self {
-            kind: Some(kind),
-            st: false,
-        })
+        Some(Self { kind })
     }
 
     pub fn closed(&mut self, c: char) -> bool {
-        let Some(kind) = &self.kind else {
-            // `[` and `O` are also final bytes by the range test, so they
-            // must come first to select Control instead of Done.
-            let kind = match c {
-                '[' | 'O' => Kind::Control,
-                'P' | 'X' | ']' | '^' | '_' => Kind::Str,
-                c if ('\x30'..='\x7e').contains(&c) => Kind::Done,
-                _ => Kind::Bare,
-            };
-            let done = matches!(kind, Kind::Done);
-            self.kind = Some(kind);
-            return done;
-        };
-        match kind {
+        match &mut self.kind {
+            Kind::Start => {
+                // `[` and `O` are also final bytes by the range test, so they
+                // must come first to select Control instead of Done.
+                self.kind = match c {
+                    '[' | 'O' => Kind::Control,
+                    'P' | 'X' | ']' | '^' | '_' => Kind::Str { st: false },
+                    c if ('\x30'..='\x7e').contains(&c) => Kind::Done,
+                    _ => Kind::Bare,
+                };
+                matches!(self.kind, Kind::Done)
+            }
             Kind::Done => true,
             Kind::Control => ('\x40'..='\x7e').contains(&c),
             Kind::Bare => ('\x30'..='\x7e').contains(&c),
-            Kind::Str => {
-                let closed = c == '\x07' || c == '\u{9c}' || (self.st && c == '\\');
-                self.st = c == '\x1b';
+            Kind::Str { st } => {
+                let closed = c == '\x07' || c == '\u{9c}' || (*st && c == '\\');
+                *st = c == '\x1b';
                 closed
             }
         }

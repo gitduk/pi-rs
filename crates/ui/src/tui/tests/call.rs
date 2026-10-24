@@ -86,7 +86,7 @@ fn an_errored_tool_adopts_its_full_body() {
     ui.on_event(
         &mut lane,
         &mut view,
-        agent::Event::ToolStart {
+        agent::Event::ToolQueued {
             id: "c1".into(),
             name: "edit".into(),
             args: serde_json::json!({}),
@@ -98,9 +98,9 @@ fn an_errored_tool_adopts_its_full_body() {
         agent::Event::ToolEnd {
             id: "c1".into(),
             name: "edit".into(),
-            is_error: true,
-            warned: false,
+            outcome: agent::Outcome::Failed,
             preview: body.into(),
+            took: std::time::Duration::ZERO,
         },
     );
     // What the loop files for the call: error content, and the preview
@@ -115,6 +115,7 @@ fn an_errored_tool_adopts_its_full_body() {
                 result: llm::message::ToolResult::error("c1", "edit", body),
                 preview: Some(body.into()),
                 warned: false,
+                took: None,
             }],
         },
     );
@@ -133,12 +134,12 @@ fn a_wrapped_pending_batch_tags_every_row_it_takes() {
     let (_dir, mut lane) = a_running_lane();
     let mut view = View::default();
     // A run under way: its clock gives the status line something to say.
-    view.state.started = Some(std::time::Instant::now());
+    view.state.work = a_turn(false);
 
     ui.on_event(
         &mut lane,
         &mut view,
-        agent::Event::ToolStart {
+        agent::Event::ToolQueued {
             id: "c-long".into(),
             name: "bash".into(),
             args: serde_json::json!({"command":
@@ -148,7 +149,7 @@ fn a_wrapped_pending_batch_tags_every_row_it_takes() {
     ui.on_event(
         &mut lane,
         &mut view,
-        agent::Event::ToolStart {
+        agent::Event::ToolQueued {
             id: "c-read".into(),
             name: "read".into(),
             args: serde_json::json!({}),
@@ -218,8 +219,8 @@ fn a_batch_in_flight_hands_its_remainder_to_the_row_that_opens() {
     let mut ui = test_ui(80, 24);
     let (_dir, mut lane) = a_running_lane();
     let mut view = View::default();
-    read_started(&mut ui, &mut lane, &mut view, "a", "a.rs");
-    read_started(&mut ui, &mut lane, &mut view, "b", "b.rs");
+    read_queued(&mut ui, &mut lane, &mut view, "a", "a.rs");
+    read_queued(&mut ui, &mut lane, &mut view, "b", "b.rs");
     ui.flush(&lane, &mut view);
 
     // No row yet, so the batch is a line of its own: collapsed, the
@@ -252,12 +253,12 @@ fn a_modifying_call_keeps_its_line() {
     let mut ui = test_ui(80, 24);
     let (_dir, mut lane) = a_running_lane();
     let mut view = View::default();
-    read_started(&mut ui, &mut lane, &mut view, "a", "a.rs");
+    read_queued(&mut ui, &mut lane, &mut view, "a", "a.rs");
     read_landed(&mut ui, &mut lane, &mut view, 7, "a", "a.rs");
     ui.on_event(
         &mut lane,
         &mut view,
-        agent::Event::ToolStart {
+        agent::Event::ToolQueued {
             id: "e".into(),
             name: "edit".into(),
             args: serde_json::json!({"path": "b.rs"}),
@@ -285,9 +286,9 @@ fn a_failing_call_never_joins_the_row() {
     let mut ui = test_ui(80, 24);
     let (_dir, mut lane) = a_running_lane();
     let mut view = View::default();
-    read_started(&mut ui, &mut lane, &mut view, "a", "a.rs");
+    read_queued(&mut ui, &mut lane, &mut view, "a", "a.rs");
     read_landed(&mut ui, &mut lane, &mut view, 7, "a", "a.rs");
-    read_started(&mut ui, &mut lane, &mut view, "b", "b.rs");
+    read_queued(&mut ui, &mut lane, &mut view, "b", "b.rs");
     ui.flush(&lane, &mut view);
     // Out and held: the row draws it.
     assert_eq!(live_pending_rows(&ui), 0);
@@ -298,9 +299,9 @@ fn a_failing_call_never_joins_the_row() {
         agent::Event::ToolEnd {
             id: "b".into(),
             name: "read".into(),
-            is_error: true,
-            warned: false,
+            outcome: agent::Outcome::Failed,
             preview: "Error: no such file".into(),
+            took: std::time::Duration::ZERO,
         },
     );
     ui.flush(&lane, &mut view);
@@ -352,7 +353,7 @@ fn a_failing_call_keeps_where_it_ran() {
     ui.on_event(
         &mut lane,
         &mut view,
-        agent::Event::ToolStart {
+        agent::Event::ToolQueued {
             id: "b".into(),
             name: "bash".into(),
             args: serde_json::json!({"command": "ls", "cwd": "sub"}),
@@ -364,9 +365,9 @@ fn a_failing_call_keeps_where_it_ran() {
         agent::Event::ToolEnd {
             id: "b".into(),
             name: "bash".into(),
-            is_error: true,
-            warned: false,
+            outcome: agent::Outcome::Failed,
             preview: "no such dir".into(),
+            took: std::time::Duration::ZERO,
         },
     );
     ui.on_event(
@@ -381,6 +382,54 @@ fn a_failing_call_keeps_where_it_ran() {
     assert!(
         rows.iter()
             .any(|r| r.ends_with(&format!("no such dir{}in sub", icons::PART_SEP))),
+        "got: {rows:?}"
+    );
+}
+
+// The time the live line says must be the one the stored entry gives back,
+// or reopening the session redraws the call differently.
+#[test]
+fn a_call_keeps_how_long_it_ran() {
+    let mut ui = test_ui(80, 24);
+    let (_dir, mut lane) = a_running_lane();
+    let mut view = View::default();
+    ui.on_event(
+        &mut lane,
+        &mut view,
+        agent::Event::ToolQueued {
+            id: "b".into(),
+            name: "bash".into(),
+            args: serde_json::json!({"command": "ls", "cwd": "sub"}),
+        },
+    );
+    ui.on_event(
+        &mut lane,
+        &mut view,
+        agent::Event::ToolEnd {
+            id: "b".into(),
+            name: "bash".into(),
+            outcome: agent::Outcome::Failed,
+            preview: "no such dir".into(),
+            took: std::time::Duration::from_millis(5_400),
+        },
+    );
+    let mut entry = failed_entry(8, "b", "bash", "no such dir");
+    if let agent::session::Entry::Tool { took, .. } = &mut entry {
+        *took = Some(std::time::Duration::from_millis(5_400));
+    }
+    ui.on_event(
+        &mut lane,
+        &mut view,
+        agent::Event::Committed {
+            entries: vec![entry],
+        },
+    );
+    ui.flush(&lane, &mut view);
+    let rows = drawn_rows(&view);
+    let sep = icons::PART_SEP;
+    assert!(
+        rows.iter()
+            .any(|r| r.ends_with(&format!("no such dir{sep}in sub{sep}5s"))),
         "got: {rows:?}"
     );
 }
@@ -413,7 +462,7 @@ fn the_live_region_ends_with_the_turn_and_not_with_the_clock() {
     let ui = test_ui(80, 24);
     let (_dir, mut lane) = a_running_lane();
     let mut view = View::default();
-    view.state.started = Some(std::time::Instant::now());
+    view.state.work = a_turn(false);
     // Nothing else is live here, so the status line is the only row.
     assert!(
         !ui.live(&lane, &view, false, std::time::Instant::now())
@@ -440,12 +489,13 @@ fn live_pending_rows(ui: &crate::tui::Ui) -> usize {
         .count()
 }
 
-// One of the two events (with `read_landed`) that decide what the screen draws.
-fn read_started(ui: &mut crate::tui::Ui, lane: &mut Lane, view: &mut View, call: &str, path: &str) {
+// A read taken into its batch; `read_landed` ends it. Between them they
+// decide what the screen draws.
+fn read_queued(ui: &mut crate::tui::Ui, lane: &mut Lane, view: &mut View, call: &str, path: &str) {
     ui.on_event(
         lane,
         view,
-        agent::Event::ToolStart {
+        agent::Event::ToolQueued {
             id: call.into(),
             name: "read".into(),
             args: serde_json::json!({"path": path}),
@@ -467,9 +517,9 @@ fn read_landed(
         agent::Event::ToolEnd {
             id: call.into(),
             name: "read".into(),
-            is_error: false,
-            warned: false,
+            outcome: agent::Outcome::Done,
             preview: path.into(),
+            took: std::time::Duration::ZERO,
         },
     );
     ui.on_event(
@@ -489,6 +539,7 @@ fn tool_entry(id: u64, call: &str, name: &str, preview: &str) -> agent::session:
         result: llm::message::ToolResult::text(call, name, format!("the body of {call}")),
         preview: Some(preview.into()),
         warned: false,
+        took: None,
     }
 }
 
@@ -500,6 +551,7 @@ fn failed_entry(id: u64, call: &str, name: &str, body: &str) -> agent::session::
         result: llm::message::ToolResult::error(call, name, body),
         preview: Some(body.into()),
         warned: false,
+        took: None,
     }
 }
 

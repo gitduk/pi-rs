@@ -1,4 +1,4 @@
-//! The rows a tool call occupies while it runs: the line it holds itself, and
+//! The rows a tool call occupies until it settles: the line it holds itself, and
 //! the group that draws it when there is one to fold into.
 
 use std::time::Instant;
@@ -7,14 +7,16 @@ use llm::message::ToolResult;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 
-use super::row::{self, PendingTool, Row};
+use super::row::{self, PendingTool, Row, Stage, StepMark};
 use super::scrollback::{Folds, Scrollback};
+use super::ui::OpenJob;
+use crate::render::Outcome;
 use crate::render::{Paint, named};
 use pi_core::core::tools::modifies;
 use pi_core::driver::jobs::{Job, State};
 use pi_store::icons;
 
-// A tool call still running. Its line is drawn by the group it will fold
+// A tool call not yet settled. Its line is drawn by the group it will fold
 // into when there is one, and by the live block when there is not.
 pub(super) struct RunTool {
     pub(super) id: String,
@@ -22,77 +24,94 @@ pub(super) struct RunTool {
     pub(super) summary: String,
     // Where it runs, when not the workspace root.
     pub(super) place: Option<String>,
-    pub(super) started: Instant,
-    // What the call last said of its progress, if it says any.
-    pub(super) progress: Option<String>,
-    // Set when the call ended: the row its entry will adopt, parked until the
-    // committed entries arrive — and what decides whether it can still fold.
-    pub(super) done: Option<Row>,
+    pub(super) run: Run,
 }
 
-fn out_secs(t: &RunTool, now: Instant) -> Option<u64> {
-    let secs = now.saturating_duration_since(t.started).as_secs();
-    (t.done.is_none() && secs >= SHOWN_AFTER).then_some(secs)
+// Where a call stands, each stage holding what only it has.
+pub(super) enum Run {
+    // Taken into its batch, waiting its turn.
+    Queued,
+    // Running since `since`, with what it last said of its progress.
+    Running {
+        since: Instant,
+        progress: Option<String>,
+    },
+    // Ended: the row its entry will adopt, parked until the committed
+    // entries arrive — and what decides whether it can still fold.
+    Landed(Row),
 }
 
-// A quick call is over before a count could be read, and one that shows `1s`
-// only to vanish reads as a flicker.
-const SHOWN_AFTER: u64 = 2;
+impl RunTool {
+    // Running, how long so far; landed, how long it ran; queued, nothing.
+    fn out_secs(&self, now: Instant) -> Option<u64> {
+        let secs = match &self.run {
+            Run::Queued => return None,
+            Run::Running { since, .. } => now.saturating_duration_since(*since),
+            Run::Landed(row) => row.took()?,
+        };
+        Some(secs.as_secs())
+    }
 
-// The call's line in the live block: mark, text, elapsed time.
-// A modifying call never folds, so it stays drawn here after it ends.
-pub(super) fn pending_line(now: Instant, tick: usize, t: &RunTool, paint: &Paint) -> Line<'static> {
-    let ended = if modifies(&t.name) {
-        None
-    } else {
-        t.done.as_ref().and_then(Row::ok)
-    };
-    let muted = |s: String| paint.span(&paint.theme.muted, s);
-    let named = named(&t.name, &t.summary) + &crate::render::placed(t.place.as_deref());
-    match ended {
-        // Mark leads, matching the row this call lands as once folded.
-        Some(ok) => {
-            let mark = if ok {
-                icons::DONE_MARK
-            } else {
-                icons::FAIL_MARK
-            };
-            Line::from(muted(format!("{mark} {named}")))
+    // The stage as a line draws it.
+    fn stage(&self) -> Stage {
+        match &self.run {
+            Run::Queued => Stage::Queued,
+            Run::Running { progress, .. } => Stage::Running {
+                progress: progress.clone(),
+            },
+            // A parked row is always a result's, so it has an outcome.
+            Run::Landed(row) => Stage::Landed(row.outcome().unwrap_or(Outcome::Failed)),
         }
-        None => {
-            let out = row::out_for(t.progress.as_deref(), out_secs(t, now));
-            Line::from(muted(format!("{} {named}{out}", row::call_frame(tick))))
-        }
+    }
+
+    // Whether the group draws this call: true from when a foldable call is
+    // queued until it ends badly — a failed call is on its way to its own line.
+    fn held(&self) -> bool {
+        !modifies(&self.name)
+            && match &self.run {
+                Run::Landed(row) => row.outcome() != Some(Outcome::Failed),
+                Run::Queued | Run::Running { .. } => true,
+            }
     }
 }
 
-// Whether the group draws this call: true from when a foldable call
-// starts until it ends badly — a failed call is on its way to its own line.
-fn holds(t: &RunTool) -> bool {
-    !modifies(&t.name) && t.done.as_ref().is_none_or(|row| row.ok() == Some(true))
+// The call's line in the live block: mark, text, elapsed time. Mark leads,
+// matching the row this call lands as once folded.
+pub(super) fn pending_line(now: Instant, tick: usize, t: &RunTool, paint: &Paint) -> Line<'static> {
+    let stage = t.stage();
+    let named = named(&t.name, &t.summary) + &crate::render::placed(t.place.as_deref());
+    let (mark, out) = match &t.run {
+        // A modifying call never folds, so it stays drawn here, still
+        // turning, after it ends: a time beside it would read as finished.
+        Run::Landed(_) if modifies(&t.name) => (StepMark::Out(tick), String::new()),
+        _ => (
+            stage.mark(tick),
+            row::out_for(stage.progress(), t.out_secs(now)),
+        ),
+    };
+    let text = format!("{} {named}{out}", mark.glyph());
+    Line::from(paint.span(&paint.theme.muted, text))
 }
 
-// Foldable calls, shown from the start so the row doesn't visually jump
+// Foldable calls, shown from when they are queued so the row doesn't jump
 // when the result lands.
 pub(super) fn held(tools: &[RunTool], now: Instant) -> Vec<PendingTool> {
     tools
         .iter()
-        .filter(|t| holds(t))
+        .filter(|t| t.held())
         .map(|t| PendingTool {
             name: t.name.clone(),
             preview: t.summary.clone(),
-            landed: t.done.is_some(),
-            progress: t.progress.clone(),
-            secs: out_secs(t, now),
+            stage: t.stage(),
+            secs: t.out_secs(now),
             place: t.place.clone(),
-            warned: t.done.as_ref().is_some_and(Row::warned),
         })
         .collect()
 }
 
 // Calls the live block draws: the complement of `held`'s foldable set.
 pub(super) fn drawn(tools: &[RunTool], row_holds: bool) -> Vec<&RunTool> {
-    tools.iter().filter(|t| !(row_holds && holds(t))).collect()
+    tools.iter().filter(|t| !(row_holds && t.held())).collect()
 }
 
 // Where a tool's row goes: a call that landed well and is not a write is a
@@ -106,7 +125,7 @@ pub(super) fn push_tool_row(
     result: &ToolResult,
 ) {
     if let Some(name) = row.tool_name().filter(|&n| !modifies(n))
-        && row.ok() == Some(true)
+        && let Some(outcome @ (Outcome::Done | Outcome::Warned)) = row.outcome()
     {
         let tool = row::FoldedTool::new(
             name,
@@ -115,7 +134,8 @@ pub(super) fn push_tool_row(
             &row::result_text(result),
         )
         .at(row.place().map(str::to_string))
-        .warned(row.warned());
+        .ended(outcome)
+        .timed(row.took());
         folds.join(scrollback, row::Step::Tool(tool));
         return;
     }
@@ -138,7 +158,7 @@ fn job_text(job: &Job) -> (String, String) {
         ),
     };
     let state = match job.state {
-        State::Running => row::out_for(None, Some(job.started.elapsed().as_secs())),
+        State::Running => crate::render::lasted(job.started.elapsed()),
         State::Back => format!("{}done, back when idle", icons::PART_SEP),
         State::Stopped => format!("{}stopped", icons::PART_SEP),
         State::Exited => format!("{}exited", icons::PART_SEP),
@@ -167,7 +187,7 @@ pub(super) enum JobRow {
 pub(super) fn job_lines(
     jobs: &[Job],
     hovered: Option<JobRow>,
-    (open, body): (Option<u64>, &str),
+    open: Option<&OpenJob>,
     all: bool,
     paint: &Paint,
     width: usize,
@@ -182,7 +202,7 @@ pub(super) fn job_lines(
     };
     for job in jobs.iter().take(shown) {
         let shine = hovered == Some(JobRow::Job(job.id));
-        let rows = if open == Some(job.id) {
+        let rows = if let Some(OpenJob { body, .. }) = open.filter(|o| o.id == job.id) {
             let (head, tail) = job_text(job);
             let row = Line::from(paint.span_hovered(shine, &paint.theme.muted, head + &tail));
             let said: Vec<String> = (body.lines())

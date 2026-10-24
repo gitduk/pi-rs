@@ -16,6 +16,7 @@ pub(super) struct ToolOut {
     pub(super) preview: String,
     // Where the call ran, when not the workspace root.
     pub(super) place: Option<String>,
+    pub(super) took: Option<std::time::Duration>,
     // The row count, so expandability and toggle don't re-walk the
     // preview string on every mouse move.
     preview_lines: usize,
@@ -34,6 +35,7 @@ impl ToolOut {
             outcome,
             name,
             place: None,
+            took: None,
             preview_lines: preview.lines().count(),
             widest: (preview.lines())
                 .map(pi_store::text::width)
@@ -84,6 +86,7 @@ impl ToolOut {
             name: &self.name,
             preview: &self.preview,
             place: self.place.as_deref(),
+            took: self.took,
         }
     }
 

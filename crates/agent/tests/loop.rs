@@ -499,6 +499,50 @@ async fn an_exclusive_call_runs_alone_and_its_neighbours_still_join() {
     assert_eq!(ended, ["t1", "t3", "t2"], "the shared pair must overlap");
 }
 
+// A call held back by an exclusive one starts once that one is done, so its
+// time counts only its own run; every call is queued before any starts.
+#[tokio::test]
+async fn a_call_starts_when_it_runs_not_when_it_is_queued() {
+    let (_d, mut a, ctx) = harness(vec![
+        call_turn(&[("t1", "solo", "{}"), ("t2", "fast", "{}")]),
+        text_turn("ok"),
+    ]);
+    brief(&mut a).registry = Registry::new()
+        .with(Sleeper {
+            name: "solo",
+            delay_ms: 10,
+            exclusive: true,
+        })
+        .with(Sleeper {
+            name: "fast",
+            delay_ms: 10,
+            exclusive: false,
+        });
+
+    let (_s, out, events) = drive(&a, &ctx, "go").await;
+    out.unwrap();
+    let marks: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ToolQueued { id, .. } => Some(format!("queued {id}")),
+            Event::ToolStart { id, .. } => Some(format!("start {id}")),
+            Event::ToolEnd { id, .. } => Some(format!("end {id}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        marks,
+        [
+            "queued t1",
+            "queued t2",
+            "start t1",
+            "end t1",
+            "start t2",
+            "end t2"
+        ]
+    );
+}
+
 #[tokio::test]
 async fn cancellation_stops_the_run() {
     let (_d, a, ctx) = harness(vec![

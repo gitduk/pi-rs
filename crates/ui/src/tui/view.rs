@@ -71,19 +71,44 @@ pub struct State {
     // Calls in flight, plus ended calls not yet adopted: parked until the
     // commit checks them, `abandon_tools` files the rest.
     pub(super) tools: Vec<RunTool>,
-    // When work began, for the timing segment. `Lane::turn` says whether a
-    // run is on; this field alone must not decide that.
-    pub(super) started: Option<Instant>,
-    // Whether this run has produced anything yet — a word, a thought, a call.
-    // Once it has, Esc means stop rather than unsend.
-    pub(super) committed: bool,
-    // The run has been asked to stop and is still winding down.
+    // The run this screen is drawing, from `arm_view` until it ends.
+    // `Lane::turn` says whether a run is on; this field alone must not
+    // decide that.
+    pub(super) work: Option<Work>,
+}
+
+// One run, as the screen draws it.
+pub(super) struct Work {
+    // When it began, for the timing segment.
+    pub(super) since: Instant,
+    pub(super) doing: Doing,
+    // It has been asked to stop and is still winding down.
     pub(super) stopping: bool,
-    // The run is a `/compact`, not a turn: no figures of its own to show.
-    pub(super) compacting: bool,
-    // The retry the run is waiting out, worded for the status line; any
-    // other event means the wait is over.
+    // The retry it is waiting out, worded for the status line; any other
+    // event means the wait is over.
     pub(super) retry: Option<String>,
+}
+
+impl Work {
+    pub(super) fn new(doing: Doing) -> Self {
+        Self {
+            since: Instant::now(),
+            doing,
+            stopping: false,
+            retry: None,
+        }
+    }
+}
+
+// What kind of run it is, with what only that kind carries.
+pub(super) enum Doing {
+    // A prompt's turn. `committed` once it has produced anything — a word,
+    // a thought, a call; from then Esc means stop rather than unsend.
+    Turn { committed: bool },
+    // A `!` command: no prompt to take back.
+    Bash,
+    // A `/compact`: no figures of its own to show.
+    Compact,
 }
 
 // The stream still writing into the screen, tagged with which kind of
@@ -131,7 +156,7 @@ pub(super) fn view_at(views: &mut Views, token: u64) -> &mut View {
 pub(super) fn snapshot(lane: &Lane, view: &View) -> Snapshot {
     lane.snapshot(
         &view.model,
-        view.state.started.map(|s| s.elapsed()),
+        view.state.work.as_ref().map(|w| w.since.elapsed()),
         view.queued.iter().filter(|q| q.line.is_none()).count(),
     )
 }

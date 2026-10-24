@@ -25,7 +25,7 @@ use note::Note;
 use relayed::Relayed;
 use result::ToolOut;
 use steps::Group;
-pub use steps::{FoldedTool, PendingTool, Step, call_frame, out_for};
+pub use steps::{FoldedTool, PendingTool, Stage, Step, StepMark, out_for};
 
 pub struct Row(Kind, Height);
 
@@ -323,9 +323,9 @@ impl Row {
     }
 
     /// Add a step to this row if it is a group; the step comes back if not.
-    pub fn join(&mut self, step: Step) -> Result<(), Step> {
+    pub fn join(&mut self, step: Step) -> Result<(), Box<Step>> {
         let Kind::Steps(g) = &mut self.0 else {
-            return Err(step);
+            return Err(Box::new(step));
         };
         g.join(step);
         self.1.clear();
@@ -439,6 +439,22 @@ impl Row {
         self
     }
 
+    /// How long the call behind this result ran.
+    pub fn timed(mut self, took: Option<std::time::Duration>) -> Self {
+        if let Kind::Result(r) = &mut self.0 {
+            r.took = took;
+        }
+        self
+    }
+
+    /// How long the call behind this result ran, if known.
+    pub fn took(&self) -> Option<std::time::Duration> {
+        match &self.0 {
+            Kind::Result(r) => r.took,
+            _ => None,
+        }
+    }
+
     /// Where the call behind this result ran, if it said and it was not the
     /// workspace root.
     pub fn place(&self) -> Option<&str> {
@@ -450,7 +466,12 @@ impl Row {
 
     /// The row for a stored result: the tool's own sketch if it made one
     /// (`ToolResult` lacks it), else the content's first line.
-    pub fn stored_result(r: &ToolResult, preview: Option<&str>, warned: bool) -> Self {
+    pub fn stored_result(
+        r: &ToolResult,
+        preview: Option<&str>,
+        outcome: crate::render::Outcome,
+        took: Option<std::time::Duration>,
+    ) -> Self {
         let preview = preview.map(str::to_string).unwrap_or_else(|| {
             let body = result_text(r);
             match body.split_once('\n') {
@@ -458,8 +479,7 @@ impl Row {
                 None => body,
             }
         });
-        let outcome = crate::render::Outcome::of(r.is_error, warned);
-        Self::result(outcome, r.name.clone(), preview)
+        Self::result(outcome, r.name.clone(), preview).timed(took)
     }
 
     /// Say `said` beside this row's first line, until `FLASH` has passed.
@@ -505,17 +525,12 @@ impl Row {
         }
     }
 
-    /// Whether this tool result succeeded.
-    pub fn ok(&self) -> Option<bool> {
+    /// How this tool result's call came out.
+    pub fn outcome(&self) -> Option<crate::render::Outcome> {
         match &self.0 {
-            Kind::Result(r) => Some(r.outcome != crate::render::Outcome::Failed),
+            Kind::Result(r) => Some(r.outcome),
             _ => None,
         }
-    }
-
-    /// Whether this tool result ran to the end but asks for a look.
-    pub fn warned(&self) -> bool {
-        matches!(&self.0, Kind::Result(r) if r.outcome == crate::render::Outcome::Warned)
     }
 
     /// The line a call that was never answered keeps: stopped before it landed.

@@ -125,11 +125,11 @@ impl Inner {
 
     // The running jobs on `root` told of every turn there.
     fn followers<'a>(&'a self, root: &'a Path) -> impl Iterator<Item = &'a Item> {
-        (self.items.iter()).filter(move |i| i.root == root && i.running() && i.follows)
+        (self.items.iter()).filter(move |i| i.root == root && i.running() && i.listens.follows())
     }
 
     fn tell_followers(&self, root: &Path, told: Told) {
-        for to in self.followers(root).filter_map(|i| i.told.as_ref()) {
+        for to in self.followers(root).filter_map(|i| i.listens.to()) {
             let _ = to.send(told.clone());
         }
     }
@@ -162,10 +162,7 @@ struct Item {
     waiting: VecDeque<Back>,
     // What arrived while `waiting` was full.
     dropped: usize,
-    // Where the turns its inputs opened are told of; None if it never listens.
-    told: Option<UnboundedSender<Told>>,
-    // It asked to be told of every turn on its checkout, not just its inputs'.
-    follows: bool,
+    listens: Listens,
     // It asked to stop its checkout's running turn, not yet acted on.
     interrupt: bool,
     // Lines for the screen, not yet shown.
@@ -179,6 +176,28 @@ struct Item {
     run: u64,
     // Cancelled once this run's task has let go of what it held.
     gone: CancellationToken,
+}
+
+// What a job is told of, and where.
+enum Listens {
+    Never,
+    // The turns its inputs opened.
+    Inputs(UnboundedSender<Told>),
+    // Every turn on its checkout, not just its inputs': it asked to follow.
+    Turns(UnboundedSender<Told>),
+}
+
+impl Listens {
+    fn to(&self) -> Option<&UnboundedSender<Told>> {
+        match self {
+            Listens::Never => None,
+            Listens::Inputs(to) | Listens::Turns(to) => Some(to),
+        }
+    }
+
+    fn follows(&self) -> bool {
+        matches!(self, Listens::Turns(_))
+    }
 }
 
 // Where a job's latest run stands.
@@ -474,7 +493,7 @@ impl Table {
             .items
             .iter()
             .find(|i| i.id == id)
-            .and_then(|i| i.told.as_ref())
+            .and_then(|i| i.listens.to())
         {
             let _ = to.send(told);
         }
@@ -482,10 +501,7 @@ impl Table {
 
     /// The running jobs on `root` told of every turn there.
     pub fn followers(&self, root: &Path) -> Vec<u64> {
-        (self.lock().followers(root))
-            .filter(|i| i.told.is_some())
-            .map(|i| i.id)
-            .collect()
+        (self.lock().followers(root)).map(|i| i.id).collect()
     }
 
     /// The jobs for `root`, oldest first.
@@ -783,8 +799,7 @@ impl Table {
             phase: Phase::Running { stop },
             waiting: VecDeque::new(),
             dropped: 0,
-            told,
-            follows: false,
+            listens: told.map_or(Listens::Never, Listens::Inputs),
             interrupt: false,
             notices: VecDeque::new(),
             output: None,
@@ -989,7 +1004,7 @@ impl JobHandle for Handle {
                 tracing::warn!(
                     target: "pi::job", job = self.id, question, ?picks, %why, "an answer refused"
                 );
-                if let Some(to) = &inner.items[at].told {
+                if let Some(to) = inner.items[at].listens.to() {
                     let _ = to.send(Told::Refused { question, why });
                 }
                 return;
@@ -1025,15 +1040,19 @@ impl JobHandle for Handle {
             return;
         };
         let item = &mut inner.items[at];
-        item.follows = true;
-        let (root, told) = (item.root.clone(), item.told.clone());
-        if let Some(to) = told {
-            for (_, q) in inner.standing.iter().filter(|(at, _)| *at == root) {
-                let _ = to.send(Told::Question {
-                    id: q.id,
-                    asked: q.asked(),
-                });
-            }
+        // One that never listens has nowhere to be told.
+        let (Listens::Inputs(to) | Listens::Turns(to)) =
+            std::mem::replace(&mut item.listens, Listens::Never)
+        else {
+            return;
+        };
+        item.listens = Listens::Turns(to.clone());
+        let root = item.root.clone();
+        for (_, q) in inner.standing.iter().filter(|(at, _)| *at == root) {
+            let _ = to.send(Told::Question {
+                id: q.id,
+                asked: q.asked(),
+            });
         }
         drop(inner);
         self.table.changed.notify_one();

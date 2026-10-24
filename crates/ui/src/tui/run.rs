@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::row::Row;
 use super::term::{Deafened, EXIT_GRACE, external_editor, scratch_file};
-use super::view::{front_view, tail_of, view_at};
+use super::view::{Doing, Work, front_view, tail_of, view_at};
 use super::{NO_TRANSCRIPT, Tui};
 use pi_core::core;
 use pi_core::driver::{Ended, Origin};
@@ -103,14 +103,10 @@ impl Tui {
     }
 
     // Hands the view to a run about to start: clock running, run figures
-    // at zero. `committed` says whether the prompt can still be taken back.
-    pub(super) fn arm_view(&mut self, committed: bool) {
+    // at zero.
+    pub(super) fn arm_view(&mut self, doing: Doing) {
         let view = front_view(&mut self.views, self.core.lane());
-        view.state.started = Some(std::time::Instant::now());
-        view.state.committed = committed;
-        view.state.stopping = false;
-        view.state.compacting = false;
-        view.state.retry = None;
+        view.state.work = Some(Work::new(doing));
         self.core.lane_mut().seed_meter();
     }
 
@@ -182,7 +178,7 @@ impl Tui {
         let cancel = CancellationToken::new();
         let ctx = self.core.lane().ctx_for(cancel.clone());
 
-        self.arm_view(false);
+        self.arm_view(Doing::Turn { committed: false });
         // Read while the agent is still reachable: `/model` may replace it
         // while this run works, and the run keeps the one it started on.
         front_view(&mut self.views, self.core.lane()).model =
@@ -214,9 +210,9 @@ impl Tui {
         };
         let cancel = CancellationToken::new();
         let ctx = self.core.lane_mut().ctx_for(cancel.clone());
-        // Committed forecloses `Deed::Unsend`, the only writer of
-        // `Run::Running.unsend`, which a `!` has no prompt to honour.
-        self.arm_view(true);
+        // A `!` forecloses `Deed::Unsend`, the only writer of
+        // `Run::Running.unsend`, which it has no prompt to honour.
+        self.arm_view(Doing::Bash);
 
         let token = self.core.lane().token();
         let done = done.clone();
@@ -370,10 +366,7 @@ impl Tui {
         };
         let cancel = CancellationToken::new();
         // Work under way like any turn's, and nothing anyone can take back.
-        self.arm_view(true);
-        front_view(&mut self.views, self.core.lane())
-            .state
-            .compacting = true;
+        self.arm_view(Doing::Compact);
 
         let agent = self.core.lane_mut().agent().clone();
         let token = self.core.lane().token();
@@ -722,7 +715,7 @@ impl Tui {
         // live region — already went with the turn.
         view_at(&mut self.views, self.core.lanes[lane].token())
             .state
-            .started = None;
+            .work = None;
     }
 
     // Puts back the archive when a run never returned the borrowed
@@ -772,8 +765,7 @@ impl Tui {
             true => crate::status::parts(&self.ui.status, &super::view::snapshot(on, view)),
             false => Vec::new(),
         };
-        view.state.started = None;
-        view.state.retry = None;
+        view.state.work = None;
         match out {
             Ok(_) => {}
             Err(AgentError::Cancelled) if parts.is_empty() => {

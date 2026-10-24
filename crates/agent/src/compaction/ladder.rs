@@ -73,20 +73,47 @@ struct Item<'a> {
     id: EntryId,
     entry: &'a Entry,
     tokens: usize,
-    // What the view already shows in its place, from this pass or an earlier
-    // one; `fresh` marks only this pass's decisions, so the record doesn't restate.
-    notice: Option<String>,
-    fresh: bool,
-    gone: bool,
+    fate: Fate,
     // Blocks of this turn whose arguments this pass is taking. Separate from
-    // `notice`: the entry is still shown, only its bulk is not.
+    // `fate`: the entry is still shown, only its bulk is not.
     args_gone: Vec<usize>,
 }
 
+// What the plan leaves of an entry.
+enum Fate {
+    Kept,
+    // A notice shows in its place, from this pass or an earlier one; `fresh`
+    // marks only this pass's decisions, so the record doesn't restate.
+    Omitted { notice: String, fresh: bool },
+    // It leaves the view.
+    Dropped,
+}
+
 impl<'a> Item<'a> {
+    fn new(entry: &'a Entry, tokens: usize, fate: Fate) -> Self {
+        Self {
+            id: entry.id(),
+            entry,
+            tokens,
+            fate,
+            args_gone: Vec::new(),
+        }
+    }
+
+    fn notice(&self) -> Option<&str> {
+        match &self.fate {
+            Fate::Omitted { notice, .. } => Some(notice),
+            Fate::Kept | Fate::Dropped => None,
+        }
+    }
+
+    fn gone(&self) -> bool {
+        matches!(self.fate, Fate::Dropped)
+    }
+
     fn result(&self) -> Option<&'a llm::message::ToolResult> {
         match self.entry {
-            Entry::Tool { result: r, .. } if self.notice.is_none() => Some(r),
+            Entry::Tool { result: r, .. } if self.notice().is_none() => Some(r),
             _ => None,
         }
     }
@@ -94,7 +121,7 @@ impl<'a> Item<'a> {
     // The text an omission would stand in for: a tool's result or a `!`
     // command's output — the two things on the user's side nobody is waiting on.
     fn prunable(&self) -> Option<String> {
-        if self.notice.is_some() {
+        if self.notice().is_some() {
             return None;
         }
         match self.entry {
@@ -124,8 +151,10 @@ impl<'a> Item<'a> {
 
     fn omit(&mut self, notice: String) {
         self.tokens = omitted_tokens(self.entry, &notice);
-        self.notice = Some(notice);
-        self.fresh = true;
+        self.fate = Fate::Omitted {
+            notice,
+            fresh: true,
+        };
     }
 }
 
@@ -211,24 +240,15 @@ pub fn plan(
     let mut items: Vec<Item> = view
         .iter()
         .map(|s| match s {
-            Seen::Omitted { entry, notice } => Item {
-                id: entry.id(),
+            Seen::Omitted { entry, notice } => Item::new(
                 entry,
-                tokens: omitted_tokens(entry, notice),
-                notice: Some((*notice).to_string()),
-                fresh: false,
-                gone: false,
-                args_gone: Vec::new(),
-            },
-            Seen::As(entry) => Item {
-                id: entry.id(),
-                entry,
-                tokens: tokens_of(s, spec, &already_gone),
-                notice: None,
-                fresh: false,
-                gone: false,
-                args_gone: Vec::new(),
-            },
+                omitted_tokens(entry, notice),
+                Fate::Omitted {
+                    notice: (*notice).to_string(),
+                    fresh: false,
+                },
+            ),
+            Seen::As(entry) => Item::new(entry, tokens_of(s, spec, &already_gone), Fate::Kept),
         })
         .collect();
 
@@ -262,7 +282,7 @@ pub fn plan(
 
     let mut record = Compaction::default();
     for it in &items {
-        if it.gone {
+        if it.gone() {
             record.dropped.push(it.id);
             continue;
         }
@@ -273,8 +293,10 @@ pub fn plan(
                 notice: ARGS_TAKEN.to_string(),
             });
         }
-        if let Some(notice) = &it.notice
-            && it.fresh
+        if let Fate::Omitted {
+            notice,
+            fresh: true,
+        } = &it.fate
         {
             record.omissions.push(Omission {
                 entry: it.id,
@@ -383,7 +405,7 @@ fn trim_notices(items: &mut [Item<'_>], f: &Frame<'_>, report: &mut Report) {
         if total(items) <= f.budget {
             break;
         }
-        let Some(full) = items[n].notice.clone() else {
+        let Some(full) = items[n].notice().map(str::to_string) else {
             continue;
         };
         let Some(head) = full.lines().next() else {
@@ -405,7 +427,7 @@ fn drop_history(items: &mut [Item<'_>], f: &Frame<'_>, report: &mut Report) {
             break;
         };
         for n in &doomed {
-            items[*n].gone = true;
+            items[*n].fate = Fate::Dropped;
             items[*n].tokens = 0;
         }
         report.dropped += doomed.len();
@@ -434,7 +456,7 @@ fn round_starts(items: &[Item<'_>]) -> Vec<usize> {
 // The entries of `span` that are still in the view, or `None` when the span
 // holds nothing to take.
 fn takeable(items: &[Item<'_>], span: std::ops::Range<usize>) -> Option<Vec<usize>> {
-    let out: Vec<usize> = span.filter(|n| !items[*n].gone).collect();
+    let out: Vec<usize> = span.filter(|n| !items[*n].gone()).collect();
     (!out.is_empty()).then_some(out)
 }
 
@@ -476,7 +498,7 @@ fn droppable(items: &[Item<'_>], policy: &Policy, suffix: &[usize]) -> Option<Ve
         if suffix[n] < policy.protect_tail {
             break;
         }
-        if items[n].gone || !matches!(items[n].entry, Entry::Answer { .. }) {
+        if items[n].gone() || !matches!(items[n].entry, Entry::Answer { .. }) {
             continue;
         }
         return Some(exchange(items, n));
@@ -504,7 +526,7 @@ fn exchange(items: &[Item<'_>], start: usize) -> Vec<usize> {
         }
         let answers = matches!(it.entry, Entry::Tool { result: r, .. }
             if calls.contains(&r.call.as_str()));
-        if answers && !it.gone {
+        if answers && !it.gone() {
             out.push(n);
         }
     }

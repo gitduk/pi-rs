@@ -142,16 +142,23 @@ mod bridge {
         }
     }
 
+    // Where a question is with this chat.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Stage {
+        // Not sent yet: one asked while a turn runs waits for that turn's
+        // reply, which it follows on from.
+        Held,
+        Shown,
+        // Its answer went up; pi closes it soon.
+        Answered,
+    }
+
     #[derive(Debug, Clone, PartialEq)]
     struct Up {
         id: u64,
         text: String,
         options: Vec<String>,
-        // Sent: one asked while a turn runs waits for that turn's reply,
-        // which it follows on from.
-        shown: bool,
-        // Its answer went up; pi closes it soon.
-        answered: bool,
+        stage: Stage,
     }
 
     impl Up {
@@ -165,8 +172,7 @@ mod bridge {
                 id: q.get("id")?.as_u64()?,
                 text: q.get("text")?.as_str()?.to_string(),
                 options,
-                shown: false,
-                answered: false,
+                stage: Stage::Held,
             })
         }
 
@@ -184,7 +190,7 @@ mod bridge {
     // yet answered, by place; anything else is the person's own words.
     fn picks_of(asking: &Asking, line: &str) -> Option<(u64, Vec<usize>)> {
         let mut up = asking.lock();
-        let q = up.iter_mut().rev().find(|q| q.shown && !q.answered)?;
+        let q = up.iter_mut().rev().find(|q| q.stage == Stage::Shown)?;
         let picks = (line.split(|c: char| c.is_whitespace() || ",，、".contains(c)))
             .filter(|w| !w.is_empty())
             .map(|w| {
@@ -196,7 +202,7 @@ mod bridge {
         if picks.is_empty() {
             return None;
         }
-        q.answered = true;
+        q.stage = Stage::Answered;
         Some((q.id, picks.into_iter().collect()))
     }
 
@@ -205,17 +211,18 @@ mod bridge {
     // again if the send failed, to go with the next.
     async fn show_held(client: &Client, to: &Target, asking: &Asking, pi: &Pi) {
         let held: Vec<Up> = (asking.lock().iter_mut())
-            .filter(|q| !q.shown)
+            .filter(|q| q.stage == Stage::Held)
             .map(|q| {
-                q.shown = true;
+                q.stage = Stage::Shown;
                 q.clone()
             })
             .collect();
         for q in held {
             if !send(client, to, pi, &q.shown()).await
                 && let Some(up) = asking.lock().iter_mut().find(|u| u.id == q.id)
+                && up.stage == Stage::Shown
             {
-                up.shown = false;
+                up.stage = Stage::Held;
             }
         }
     }
@@ -450,8 +457,10 @@ mod bridge {
             }
             // Not taken: it may be answered again, and the person hears why.
             let refused = told.get("refused").and_then(Value::as_u64).map(|id| {
-                if let Some(q) = asking.lock().iter_mut().find(|q| q.id == id) {
-                    q.answered = false;
+                if let Some(q) = asking.lock().iter_mut().find(|q| q.id == id)
+                    && q.stage == Stage::Answered
+                {
+                    q.stage = Stage::Shown;
                 }
                 told.get("why")
                     .and_then(Value::as_str)
@@ -647,7 +656,7 @@ mod bridge {
             };
             asking.lock().push(Up::of(&told(3)).unwrap());
             assert_eq!(picks_of(&asking, "2"), None, "not shown yet");
-            asking.lock()[0].shown = true;
+            asking.lock()[0].stage = Stage::Shown;
             assert_eq!(picks_of(&asking, "4"), None);
             assert_eq!(picks_of(&asking, "2 please"), None);
             assert_eq!(picks_of(&asking, "3，1 3"), Some((3, vec![0, 2])));

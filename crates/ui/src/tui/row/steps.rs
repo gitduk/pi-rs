@@ -4,7 +4,7 @@
 use ratatui::text::{Line, Span};
 
 use super::{Fold, Opening, count};
-use crate::render::{self, Paint};
+use crate::render::{self, Outcome, Paint};
 use crate::tui::browse::PageLine;
 use crate::tui::{THINKING, screen};
 use pi_store::icons;
@@ -19,7 +19,9 @@ pub struct FoldedTool {
     asked: usize,
     open: bool,
     place: Option<String>,
-    warned: bool,
+    // Done, or warned: a failed call is never a step.
+    outcome: Outcome,
+    took: Option<std::time::Duration>,
 }
 
 impl FoldedTool {
@@ -41,7 +43,8 @@ impl FoldedTool {
             asked,
             open: false,
             place: None,
-            warned: false,
+            outcome: Outcome::Done,
+            took: None,
         }
     }
 
@@ -51,9 +54,15 @@ impl FoldedTool {
         self
     }
 
-    /// Whether the call ran to the end but asks for a look.
-    pub fn warned(mut self, warned: bool) -> Self {
-        self.warned = warned;
+    /// How the call came out: done, or ran to the end but asks for a look.
+    pub fn ended(mut self, outcome: Outcome) -> Self {
+        self.outcome = outcome;
+        self
+    }
+
+    /// How long the call ran, if known.
+    pub fn timed(mut self, took: Option<std::time::Duration>) -> Self {
+        self.took = took;
         self
     }
 
@@ -64,63 +73,84 @@ impl FoldedTool {
     fn placed(&self) -> String {
         render::placed(self.place.as_deref())
     }
-
-    // The lines the call printed, the count its line ends with.
-    fn printed(&self) -> usize {
-        self.body.len() - self.asked
-    }
 }
 
 // A call still in flight, as the group that will fold it draws it: the
-// row draws it from the moment it starts, so nothing jumps when it lands.
+// row draws it from the moment it is queued, so nothing jumps when it lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingTool {
     /// The call's name and leading argument, read the way the live line read
     /// them — they already agree with the row the call will land as.
     pub name: String,
     pub preview: String,
-    /// Whether the call has landed yet. A call that lands badly is never
-    /// the row's — it's on its way to its own line.
-    pub landed: bool,
-    /// What the call last said of how far it has got.
-    pub progress: Option<String>,
-    /// Whole seconds it has been out, once there are enough to be worth
-    /// saying; `None` before that and once it has landed.
+    /// How far the call has got. A call that lands badly is never the
+    /// row's — it's on its way to its own line.
+    pub stage: Stage,
+    /// Whole seconds it has been out, or ran once landed; `None` while
+    /// queued. Whole, so a frame within the same second compares equal.
     pub secs: Option<u64>,
     /// Where it runs, as `render::place` reads it off its arguments.
     pub place: Option<String>,
-    /// Landed, but asks for a look.
-    pub warned: bool,
+}
+
+/// Where a call in flight stands, each stage holding what only it has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stage {
+    /// Taken into its batch, waiting for its turn to run.
+    Queued,
+    /// With what it last said of how far it has got.
+    Running {
+        progress: Option<String>,
+    },
+    Landed(Outcome),
+}
+
+impl Stage {
+    /// The mark its line leads with at spinner tick `tick`.
+    pub fn mark(&self, tick: usize) -> StepMark {
+        match self {
+            Stage::Queued => StepMark::Queued,
+            Stage::Running { .. } => StepMark::Out(tick),
+            Stage::Landed(outcome) => StepMark::Ended(*outcome),
+        }
+    }
+
+    /// What it last said of how far it has got, while it runs.
+    pub fn progress(&self) -> Option<&str> {
+        match self {
+            Stage::Running { progress } => progress.as_deref(),
+            Stage::Queued | Stage::Landed(_) => None,
+        }
+    }
 }
 
 impl PendingTool {
     fn desc(&self) -> String {
         desc_of(&self.name, &self.preview)
     }
+
+    fn landed(&self) -> bool {
+        matches!(self.stage, Stage::Landed(_))
+    }
 }
 
-/// The frame a call in flight shows at spinner tick `tick`.
-pub fn call_frame(tick: usize) -> &'static str {
+// The frame a call in flight shows at spinner tick `tick`.
+fn call_frame(tick: usize) -> &'static str {
     const TICKS_PER_FRAME: usize = 2;
     icons::CALL_FRAMES[tick / TICKS_PER_FRAME % icons::CALL_FRAMES.len()]
 }
 
-/// What a call's line says while it is out: its progress, if it reports any,
-/// then how long it has been out — nothing for a call over before that reads.
+/// What a call's line ends with: its progress, if it reports any, then how
+/// long it has been out or ran, as `render::ran_for` says it.
 pub fn out_for(progress: Option<&str>, secs: Option<u64>) -> String {
-    let secs = secs.map(|s| llm::figures::elapsed(std::time::Duration::from_secs(s)));
-    progress
-        .into_iter()
-        .map(str::to_string)
-        .chain(secs)
-        .map(|part| format!("{}{part}", icons::PART_SEP))
-        .collect()
+    let progress = progress.map_or_else(String::new, |p| format!("{}{p}", icons::PART_SEP));
+    progress + &render::ran_for(secs.map(std::time::Duration::from_secs))
 }
 
 // Whether the row still has a call out. Any of them, not the newest:
 // the row is the only place a call in flight shows.
 fn running(pending: &[PendingTool]) -> bool {
-    pending.iter().any(|p| !p.landed)
+    pending.iter().any(|p| !p.landed())
 }
 
 // The lines of the block still streaming in the row, if one is.
@@ -190,35 +220,46 @@ pub enum Step {
     },
 }
 
-// The mark a line naming a step or a call leads with.
+/// The mark a line naming a step or a call leads with.
 #[derive(Clone, Copy)]
-enum Mark {
-    // Landed; `true` when it asks for a look.
-    Done(bool),
-    // Out, turning at this spinner tick.
+pub enum StepMark {
+    /// Landed, as it came out.
+    Ended(Outcome),
+    /// Out, turning at this spinner tick.
     Out(usize),
-    // Reasoning wears none: a call is the thing that gets a mark.
+    /// Waiting its turn: still, since nothing runs yet.
+    Queued,
+    /// Reasoning wears none: a call is the thing that gets a mark.
     Thought,
 }
 
-impl Mark {
+impl StepMark {
+    /// The glyph alone, for a line drawn in one style.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            StepMark::Ended(outcome) => render::outcome_glyph(outcome),
+            StepMark::Out(tick) => call_frame(tick),
+            StepMark::Queued => icons::PENDING_MARK,
+            StepMark::Thought => "",
+        }
+    }
+
     // The mark and the space after it, or nothing.
     fn spans(self, hovered: bool, paint: &Paint) -> Vec<Span<'static>> {
-        let (glyph, style) = match self {
-            Mark::Done(false) => (icons::DONE_MARK, &paint.theme.status.ok),
-            Mark::Done(true) => (icons::DONE_MARK, &paint.theme.status.warn),
-            Mark::Out(tick) => (call_frame(tick), &paint.theme.muted),
-            Mark::Thought => return Vec::new(),
+        let style = match self {
+            StepMark::Ended(outcome) => render::outcome_style(outcome, &paint.theme),
+            StepMark::Out(_) | StepMark::Queued => &paint.theme.muted,
+            StepMark::Thought => return Vec::new(),
         };
         vec![
-            paint.span_hovered(hovered, style, glyph),
+            paint.span_hovered(hovered, style, self.glyph()),
             paint.span_hovered(hovered, &paint.theme.muted, " "),
         ]
     }
 
     fn width(self) -> usize {
         match self {
-            Mark::Thought => 0,
+            StepMark::Thought => 0,
             _ => 2,
         }
     }
@@ -226,7 +267,7 @@ impl Mark {
 
 // What one line naming a step or a call says, before it is fitted to a width.
 struct Head {
-    mark: Mark,
+    mark: StepMark,
     text: String,
     // What follows the text, a count or a time, kept whole when the text is cut.
     tail: String,
@@ -271,15 +312,16 @@ fn lines_tail(n: usize) -> String {
     format!("{}{}", icons::PART_SEP, count(n, "line"))
 }
 
-fn pending_head(p: &PendingTool, tick: usize) -> Head {
+// `timed` keeps how long it has been out or ran on the tail.
+fn pending_head(p: &PendingTool, tick: usize, timed: bool) -> Head {
+    let place = render::placed(p.place.as_deref());
     Head {
-        mark: if p.landed {
-            Mark::Done(p.warned)
-        } else {
-            Mark::Out(tick)
-        },
+        mark: p.stage.mark(tick),
         text: p.desc(),
-        tail: render::placed(p.place.as_deref()) + &out_for(p.progress.as_deref(), p.secs),
+        tail: match timed {
+            true => place + &out_for(p.stage.progress(), p.secs),
+            false => place,
+        },
         more: false,
     }
 }
@@ -315,13 +357,13 @@ impl Step {
     fn head(&self) -> Head {
         match self {
             Step::Tool(t) => Head {
-                mark: Mark::Done(t.warned),
+                mark: StepMark::Ended(t.outcome),
                 text: t.desc(),
-                tail: t.placed() + &lines_tail(t.printed()),
+                tail: t.placed() + &render::ran_for(t.took),
                 more: t.asked > 0,
             },
             Step::Thinking { lines, .. } => Head {
-                mark: Mark::Thought,
+                mark: StepMark::Thought,
                 text: lines
                     .first()
                     .map_or_else(|| THINKING.to_string(), screen::plain),
@@ -397,13 +439,14 @@ fn steps_header(
     // after the last call landed means the group is not done.
     let thinking = thinking_now(steps).is_some() && !running(pending);
     let mark = if running(pending) || thinking {
-        Mark::Out(tick)
+        StepMark::Out(tick)
     } else {
-        Mark::Done(warned(steps, pending))
+        StepMark::Ended(ended(steps, pending))
     };
-    // The newest call's line, less its line count: that is the call's alone.
+    // The newest call's line; once it lands, less its time, which is the
+    // call's alone.
     let newest = match pending.last() {
-        Some(p) => Some(pending_head(p, tick)),
+        Some(p) => Some(pending_head(p, tick, !p.landed())),
         None => steps.iter().rev().find_map(|s| match s {
             Step::Tool(t) => Some(Head {
                 tail: t.placed(),
@@ -442,10 +485,17 @@ fn steps_header(
     )
 }
 
-// Whether any call the group holds asks for a look.
-fn warned(steps: &[Step], pending: &[PendingTool]) -> bool {
-    steps.iter().any(|s| matches!(s, Step::Tool(t) if t.warned))
-        || pending.iter().any(|p| p.landed && p.warned)
+// How the group came out: warned if any call it holds asks for a look.
+fn ended(steps: &[Step], pending: &[PendingTool]) -> Outcome {
+    let warned = steps
+        .iter()
+        .any(|s| matches!(s, Step::Tool(t) if t.outcome == Outcome::Warned))
+        || (pending.iter()).any(|p| p.stage == Stage::Landed(Outcome::Warned));
+    if warned {
+        Outcome::Warned
+    } else {
+        Outcome::Done
+    }
 }
 
 // A line of what an opened call shows: the argument's own lines in the
@@ -480,7 +530,7 @@ fn step_line(
         // No mark to sit past: the block's lines run under its first.
         Some((Unit::Step(Step::Thinking { lines, .. }), j)) => (lines[j].clone(), STEP_INDENT),
         Some((Unit::Pending(p), _)) => (
-            pending_head(p, tick).line(false, false, paint, room),
+            pending_head(p, tick, true).line(false, false, paint, room),
             STEP_INDENT,
         ),
         None => (Line::default(), STEP_INDENT),
@@ -582,11 +632,10 @@ impl Group {
         if self.pending.as_slice() == held {
             return false;
         }
-        let reshaped =
-            self.pending.len() != held.len()
-                || self.pending.iter().zip(held).any(|(a, b)| {
-                    (&a.name, &a.preview, a.landed) != (&b.name, &b.preview, b.landed)
-                });
+        let reshaped = self.pending.len() != held.len()
+            || self.pending.iter().zip(held).any(|(a, b)| {
+                (&a.name, &a.preview, a.landed()) != (&b.name, &b.preview, b.landed())
+            });
         self.pending = held.to_vec();
         reshaped
     }
@@ -767,11 +816,13 @@ mod tests {
         PendingTool {
             name: name.to_string(),
             preview: preview.to_string(),
-            landed,
-            progress: None,
+            stage: if landed {
+                Stage::Landed(Outcome::Done)
+            } else {
+                Stage::Running { progress: None }
+            },
             secs: None,
             place: None,
-            warned: false,
         }
     }
 
@@ -854,7 +905,8 @@ mod tests {
     // each step opens alone, named by the click's line.
     #[test]
     fn a_group_unfolds_to_its_steps_and_each_step_opens_alone() {
-        let ran = FoldedTool::new("bash", "cat <<EOF", "cat <<EOF\nhi\nEOF", "hi\n");
+        let ran = FoldedTool::new("bash", "cat <<EOF", "cat <<EOF\nhi\nEOF", "hi\n")
+            .timed(Some(std::time::Duration::from_secs(5)));
         let mut row = bundle(vec![tool("read", "a.rs")]);
         assert!(row.join(think(1, 3)).is_ok());
         assert!(row.join(Step::Tool(ran)).is_ok());
@@ -866,7 +918,7 @@ mod tests {
             header,
             format!("  {done} read a.rs"),
             format!("  line 1{dots}{sep}3 lines"),
-            format!("  {done} bash cat <<EOF{dots}{sep}1 line"),
+            format!("  {done} bash cat <<EOF{dots}{sep}5s"),
         ];
         assert_eq!(shown(&row, 80), unfolded);
 

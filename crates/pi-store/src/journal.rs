@@ -134,16 +134,22 @@ fn civil(z: i64) -> (i64, u32, u32) {
 struct Sink {
     out: BufWriter<File>,
     written: u64,
-    capped: bool,
-    // A failed flush means the file can no longer be trusted to hold what we
-    // send it; the sink stops writing for good.
-    failed: bool,
-    // Why it failed, for whoever shows the run's state: a raw-mode screen
-    // cannot take a stray stderr line.
-    why: Option<String>,
+    state: Writes,
     // Which file `out` writes to now; `retarget` moves it. Kept under the
     // sink's lock so [`path`] reads it back rather than a copy that could drift.
     path: PathBuf,
+}
+
+// Whether a sink still writes. Both stops are for good, until `retarget`
+// hands it a fresh file.
+enum Writes {
+    Open,
+    // Past `FILE_CAP`: the file holds what it can.
+    Capped,
+    // A failed flush means the file can no longer be trusted to hold what we
+    // send it. Why, for whoever shows the run's state: a raw-mode screen
+    // cannot take a stray stderr line.
+    Failed(String),
 }
 
 // The open journal: one per run, held only by the layer.
@@ -161,9 +167,7 @@ fn sink_for(file: File, path: &Path) -> Sink {
     Sink {
         out: BufWriter::new(file),
         written,
-        capped: false,
-        failed: false,
-        why: None,
+        state: Writes::Open,
         path: path.to_path_buf(),
     }
 }
@@ -213,7 +217,7 @@ impl Journal {
         let Ok(mut sink) = self.sink.lock() else {
             return;
         };
-        if sink.capped || sink.failed {
+        if !matches!(sink.state, Writes::Open) {
             return;
         }
         let Ok(mut line) = serde_json::to_vec(&Value::Object(record)) else {
@@ -223,7 +227,7 @@ impl Journal {
         sink.written += line.len() as u64;
         let _ = sink.out.write_all(&line);
         if sink.written >= FILE_CAP {
-            sink.capped = true;
+            sink.state = Writes::Capped;
             let _ = writeln!(
                 sink.out,
                 r#"{{"lvl":"WARN","ev":"pi::journal","msg":"journal capped at {FILE_CAP} bytes; nothing further is recorded"}}"#
@@ -232,8 +236,7 @@ impl Journal {
         // Flushed per record: the records worth having are the ones written just
         // before whatever killed the process. A failed flush stops it for good.
         if let Err(e) = sink.out.flush() {
-            sink.failed = true;
-            sink.why = Some(e.to_string());
+            sink.state = Writes::Failed(e.to_string());
         }
     }
 }
@@ -505,7 +508,10 @@ pub fn path() -> Option<PathBuf> {
 /// Why the journal stopped recording, while it is stopped. A file it moves
 /// to is tried afresh.
 pub fn failure() -> Option<String> {
-    JOURNAL.get()?.sink.lock().ok()?.why.clone()
+    match &JOURNAL.get()?.sink.lock().ok()?.state {
+        Writes::Failed(why) => Some(why.clone()),
+        Writes::Open | Writes::Capped => None,
+    }
 }
 
 /// Whether the journal has stopped recording: `failure` without the text,
@@ -513,7 +519,7 @@ pub fn failure() -> Option<String> {
 pub fn failed() -> bool {
     JOURNAL
         .get()
-        .and_then(|j| j.sink.lock().ok().map(|s| s.why.is_some()))
+        .and_then(|j| (j.sink.lock().ok()).map(|s| matches!(s.state, Writes::Failed(_))))
         .unwrap_or(false)
 }
 

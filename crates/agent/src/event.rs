@@ -1,6 +1,8 @@
 use llm::stream::Usage;
 pub use llm::totals::Totals;
 
+pub use transcript::Outcome;
+
 /// What the loop reports as it runs. A renderer consumes these; the loop never
 /// writes to a terminal itself.
 #[derive(Debug, Clone, PartialEq)]
@@ -10,10 +12,17 @@ pub enum Event {
     },
     TextDelta(String),
     ReasoningDelta(String),
-    ToolStart {
+    // A call taken into its batch; it may wait there for an exclusive one.
+    ToolQueued {
         id: String,
         name: String,
         args: serde_json::Value,
+    },
+    // The call begins running at `at`: its time counts from there, by this
+    // one clock for whoever shows it.
+    ToolStart {
+        id: String,
+        at: std::time::Instant,
     },
     // A running call's latest word on how far it has got.
     ToolProgress {
@@ -23,10 +32,10 @@ pub enum Event {
     ToolEnd {
         id: String,
         name: String,
-        is_error: bool,
-        // Ran to the end, but asks for a look: see `ToolOutput::warned`.
-        warned: bool,
+        outcome: Outcome,
         preview: String,
+        // From its `ToolStart` to when it landed.
+        took: std::time::Duration,
     },
     ToolDenied {
         id: String,
@@ -126,24 +135,28 @@ pub(crate) fn journal(event: &Event) {
         // What it sums up is journaled where it happened.
         Event::ToolProgress { .. } => {}
         Event::TurnStart { turn } => tracing::info!(target: "pi::loop", turn, "turn start"),
-        Event::ToolStart { id, name, args } => {
+        Event::ToolQueued { id, name, args } => {
             tracing::info!(target: "pi::tool", call = %id, tool = %name, args = %clipped(args), "call");
             // Whole at debug: args can be a file's worth, which `call` clips.
             tracing::debug!(target: "pi::tool", call = %id, args = %args, "arguments");
         }
+        Event::ToolStart { id, .. } => tracing::info!(target: "pi::tool", call = %id, "running"),
         Event::ToolEnd {
             id,
             name,
-            is_error,
-            warned,
+            outcome,
             preview,
-        } => {
-            if *is_error {
+            // The transcript keeps it beside the result.
+            took: _,
+        } => match outcome {
+            Outcome::Failed => {
                 tracing::warn!(target: "pi::tool", call = %id, tool = %name, detail = %preview, "failed")
-            } else {
+            }
+            Outcome::Done | Outcome::Warned => {
+                let warned = *outcome == Outcome::Warned;
                 tracing::info!(target: "pi::tool", call = %id, tool = %name, preview = %preview, warned, "ok")
             }
-        }
+        },
         Event::ToolDenied { id, name, reason } => {
             tracing::warn!(target: "pi::tool", call = %id, tool = %name, reason = %reason, "denied")
         }

@@ -54,13 +54,25 @@ pub struct Capture {
     front: Vec<u8>,
     /// The last `VIEW` bytes of a stream that crossed the threshold.
     tail: Vec<u8>,
-    /// The spill handle and the locator it answers to, set together or not.
-    file: Option<(std::fs::File, String)>,
-    /// Why the spill was given up, answered once the stream is dry: it still
-    /// drains, keeping only its two ends, or the child blocks on a full pipe.
-    failure: Option<ToolError>,
-    lost: bool,
+    spill: Spill,
     total: usize,
+}
+
+/// Where the bytes past the threshold go.
+#[derive(Default)]
+enum Spill {
+    /// Nowhere yet: the stream is still under it.
+    #[default]
+    Held,
+    /// Into the spill file, which `locator` answers to.
+    To {
+        file: std::fs::File,
+        locator: String,
+    },
+    /// Nowhere: the spill was given up. Why, answered once the stream is dry
+    /// and then taken: it still drains, keeping only its two ends, or the
+    /// child blocks on a full pipe.
+    Lost(Option<ToolError>),
 }
 
 impl Capture {
@@ -79,7 +91,10 @@ impl Capture {
         loop {
             let n = reader.read(&mut buf).await?;
             if n == 0 {
-                return self.failure.take().map_or(Ok(()), Err);
+                return match &mut self.spill {
+                    Spill::Lost(why) => why.take().map_or(Ok(()), Err),
+                    Spill::Held | Spill::To { .. } => Ok(()),
+                };
             }
             self.absorb(&buf[..n], ctx);
         }
@@ -87,14 +102,19 @@ impl Capture {
 
     fn absorb(&mut self, chunk: &[u8], ctx: &Ctx) {
         self.total += chunk.len();
-        if self.file.is_some() || self.lost {
-            if let Some((file, _)) = self.file.as_mut()
-                && let Err(e) = file.write_all(chunk)
-            {
-                self.give_up(e.into());
+        match &mut self.spill {
+            Spill::Held => {}
+            Spill::To { file, .. } => {
+                if let Err(e) = file.write_all(chunk) {
+                    self.give_up(e.into());
+                }
+                self.keep_tail(chunk);
+                return;
             }
-            self.keep_tail(chunk);
-            return;
+            Spill::Lost(_) => {
+                self.keep_tail(chunk);
+                return;
+            }
         }
         if self.front.len() + chunk.len() <= spill::MAX_OUTPUT {
             self.front.extend_from_slice(chunk);
@@ -104,7 +124,7 @@ impl Capture {
         self.front.extend_from_slice(&chunk[..room]);
         let rest = &chunk[room..];
         match self.open_with(rest, ctx) {
-            Ok(opened) => self.file = Some(opened),
+            Ok((file, locator)) => self.spill = Spill::To { file, locator },
             Err(why) => self.give_up(why),
         }
         // The tail is the stream's last bytes, held ones included: a stream
@@ -124,9 +144,7 @@ impl Capture {
 
     // A half-written spill is not offered back: its locator would read as whole.
     fn give_up(&mut self, why: ToolError) {
-        self.file = None;
-        self.lost = true;
-        self.failure = Some(why);
+        self.spill = Spill::Lost(Some(why));
     }
 
     fn keep_tail(&mut self, chunk: &[u8]) {
@@ -142,18 +160,20 @@ impl Capture {
         let Self {
             front,
             tail,
-            file,
-            lost,
+            spill,
             total,
-            ..
         } = self;
-        if file.is_none() && !lost {
-            return Captured {
-                total,
-                text: fold_repeats(&String::from_utf8_lossy(&front)),
-                spill: None,
-            };
-        }
+        let (spilled, lost) = match spill {
+            Spill::Held => {
+                return Captured {
+                    total,
+                    text: fold_repeats(&String::from_utf8_lossy(&front)),
+                    spill: None,
+                };
+            }
+            Spill::To { locator, .. } => (Some(locator), false),
+            Spill::Lost(_) => (None, true),
+        };
         let front = String::from_utf8_lossy(&front);
         let tail = String::from_utf8_lossy(&tail);
         let head = head_bytes(&front, VIEW);
@@ -165,7 +185,7 @@ impl Capture {
         Captured {
             total,
             text,
-            spill: file.map(|(_, locator)| SpillRef {
+            spill: spilled.map(|locator| SpillRef {
                 bytes: total,
                 locator,
             }),

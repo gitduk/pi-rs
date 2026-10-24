@@ -85,9 +85,7 @@ struct Checkout {
 // One session: replaced whole by `/new` and `/resume`, so nothing of the one
 // being left survives into the next.
 struct Conversation {
-    // The transcript, or None while a run has it: lent through `take_session`
-    // and given back through `return_session`.
-    session: Option<Session>,
+    transcript: Transcript,
     id: String,
     // When this session began. Held rather than read back: going to disk for
     // it made every save parse the whole transcript to recover one integer.
@@ -99,14 +97,36 @@ struct Conversation {
     // What the run in flight has cost so far, seeded when a run
     // arms; the status lines read this run alone, `/status` the session.
     tally: Tally,
-    // Rows and notes filed while a run had the transcript out. They land
-    // when it comes home, after everything the run committed.
-    held: Vec<Held>,
     // Why the last save failed; cleared by the next one that lands.
     unsaved: Option<String>,
     // Rows and notes filed since the last save: turns save themselves, but
     // what lands between them waits for the next turn, or for leaving.
     filed: bool,
+}
+
+// Where the transcript is: lent through `take_session`, given back through
+// `return_session`.
+enum Transcript {
+    Home(Session),
+    // A run has it. Rows and notes filed meanwhile land when it comes home,
+    // after everything the run committed.
+    Lent(Vec<Held>),
+}
+
+impl Transcript {
+    fn home(&self) -> Option<&Session> {
+        match self {
+            Transcript::Home(session) => Some(session),
+            Transcript::Lent(_) => None,
+        }
+    }
+
+    fn home_mut(&mut self) -> Option<&mut Session> {
+        match self {
+            Transcript::Home(session) => Some(session),
+            Transcript::Lent(_) => None,
+        }
+    }
 }
 
 enum Held {
@@ -128,13 +148,12 @@ impl Conversation {
         claim: Option<session::Claim>,
     ) -> Self {
         Self {
-            session,
+            transcript: session.map_or_else(|| Transcript::Lent(Vec::new()), Transcript::Home),
             id,
             created,
             _claim: claim,
             name,
             tally: Tally::default(),
-            held: Vec::new(),
             unsaved: None,
             filed: false,
         }
@@ -420,7 +439,7 @@ impl Lane {
     /// Whether the session moved or was compacted since the last look; the
     /// first look only marks where things stand.
     pub(super) fn prompt_files_due(&mut self) -> bool {
-        let Some(session) = &self.talk.session else {
+        let Some(session) = self.talk.transcript.home() else {
             return false;
         };
         let compacted = session.entries().iter().rev().find_map(|e| match e {
@@ -464,12 +483,12 @@ impl Lane {
     /// way: the states a lane can be in are named (`NO_TRANSCRIPT`,
     /// `NOTHING_TO_REWIND`) rather than one of them being a panic.
     pub fn session(&self) -> Option<&Session> {
-        self.talk.session.as_ref()
+        self.talk.transcript.home()
     }
 
     /// The ask nobody has answered, when a run left one open.
     pub fn last_ask(&self) -> Option<EntryId> {
-        self.talk.session.as_ref().and_then(Session::last_ask)
+        self.talk.transcript.home().and_then(Session::last_ask)
     }
 
     /// The checkout this lane works in.
@@ -562,7 +581,13 @@ impl Lane {
 
     /// Lend the transcript to a job for the length of its run.
     pub fn take_session(&mut self) -> Option<Session> {
-        self.talk.session.take()
+        match std::mem::replace(&mut self.talk.transcript, Transcript::Lent(Vec::new())) {
+            Transcript::Home(session) => Some(session),
+            lent @ Transcript::Lent(_) => {
+                self.talk.transcript = lent;
+                None
+            }
+        }
     }
 
     /// Take it back: the job has finished, or never started. Whatever was
@@ -570,23 +595,22 @@ impl Lane {
     /// drawn — the transcript a rebuild reads has to hold the rows the screen
     /// was shown.
     pub fn return_session(&mut self, mut session: Session) {
-        assert!(
-            self.talk.session.is_none(),
-            "a lane holds one transcript: a second would drop the first"
-        );
-        for held in self.talk.held.drain(..) {
+        let Transcript::Lent(held) = &mut self.talk.transcript else {
+            panic!("a lane holds one transcript: a second would drop the first")
+        };
+        for held in std::mem::take(held) {
             self.talk.filed = true;
             match held {
                 Held::Screen(text) => session.push_screen(text),
                 Held::Note(text) => session.push_note(text),
             };
         }
-        self.talk.session = Some(session);
+        self.talk.transcript = Transcript::Home(session);
     }
 
     /// What a run's ending should leave in the transcript.
     pub fn note_outcome(&mut self, out: &Result<llm::stream::Usage, agent::AgentError>) {
-        if let Some(session) = self.talk.session.as_mut() {
+        if let Some(session) = self.talk.transcript.home_mut() {
             session.note_outcome(out);
         }
     }
@@ -596,13 +620,13 @@ impl Lane {
     ///
     /// Returns the id as `push_screen` does; `None` for a held note.
     pub fn push_note(&mut self, note: &str) -> Option<EntryId> {
-        match self.talk.session.as_mut() {
-            Some(session) => {
+        match &mut self.talk.transcript {
+            Transcript::Home(session) => {
                 self.talk.filed = true;
                 Some(session.push_note(note))
             }
-            None => {
-                self.talk.held.push(Held::Note(note.to_string()));
+            Transcript::Lent(held) => {
+                held.push(Held::Note(note.to_string()));
                 None
             }
         }
@@ -614,13 +638,13 @@ impl Lane {
     /// Returns the id so a surface can tell it from what it has yet to show;
     /// `None` for a held row, filed later.
     pub fn push_screen(&mut self, text: &str) -> Option<EntryId> {
-        match self.talk.session.as_mut() {
-            Some(session) => {
+        match &mut self.talk.transcript {
+            Transcript::Home(session) => {
                 self.talk.filed = true;
                 Some(session.push_screen(text))
             }
-            None => {
-                self.talk.held.push(Held::Screen(text.to_string()));
+            Transcript::Lent(held) => {
+                held.push(Held::Screen(text.to_string()));
                 None
             }
         }
@@ -635,7 +659,10 @@ impl Lane {
     }
 
     pub fn held(&self) -> usize {
-        self.talk.held.len()
+        match &self.talk.transcript {
+            Transcript::Home(_) => 0,
+            Transcript::Lent(held) => held.len(),
+        }
     }
 }
 
@@ -659,7 +686,7 @@ impl Core {
         let Some(lane) = self.lanes.get_mut(at) else {
             return Ok(());
         };
-        let Some(session) = &lane.talk.session else {
+        let Some(session) = lane.talk.transcript.home() else {
             return Ok(());
         };
         let header = session::Header {
@@ -696,7 +723,7 @@ impl Core {
     pub fn rewind_to(&mut self, entry: agent::session::EntryId) -> (Rewound, anyhow::Result<()>) {
         // A rewind is refused while a run has the transcript, so this is the
         // idle path; without it there is nothing to go back through.
-        let Some(session) = &mut self.lane_mut().talk.session else {
+        let Some(session) = self.lane_mut().talk.transcript.home_mut() else {
             return (Rewound::Nothing, Ok(()));
         };
         let unsent = session.unsent_text(entry);
@@ -1002,8 +1029,8 @@ impl Core {
         if self
             .lane()
             .talk
-            .session
-            .as_ref()
+            .transcript
+            .home()
             .is_some_and(|s| !s.is_empty())
             && let Err(e) = self.save()
         {

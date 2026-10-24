@@ -155,7 +155,7 @@ impl Folds {
         let step = match scrollback.last_mut() {
             Some(last) => match last.join(step) {
                 Ok(()) => return,
-                Err(step) => step,
+                Err(step) => *step,
             },
             None => step,
         };
@@ -611,9 +611,12 @@ pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
             result: r,
             preview,
             warned,
+            took,
             ..
-        } => (!agent::session::is_stopped_call(r))
-            .then(|| vec![Row::stored_result(r, preview.as_deref(), *warned)]),
+        } => (!agent::session::is_stopped_call(r)).then(|| {
+            let outcome = agent::Outcome::of(r.is_error, *warned);
+            vec![Row::stored_result(r, preview.as_deref(), outcome, *took)]
+        }),
         _ => None,
     }
 }

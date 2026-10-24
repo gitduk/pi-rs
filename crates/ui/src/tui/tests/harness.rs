@@ -48,6 +48,13 @@ pub(super) fn frame(
     rows.into_iter().map(|r| plain(&r.0)).collect()
 }
 
+// A prompt's turn as `arm_view` starts one, `committed` once it has said
+// anything.
+pub(super) fn a_turn(committed: bool) -> Option<crate::tui::view::Work> {
+    let doing = crate::tui::view::Doing::Turn { committed };
+    Some(crate::tui::view::Work::new(doing))
+}
+
 // A lane just real enough to settle (real transcript/agent, `Run::Running`
 // standing in for the job); the temp-dir guard comes back so it stays alive.
 pub(super) fn a_running_lane() -> (tempfile::TempDir, Lane) {

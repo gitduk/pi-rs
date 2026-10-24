@@ -324,7 +324,7 @@ fn esc_takes_the_list_first_and_the_run_next() {
 
     // An empty line raises no list, so one `esc` stops the run — unless
     // uncommitted, where the same key means `Unsend` instead (a different test).
-    view.state.committed = true;
+    view.state.work = a_turn(true);
     assert!(ui.menu().is_empty(), "an empty line completes to nothing");
     let intent = ui.key(&lane, &mut view, esc(), true);
     assert!(matches!(intent, Asked::Own(Deed::Interrupt)), "{intent:?}");

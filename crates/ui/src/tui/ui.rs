@@ -136,9 +136,8 @@ pub(super) struct Ui {
     // The front lane's tools, for `/tool` to complete; read only when it does,
     // since reading one re-stats the tools directory.
     pub(super) tools: Option<Arc<agent::Briefing>>,
-    // The job a click opened under its row, and what it has to show there.
-    pub(super) job_open: Option<u64>,
-    pub(super) job_body: String,
+    // The job a click opened under its row.
+    pub(super) job_open: Option<OpenJob>,
     // Whose own row each bar row the last frame drew is, from the top.
     pub(super) job_rows: Vec<super::call::JobRow>,
     // Every job listed, not the first few: the fold row flips it.
@@ -258,7 +257,6 @@ impl Ui {
             every_job: Vec::new(),
             tools: None,
             job_open: None,
-            job_body: String::new(),
             job_rows: Vec::new(),
             jobs_all: false,
             below: 0,
@@ -401,4 +399,10 @@ pub(super) struct Press {
     pub(super) moved: bool,
     // The job a click on its row opens: no double click there, only this.
     pub(super) job: Option<u64>,
+}
+
+// A job opened under its row, and what it has to show there.
+pub(super) struct OpenJob {
+    pub(super) id: u64,
+    pub(super) body: String,
 }

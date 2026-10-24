@@ -98,7 +98,7 @@ impl Agent {
                     });
                 }
                 Action::Run(_) => {
-                    voice.say(Event::ToolStart {
+                    voice.say(Event::ToolQueued {
                         id: call.id.clone(),
                         name: call.name.clone(),
                         args: call.args.clone(),
@@ -119,6 +119,11 @@ impl Agent {
                             Drawn::default(),
                         ),
                         Action::Run(t) => {
+                            let began = std::time::Instant::now();
+                            voice.say(Event::ToolStart {
+                                id: call.id.clone(),
+                                at: began,
+                            });
                             let ctx = &with_progress(ctx, call, voice);
                             let mut output =
                                 tool::output::gated(t.as_ref(), call.args.clone(), ctx).await;
@@ -133,7 +138,7 @@ impl Agent {
                                 let note = tool::output::bound(ToolOutput::text(note), ctx);
                                 out.content.extend(note.content);
                             }
-                            landed(call, output, voice)
+                            landed(call, output, began.elapsed(), voice)
                         }
                     }
                 }
@@ -195,7 +200,12 @@ fn with_progress(ctx: &Ctx, call: &ToolCall, voice: &Voice) -> Ctx {
 }
 
 // A call's output as its result, its end said as it lands.
-fn landed(call: &ToolCall, output: Result<ToolOutput, ToolError>, voice: &Voice) -> Landed {
+fn landed(
+    call: &ToolCall,
+    output: Result<ToolOutput, ToolError>,
+    took: std::time::Duration,
+    voice: &Voice,
+) -> Landed {
     match output {
         Err(ToolError::Cancelled) => Landed::Stopped,
         Err(e) => {
@@ -210,15 +220,16 @@ fn landed(call: &ToolCall, output: Result<ToolOutput, ToolError>, voice: &Voice)
             voice.say(Event::ToolEnd {
                 id: call.id.clone(),
                 name: call.name.clone(),
-                is_error: true,
-                warned: false,
+                outcome: crate::Outcome::Failed,
                 preview: body.clone(),
+                took,
             });
             Landed::Answered(
                 ToolResult::error(call.id.clone(), &call.name, body.clone()),
                 Drawn {
                     preview: Some(body),
                     warned: false,
+                    took: Some(took),
                 },
             )
         }
@@ -226,9 +237,12 @@ fn landed(call: &ToolCall, output: Result<ToolOutput, ToolError>, voice: &Voice)
             voice.say(Event::ToolEnd {
                 id: call.id.clone(),
                 name: call.name.clone(),
-                is_error: false,
-                warned: out.warned,
+                outcome: match out.warned {
+                    true => crate::Outcome::Warned,
+                    false => crate::Outcome::Done,
+                },
                 preview: out.preview(),
+                took,
             });
             let result = ToolResult {
                 call: call.id.clone(),
@@ -239,6 +253,7 @@ fn landed(call: &ToolCall, output: Result<ToolOutput, ToolError>, voice: &Voice)
             let drawn = Drawn {
                 preview: out.preview,
                 warned: out.warned,
+                took: Some(took),
             };
             Landed::Ran(result, drawn, out.spent)
         }

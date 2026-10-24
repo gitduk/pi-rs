@@ -85,13 +85,7 @@ impl Laid {
 }
 
 pub(super) struct Search {
-    // The query once it is in; while it is typed, it is the line's text.
-    query: String,
-    // Still being typed: the line holds the query.
-    pub(super) typing: bool,
-    // What the line held, and the mode, when the query took it over.
-    draft: String,
-    mode: Option<Mode>,
+    query: Query,
     // The hit the view was last brought to.
     at: Option<Hit>,
     // Where that hit was among the laid lines, for when its line is gone:
@@ -115,6 +109,15 @@ pub(super) struct Search {
     lines: Vec<Found>,
 }
 
+// Where the query is.
+enum Query {
+    // Still being typed: the line holds it. What the line held, and the
+    // mode, when the query took it over.
+    Typing { draft: String, mode: Option<Mode> },
+    // In.
+    Entered(String),
+}
+
 // A hit as the list offers it.
 struct Found {
     hit: Hit,
@@ -126,6 +129,10 @@ struct Found {
 }
 
 impl Search {
+    fn typing(&self) -> bool {
+        matches!(self.query, Query::Typing { .. })
+    }
+
     // The view brought to `hit`, the `first`-th of every hit, on laid `line`.
     fn bring(&mut self, hit: Hit, line: usize, first: usize) {
         self.at = Some(hit);
@@ -143,12 +150,16 @@ impl Search {
     }
 
     // The query let go of as typed: the view stays on the hit it was brought
-    // to, unless what was typed is still unanswered or found nothing.
-    fn enter(&mut self, query: String) {
-        self.query = query;
-        self.typing = false;
+    // to, unless what was typed is still unanswered or found nothing. Hands
+    // back what the line held and its mode, when it was being typed.
+    fn enter(&mut self, query: String) -> Option<(String, Option<Mode>)> {
+        let was = std::mem::replace(&mut self.query, Query::Entered(query));
         if self.want.is_some() || self.at.is_none() {
             self.want = Some(Want::Typed { entered: true });
+        }
+        match was {
+            Query::Typing { draft, mode } => Some((draft, mode)),
+            Query::Entered(_) => None,
         }
     }
 }
@@ -207,18 +218,16 @@ impl Ui {
         // then puts the view back where this `/` found it.
         match self.search.as_mut() {
             Some(search) => {
-                self.editor.set_line(&search.query);
-                search.typing = true;
+                let typed = std::mem::replace(&mut search.query, Query::Typing { draft, mode });
+                if let Query::Entered(query) = typed {
+                    self.editor.set_line(&query);
+                }
                 search.from = top;
                 search.newest = newest;
-                (search.draft, search.mode) = (draft, mode);
             }
             None => {
                 self.search = Some(Box::new(Search {
-                    query: String::new(),
-                    typing: true,
-                    draft,
-                    mode,
+                    query: Query::Typing { draft, mode },
                     at: None,
                     last: (0, 0),
                     count: (0, 0),
@@ -244,8 +253,8 @@ impl Ui {
         let Some(search) = self.search.take() else {
             return false;
         };
-        if search.typing {
-            self.give_back(&search.draft, search.mode);
+        if let Query::Typing { draft, mode } = &search.query {
+            self.give_back(draft, *mode);
         }
         self.search_place(view, search.back(), search.newest);
         true
@@ -262,9 +271,9 @@ impl Ui {
         let Some(search) = self.search.as_mut() else {
             return;
         };
-        search.enter(query);
-        let (draft, mode) = (std::mem::take(&mut search.draft), search.mode);
-        self.give_back(&draft, mode);
+        if let Some((draft, mode)) = search.enter(query) {
+            self.give_back(&draft, mode);
+        }
         self.list.picked = None;
     }
 
@@ -299,16 +308,16 @@ impl Ui {
 
     // The prompt up to the caret, for the frame to stand it after.
     pub(super) fn search_caret(&self) -> Option<String> {
-        self.search.as_deref().filter(|s| s.typing)?;
+        self.search.as_deref().filter(|s| s.typing())?;
         Some(format!("/{}", &self.editor.text()[..self.editor.cursor()]))
     }
 
     // What is searched for: the line while it is typed, else what went in.
     fn search_text(&self) -> Option<&str> {
         let s = self.search.as_deref()?;
-        Some(match s.typing {
-            true => self.editor.text(),
-            false => &s.query,
+        Some(match &s.query {
+            Query::Typing { .. } => self.editor.text(),
+            Query::Entered(query) => query,
         })
     }
 
@@ -332,7 +341,7 @@ impl Ui {
 
     // Whether the query is still being typed: the caret is on its row.
     pub(super) fn search_typing(&self) -> bool {
-        self.search.as_ref().is_some_and(|s| s.typing)
+        self.search.as_ref().is_some_and(|s| s.typing())
     }
 
     // What is searched for on what is up, for the frame to mark,
@@ -372,7 +381,7 @@ impl Ui {
     // looked for. Typed text, not presses: none of it starts a pair.
     pub(super) fn search_typed(&mut self, was: &str) {
         let changed = self.editor.text() != was;
-        let Some(search) = self.search.as_mut().filter(|s| s.typing) else {
+        let Some(search) = self.search.as_mut().filter(|s| s.typing()) else {
             return;
         };
         if changed {
@@ -384,7 +393,7 @@ impl Ui {
     // Every hit, while the query is typed: the list over it.
     pub(super) fn search_menu(&self) -> Vec<MenuEntry> {
         match self.search.as_deref() {
-            Some(s) if s.typing => (s.lines.iter())
+            Some(s) if s.typing() => (s.lines.iter())
                 .map(|f| MenuEntry::Hit {
                     show: f.show.clone(),
                     k: f.hit.k,
@@ -397,7 +406,7 @@ impl Ui {
     // The list moved: the view goes to its hit, as the frame lands it.
     pub(super) fn search_follow(&mut self) {
         let picked = self.list.picked;
-        let Some(search) = self.search.as_mut().filter(|s| s.typing) else {
+        let Some(search) = self.search.as_mut().filter(|s| s.typing()) else {
             return;
         };
         let Some(found) = picked.and_then(|p| search.lines.get(p)) else {
@@ -411,7 +420,7 @@ impl Ui {
     // since no match spans rows.
     pub(super) fn search_paste(&mut self, text: &str) {
         if let Some(search) = self.search.as_mut()
-            && search.typing
+            && search.typing()
         {
             let line = text.lines().next().unwrap_or_default();
             // As the rows searched were drawn: escapes gone, tabs as spaces.
@@ -424,8 +433,7 @@ impl Ui {
     // round past either end.
     pub(super) fn search_step(&mut self, forward: bool) {
         if let Some(search) = self.search.as_mut()
-            && !search.typing
-            && !search.query.is_empty()
+            && matches!(&search.query, Query::Entered(query) if !query.is_empty())
         {
             search.want = Some(Want::Step { forward });
         }

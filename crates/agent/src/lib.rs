@@ -27,7 +27,7 @@ pub use approval::Ceiling;
 pub use compaction::Summarizing;
 pub use compaction::ladder::{Policy, Report};
 use event::Voice;
-pub use event::{Event, Totals};
+pub use event::{Event, Outcome, Totals};
 pub use hooks::{GatesOnly, Hooks, NoHooks};
 pub use retry::Retry;
 pub use seams::{Approver, Archive, Compactor, Decision, Fitted, Untouched, Working};

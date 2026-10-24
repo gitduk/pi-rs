@@ -268,7 +268,7 @@ async fn a_stopped_turn_keeps_its_status_line_and_a_stopped_bang_does_not() {
             let mut tui = surface(&dir);
             tui.ui.status = vec![Segment::Elapsed];
             let token = tui.core.lanes[0].token();
-            view_at(&mut tui.views, token).state.started = Some(std::time::Instant::now());
+            view_at(&mut tui.views, token).state.work = a_turn(false);
             tui.settle(crate::tui::run::Done {
                 token,
                 kind,

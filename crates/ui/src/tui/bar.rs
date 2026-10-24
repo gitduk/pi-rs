@@ -419,9 +419,15 @@ pub(super) struct BarScript {
     // What the last run was told, and the script as it stood then: an edit
     // to the file reruns it like any other change.
     sent: Option<(Facts, Option<SystemTime>)>,
-    busy: bool,
-    due: Option<Instant>,
+    run: Run,
     failing: bool,
+}
+
+// Whether the script is out, and when it is next due if not.
+enum Run {
+    Out,
+    // Its clock, if it keeps one, or a retry after a failure.
+    Idle { due: Option<Instant> },
 }
 
 impl BarScript {
@@ -440,8 +446,7 @@ impl BarScript {
             tx,
             rx,
             sent: None,
-            busy: false,
-            due: None,
+            run: Run::Idle { due: None },
             failing: false,
         }
     }
@@ -452,20 +457,19 @@ impl BarScript {
         let Some(path) = &self.path else {
             return;
         };
-        if self.busy {
+        let Run::Idle { due } = self.run else {
             return;
-        }
+        };
         let now = (
             Facts::of(lane),
             std::fs::metadata(path).and_then(|m| m.modified()).ok(),
         );
-        let due = self.due.is_some_and(|at| Instant::now() >= at);
+        let due = due.is_some_and(|at| Instant::now() >= at);
         if self.sent.as_ref() == Some(&now) && !due {
             return;
         }
         let input = serde_json::to_vec(&now.0).unwrap_or_default();
-        self.busy = true;
-        self.due = None;
+        self.run = Run::Out;
         self.sent = Some(now);
         // Its own way out: stopping the lane's run is not stopping the bar.
         let ctx = lane.ctx_for(tokio_util::sync::CancellationToken::new());
@@ -477,7 +481,10 @@ impl BarScript {
 
     /// When the loop should wake to run the script again unprompted.
     pub(super) fn due(&self) -> Option<Instant> {
-        self.due.filter(|_| !self.busy)
+        match self.run {
+            Run::Out => None,
+            Run::Idle { due } => due,
+        }
     }
 
     /// A finished run into the layout to draw. A failure puts the default
@@ -487,20 +494,21 @@ impl BarScript {
         out: Result<Layout, String>,
         layout: &mut Layout,
     ) -> Option<String> {
-        self.busy = false;
         match out {
             Ok(found) => {
                 self.failing = false;
-                self.due = found
-                    .refresh
+                let due = (found.refresh)
                     .filter(|s| s.is_finite() && *s > 0.0)
                     .map(|s| Instant::now() + Duration::from_secs_f64(s.max(MIN_REFRESH)));
+                self.run = Run::Idle { due };
                 *layout = found;
                 None
             }
             Err(why) => {
                 *layout = Layout::default();
-                self.due = Some(Instant::now() + RETRY);
+                self.run = Run::Idle {
+                    due: Some(Instant::now() + RETRY),
+                };
                 let first = !std::mem::replace(&mut self.failing, true);
                 // Cargo's own warnings come first; the error is what to show.
                 let head = why

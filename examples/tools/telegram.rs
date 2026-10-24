@@ -123,18 +123,26 @@ mod bridge {
         }
     }
 
+    // Where a question is with this chat.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Stage {
+        // Not sent yet: one asked while a turn runs waits for that turn's
+        // reply, which it follows on from.
+        Held,
+        // On its way to the chat or there.
+        Shown,
+        // Its answer went up; pi closes it soon.
+        Answered,
+    }
+
     #[derive(Debug, Clone, PartialEq)]
     struct Up {
         id: u64,
         text: String,
         options: Vec<String>,
-        // On its way to the chat or there: one asked while a turn runs waits
-        // for that turn's reply, which it follows on from.
-        shown: bool,
+        stage: Stage,
         // The message showing it, once sent.
         message: Option<i64>,
-        // Its answer went up; pi closes it soon.
-        answered: bool,
     }
 
     impl Up {
@@ -148,9 +156,8 @@ mod bridge {
                 id: q.get("id")?.as_u64()?,
                 text: q.get("text")?.as_str()?.to_string(),
                 options,
-                shown: false,
+                stage: Stage::Held,
                 message: None,
-                answered: false,
             })
         }
 
@@ -186,7 +193,7 @@ mod bridge {
         let id: u64 = id.parse().map_err(|_| CLOSED)?;
         let mut up = asking.lock();
         let q = up.iter_mut().find(|q| q.id == id).ok_or(CLOSED)?;
-        if q.answered {
+        if q.stage == Stage::Answered {
             return Err("already answered");
         }
         let picks: Vec<usize> = match what {
@@ -198,7 +205,7 @@ mod bridge {
                 vec![at]
             }
         };
-        q.answered = true;
+        q.stage = Stage::Answered;
         pi.say(json!({ "answer": id, "picks": picks }));
         Ok(())
     }
@@ -212,7 +219,7 @@ mod bridge {
     // yet answered, by place; anything else is the person's own words.
     fn picks_of(asking: &Asking, line: &str) -> Option<(u64, Vec<usize>)> {
         let mut up = asking.lock();
-        let q = up.iter_mut().rev().find(|q| q.shown && !q.answered)?;
+        let q = up.iter_mut().rev().find(|q| q.stage == Stage::Shown)?;
         let picks = (line.split(|c: char| c.is_whitespace() || ",，、".contains(c)))
             .filter(|w| !w.is_empty())
             .map(|w| {
@@ -224,7 +231,7 @@ mod bridge {
         if picks.is_empty() {
             return None;
         }
-        q.answered = true;
+        q.stage = Stage::Answered;
         Some((q.id, picks.into_iter().collect()))
     }
 
@@ -233,9 +240,9 @@ mod bridge {
     // away again.
     async fn show_held(client: &Client, chat: i64, asking: &Asking, pi: &Pi) {
         let held: Vec<Up> = (asking.lock().iter_mut())
-            .filter(|q| !q.shown)
+            .filter(|q| q.stage == Stage::Held)
             .map(|q| {
-                q.shown = true;
+                q.stage = Stage::Shown;
                 q.clone()
             })
             .collect();
@@ -251,8 +258,11 @@ mod bridge {
                     }
                 }
                 Err(e) => {
-                    if let Some(u) = asking.lock().iter_mut().find(|u| u.id == q.id) {
-                        u.shown = false;
+                    // Answered while it went stays answered, not sent again.
+                    if let Some(u) = asking.lock().iter_mut().find(|u| u.id == q.id)
+                        && u.stage == Stage::Shown
+                    {
+                        u.stage = Stage::Held;
                     }
                     pi.notice(&format!("telegram could not show a question: {e}"));
                 }
@@ -548,8 +558,10 @@ mod bridge {
                     }
                     // Not taken: it may be answered again, and the person hears why.
                     let refused = told.get("refused").and_then(Value::as_u64).map(|id| {
-                        if let Some(q) = asking.lock().iter_mut().find(|q| q.id == id) {
-                            q.answered = false;
+                        if let Some(q) = asking.lock().iter_mut().find(|q| q.id == id)
+                            && q.stage == Stage::Answered
+                        {
+                            q.stage = Stage::Shown;
                         }
                         told.get("why").and_then(Value::as_str).unwrap_or_default().to_string()
                     });
@@ -764,7 +776,7 @@ mod bridge {
             assert_eq!(pressed(&asking, &pi, "9:0"), Err(CLOSED));
 
             let mut shown = Up::of(&told(6)).unwrap();
-            shown.shown = true;
+            shown.stage = Stage::Shown;
             asking.lock().push(shown);
             let says = |text: &str| {
                 heard(

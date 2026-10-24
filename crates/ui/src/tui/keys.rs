@@ -3,7 +3,7 @@
 use super::DOUBLE_TAP;
 use super::menu::MenuEntry;
 use super::ui::LastPress;
-use super::view::View;
+use super::view::{Doing, View};
 use super::{Asked, Deed, Ui};
 use crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
@@ -302,7 +302,12 @@ impl Ui {
             Some(Action::RunInterrupt) => {
                 // Esc before the model has moved means "I didn't mean to send
                 // that"; an empty editor, or unsending overwrites a line.
-                if self.editor.is_empty() && lane.is_running() && !view.state.committed {
+                let unsendable = view
+                    .state
+                    .work
+                    .as_ref()
+                    .is_some_and(|w| matches!(w.doing, Doing::Turn { committed: false }));
+                if self.editor.is_empty() && lane.is_running() && unsendable {
                     return Asked::Own(Deed::Unsend);
                 }
                 return Asked::Own(Deed::Interrupt);

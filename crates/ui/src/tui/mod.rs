@@ -473,7 +473,13 @@ impl Tui {
             Deed::Rewind => self.open_rewind(),
             Deed::External => self.edit_externally().await,
             Deed::Job(id) => {
-                self.ui.job_open = (self.ui.job_open != Some(id)).then_some(id);
+                self.ui.job_open = match &self.ui.job_open {
+                    Some(open) if open.id == id => None,
+                    _ => Some(ui::OpenJob {
+                        id,
+                        body: String::new(),
+                    }),
+                };
             }
             Deed::Tidy => self.ui.tidy(front_view(&mut self.views, self.core.lane())),
             Deed::Answer { question, picked } => self.drivers.jobs().answer(question, picked),
@@ -546,7 +552,9 @@ impl Tui {
             self.ui.flash("nothing running to stop");
             return;
         }
-        front_view(&mut self.views, self.core.lane()).state.stopping = true;
+        if let Some(work) = &mut front_view(&mut self.views, self.core.lane()).state.work {
+            work.stopping = true;
+        }
     }
 
     // A different pi installed: become it once nothing on screen is half
@@ -648,10 +656,12 @@ impl Tui {
             } else if self.ui.said.is_empty() {
                 self.ui.said = said_of(self.core.lane());
             }
-            let body = self.ui.job_open.and_then(|id| jobs.body(root, id));
-            let shown = |id: &u64| self.ui.jobs.iter().any(|j| j.id == *id);
-            self.ui.job_open = self.ui.job_open.filter(|id| body.is_some() && shown(id));
-            self.ui.job_body = body.unwrap_or_default();
+            let open = self.ui.job_open.take();
+            let shown = |id: u64| self.ui.jobs.iter().any(|j| j.id == id);
+            self.ui.job_open = open.filter(|o| shown(o.id)).and_then(|o| {
+                let body = jobs.body(root, o.id)?;
+                Some(ui::OpenJob { id: o.id, body })
+            });
             let view = front_view(&mut self.views, self.core.lane());
             self.ui.flush(self.core.lane(), view);
             if std::mem::take(&mut self.ui.redraw) {

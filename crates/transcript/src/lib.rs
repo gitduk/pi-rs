@@ -143,12 +143,53 @@ pub enum Author {
     Agent,
 }
 
+/// How a finished call came out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Done,
+    /// Ran to the end, but what came back deserves a look.
+    Warned,
+    Failed,
+}
+
+impl Outcome {
+    /// From the two flags a stored result keeps: its wire `is_error`, and the
+    /// `warned` kept beside it.
+    pub fn of(is_error: bool, warned: bool) -> Self {
+        match (is_error, warned) {
+            (true, _) => Self::Failed,
+            (false, true) => Self::Warned,
+            (false, false) => Self::Done,
+        }
+    }
+}
+
+// A duration on disk as whole milliseconds.
+mod millis {
+    use std::time::Duration;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(d: &Option<Duration>, s: S) -> Result<S::Ok, S::Error> {
+        match d {
+            Some(d) => s.serialize_some(&(d.as_millis() as u64)),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+        Ok(Option::<u64>::deserialize(d)?.map(Duration::from_millis))
+    }
+}
+
 /// What the screen drew for a result, kept beside it so a rebuild draws the
-/// same row: its preview line, and whether the result asked for a look.
+/// same row: its preview line, whether the result asked for a look, and how
+/// long the call ran.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Drawn {
     pub preview: Option<String>,
     pub warned: bool,
+    pub took: Option<std::time::Duration>,
 }
 
 /// The session's atom. Append only, or truncated by a rollback; the content of
@@ -190,6 +231,15 @@ pub enum Entry {
         preview: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         warned: bool,
+        // How long the call ran; a session written before calls were timed
+        // has none.
+        #[serde(
+            rename = "took_ms",
+            with = "millis",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        took: Option<std::time::Duration>,
     },
     // Machine prose in the user's voice — a stopped run's cause, a round
     // note. The model reads it; the screen shows it muted. Omittable.
@@ -604,6 +654,7 @@ impl Session {
                     result,
                     preview: drawn.preview,
                     warned: drawn.warned,
+                    took: drawn.took,
                 });
                 id
             })
@@ -1136,30 +1187,40 @@ mod tests {
         assert!(!serde_json::to_string(&none).unwrap().contains("image"));
     }
 
-    // A session saved before `warned` existed still opens, and a result that
-    // never asked for a look writes nothing new.
+    // A session saved before `warned` or `took` existed still opens, and a
+    // result that never asked for a look writes nothing new.
     #[test]
     fn a_tool_entry_without_warned_reads_back_unwarned() {
         let old = r#"{"kind":"tool","id":2,"at":1,"preview":"ls",
             "result":{"call":"c","name":"bash","content":[{"type":"text","text":"x"}]}}"#;
         let entry: Entry = serde_json::from_str(old).unwrap();
         assert!(
-            matches!(entry, Entry::Tool { warned: false, .. }),
+            matches!(
+                entry,
+                Entry::Tool {
+                    warned: false,
+                    took: None,
+                    ..
+                }
+            ),
             "{entry:?}"
         );
-        assert!(!serde_json::to_string(&entry).unwrap().contains("warned"));
+        let written = serde_json::to_string(&entry).unwrap();
+        assert!(!written.contains("warned") && !written.contains("took"));
 
         let mut s = Session::with_prompt("go");
         let drawn = Drawn {
             preview: Some("false".into()),
             warned: true,
+            took: Some(std::time::Duration::from_millis(5_400)),
         };
         s.push_previewed(vec![(ToolResult::text("c", "bash", "exit 1"), drawn)]);
         let back: Session = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        let five = Some(std::time::Duration::from_millis(5_400));
         assert!(
             back.entries()
                 .iter()
-                .any(|e| matches!(e, Entry::Tool { warned: true, .. })),
+                .any(|e| matches!(e, Entry::Tool { warned: true, took, .. } if *took == five)),
         );
     }
 

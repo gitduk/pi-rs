@@ -1,11 +1,11 @@
 //! A run's events becoming rows: the text as it streams, the tool calls as
 //! they run and finish, and the block that closes when the turn does.
 use super::Ui;
-use super::call::{RunTool, push_tool_row};
+use super::call::{Run, RunTool, push_tool_row};
 use super::row::Row;
 use super::scrollback::f_entry;
 use super::search::Spot;
-use super::view::{StreamKind, Surface, View, snapshot};
+use super::view::{Doing, StreamKind, Surface, View, snapshot};
 use crate::render;
 use crate::status;
 use agent::Event;
@@ -120,18 +120,21 @@ impl Ui {
     pub(super) fn on_event(&mut self, lane: &mut Lane, view: &mut View, event: Event) {
         // Anything the model produces spends the chance to unsend: past this
         // the prompt has been answered, not merely sent.
-        if matches!(
-            event,
-            Event::TextDelta(_) | Event::ReasoningDelta(_) | Event::ToolStart { .. }
-        ) {
-            view.state.committed = true;
+        if let Some(work) = &mut view.state.work {
+            if matches!(
+                event,
+                Event::TextDelta(_) | Event::ReasoningDelta(_) | Event::ToolQueued { .. }
+            ) && let Doing::Turn { committed } = &mut work.doing
+            {
+                *committed = true;
+            }
+            if !matches!(event, Event::Retrying { .. }) {
+                work.retry = None;
+            }
         }
         // Every number either status line shows is read here, once. The arms
         // below decide only what reaches the scrollback.
         lane.note(&event);
-        if !matches!(event, Event::Retrying { .. }) {
-            view.state.retry = None;
-        }
         match &event {
             Event::TextDelta(d) => self.write(view, d, false),
             Event::ReasoningDelta(d) => self.write(view, d, true),
@@ -162,16 +165,17 @@ impl Ui {
             }
             // State, not rows: the usage line marks it, `/status` says why.
             Event::Refit(_) => {}
-            Event::Compacted(_) if view.state.started.is_some() => {}
+            Event::Compacted(_) if view.state.work.is_some() => {}
             // A `/compact` asked for: its report is the answer, filed as worded.
             Event::Compacted(r) => {
                 self.close(view);
                 let line = pi_core::core::meter::compaction_line(r);
                 self.say_kept(lane, view, &line);
             }
-            // A call's two events are one line here: start takes a place in
-            // the group or live region; end settles it, matched back by id.
-            Event::ToolStart { id, name, args, .. } => {
+            // A call's events are one line here: queued takes a place in the
+            // group or live region, start sets its clock, end settles it,
+            // each matched back by id.
+            Event::ToolQueued { id, name, args } => {
                 self.close(view);
                 let place = view.surface.folds.ask(id, args, lane.root());
                 view.state.tools.push(RunTool {
@@ -179,31 +183,38 @@ impl Ui {
                     name: name.clone(),
                     summary: crate::render::summarize(args),
                     place,
-                    started: std::time::Instant::now(),
-                    progress: None,
-                    done: None,
+                    run: Run::Queued,
                 });
             }
-            Event::ToolProgress { id, text } => {
+            Event::ToolStart { id, at } => {
                 if let Some(t) = view.state.tools.iter_mut().find(|t| t.id == *id) {
-                    t.progress = Some(text.clone());
+                    t.run = Run::Running {
+                        since: *at,
+                        progress: None,
+                    };
+                }
+            }
+            Event::ToolProgress { id, text } => {
+                if let Some(t) = view.state.tools.iter_mut().find(|t| t.id == *id)
+                    && let Run::Running { progress, .. } = &mut t.run
+                {
+                    *progress = Some(text.clone());
                 }
             }
             Event::ToolEnd {
                 id,
                 name,
-                is_error,
-                warned,
+                outcome,
                 preview,
+                took,
             } => {
                 self.close(view);
                 // Parked until the entry commits; adoption checks it against
                 // what the entry derives to.
                 if let Some(t) = view.state.tools.iter_mut().find(|t| t.id == *id) {
-                    let outcome = crate::render::Outcome::of(*is_error, *warned);
-                    let row = Row::result(outcome, name.clone(), preview.clone());
-                    t.done = Some(row.at(t.place.clone()));
-                    t.progress = None;
+                    let row =
+                        Row::result(*outcome, name.clone(), preview.clone()).timed(Some(*took));
+                    t.run = Run::Landed(row.at(t.place.clone()));
                 }
             }
             // New entries: derive rows via `f_entry`, check them against
@@ -220,10 +231,12 @@ impl Ui {
                 reason,
             } => {
                 self.close(view);
-                view.state.retry = Some(format!(
-                    "retry {attempt} in {}",
-                    render::fmt_delay(*delay_ms)
-                ));
+                if let Some(work) = &mut view.state.work {
+                    work.retry = Some(format!(
+                        "retry {attempt} in {}",
+                        render::fmt_delay(*delay_ms)
+                    ));
+                }
                 self.say_muted(view, reason.as_str());
             }
             _ => {
@@ -281,9 +294,12 @@ impl Ui {
     pub(super) fn abandon_tools(&mut self, view: &mut View) {
         for t in std::mem::take(&mut view.state.tools) {
             view.surface.folds.take_asked(&t.id);
-            let row = t
-                .done
-                .unwrap_or_else(|| Row::tool_start(&t.name, &t.summary, &self.paint));
+            let row = match t.run {
+                Run::Landed(row) => row,
+                Run::Queued | Run::Running { .. } => {
+                    Row::tool_start(&t.name, &t.summary, &self.paint)
+                }
+            };
             view.surface.scrollback.push(row);
         }
     }
@@ -326,7 +342,7 @@ impl Ui {
         let Some(at) = view.state.tools.iter().position(|t| t.id == call) else {
             return;
         };
-        let Some(pending) = view.state.tools.remove(at).done else {
+        let Run::Landed(pending) = view.state.tools.remove(at).run else {
             return;
         };
         if let Some(row) = row {

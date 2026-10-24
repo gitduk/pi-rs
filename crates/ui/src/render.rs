@@ -413,31 +413,22 @@ pub fn result_room(width: usize) -> usize {
     width.saturating_sub(2).max(20)
 }
 
-/// How a finished call came out, which its mark says.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
-    Done,
-    // Ran to the end, but what came back deserves a look.
-    Warned,
-    Failed,
+pub use agent::Outcome;
+
+/// The mark a finished call's `outcome` says.
+pub fn outcome_glyph(outcome: Outcome) -> &'static str {
+    match outcome {
+        Outcome::Done | Outcome::Warned => icons::DONE_MARK,
+        Outcome::Failed => icons::FAIL_MARK,
+    }
 }
 
-impl Outcome {
-    pub fn of(is_error: bool, warned: bool) -> Self {
-        match (is_error, warned) {
-            (true, _) => Self::Failed,
-            (false, true) => Self::Warned,
-            (false, false) => Self::Done,
-        }
-    }
-
-    /// The mark and the style it is drawn in.
-    pub fn mark(self, theme: &Theme) -> (&Style, &'static str) {
-        match self {
-            Self::Done => (&theme.status.ok, icons::DONE_MARK),
-            Self::Warned => (&theme.status.warn, icons::DONE_MARK),
-            Self::Failed => (&theme.status.err, icons::FAIL_MARK),
-        }
+/// The style that mark is drawn in.
+pub fn outcome_style(outcome: Outcome, theme: &Theme) -> &Style {
+    match outcome {
+        Outcome::Done => &theme.status.ok,
+        Outcome::Warned => &theme.status.warn,
+        Outcome::Failed => &theme.status.err,
     }
 }
 
@@ -448,6 +439,8 @@ pub struct Finished<'a> {
     pub preview: &'a str,
     /// Where it ran, when not the workspace root.
     pub place: Option<&'a str>,
+    /// How long it ran, when known.
+    pub took: Option<std::time::Duration>,
 }
 
 /// The rows a finished tool result takes on screen: its head, clipped to fit,
@@ -460,11 +453,14 @@ pub fn result_rows(
     width: usize,
 ) -> Vec<ratatui::text::Line<'static>> {
     let room = result_room(width);
-    let (mark_style, mark) = call.outcome.mark(&p.theme);
+    let (mark_style, mark) = (
+        outcome_style(call.outcome, &p.theme),
+        outcome_glyph(call.outcome),
+    );
     let (head, rest) = call.preview.split_once('\n').unwrap_or((call.preview, ""));
-    // Past the mark, the name and the `…` a cut adds; the place is kept
-    // whole, the command gives way to it.
-    let placed = placed(call.place);
+    // Past the mark, the name and the `…` a cut adds; the place and time
+    // are kept whole, the command gives way to them.
+    let placed = placed(call.place) + &ran_for(call.took);
     let width_of = pi_store::text::width;
     let fits = room.saturating_sub(width_of(call.name) + 2 + width_of(placed.as_str()));
     let mut out = vec![Line::from(vec![
@@ -632,22 +628,23 @@ pub fn describe(
     let line = match event {
         // Same naming every line that shows a call uses — not a place to
         // spell a tool differently.
-        Event::ToolStart { name, args, .. } => Line::from(vec![
+        Event::ToolQueued { name, args, .. } => Line::from(vec![
             p.span(&p.theme.muted, icons::PENDING_MARK),
             Span::raw(format!(" {}", named(name, &summarize(args)))),
         ]),
         Event::ToolEnd {
             name,
-            is_error,
-            warned,
+            outcome,
             preview,
+            took,
             ..
         } => {
             let call = Finished {
-                outcome: Outcome::of(*is_error, *warned),
+                outcome: *outcome,
                 name,
                 preview,
                 place: None,
+                took: Some(*took),
             };
             return Some(result_rows(&call, Shown::Sketch, false, p, width));
         }
@@ -863,6 +860,22 @@ pub fn place(args: &serde_json::Value, root: &std::path::Path) -> Option<String>
 /// speaking for many calls leaves it off.
 pub fn placed(place: Option<&str>) -> String {
     place.map_or_else(String::new, |p| format!("{}in {p}", icons::PART_SEP))
+}
+
+/// How long a call runs before its line says so. A quick one's time is
+/// nothing to read, and a `1s` that shows only to vanish reads as a flicker.
+pub const TIMED_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A time as the tail of a line, ` · 5s`: how long a call or job ran, or
+/// has been out so far.
+pub fn lasted(d: std::time::Duration) -> String {
+    format!("{}{}", icons::PART_SEP, llm::figures::elapsed(d))
+}
+
+/// What a call's line says of its time: nothing under `TIMED_AFTER`.
+pub fn ran_for(took: Option<std::time::Duration>) -> String {
+    took.filter(|d| *d >= TIMED_AFTER)
+        .map_or_else(String::new, lasted)
 }
 
 /// The one argument worth showing in a progress line: its first line, `…`
