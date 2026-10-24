@@ -31,65 +31,27 @@ impl Ui {
         std::mem::take(&mut self.submitted)
     }
 
-    pub(super) fn key(
-        &mut self,
-        lane: &Lane,
-        view: &mut View,
-        event: TermEvent,
-        running: bool,
-    ) -> Asked {
-        let asking = self.asking(view);
-        let writing = view.writing;
-        let asked = self.read_key(lane, view, event, running, asking);
-        if writing {
-            // Their own words sent are the answer; a line emptied hands the
-            // keyboard back to the question.
-            let back = view.questions.front().is_some_and(|q| q.back);
-            // To an asker that waits, their words go back instead of out.
-            if let Some(own) = self.submitted.take_if(|_| back) {
-                return self.answer(view, &[], Some(own));
-            } else if self.submitted.is_some() {
-                self.answer(view, &[], None);
-            } else if self.editor.is_empty() {
-                view.writing = false;
-            }
-        }
-        asked
-    }
-
-    // A question is answered only from an empty line with nothing over it,
-    // so a key meant for text, a list or a page is never taken as a pick.
-    pub(super) fn asking(&mut self, view: &View) -> bool {
-        let listed = !self.menu().is_empty();
-        self.holds(view, listed)
-    }
-
-    // `asking`, for a caller that already knows whether a list is up.
-    pub(super) fn holds(&self, view: &View, listed: bool) -> bool {
-        !view.questions.is_empty() && !view.writing && self.line_bare() && !listed
-    }
-
-    // Nothing typed and nothing read: a list needs typing to open.
-    pub(super) fn line_bare(&self) -> bool {
-        self.editor.is_empty() && !self.reading()
-    }
-
     // A page up over the transcript, or a search on it.
-    fn reading(&self) -> bool {
+    pub(super) fn reading(&self) -> bool {
         self.read.is_some() || self.search.is_some()
     }
 
-    // The front question let go, with the options at `picks`, or the
-    // person's `own` words, as its answer.
-    fn answer(&mut self, view: &mut View, picks: &[usize], own: Option<String>) -> Asked {
+    // The first question let go, answered with the options at `picks`, or
+    // with the person's `own` words; with neither, closed unanswered.
+    fn answer(&mut self, picks: &[usize], own: Option<String>) -> Asked {
         self.disarm();
-        let Some((question, picked)) = view.answer(picks) else {
+        let Some(question) = self.questions.first().cloned() else {
             return Asked::Own(Deed::Nothing);
         };
+        self.sync_questions(self.questions[1..].to_vec());
+        let picked = question.picked(picks).ok().flatten();
         tracing::info!(
             target: "pi::session", question = question.id, from = ?question.from, ?picks,
-            "question answered"
+            own = own.is_some(), "question answered"
         );
+        if !question.back {
+            self.answered.push(question.id);
+        }
         match (question.back, own.or(picked)) {
             (true, picked) => Asked::Own(Deed::Answer {
                 question: question.id,
@@ -100,21 +62,18 @@ impl Ui {
         }
     }
 
-    fn read_key(
+    pub(super) fn key(
         &mut self,
         lane: &Lane,
         view: &mut View,
         event: TermEvent,
         running: bool,
-        asking: bool,
     ) -> Asked {
         let key = match event {
             TermEvent::Resize(w, h) => {
                 self.screen.resized(w, h);
                 return Asked::Own(Deed::Nothing);
             }
-            // A question holds the keyboard: nothing lands on the line under it.
-            TermEvent::Paste(_) if asking => return Asked::Own(Deed::Nothing),
             TermEvent::Paste(text) => {
                 self.last_press = None;
                 // Only the line or a query being typed takes text: anywhere
@@ -135,17 +94,13 @@ impl Ui {
             }
             _ => return Asked::Own(Deed::Nothing),
         };
-        if self.search_key(view, &key) {
-            return Asked::Own(Deed::Nothing);
-        }
-
         let press = press_of(&key);
         let now = Instant::now();
         let last = self.last_press.take();
         let prev = last
             .filter(|l| now.duration_since(l.at) < self.pair_window_after(l.press))
             .map(|l| l.press);
-        let layers = self.layers(running, asking);
+        let layers = self.layers(running);
         let hit = self.keys.hit(prev, press, layers);
         if let Some(h) = hit
             && h.pair
@@ -166,79 +121,26 @@ impl Ui {
         let action = hit.map(|h| h.action);
 
         match action {
-            Some(action @ (Action::QuestionNext | Action::QuestionPrevious)) => {
-                let count = view.questions.front().map_or(1, |q| q.options.len());
-                view.picked = match action {
-                    Action::QuestionNext => (view.picked + 1) % count,
-                    _ => (view.picked + count - 1) % count,
-                };
-                self.disarm();
-                return Asked::Own(Deed::Nothing);
-            }
-            // What was checked, or with nothing checked the highlighted one.
-            Some(Action::QuestionAccept) => {
-                let picks: Vec<usize> = match view.checked.is_empty() {
-                    true => vec![view.picked],
-                    false => view.checked.iter().copied().collect(),
-                };
-                return self.answer(view, &picks, None);
-            }
-            // A digit names its option; one past the last names none. Where
-            // several may be picked, it toggles rather than sends.
-            Some(Action::QuestionPick) => {
-                let (count, multiple) = view
-                    .questions
-                    .front()
-                    .map_or((0, false), |q| (q.options.len(), q.multiple));
-                let at = match key.code {
-                    KeyCode::Char(c) => c.to_digit(10).map(|d| d as usize),
-                    _ => None,
-                }
-                .map_or(Some(view.picked), |d| {
-                    (1..=count).contains(&d).then(|| d - 1)
-                });
-                let Some(at) = at else {
-                    return Asked::Own(Deed::Nothing);
-                };
-                if !multiple {
-                    return self.answer(view, &[at], None);
-                }
-                view.picked = at;
-                view.toggle(at);
-                self.disarm();
-                return Asked::Own(Deed::Nothing);
-            }
-            Some(Action::QuestionToggle) => {
-                if view.questions.front().is_some_and(|q| q.multiple) {
-                    view.toggle(view.picked);
-                }
-                self.disarm();
-                return Asked::Own(Deed::Nothing);
-            }
-            Some(Action::QuestionWrite) => {
-                view.writing = true;
-                self.disarm();
-                return Asked::Own(Deed::Nothing);
-            }
-            Some(Action::QuestionDecline) => return self.answer(view, &[], None),
             Some(Action::AppCancel) => return self.cancel(view, running),
             Some(Action::AppQuit) => return Asked::Core(Intent::Builtin(Builtin::Quit)),
-            // A stray key must not close a question, nor type under it.
-            _ if asking => return Asked::Own(Deed::Nothing),
             _ => {}
         }
-        self.editor_key(lane, view, key, action)
+        if self.search_key(view, action) {
+            self.disarm();
+            return Asked::Own(Deed::Nothing);
+        }
+        let was = self.search_typing().then(|| self.editor.text().to_string());
+        let asked = self.editor_key(lane, view, key, action);
+        if let Some(was) = was {
+            self.search_typed(&was);
+        }
+        asked
     }
 
-    // The layers the key table reads: the line's, a list, a question or a
-    // page over it.
-    fn layers(&mut self, running: bool, asking: bool) -> Layers {
+    // The layers the key table reads: the line's, a list or a page over it.
+    fn layers(&mut self, running: bool) -> Layers {
         Layers {
-            surface: if asking {
-                Surface::Question
-            } else {
-                self.surface()
-            },
+            surface: self.surface(),
             run: running,
             mode: self.vim.unwrap_or_default(),
             // Whether the line has anything on it, which the keys bound
@@ -296,7 +198,7 @@ impl Ui {
 
     // A press that did its own thing is not the first of a pair: the table
     // pairs by key alone (dismissing `esc`, clearing `ctrl+l`).
-    fn disarm(&mut self) {
+    pub(super) fn disarm(&mut self) {
         self.last_press = None;
     }
 
@@ -315,13 +217,24 @@ impl Ui {
         }
         match action {
             Some(Action::LineSubmit) => {
-                self.seeded = None;
+                self.list.seeded = None;
                 // What is sent is answered on the transcript, not the page.
                 self.close_overlay(view);
                 // Enter with a menu open runs what's highlighted, the typed
                 // text a mere prefix. Pick before draining the editor.
                 return match self.highlighted() {
-                    Some(MenuEntry::Completion(c)) if !c.picked_only || self.picked.is_some() => {
+                    // What was marked, or with nothing marked the highlighted one.
+                    Some(MenuEntry::Pick { at, .. }) => {
+                        self.editor.take();
+                        let picks: Vec<usize> = match self.list.marked.is_empty() {
+                            true => vec![at],
+                            false => self.list.marked.iter().copied().collect(),
+                        };
+                        self.answer(&picks, None)
+                    }
+                    Some(MenuEntry::Completion(c))
+                        if !c.picked_only || self.list.picked.is_some() =>
+                    {
                         // The completion's line runs; the prefix that
                         // produced it goes, so it can't resubmit as a stray prompt.
                         self.editor.take();
@@ -335,7 +248,7 @@ impl Ui {
                         dir,
                         picked_only,
                         ..
-                    }) if !picked_only || self.picked.is_some() => {
+                    }) if !picked_only || self.list.picked.is_some() => {
                         // Enter on a path applies it and stays: the prompt
                         // is not done until the user says so.
                         self.apply_file(start, end, lead, &path, dir);
@@ -346,7 +259,14 @@ impl Ui {
                     )
                     | None => {
                         let typed = self.editor.take();
-                        self.run_line(typed)
+                        // Words matching none of a question's options answer it.
+                        let own = !self.questions.is_empty()
+                            && !typed.trim().is_empty()
+                            && input::plain(&typed);
+                        match own {
+                            true => self.answer(&[], Some(typed)),
+                            false => self.run_line(typed),
+                        }
                     }
                 };
             }
@@ -496,17 +416,36 @@ impl Ui {
                     dir,
                     ..
                 }) => self.apply_file(start, end, lead, &path, dir),
-                Some(MenuEntry::Hit { .. }) => self.search_accept(),
+                Some(MenuEntry::Hit { .. }) => self.search_enter(view),
+                // Several may be picked: marked. Else onto the line, to send
+                // as it is or changed.
+                Some(MenuEntry::Pick { at, .. }) => match self.questions.first() {
+                    Some(q) if q.multiple => {
+                        self.list.mark(at);
+                    }
+                    Some(q) => {
+                        if let Some(option) = q.options.get(at).cloned() {
+                            self.editor.set_line(&option);
+                        }
+                    }
+                    None => {}
+                },
                 None => {}
             },
             Some(action @ (Action::MenuNext | Action::MenuPrevious)) => self.step_menu(action),
+            // A question's list is let go only by closing the question.
+            Some(Action::MenuDismiss)
+                if matches!(self.highlighted(), Some(MenuEntry::Pick { .. })) =>
+            {
+                return self.answer(&[], None);
+            }
             Some(Action::MenuDismiss) => {
-                if self.seeded.take().as_deref() == Some(self.editor.text()) {
+                if self.list.seeded.take().as_deref() == Some(self.editor.text()) {
                     self.editor.clear();
                 }
                 // Keyed to the text, so any edit brings the list back —
                 // "not that", not "never again".
-                self.dismissed_at = Some(self.editor.text().to_string());
+                self.list.dismissed_at = Some(self.editor.text().to_string());
                 self.disarm();
             }
             // Unbound and printable is the one thing no table has to say —
@@ -593,7 +532,7 @@ impl Ui {
             self.seed(super::RESUME);
             if self.menu().is_empty() {
                 self.editor.clear();
-                self.seeded = None;
+                self.list.seeded = None;
                 self.flash(super::NO_SESSIONS);
             }
             return Asked::Own(Deed::Nothing);

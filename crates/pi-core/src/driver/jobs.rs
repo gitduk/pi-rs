@@ -6,9 +6,10 @@
 //! What comes back goes only when the lane is free and nothing typed is
 //! waiting. Nothing here outlives this process; past it, use cron.
 //!
-//! The questions such calls put to the person pass through here too, jobs'
-//! and those of calls still in their turn alike: numbered, held until the
-//! surface takes them, and withdrawn once their asker is gone.
+//! The questions such calls put to the person stand here too, jobs' and
+//! those of calls still in their turn alike: numbered, up until answered
+//! from the screen or through a job that follows, and withdrawn once their
+//! asker is gone.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -47,12 +48,10 @@ struct Inner {
     next_id: u64,
     items: Vec<Item>,
     next_question: u64,
-    // Questions a call still in its turn put, by checkout, not yet taken.
-    asked: Vec<(PathBuf, Question)>,
+    // Every question up and not yet answered, by checkout, oldest first.
+    standing: Vec<(PathBuf, Question)>,
     // Where the answer to each question asked with `back` goes.
     answers: HashMap<u64, oneshot::Sender<Option<String>>>,
-    // Questions whose asker is gone since last asked: void wherever they went.
-    withdrawn: Vec<u64>,
 }
 
 impl Inner {
@@ -62,11 +61,82 @@ impl Inner {
             .filter(|(_, to)| to.is_closed())
             .map(|(id, _)| *id)
             .collect();
-        for id in &gone {
-            self.answers.remove(id);
+        for id in gone {
+            self.answers.remove(&id);
+            self.close(id, "its asker stopped waiting");
         }
-        self.asked.retain(|(_, q)| !gone.contains(&q.id));
-        self.withdrawn.extend(gone);
+    }
+
+    // Put `question` up at `root`. Asking again is a change of mind: only an
+    // asker's latest stands, where its last one stood. One an asker waits
+    // on is never replaced: it would wait for good.
+    fn put(&mut self, root: PathBuf, question: Question) {
+        let told = Told::Question {
+            id: question.id,
+            asked: question.asked(),
+        };
+        let stale = (self.standing.iter()).position(|(at, q)| {
+            *at == root && q.from == question.from && !q.back && !question.back
+        });
+        match stale {
+            Some(at) => {
+                let old = std::mem::replace(&mut self.standing[at].1, question).id;
+                tracing::info!(target: "pi::job", question = old, why = "asked again", "closed");
+                self.tell_followers(&root, Told::Closed(old));
+            }
+            None => self.standing.push((root.clone(), question)),
+        }
+        self.tell_followers(&root, told);
+    }
+
+    // Take question `id` down, if it is still up, and say so to every job
+    // that follows its checkout.
+    fn close(&mut self, id: u64, why: &str) -> Option<Question> {
+        let at = self.standing.iter().position(|(_, q)| q.id == id)?;
+        let (root, question) = self.standing.remove(at);
+        tracing::info!(target: "pi::job", question = id, why, "closed");
+        self.tell_followers(&root, Told::Closed(id));
+        Some(question)
+    }
+
+    // Take question `id` down as answered: the pick goes to an asker that
+    // waits on it. What comes back is the pick still to go out as typed.
+    fn answered(&mut self, id: u64, why: &str, picked: Option<String>) -> Option<String> {
+        let question = self.close(id, why)?;
+        match self.answers.remove(&id) {
+            Some(to) => {
+                let _ = to.send(picked);
+                None
+            }
+            None => picked.filter(|_| !question.back),
+        }
+    }
+
+    // Take down what job `id` asked: it is gone, or no longer the run that asked.
+    fn withdraw(&mut self, id: u64, why: &str) {
+        let asked: Vec<u64> = (self.standing.iter())
+            .filter(|(_, q)| matches!(q.from, Asker::Job { id: of, .. } if of == id))
+            .map(|(_, q)| q.id)
+            .collect();
+        for question in asked {
+            self.close(question, why);
+        }
+    }
+
+    // The running jobs on `root` told of every turn there.
+    fn followers<'a>(&'a self, root: &'a Path) -> impl Iterator<Item = &'a Item> {
+        (self.items.iter()).filter(move |i| i.root == root && i.running() && i.follows)
+    }
+
+    fn tell_followers(&self, root: &Path, told: Told) {
+        for to in self.followers(root).filter_map(|i| i.told.as_ref()) {
+            let _ = to.send(told.clone());
+        }
+    }
+
+    // Where run `run` of job `id` stands in the table, if it is still here.
+    fn mine(&self, id: u64, run: u64) -> Option<usize> {
+        (self.items.iter()).position(|i| i.id == id && i.run == run)
     }
 
     // `question` numbered, so an answer or a withdrawal can name it.
@@ -100,10 +170,6 @@ struct Item {
     interrupt: bool,
     // Lines for the screen, not yet shown.
     notices: VecDeque<String>,
-    // A question it put to the person, not yet taken; a newer one replaces it.
-    question: Option<Question>,
-    // Its latest question's id, taken or not, withdrawn when it stops.
-    asked: Option<u64>,
     // Reads the latest of what it printed; None for one that keeps none.
     output: Option<Peek>,
     // How it runs again. One that has it is kept once it ends, to be
@@ -135,7 +201,6 @@ impl Item {
         !self.running()
             && self.waiting.is_empty()
             && self.notices.is_empty()
-            && self.question.is_none()
             && self.rerun.is_none()
     }
 
@@ -154,7 +219,6 @@ impl Item {
         self.waiting.clear();
         self.dropped = 0;
         self.notices.clear();
-        self.question = None;
     }
 
     // The job as a person reads it: `judge #3`.
@@ -270,9 +334,15 @@ impl State {
 
 /// What comes back from a job: a result, or a person speaking through it,
 /// their words untouched; `note` says only what the cap dropped, if anything.
+/// Their words are a prompt, unless `as_typed`: a pick of offered options,
+/// read as if typed, so one that is a command runs.
 pub enum Back {
     Result(Due),
-    Input { text: String, note: String },
+    Input {
+        text: String,
+        note: String,
+        as_typed: bool,
+    },
 }
 
 /// What a lane is sent when something it left comes back: the line to
@@ -349,34 +419,24 @@ impl Table {
         self.take(root, |i| std::mem::take(&mut i.notices))
     }
 
-    /// The questions put at `root` since last asked: by its jobs, then by
-    /// calls still in their turn.
-    pub fn take_questions(&self, root: &Path) -> Vec<Question> {
-        let mut taken = self.take(root, |i| i.question.take());
+    /// The questions up at `root`, oldest first.
+    pub fn questions(&self, root: &Path) -> Vec<Question> {
         let mut inner = self.lock();
         inner.sweep();
-        let (here, elsewhere) = std::mem::take(&mut inner.asked)
-            .into_iter()
-            .partition(|(at, _)| at == root);
-        inner.asked = elsewhere;
-        taken.extend(here.into_iter().map(|(_, q)| q));
-        taken
+        (inner.standing.iter())
+            .filter(|(at, _)| at == root)
+            .map(|(_, q)| q.clone())
+            .collect()
     }
 
-    /// The ids of questions whose asker has gone since last asked — a job
-    /// stopped or started over, a call that waited and is waiting no more.
-    pub fn take_withdrawn(&self) -> Vec<u64> {
-        let mut inner = self.lock();
-        inner.sweep();
-        std::mem::take(&mut inner.withdrawn)
-    }
-
-    /// The person's answer to question `id`, for the asker waiting on it;
-    /// `None` when they closed it. Nothing when no one waits.
+    /// The screen answered question `id`: it comes down, and the pick goes
+    /// to an asker that waits on it — `None` when they closed it. One that
+    /// does not wait hears nothing: the screen sent the pick as typed.
     pub fn answer(&self, id: u64, picked: Option<String>) {
-        if let Some(to) = self.lock().answers.remove(&id) {
-            let _ = to.send(picked);
-        }
+        let mut inner = self.lock();
+        inner.answered(id, "answered on the screen", picked);
+        drop(inner);
+        self.changed.notify_one();
     }
 
     // What `root`'s jobs kept for the surface, taken; a job it was all that
@@ -406,6 +466,8 @@ impl Table {
             Told::Answer(answer) => {
                 tracing::info!(target: "pi::job", job = id, ?answer, "told answer")
             }
+            // Told every follower at once, where the question goes up or down.
+            Told::Question { .. } | Told::Closed(_) => {}
         }
         if let Some(to) = self
             .lock()
@@ -420,8 +482,8 @@ impl Table {
 
     /// The running jobs on `root` told of every turn there.
     pub fn followers(&self, root: &Path) -> Vec<u64> {
-        (self.lock().items.iter())
-            .filter(|i| i.root == root && i.running() && i.follows && i.told.is_some())
+        (self.lock().followers(root))
+            .filter(|i| i.told.is_some())
             .map(|i| i.id)
             .collect()
     }
@@ -534,7 +596,6 @@ impl Table {
             .ok_or_else(|| format!("no job #{id} here"))?;
         let item = &mut inner.items[at];
         let what = item.description.clone();
-        let asked = item.asked.take();
         match (&item.phase, item.rerun.is_some()) {
             (Phase::Over { .. }, true) => return Err(format!("#{id} ({what}) is not running")),
             (Phase::Running { stop }, true) => {
@@ -553,7 +614,7 @@ impl Table {
                 tracing::info!(target: "pi::job", job = id, "stopped and forgotten");
             }
         }
-        inner.withdrawn.extend(asked);
+        inner.withdraw(id, "its job stopped");
         drop(inner);
         self.changed.notify_one();
         Ok(what)
@@ -590,8 +651,7 @@ impl Table {
             table: self.clone(),
         });
         let what = item.description.clone();
-        let asked = item.asked.take();
-        inner.withdrawn.extend(asked);
+        inner.withdraw(id, "its job started over");
         drop(inner);
         tracing::info!(target: "pi::job", job = id, "restarting");
         self.changed.notify_one();
@@ -662,6 +722,9 @@ impl Table {
             tracing::info!(target: "pi::job", job = item.id, to = %to.display(), "rehomed");
             item.root = to.to_path_buf();
         }
+        for (at, _) in inner.standing.iter_mut().filter(|(at, _)| at == from) {
+            *at = to.to_path_buf();
+        }
         drop(inner);
         self.changed.notify_one();
     }
@@ -671,7 +734,6 @@ impl Table {
     pub fn drop_under(&self, root: &Path) -> usize {
         let mut inner = self.lock();
         let had = inner.items.len();
-        let mut withdrawn = Vec::new();
         inner.items.retain(|i| {
             let gone = i.root.starts_with(root);
             if gone {
@@ -679,12 +741,18 @@ impl Table {
                 if let Phase::Running { stop } = &i.phase {
                     stop.cancel();
                 }
-                withdrawn.extend(i.asked);
             }
             !gone
         });
-        inner.withdrawn.extend(withdrawn);
-        inner.asked.retain(|(at, _)| !at.starts_with(root));
+        // No one is left there to follow them, nor to show them; one that
+        // waits hears none, and goes on.
+        let (gone, kept) = std::mem::take(&mut inner.standing)
+            .into_iter()
+            .partition(|(at, _)| at.starts_with(root));
+        inner.standing = kept;
+        for (_, q) in gone {
+            inner.answers.remove(&q.id);
+        }
         let gone = had - inner.items.len();
         drop(inner);
         self.changed.notify_one();
@@ -719,8 +787,6 @@ impl Table {
             follows: false,
             interrupt: false,
             notices: VecDeque::new(),
-            question: None,
-            asked: None,
             output: None,
             rerun: None,
             run: 0,
@@ -779,7 +845,7 @@ impl Ask for Jobs {
             inner.answers.insert(question.id, to);
             answer
         });
-        inner.asked.push((root, question));
+        inner.put(root, question);
         drop(inner);
         self.table.changed.notify_one();
         Ok(answer)
@@ -844,14 +910,29 @@ impl JobHandle for Handle {
         });
     }
 
+    // Writing instead of picking answers every question that does not wait:
+    // what they wrote is the answer.
     fn input(&self, text: String) {
         tracing::info!(target: "pi::job", job = self.id, text = %text, "input");
-        self.table.update(self.id, self.run, |i| {
-            i.wait(Back::Input {
-                text,
-                note: String::new(),
-            })
+        let mut inner = self.table.lock();
+        let Some(at) = inner.mine(self.id, self.run) else {
+            return;
+        };
+        let root = inner.items[at].root.clone();
+        let lapsed: Vec<u64> = (inner.standing.iter())
+            .filter(|(r, q)| *r == root && !q.back)
+            .map(|(_, q)| q.id)
+            .collect();
+        for id in lapsed {
+            inner.close(id, "the person wrote instead");
+        }
+        inner.items[at].wait(Back::Input {
+            text,
+            note: String::new(),
+            as_typed: false,
         });
+        drop(inner);
+        self.table.changed.notify_one();
     }
 
     fn notice(&self, text: String) {
@@ -866,8 +947,7 @@ impl JobHandle for Handle {
 
     fn choose(&self, asked: Asked) {
         let mut inner = self.table.lock();
-        let Some(at) = (inner.items.iter()).position(|i| i.id == self.id && i.run == self.run)
-        else {
+        let Some(at) = inner.mine(self.id, self.run) else {
             return;
         };
         let item = &inner.items[at];
@@ -886,9 +966,40 @@ impl JobHandle for Handle {
             target: "pi::job", job = self.id, question = question.id, text = %question.text,
             options = ?question.options, "choose"
         );
-        let item = &mut inner.items[at];
-        item.asked = Some(question.id);
-        item.question = Some(question);
+        let root = inner.items[at].root.clone();
+        inner.put(root, question);
+        drop(inner);
+        self.table.changed.notify_one();
+    }
+
+    fn answer(&self, question: u64, picks: Vec<usize>) {
+        let mut inner = self.table.lock();
+        inner.sweep();
+        let Some(at) = inner.mine(self.id, self.run) else {
+            return;
+        };
+        let root = &inner.items[at].root;
+        let picked = (inner.standing.iter())
+            .find(|(r, q)| r == root && q.id == question)
+            .ok_or_else(|| "it is no longer up".to_string())
+            .and_then(|(_, q)| q.picked(&picks));
+        let picked = match picked {
+            Ok(picked) => picked,
+            Err(why) => {
+                tracing::warn!(
+                    target: "pi::job", job = self.id, question, ?picks, %why, "an answer dropped"
+                );
+                return;
+            }
+        };
+        tracing::info!(target: "pi::job", job = self.id, question, ?picks, "answer");
+        if let Some(text) = inner.answered(question, "answered through a job", picked) {
+            inner.items[at].wait(Back::Input {
+                text,
+                note: String::new(),
+                as_typed: true,
+            });
+        }
         drop(inner);
         self.table.changed.notify_one();
     }
@@ -903,9 +1014,26 @@ impl JobHandle for Handle {
             .update(self.id, self.run, |i| i.output = Some(output));
     }
 
+    // What is already up is told too, as if just asked.
     fn follow(&self) {
         tracing::info!(target: "pi::job", job = self.id, "follows");
-        self.table.update(self.id, self.run, |i| i.follows = true);
+        let mut inner = self.table.lock();
+        let Some(at) = inner.mine(self.id, self.run) else {
+            return;
+        };
+        let item = &mut inner.items[at];
+        item.follows = true;
+        let (root, told) = (item.root.clone(), item.told.clone());
+        if let Some(to) = told {
+            for (_, q) in inner.standing.iter().filter(|(at, _)| *at == root) {
+                let _ = to.send(Told::Question {
+                    id: q.id,
+                    asked: q.asked(),
+                });
+            }
+        }
+        drop(inner);
+        self.table.changed.notify_one();
     }
 
     fn rerun(&self, how: Rerun) {
@@ -1057,7 +1185,7 @@ mod tests {
         job.result("connected".into());
         job.input("why did the tests fail".into());
         assert!(matches!(table.take_back(&root), Some((_, Back::Result(_)))));
-        let Some((id, Back::Input { text, note })) = table.take_back(&root) else {
+        let Some((id, Back::Input { text, note, .. })) = table.take_back(&root) else {
             panic!("the input comes next")
         };
         assert_eq!((id, text.as_str()), (job.id(), "why did the tests fail"));
@@ -1082,7 +1210,7 @@ mod tests {
         while let Some((_, back)) = table.take_back(&root) {
             last = Some(back);
         }
-        let Some(Back::Input { text, note }) = last else {
+        let Some(Back::Input { text, note, .. }) = last else {
             panic!("an input")
         };
         assert_eq!(text, format!("line {}", MAX_WAITING - 1));
@@ -1123,26 +1251,50 @@ mod tests {
         ));
         job.notice("judged".into());
         job.end();
-        assert!(table.take_questions(Path::new("/elsewhere")).is_empty());
-        let taken = table.take_questions(Path::new("/checkout"));
-        assert_eq!(taken.len(), 1);
-        assert_eq!(taken[0].text, "a long one?");
-        assert_eq!(taken[0].options, ["/compact", "go on"]);
+        assert!(table.questions(Path::new("/elsewhere")).is_empty());
+        let up = table.questions(Path::new("/checkout"));
+        assert_eq!(up.len(), 1);
+        assert_eq!(up[0].text, "a long one?");
+        assert_eq!(up[0].options, ["/compact", "go on"]);
         assert!(
-            matches!(&taken[0].from, Asker::Job { name, .. } if name.starts_with("judge #")),
+            matches!(&up[0].from, Asker::Job { name, .. } if name.starts_with("judge #")),
             "{:?}",
-            taken[0].from
+            up[0].from
         );
-        assert!(table.take_questions(Path::new("/checkout")).is_empty());
         assert_eq!(table.take_notices(Path::new("/checkout")), ["judged"]);
         assert!(
             table.jobs(Path::new("/checkout")).is_empty(),
             "spent, so gone"
         );
-        assert!(
-            table.take_withdrawn().is_empty(),
+        assert_eq!(
+            table.questions(Path::new("/checkout")),
+            up,
             "ending is not withdrawing"
         );
+    }
+
+    // One asker, one question: asking again replaces it where it stood, so
+    // the front stays in front; one an asker waits on is never replaced.
+    #[tokio::test]
+    async fn asking_again_replaces_unless_the_asker_waits() {
+        let table = Arc::new(Table::default());
+        let jobs = Jobs::new(table.clone());
+        let root = PathBuf::from("/checkout");
+        let job = start(&table, &root, "judge");
+        job.choose(asked("first?", &["/new"], false));
+        jobs.ask(root.clone(), "choose", asked("which?", &["a"], false))
+            .unwrap();
+        job.choose(asked("second?", &["/new"], false));
+        let texts = |table: &Table| -> Vec<String> {
+            (table.questions(&root).into_iter())
+                .map(|q| q.text)
+                .collect()
+        };
+        assert_eq!(texts(&table), ["second?", "which?"]);
+        let _waits = (0..2)
+            .map(|_| jobs.ask(root.clone(), "guard", asked("allow?", &["yes"], true)))
+            .collect::<Vec<_>>();
+        assert_eq!(texts(&table), ["second?", "which?", "allow?", "allow?"]);
     }
 
     #[tokio::test]
@@ -1150,10 +1302,9 @@ mod tests {
         let table = Arc::new(Table::default());
         let job = start(&table, Path::new("/checkout"), "judge");
         job.choose(asked("new?", &["/new"], false));
-        let taken = table.take_questions(Path::new("/checkout"));
+        assert_eq!(table.questions(Path::new("/checkout")).len(), 1);
         table.stop(Path::new("/checkout"), job.id()).unwrap();
-        assert_eq!(table.take_withdrawn(), [taken[0].id]);
-        assert!(table.take_withdrawn().is_empty());
+        assert!(table.questions(Path::new("/checkout")).is_empty());
     }
 
     // A call in its turn asks: the answer reaches it, once; an asker that
@@ -1178,28 +1329,96 @@ mod tests {
             fire.is_none(),
             "one that goes out as typed waits on nothing"
         );
-        let taken = table.take_questions(&root);
-        assert_eq!(taken.len(), 2);
-        assert!(taken[0].back && !taken[1].back);
+        let up = table.questions(&root);
+        assert_eq!(up.len(), 2);
+        assert!(up[0].back && !up[1].back);
         assert_eq!(
-            taken[0].from,
+            up[0].from,
             Asker::Tool {
                 name: "guard".into()
             }
         );
-        assert_ne!(taken[0].id, taken[1].id);
-        table.answer(taken[0].id, Some("deny".into()));
+        assert_ne!(up[0].id, up[1].id);
+        table.answer(up[0].id, Some("deny".into()));
         assert_eq!(answer.try_recv(), Ok(Some("deny".into())));
-        table.answer(taken[0].id, Some("allow".into()));
+        table.answer(up[0].id, Some("allow".into()));
+        table.answer(up[1].id, None);
+        assert!(table.questions(&root).is_empty(), "answered, so down");
 
         let gone = jobs.ask(root.clone(), "guard", asked("again?", &["yes"], true));
         drop(gone);
-        let left = table.take_questions(&root);
-        assert!(left.is_empty(), "withdrawn before it was ever shown");
-        assert_eq!(table.take_withdrawn().len(), 1);
+        assert!(
+            table.questions(&root).is_empty(),
+            "withdrawn before it was ever shown"
+        );
         assert!(
             jobs.ask(root, "guard", asked("?", &[], true)).is_err(),
             "one that cannot be put says why"
+        );
+    }
+
+    // A job that follows is told each question up on its checkout — even one
+    // up before it followed — and when it comes down; its pick goes out as
+    // typed, while writing instead lets every question that does not wait lapse.
+    #[tokio::test]
+    async fn a_follower_hears_each_question_and_answers_it() {
+        let table = Arc::new(Table::default());
+        let jobs = Jobs::new(table.clone());
+        let root = PathBuf::from("/checkout");
+        jobs.ask(
+            root.clone(),
+            "choose",
+            asked("which?", &["/compact", "go on"], false),
+        )
+        .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let bridge = JobSink::start(
+            &jobs,
+            root.clone(),
+            "telegram".into(),
+            CancellationToken::new(),
+            Some(tx),
+        );
+        bridge.follow();
+        let first = table.questions(&root)[0].id;
+        assert!(matches!(rx.try_recv(), Ok(Told::Question { id, .. }) if id == first));
+
+        bridge.answer(first, vec![5]);
+        bridge.answer(first, vec![0, 1]);
+        bridge.answer(first, vec![0, 0]);
+        assert_eq!(table.questions(&root).len(), 1, "no such pick, still up");
+        bridge.answer(first, vec![0]);
+        assert_eq!(rx.try_recv(), Ok(Told::Closed(first)));
+        let Some((_, Back::Input { text, as_typed, .. })) = table.take_back(&root) else {
+            panic!("the pick went nowhere");
+        };
+        assert_eq!((text.as_str(), as_typed), ("/compact", true));
+        bridge.answer(first, vec![1]);
+        assert!(table.take_back(&root).is_none(), "answered once");
+
+        let mut waits = jobs
+            .ask(root.clone(), "guard", asked("allow?", &["yes", "no"], true))
+            .unwrap()
+            .expect("it waits");
+        jobs.ask(root.clone(), "choose", asked("next?", &["a"], false))
+            .unwrap();
+        let up = table.questions(&root);
+        for q in &up {
+            assert!(matches!(rx.try_recv(), Ok(Told::Question { id, .. }) if id == q.id));
+        }
+        bridge.input("neither".into());
+        assert_eq!(rx.try_recv(), Ok(Told::Closed(up[1].id)), "it lapsed");
+        assert_eq!(table.questions(&root).len(), 1, "one that waits stays");
+        bridge.answer(up[0].id, vec![1]);
+        assert_eq!(waits.try_recv(), Ok(Some("no".into())));
+        assert_eq!(rx.try_recv(), Ok(Told::Closed(up[0].id)));
+        let Some((_, Back::Input { text, as_typed, .. })) = table.take_back(&root) else {
+            panic!("their words went nowhere");
+        };
+        assert_eq!((text.as_str(), as_typed), ("neither", false));
+        assert!(
+            table.take_back(&root).is_none(),
+            "a pick that goes back is not typed"
         );
     }
 

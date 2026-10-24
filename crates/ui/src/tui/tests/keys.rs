@@ -438,11 +438,14 @@ async fn the_esc_that_closed_a_command_page_is_not_half_a_rewind() {
     }
 }
 
-// A question `choose` put is answered in a press or two: the highlighted
-// option or a numbered one goes as if typed; `q` or esc closes it.
+// A question's options are the list over the line: enter sends the
+// highlighted one as if typed, typing narrows them by words or number, words
+// matching none are the answer, esc closes it, tab takes one onto the line.
 #[tokio::test]
-async fn a_question_is_answered_by_its_options_or_closed() {
+async fn a_question_is_answered_from_the_list_over_the_line() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use pi_core::core::question::{Asker, Question};
+    use pi_store::keys::Mode;
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     let token = tui.core.lanes[0].token();
@@ -453,273 +456,163 @@ async fn a_question_is_answered_by_its_options_or_closed() {
         let options = ["/compact".to_string(), "fix parse.rs".to_string()];
         let mut q = Question::new(from, "tests failed, now what?", &options, false).unwrap();
         q.id = id;
-        view_at(&mut tui.views, token).ask(q);
+        tui.ui.sync_questions(vec![q]);
     };
     let press = |tui: &mut crate::tui::Tui, event| {
         let lane = tui.core.lane();
         tui.ui
             .key(lane, view_at(&mut tui.views, token), event, false)
     };
-    let waiting = |tui: &mut crate::tui::Tui| view_at(&mut tui.views, token).questions.len();
-    let shown = |tui: &mut crate::tui::Tui| -> Vec<String> {
-        let view = view_at(&mut tui.views, token);
-        let question = view.questions.front().expect("a question up").clone();
-        (tui.ui
-            .question_lines(
-                &question,
-                &view.checked,
-                !view.writing && tui.ui.line_bare(),
-                80,
-            )
-            .iter())
-        .map(|r| r.spans.iter().map(|s| s.content.as_ref()).collect())
-        .collect()
-    };
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let key = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+    let ctrl =
+        |c| crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+    let listed = |tui: &mut crate::tui::Tui| -> Vec<String> {
+        tui.ui.menu().iter().map(|e| e.show().to_string()).collect()
+    };
+    let answered = |tui: &mut crate::tui::Tui| std::mem::take(&mut tui.ui.answered);
 
     call(&mut tui, 2);
     assert_eq!(
-        shown(&mut tui),
-        [
-            "? choose · tests failed, now what? · j/k move · enter send · i write · q close",
-            "  1 /compact",
-            "  2 fix parse.rs"
-        ]
+        listed(&mut tui),
+        ["2 fix parse.rs", "1 /compact"],
+        "the first nearest the line"
     );
-
-    press(&mut tui, typed('j'));
-    let asked = press(&mut tui, key(KeyCode::Enter));
-    // Read as the line is: this surface knows no commands, so it is a prompt.
+    let lane = tui.core.lane();
+    tui.ui.flush(lane, view_at(&mut tui.views, token));
     assert!(
-        matches!(&asked, Asked::Core(Intent::Prompt(p)) if p == "fix parse.rs"),
+        tui.ui.regions.menu.height >= 3,
+        "its head over its two options"
+    );
+    let head: String = (tui.ui.question_head(&tui.ui.questions[0]).spans.iter())
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert_eq!(
+        head,
+        "? choose · tests failed, now what? · down/up move · tab take · enter send · esc close"
+    );
+    let asked = press(&mut tui, key(KeyCode::Enter));
+    // Read as the line is: a command word runs as one.
+    assert!(
+        matches!(&asked, Asked::Core(Intent::Other { word, .. }) if word == "/compact"),
         "{asked:?}"
     );
     assert_eq!(
         tui.ui.took_submit().as_deref(),
-        Some("fix parse.rs"),
+        Some("/compact"),
         "sent as typed"
     );
-    assert_eq!(waiting(&mut tui), 0);
+    assert!(tui.ui.questions.is_empty());
+    assert_eq!(answered(&mut tui), [2], "pi is told to take it down");
 
     call(&mut tui, 3);
-    assert!(matches!(
-        press(&mut tui, typed('9')),
-        Asked::Own(Deed::Nothing)
-    ));
-    assert_eq!(waiting(&mut tui), 1, "no ninth option, nothing picked");
-    press(&mut tui, typed('1'));
-    assert_eq!(tui.ui.took_submit().as_deref(), Some("/compact"));
-    assert!(tui.ui.editor.is_empty(), "the digit never reached the line");
+    press(&mut tui, ctrl('k'));
+    press(&mut tui, key(KeyCode::Enter));
+    assert_eq!(tui.ui.took_submit().as_deref(), Some("fix parse.rs"));
+    assert_eq!(answered(&mut tui), [3]);
 
-    call(&mut tui, 4);
+    for (typing, sent) in [
+        ("PARSE", "fix parse.rs"),
+        ("1", "/compact"),
+        ("no, stop", "no, stop"),
+    ] {
+        call(&mut tui, 4);
+        for c in typing.chars() {
+            press(&mut tui, typed(c));
+        }
+        press(&mut tui, key(KeyCode::Enter));
+        assert_eq!(tui.ui.took_submit().as_deref(), Some(sent), "`{typing}`");
+        assert!(tui.ui.editor.is_empty(), "`{typing}` went with it");
+        assert_eq!(answered(&mut tui), [4], "`{typing}` answers it");
+    }
+
+    call(&mut tui, 5);
     assert!(matches!(
         press(&mut tui, key(KeyCode::Esc)),
         Asked::Own(Deed::Nothing)
     ));
-    assert_eq!(waiting(&mut tui), 0);
+    assert!(tui.ui.questions.is_empty(), "closed");
     assert!(tui.ui.took_submit().is_none());
+    assert_eq!(answered(&mut tui), [5]);
 
-    // A stray key neither closes it nor types under it; `q` closes it.
-    call(&mut tui, 5);
-    for stray in ['x', 'y', ' '] {
-        assert!(matches!(
-            press(&mut tui, typed(stray)),
-            Asked::Own(Deed::Nothing)
-        ));
-    }
-    assert!(tui.ui.editor.is_empty(), "nothing typed under it");
-    assert_eq!(waiting(&mut tui), 1, "and still up");
-    press(&mut tui, typed('q'));
-    assert_eq!(waiting(&mut tui), 0);
-    assert!(tui.ui.took_submit().is_none());
-
-    // `i` hands the line back: their own words sent close the question, and
-    // a line emptied again returns to it. The caret says which has the keys.
-    call(&mut tui, 7);
-    let drawn = |tui: &mut crate::tui::Tui| {
-        let lane = tui.core.lane();
-        tui.ui.flush(lane, view_at(&mut tui.views, token));
-        tui.ui.question_holds
-    };
-    assert!(drawn(&mut tui), "the question holds the keyboard");
-    press(&mut tui, typed('i'));
-    assert!(!drawn(&mut tui), "the line has it back");
-    assert!(
-        !shown(&mut tui)[0].contains("send"),
-        "no keys offered while writing"
-    );
-    press(&mut tui, typed('o'));
-    press(&mut tui, key(KeyCode::Backspace));
-    assert!(
-        tui.ui.asking(view_at(&mut tui.views, token)),
-        "back at the question"
-    );
-    press(&mut tui, typed('i'));
-    for c in "no".chars() {
-        press(&mut tui, typed(c));
-    }
-    assert_eq!(tui.ui.editor.text(), "no", "letters type while writing");
-    let asked = press(&mut tui, key(KeyCode::Enter));
-    assert!(
-        matches!(&asked, Asked::Core(Intent::Prompt(p)) if p == "no"),
-        "{asked:?}"
-    );
-    assert_eq!(waiting(&mut tui), 0, "their own answer closes it");
-    tui.ui.took_submit();
-
-    tui.ui.editor.insert_str("x");
+    // Tab takes one onto the line, to send as it is or changed.
     call(&mut tui, 6);
-    press(&mut tui, typed('1'));
-    assert_eq!(
-        tui.ui.editor.text(),
-        "x1",
-        "a line being typed keeps its digit"
-    );
-    assert!(
-        !shown(&mut tui)[0].contains("send"),
-        "no keys offered that would type"
-    );
+    press(&mut tui, ctrl('k'));
+    press(&mut tui, key(KeyCode::Tab));
+    assert_eq!(tui.ui.editor.text(), "fix parse.rs");
+    assert_eq!(tui.ui.questions.len(), 1, "still up");
 
-    // One asker, one question: asking again replaces; a withdrawn one goes.
-    let job = |text: &str| {
-        let from = Asker::Job {
-            id: 3,
-            name: "judge #3".into(),
-        };
-        let mut q = Question::new(from, text, &["/new".into()], false).unwrap();
-        q.id = 7;
-        q
-    };
-    let view = view_at(&mut tui.views, token);
-    view.ask(job("first?"));
-    view.ask(job("second?"));
-    assert_eq!(view.questions.len(), 2, "the script's and the job's");
-    assert_eq!(view.questions[1].text, "second?", "replaced where it stood");
-    assert_eq!(
-        view.questions[0].from,
-        Asker::Tool {
-            name: "choose".into()
-        },
-        "the front stays in front"
-    );
-    view.withdraw(7);
-    assert_eq!(view.questions.len(), 1);
-    assert_eq!(
-        view.questions[0].from,
-        Asker::Tool {
-            name: "choose".into()
-        }
-    );
-
-    // Asked again with fewer options, the highlight starts over.
-    view.questions.clear();
-    let three = Question::new(
-        Asker::Tool {
-            name: "choose".into(),
-        },
-        "which?",
-        &["a".into(), "b".into(), "c".into()],
-        false,
-    );
-    view.ask(three.unwrap());
-    view.picked = 2;
-    view.ask(
-        Question::new(
-            Asker::Tool {
-                name: "choose".into(),
-            },
-            "which?",
-            &["a".into()],
-            false,
-        )
-        .unwrap(),
-    );
-    assert_eq!(view.picked, 0);
+    // In Normal the bare letters move it and `q` closes it.
+    tui.ui.editor.clear();
+    tui.ui.vim = Some(Mode::Normal);
+    press(&mut tui, typed('k'));
+    press(&mut tui, typed('j'));
+    press(&mut tui, typed('k'));
+    press(&mut tui, key(KeyCode::Enter));
+    assert_eq!(tui.ui.took_submit().as_deref(), Some("fix parse.rs"));
+    call(&mut tui, 7);
+    press(&mut tui, typed('q'));
+    assert!(tui.ui.questions.is_empty());
+    assert!(tui.ui.took_submit().is_none());
 }
 
-// Where several may be picked, picks are gathered and sent together as one
-// prompt, a line each; with none gathered, enter sends the highlighted one.
+// Where several may be picked, tab marks and enter sends the marked ones
+// together as one prompt, a line each; with none marked, the highlighted one.
 #[tokio::test]
 async fn several_picks_go_together_as_one_prompt() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use pi_core::core::question::{Asker, Question};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     let token = tui.core.lanes[0].token();
-    let call = |tui: &mut crate::tui::Tui, id: u64, options: &[&str]| {
+    let call = |tui: &mut crate::tui::Tui, id: u64| {
         let from = Asker::Tool {
             name: "choose".into(),
         };
-        let options: Vec<String> = options.iter().map(|o| o.to_string()).collect();
+        let options = ["fix parse.rs", "add tests", "update docs"].map(String::from);
         let mut q = Question::new(from, "which first?", &options, true).unwrap();
         q.id = id;
-        view_at(&mut tui.views, token).ask(q);
+        tui.ui.sync_questions(vec![q]);
     };
     let press = |tui: &mut crate::tui::Tui, event| {
         let lane = tui.core.lane();
         tui.ui
             .key(lane, view_at(&mut tui.views, token), event, false)
     };
-    let shown = |tui: &mut crate::tui::Tui| -> Vec<String> {
-        let view = view_at(&mut tui.views, token);
-        let question = view.questions.front().expect("a question up").clone();
-        (tui.ui
-            .question_lines(
-                &question,
-                &view.checked,
-                !view.writing && tui.ui.line_bare(),
-                80,
-            )
-            .iter())
-        .map(|r| r.spans.iter().map(|s| s.content.as_ref()).collect())
-        .collect()
-    };
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    let enter = || crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let key = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
 
-    call(&mut tui, 1, &["fix parse.rs", "add tests", "update docs"]);
-    press(&mut tui, typed(' '));
-    press(&mut tui, typed('3'));
+    call(&mut tui, 1);
+    press(&mut tui, key(KeyCode::Tab));
+    press(&mut tui, key(KeyCode::Up));
+    press(&mut tui, key(KeyCode::Up));
+    press(&mut tui, key(KeyCode::Tab));
+    let listed: Vec<String> = tui.ui.menu().iter().map(|e| e.show().to_string()).collect();
     assert_eq!(
-        shown(&mut tui),
-        [
-            "? choose · which first? · j/k move · space mark · enter send · i write · q close",
-            "  1 [x] fix parse.rs",
-            "  2 [ ] add tests",
-            "  3 [x] update docs",
-        ]
+        listed,
+        ["3 [x] update docs", "2 [ ] add tests", "1 [x] fix parse.rs"]
     );
-    assert!(
-        tui.ui.took_submit().is_none(),
-        "a digit gathers, it does not send"
-    );
-    let asked = press(&mut tui, enter());
+    assert!(tui.ui.took_submit().is_none(), "a mark does not send");
+    let asked = press(&mut tui, key(KeyCode::Enter));
     assert!(
         matches!(&asked, Asked::Core(Intent::Prompt(p)) if p == "fix parse.rs\nupdate docs"),
         "{asked:?}"
     );
+    assert!(tui.ui.list.marked.is_empty(), "the marks went with it");
 
-    call(&mut tui, 2, &["fix parse.rs", "add tests"]);
-    press(&mut tui, typed(' '));
-    press(&mut tui, typed(' '));
-    assert!(
-        view_at(&mut tui.views, token).checked.is_empty(),
-        "space twice is out again"
-    );
-    press(
-        &mut tui,
-        crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
-    );
-    press(&mut tui, enter());
+    call(&mut tui, 2);
+    press(&mut tui, key(KeyCode::Tab));
+    press(&mut tui, key(KeyCode::Tab));
+    assert!(tui.ui.list.marked.is_empty(), "tab twice is out again");
+    press(&mut tui, key(KeyCode::Up));
+    press(&mut tui, key(KeyCode::Enter));
     assert_eq!(
         tui.ui.took_submit().as_deref(),
         Some("add tests"),
-        "none gathered: the highlighted"
+        "none marked: the highlighted"
     );
 }
 
 // A question its asker waits on is answered back, never sent: the pick, the
-// person's own words, or none when closed; and it is never replaced.
+// person's own words, or none when closed.
 #[tokio::test]
 async fn an_answer_goes_back_to_an_asker_that_waits() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -748,20 +641,16 @@ async fn an_answer_goes_back_to_an_asker_that_waits() {
     };
     let key = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
 
-    let view = view_at(&mut tui.views, token);
-    view.ask(waits(1));
-    view.ask(waits(2));
-    assert_eq!(view.questions.len(), 2, "one that waits is never replaced");
-
-    press(&mut tui, typed('j'));
+    tui.ui.sync_questions(vec![waits(1), waits(2), waits(3)]);
+    press(&mut tui, key(KeyCode::Up));
     let asked = press(&mut tui, key(KeyCode::Enter));
     assert!(
         matches!(&asked, Asked::Own(d) if *d == Deed::Answer { question: 1, picked: Some("deny".into()) }),
         "{asked:?}"
     );
     assert!(tui.ui.took_submit().is_none(), "nothing went out as typed");
+    assert!(tui.ui.answered.is_empty(), "the deed takes it down");
 
-    press(&mut tui, typed('i'));
     for c in "only build/".chars() {
         press(&mut tui, typed(c));
     }
@@ -775,14 +664,9 @@ async fn an_answer_goes_back_to_an_asker_that_waits() {
         "their words went back, not out"
     );
 
-    let view = view_at(&mut tui.views, token);
-    view.ask(waits(3));
-    view.ask(waits(4));
-    view.withdraw(3);
-    assert_eq!(view.questions.len(), 1);
-    let asked = press(&mut tui, typed('q'));
+    let asked = press(&mut tui, key(KeyCode::Esc));
     assert!(
-        matches!(&asked, Asked::Own(d) if *d == Deed::Answer { question: 4, picked: None }),
+        matches!(&asked, Asked::Own(d) if *d == Deed::Answer { question: 3, picked: None }),
         "{asked:?}"
     );
 }

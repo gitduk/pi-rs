@@ -2,7 +2,6 @@
 //! settled rows, the stream still writing them, the queue of what arrived while
 //! nobody was looking, and the map from a lane's token to its screen.
 
-use std::collections::{BTreeSet, VecDeque};
 use std::time::Instant;
 
 use agent::session::EntryId;
@@ -14,7 +13,6 @@ use crate::render::Paint;
 use pi_core::core::Core;
 use pi_core::core::lane::Lane;
 use pi_core::core::meter::Snapshot;
-use pi_core::core::question::Question;
 use pi_core::core::resolve::Resolved;
 use pi_core::driver::Origin;
 use pi_core::input::Intent;
@@ -40,14 +38,6 @@ pub struct View {
     // The half-typed line parked when the surface last left this lane,
     // waiting in the view to come back to the editor with it.
     pub(super) draft: String,
-    // Questions put to the user here, the front one shown and answered first.
-    pub(super) questions: VecDeque<Question>,
-    // The front question's highlighted option.
-    pub(super) picked: usize,
-    // The front question's options picked so far, where several may be.
-    pub(super) checked: BTreeSet<usize>,
-    // The front question set aside while the user writes their own answer.
-    pub(super) writing: bool,
 }
 
 // What the screen shows: the settled rows, the stream still completing them,
@@ -204,57 +194,6 @@ pub(super) fn opened<'a>(views: &'a mut Views, lane: &Lane, paint: &Paint) -> &'
 }
 
 impl View {
-    // Asking again is a change of mind: only an asker's latest stands, and
-    // where its last one stood, so the question in front stays in front.
-    // One an asker waits on is never replaced: it would wait for good.
-    pub(super) fn ask(&mut self, question: Question) {
-        self.change_questions(|qs| {
-            let stale =
-                (qs.iter_mut()).find(|q| q.from == question.from && !q.back && !question.back);
-            match stale {
-                Some(q) => *q = question,
-                None => qs.push_back(question),
-            }
-        });
-    }
-
-    // A question whose asker is gone no longer stands.
-    pub(super) fn withdraw(&mut self, question: u64) {
-        self.change_questions(|qs| qs.retain(|q| q.id != question));
-    }
-
-    // The front question taken off, and the options at `picks`, if any were
-    // picked, as one line each.
-    pub(super) fn answer(&mut self, picks: &[usize]) -> Option<(Question, Option<String>)> {
-        let mut taken = None;
-        self.change_questions(|qs| taken = qs.pop_front());
-        let question = taken?;
-        let lines: Vec<&str> = (picks.iter())
-            .filter_map(|&at| question.options.get(at).map(String::as_str))
-            .collect();
-        let line = (!lines.is_empty()).then(|| lines.join("\n"));
-        Some((question, line))
-    }
-
-    // Where several may be picked, the option at `at` in or out.
-    pub(super) fn toggle(&mut self, at: usize) {
-        if !self.checked.remove(&at) {
-            self.checked.insert(at);
-        }
-    }
-
-    // The highlight belongs to the front question: a new front, even from
-    // the same asker, starts at the top.
-    fn change_questions(&mut self, change: impl FnOnce(&mut VecDeque<Question>)) {
-        let front = self.questions.front().cloned();
-        change(&mut self.questions);
-        if self.questions.front() != front.as_ref() {
-            self.picked = 0;
-            self.checked.clear();
-            self.writing = false;
-        }
-    }
-
     /// A lane nobody has said anything in yet: the banner naming what it
     /// stands on, and everything else empty.
     pub fn opening(resolved: &Resolved, paint: &Paint) -> Self {

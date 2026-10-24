@@ -50,6 +50,8 @@ mod bridge {
     //! `input` (or `interrupt` for `/stop`). Once connected it follows, so every
     //! turn on the checkout comes back as `started`, then one `reply`, cut into
     //! messages and sent on to the phone — not only the ones the phone opened.
+    //! Each question put there goes too, its options numbered; a reply of
+    //! numbers only goes up as the `answer` to the latest one shown.
 
     use std::os::fd::FromRawFd;
     use std::path::PathBuf;
@@ -128,6 +130,88 @@ mod bridge {
         }
     }
 
+    // The questions up on the checkout, as the phone was shown them. Never
+    // held across an await.
+    #[derive(Default)]
+    struct Asking(Mutex<Vec<Up>>);
+
+    impl Asking {
+        fn lock(&self) -> MutexGuard<'_, Vec<Up>> {
+            self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct Up {
+        id: u64,
+        text: String,
+        options: Vec<String>,
+        multiple: bool,
+        // Sent: one asked while a turn runs waits for that turn's reply,
+        // which it follows on from.
+        shown: bool,
+    }
+
+    impl Up {
+        // `{"question": {...}}` as pi tells it.
+        fn of(told: &Value) -> Option<Self> {
+            let q = told.get("question")?;
+            let options = (q.get("options")?.as_array()?.iter())
+                .map(|o| o.as_str().map(str::to_string))
+                .collect::<Option<_>>()?;
+            Some(Self {
+                id: q.get("id")?.as_u64()?,
+                text: q.get("text")?.as_str()?.to_string(),
+                options,
+                multiple: q.get("multiple").and_then(Value::as_bool) == Some(true),
+                shown: false,
+            })
+        }
+
+        fn shown(&self) -> String {
+            let options = (self.options.iter().enumerate())
+                .map(|(i, o)| format!("{}. {o}", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let how = match self.multiple {
+                true => "reply with their numbers, such as 1 3",
+                false => "reply with its number",
+            };
+            format!("? {}\n\n{options}\n\n({how})", self.text)
+        }
+    }
+
+    // A line of option numbers only answers the latest question shown, by
+    // place; anything else is the person's own words.
+    fn picks_of(asking: &Asking, line: &str) -> Option<(u64, Vec<usize>)> {
+        let up = asking.lock();
+        let q = up.iter().rev().find(|q| q.shown)?;
+        let picks = (line.split(|c: char| c.is_whitespace() || ",，、".contains(c)))
+            .filter(|w| !w.is_empty())
+            .map(|w| {
+                (w.parse::<usize>().ok())
+                    .filter(|n| (1..=q.options.len()).contains(n))
+                    .map(|n| n - 1)
+            })
+            .collect::<Option<std::collections::BTreeSet<_>>>()?;
+        let picks: Vec<usize> = picks.into_iter().collect();
+        (!picks.is_empty() && (q.multiple || picks.len() == 1)).then_some((q.id, picks))
+    }
+
+    // Questions not yet shown go out, after whatever went before them.
+    async fn show_held(client: &Client, to: &Target, asking: &Asking, pi: &Pi) {
+        let held: Vec<Up> = (asking.lock().iter())
+            .filter(|q| !q.shown)
+            .cloned()
+            .collect();
+        for q in held {
+            send(client, to, pi, &q.shown()).await;
+            if let Some(up) = asking.lock().iter_mut().find(|u| u.id == q.id) {
+                up.shown = true;
+            }
+        }
+    }
+
     // pi's end of fd 3, written by one task so a plain callback can say things.
     #[derive(Clone)]
     struct Pi(mpsc::UnboundedSender<Value>);
@@ -196,9 +280,10 @@ mod bridge {
         }
         pi.say(json!({ "status": "connected" }));
         pi.say(json!({ "follow": true }));
+        let asking = Asking::default();
         tokio::select! {
-            r = poll(&client, &kept, &pi) => r,
-            () = answer(&client, &kept, &pi, read) => Ok(()),
+            r = poll(&client, &kept, &asking, &pi) => r,
+            () = answer(&client, &kept, &asking, &pi, read) => Ok(()),
         }
     }
 
@@ -242,7 +327,7 @@ mod bridge {
 
     // Client-side timeouts are the normal empty result; real errors back off
     // (the reference's 2s/30s rhythm); a stale token ends the job.
-    async fn poll(client: &Client, kept: &Kept, pi: &Pi) -> Result<(), String> {
+    async fn poll(client: &Client, kept: &Kept, asking: &Asking, pi: &Pi) -> Result<(), String> {
         let mut failures = 0u32;
         let mut timeout = crate::client::LONG_POLL_TIMEOUT;
         loop {
@@ -267,7 +352,13 @@ mod bridge {
                     if let Some(t) = update.longpolling_timeout_ms.filter(|t| *t > 0) {
                         timeout = Duration::from_millis(t);
                     }
-                    heard(kept, pi, update);
+                    let had = kept.target().is_some();
+                    heard(kept, asking, pi, update);
+                    // Someone to send to at last: what was asked before shows
+                    // now, since the turn it waits on may never end to bring it.
+                    if let Some(to) = kept.target().filter(|_| !had) {
+                        show_held(client, &to, asking, pi).await;
+                    }
                     continue;
                 }
                 Err(e) => format!("{e:#}"),
@@ -282,9 +373,10 @@ mod bridge {
         }
     }
 
-    // Lines go up as input, `/stop` as an interrupt; the reply address moves to
-    // whoever spoke last. Saved only when something changed.
-    fn heard(kept: &Kept, pi: &Pi, update: Update) {
+    // Lines go up as input, or as an answer when they only pick options;
+    // `/stop` as an interrupt. The reply address moves to whoever spoke
+    // last. Saved only when something changed.
+    fn heard(kept: &Kept, asking: &Asking, pi: &Pi, update: Update) {
         let mut s = kept.lock();
         let before = s.clone();
         if !update.get_updates_buf.is_empty() {
@@ -308,7 +400,10 @@ mod bridge {
             if let Some(token) = &msg.context_token {
                 s.context_token = Some(token.clone());
             }
-            pi.say(json!({ "input": text }));
+            match picks_of(asking, text.trim()) {
+                Some((id, picks)) => pi.say(json!({ "answer": id, "picks": picks })),
+                None => pi.say(json!({ "input": text })),
+            }
         }
         if *s != before {
             kept.save(&s);
@@ -326,23 +421,39 @@ mod bridge {
         }
     }
 
-    // Typing while a turn the phone opened runs, then its answer, in order.
-    // Ends when pi does: there is nobody left to bridge to.
-    async fn answer(client: &Client, kept: &Kept, pi: &Pi, read: OwnedReadHalf) {
+    // Typing while a turn the phone opened runs, then its answer, then the
+    // questions it left up, in order. Ends when pi does: there is nobody
+    // left to bridge to.
+    async fn answer(client: &Client, kept: &Kept, asking: &Asking, pi: &Pi, read: OwnedReadHalf) {
         let mut lines = BufReader::new(read).lines();
         let mut tickets = Tickets::default();
+        let mut running = false;
         while let Ok(Some(line)) = lines.next_line().await {
             let Ok(told) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
+            // Kept even with no one to send to yet: it shows once there is.
+            let mut shows = false;
+            if let Some(up) = Up::of(&told) {
+                asking.lock().push(up);
+                shows = !running;
+            } else if let Some(id) = told.get("closed").and_then(Value::as_u64) {
+                asking.lock().retain(|q| q.id != id);
+            }
             let Some(to) = kept.target() else {
                 continue;
             };
             if told.get("started").and_then(Value::as_bool) == Some(true) {
+                running = true;
                 tickets.typing(client, &to, true).await;
             } else if let Some(reply) = told.get("reply").and_then(Value::as_str) {
+                running = false;
                 tickets.typing(client, &to, false).await;
                 send(client, &to, pi, reply).await;
+                shows = true;
+            }
+            if shows {
+                show_held(client, &to, asking, pi).await;
             }
         }
     }
@@ -444,7 +555,8 @@ mod bridge {
         }
 
         fn update(msgs: Value, buf: &str) -> Update {
-            serde_json::from_value(json!({ "ret": 0, "msgs": msgs, "get_updates_buf": buf })).unwrap()
+            serde_json::from_value(json!({ "ret": 0, "msgs": msgs, "get_updates_buf": buf }))
+                .unwrap()
         }
 
         fn kept() -> (tempfile::TempDir, Kept) {
@@ -476,6 +588,7 @@ mod bridge {
             let (tx, mut rx) = mpsc::unbounded_channel();
             heard(
                 &kept,
+                &Asking::default(),
                 &Pi(tx),
                 update(
                     json!([msg("why did it fail", Some("c1")), msg("/stop", None)]),
@@ -498,12 +611,35 @@ mod bridge {
             );
         }
 
+        // Numbers only answer the latest question shown; anything else, or
+        // a number with nothing shown, is the person's own words.
+        #[test]
+        fn a_reply_of_numbers_picks_the_latest_questions_options() {
+            let asking = Asking::default();
+            let told = |id: u64, multiple: bool| {
+                json!({ "question": {
+                    "id": id, "text": "which?", "options": ["a", "b", "c"], "multiple": multiple, "back": false,
+                }})
+            };
+            asking.lock().push(Up::of(&told(3, false)).unwrap());
+            assert_eq!(picks_of(&asking, "2"), None, "not shown yet");
+            asking.lock()[0].shown = true;
+            assert_eq!(picks_of(&asking, "2"), Some((3, vec![1])));
+            assert_eq!(picks_of(&asking, "1 3"), None, "only one may be picked");
+            assert_eq!(picks_of(&asking, "4"), None);
+            assert_eq!(picks_of(&asking, "2 please"), None);
+            let mut several = Up::of(&told(4, true)).unwrap();
+            several.shown = true;
+            asking.lock().push(several);
+            assert_eq!(picks_of(&asking, "3，1 3"), Some((4, vec![0, 2])));
+        }
+
         // A poll that changes nothing leaves the file alone.
         #[test]
         fn an_unchanged_poll_writes_nothing() {
             let (_dir, kept) = kept();
             let (tx, _rx) = mpsc::unbounded_channel();
-            heard(&kept, &Pi(tx), update(json!([]), ""));
+            heard(&kept, &Asking::default(), &Pi(tx), update(json!([]), ""));
             assert!(!kept.path.exists());
         }
 
@@ -534,8 +670,8 @@ mod client {
     use serde_json::{Value, json};
 
     use crate::types::{
-        BOT_TYPE, CHANNEL_VERSION, Config, Credentials, ILINK_APP_CLIENT_VERSION, ILINK_APP_ID, QrCode,
-        QrStatus, Update,
+        BOT_TYPE, CHANNEL_VERSION, Config, Credentials, ILINK_APP_CLIENT_VERSION, ILINK_APP_ID,
+        QrCode, QrStatus, Update,
     };
 
     /// How long a long-poll request is allowed to hold before the client treats
@@ -598,7 +734,11 @@ mod client {
 
         /// Long-poll the QR's scan status. A 35s client timeout means "nothing
         /// yet" and reads as `QrStatus::Wait`, never as an error.
-        pub async fn poll_qrcode(&self, qrcode: &str, verify_code: Option<&str>) -> Result<QrStatus> {
+        pub async fn poll_qrcode(
+            &self,
+            qrcode: &str,
+            verify_code: Option<&str>,
+        ) -> Result<QrStatus> {
             // The query rides a hand-built endpoint, so the values are encoded by
             // hand: a typed code with `&` or `#` in it would rewrite the request.
             let mut endpoint = format!("ilink/bot/get_qrcode_status?qrcode={}", urlencode(qrcode));
@@ -618,7 +758,12 @@ mod client {
 
         /// Long-poll for inbound messages. A client-side timeout — the server
         /// held past our 35s without news — is the ordinary empty result.
-        pub async fn get_updates(&self, token: &str, buf: &str, timeout: Duration) -> Result<Update> {
+        pub async fn get_updates(
+            &self,
+            token: &str,
+            buf: &str,
+            timeout: Duration,
+        ) -> Result<Update> {
             let body = json!({
                 "get_updates_buf": buf,
                 "base_info": base_info(),
@@ -662,7 +807,12 @@ mod client {
 
         /// The per-user config, currently just the typing ticket. The adapter
         /// caches it per peer and fetches a new one after a failed typing send.
-        pub async fn get_config(&self, token: &str, user: &str, context_token: &str) -> Result<Config> {
+        pub async fn get_config(
+            &self,
+            token: &str,
+            user: &str,
+            context_token: &str,
+        ) -> Result<Config> {
             let body = json!({
                 "ilink_user_id": user,
                 "context_token": context_token,

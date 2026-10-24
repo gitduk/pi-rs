@@ -73,6 +73,10 @@ pub trait JobHandle: Send + Sync {
     /// A question for the person, each option the line that picks it, the
     /// pick going out as if typed.
     fn choose(&self, asked: Asked);
+    /// The person, through the job, picked `picks` of question `question`'s
+    /// options, by place; none closes it. The pick goes out as if typed, or
+    /// back to an asker that waits.
+    fn answer(&self, question: u64, picks: Vec<usize>);
     /// Stop whatever runs where the job was started, as the user's stop would.
     fn interrupt(&self);
     /// Where the latest of what it prints can be read while it runs.
@@ -100,4 +104,9 @@ pub enum Told {
     /// The person's answer to a question it asked with `back`: the pick, or
     /// none; or, either way, why the question could not be put.
     Answer(Result<Option<String>, String>),
+    /// A question is up on its checkout, for a job that follows to put to
+    /// the person too; it answers by `id`.
+    Question { id: u64, asked: Asked },
+    /// Question `id` no longer stands: answered anywhere, or withdrawn.
+    Closed(u64),
 }

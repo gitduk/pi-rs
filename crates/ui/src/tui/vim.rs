@@ -43,9 +43,7 @@ impl Ui {
     pub(super) fn show_mode(&mut self) {
         // Three states, not two: vim off is not "Insert", and a caret shaped
         // for a mode nobody turned on is a change to somebody else's terminal.
-        // A question holding the keyboard is Normal's state, vim or not.
         let (icon, cursor) = match self.vim {
-            _ if self.question_holds => (&self.paint.theme.prompt.normal, self.normal_cursor),
             Some(Mode::Normal) => (&self.paint.theme.prompt.normal, self.normal_cursor),
             Some(Mode::Insert) => (&self.paint.theme.prompt.icon, self.insert_cursor),
             None => (&self.paint.theme.prompt.icon, Cursor::Default),

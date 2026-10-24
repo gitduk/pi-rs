@@ -1,8 +1,10 @@
 //! The lists a surface opens over the editor — completions, `/model`,
-//! `/rewind`: what they offer and how they read. `keys` drives them.
+//! `/rewind`, a question's options: what they offer and how they read.
+//! `keys` drives them.
 use super::Ui;
 use super::mouse::at_row_name;
 use pi_core::core;
+use pi_core::core::question::Question;
 use pi_core::input::commands::{Candidate, Choice};
 use pi_store::keys::Action;
 use pi_store::session::ResumeChoice;
@@ -10,6 +12,7 @@ use pi_store::session::Store;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::ListItem;
+use std::collections::BTreeSet;
 
 impl Ui {
     // What the line could become: a completion while a command word is typed.
@@ -19,12 +22,8 @@ impl Ui {
         if self.search_typing() {
             return self.search_menu();
         }
-        if self.picked_for.as_deref() != Some(self.editor.text()) {
-            self.picked_for = Some(self.editor.text().to_string());
-            self.picked = None;
-            self.menu_top = 0;
-        }
-        if self.dismissed_at.as_deref() == Some(self.editor.text()) {
+        self.list.follow(self.editor.text());
+        if self.list.dismissed_at.as_deref() == Some(self.editor.text()) {
             return Vec::new();
         }
         // A path token outranks the word completions: the filesystem holds
@@ -67,6 +66,12 @@ impl Ui {
                 })
                 .collect();
         }
+        // A question's options before the words they would complete: one may
+        // be a command, taken onto the line to send.
+        let picks = self.picks();
+        if !picks.is_empty() {
+            return picks;
+        }
         self.lists.catch_up();
         // Bottom-up: the best match belongs on the row right above the input.
         pi_core::input::commands::complete(
@@ -88,12 +93,51 @@ impl Ui {
         .collect()
     }
 
+    // The first question's options the line narrows to — by their words or
+    // their number — all of them on an empty line, the first nearest it.
+    fn picks(&self) -> Vec<MenuEntry> {
+        // Not over a page or a search: Normal's bare letters are theirs.
+        let Some(question) = self.questions.first().filter(|_| !self.reading()) else {
+            return Vec::new();
+        };
+        let typed = self.editor.text().trim().to_lowercase();
+        (question.options.iter().enumerate())
+            .filter(|(at, option)| {
+                typed.is_empty()
+                    || option.to_lowercase().contains(&typed)
+                    || typed == (at + 1).to_string()
+            })
+            .map(|(at, option)| {
+                let mark = match (question.multiple, self.list.marked.contains(&at)) {
+                    (false, _) => "",
+                    (true, true) => "[x] ",
+                    (true, false) => "[ ] ",
+                };
+                MenuEntry::Pick {
+                    at,
+                    show: format!("{} {mark}{option}", at + 1),
+                }
+            })
+            .rev()
+            .collect()
+    }
+
+    // The questions up where the front lane stands. A new first one starts
+    // its list over: nothing marked, the highlight on its first option.
+    pub(super) fn sync_questions(&mut self, questions: Vec<Question>) {
+        if questions.first().map(|q| q.id) != self.questions.first().map(|q| q.id) {
+            self.list.marked.clear();
+            self.list.restart();
+        }
+        self.questions = questions;
+    }
+
     // A command a key starts, on the line for its list to finish: typed into,
     // so Insert. Dismissing the list untouched takes the line back.
     pub(super) fn seed(&mut self, line: &str) {
         self.editor.set_line(line);
-        self.seeded = Some(line.to_string());
-        self.dismissed_at = None;
+        self.list.seeded = Some(line.to_string());
+        self.list.dismissed_at = None;
         self.leave_normal();
     }
 
@@ -103,7 +147,7 @@ impl Ui {
         if menu.is_empty() {
             return None;
         }
-        let at = self.picked.unwrap_or(menu.len() - 1).min(menu.len() - 1);
+        let at = self.list.highlighted(menu.len());
         Some(menu.swap_remove(at))
     }
 
@@ -195,13 +239,8 @@ impl Ui {
     }
 
     pub(super) fn step_menu(&mut self, action: Action) {
-        let n = self.menu().len().saturating_sub(1);
-        let at = self.picked.unwrap_or(n).min(n);
-        self.picked = Some(if action == Action::MenuNext {
-            at.saturating_add(1).min(n)
-        } else {
-            at.saturating_sub(1)
-        });
+        let len = self.menu().len();
+        self.list.step(action == Action::MenuNext, len);
         // A search's list moves the view with it.
         self.search_follow();
     }
@@ -213,6 +252,65 @@ pub(super) enum Path {
     At,
     Home,
     Cd,
+}
+
+// Where the list over the line stands: its highlight and window, kept
+// against the line it grew from, and what was done to it there.
+#[derive(Default)]
+pub(super) struct List {
+    // Which row is highlighted. `None` anchors a fresh list on its bottom
+    // row, and says nobody moved to one.
+    pub(super) picked: Option<usize>,
+    // The first shown row, kept across frames: rebuilt from zero, the window
+    // would pin the highlight to its bottom edge.
+    pub(super) top: usize,
+    // The line `picked` and `top` were set against: both are positions in
+    // the list it grew, so another line starts over.
+    picked_for: Option<String>,
+    // Text the list was dismissed at. Any edit brings the list back —
+    // Esc means "not that", not "never again".
+    pub(super) dismissed_at: Option<String>,
+    // A line a key put there, which dismissing its list takes back untouched.
+    pub(super) seeded: Option<String>,
+    // A question's options marked so far, where several may be.
+    pub(super) marked: BTreeSet<usize>,
+}
+
+impl List {
+    // A fresh list: the highlight back on the bottom row, in sight.
+    pub(super) fn restart(&mut self) {
+        (self.picked, self.top) = (None, 0);
+    }
+
+    // Kept against `line`: another one starts the list over.
+    fn follow(&mut self, line: &str) {
+        if self.picked_for.as_deref() != Some(line) {
+            self.picked_for = Some(line.to_string());
+            self.restart();
+        }
+    }
+
+    // The highlighted row of `len`, clamped: a list can change under the
+    // same line. `len` is never zero.
+    pub(super) fn highlighted(&self, len: usize) -> usize {
+        self.picked.unwrap_or(len - 1).min(len - 1)
+    }
+
+    fn step(&mut self, down: bool, len: usize) {
+        let n = len.saturating_sub(1);
+        let at = self.picked.unwrap_or(n).min(n);
+        self.picked = Some(match down {
+            true => at.saturating_add(1).min(n),
+            false => at.saturating_sub(1),
+        });
+    }
+
+    // Where several may be picked, the option at `at` in or out.
+    pub(super) fn mark(&mut self, at: usize) {
+        if !self.marked.remove(&at) {
+            self.marked.insert(at);
+        }
+    }
 }
 
 // One row the menu can offer: a completion of the line, a path, or a line
@@ -238,6 +336,11 @@ pub(super) enum MenuEntry {
         show: String,
         k: usize,
     },
+    // One of the first question's options, by its place.
+    Pick {
+        at: usize,
+        show: String,
+    },
 }
 
 impl MenuEntry {
@@ -245,7 +348,7 @@ impl MenuEntry {
         match self {
             MenuEntry::Completion(c) => &c.show,
             MenuEntry::File { show, .. } => show,
-            MenuEntry::Hit { show, .. } => show,
+            MenuEntry::Hit { show, .. } | MenuEntry::Pick { show, .. } => show,
         }
     }
 
@@ -253,7 +356,7 @@ impl MenuEntry {
         match self {
             MenuEntry::Completion(c) => &c.help,
             MenuEntry::File { path, .. } => path,
-            MenuEntry::Hit { .. } => "",
+            MenuEntry::Hit { .. } | MenuEntry::Pick { .. } => "",
         }
     }
 }

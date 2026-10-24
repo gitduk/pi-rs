@@ -10,6 +10,7 @@ use super::Ui;
 use super::bar::Facts;
 use super::browse::{Page, Read};
 use super::call::{self, drawn, pending_line};
+use super::menu::MenuEntry;
 use super::mouse::{Regions, Target};
 use super::row::{PendingTool, Row, count};
 use super::screen::{self, Rows};
@@ -102,39 +103,29 @@ impl Ui {
         );
         self.job_rows = job_rows;
         let mut bar = self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width);
-        // A query being typed has the line's row; otherwise the line keeps it,
-        // a page up or not.
+        // A query being typed is the line's text, drawn as the search's row:
+        // `/`, the query, which hit of how many.
         let (input, caret) = match self.search_line().filter(|_| self.search_typing()) {
             Some((line, col)) => (vec![line], (0, col)),
             None => self.editor.view(&self.paint, width),
         };
         let menu = self.menu();
-        // The caret says who has the keyboard: shaped again only on a change.
-        let holds = self.holds(view, !menu.is_empty());
-        if holds != self.question_holds {
-            self.question_holds = holds;
-            self.show_mode();
-        }
-        // A question takes the list's place, against the line, when no list is up.
-        let (mut asked, options) = match view.questions.front() {
-            Some(q) if menu.is_empty() => {
-                let mut lines = self.question_lines(q, &view.checked, holds, width);
-                let options = lines.split_off(1);
-                let head: Vec<Line<'static>> = screen::fit(&lines[0], width).into_iter().collect();
-                (head, options)
-            }
-            _ => (Vec::new(), Vec::new()),
+        // A question heads its options, and stays up over words that match
+        // none of them, since those answer it too; a command's list hides it.
+        let picking = menu.iter().all(|e| matches!(e, MenuEntry::Pick { .. }));
+        let mut asked: Vec<Line<'static>> = match self.questions.first() {
+            Some(q) if picking && !self.reading() => screen::fit(&self.question_head(q), width),
+            _ => Vec::new(),
         };
         let area = self.screen.area();
         let regions = Regions::layout(
             area,
-            menu.len() + asked.len() + options.len(),
+            menu.len() + asked.len(),
             jobs.len(),
             bar.len(),
             input.len(),
         );
         asked.truncate(regions.menu.height as usize);
-        let question_picked = view.picked;
         jobs.truncate(regions.jobs.height as usize);
         bar.truncate(regions.bar.height as usize);
         // A paste taller than the terminal keeps the caret's row in view.
@@ -150,7 +141,6 @@ impl Ui {
             let (scroll, top) = self.window_mut(view);
             (*scroll, *top)
         };
-        let menu_h = regions.menu.height as usize;
         // A line a click answers on is lit under the pointer, as a fold's
         // own line is.
         let lit = self.lit_text();
@@ -313,10 +303,7 @@ impl Ui {
             .flatten();
         let (was, top_was) = self.window_mut(view);
         (*was, *top_was) = (scroll, top);
-        let picked = self
-            .picked
-            .unwrap_or(menu.len().saturating_sub(1))
-            .min(menu.len().saturating_sub(1));
+        let picked = self.list.highlighted(menu.len().max(1));
         let items = self.menu_items(&menu, picked, regions.menu.width as usize);
         // The picked row on the input's band, the menu's width: a bar the eye
         // finds at once, where a mark in its text alone was not enough.
@@ -348,29 +335,12 @@ impl Ui {
             if let Some(below) = &below {
                 frame.render_widget(below, regions.gap);
             }
-            if !items.is_empty() {
-                // Kept full: ratatui won't pull back an offset that a taller
-                // screen or a changed list left past the end.
-                let mut state = ListState::default()
-                    .with_offset(self.menu_top.min(menu.len() - menu_h))
-                    .with_selected(Some(picked));
+            if regions.menu.height > 0 {
                 frame.render_widget(ratatui::widgets::Clear, regions.menu);
                 frame.render_widget(ratatui::widgets::Clear, regions.rule);
                 frame.render_widget(&menu_rule, regions.rule);
-                frame.render_stateful_widget(
-                    List::new(items)
-                        .highlight_style(cursor)
-                        .scroll_padding(MENU_PADDING),
-                    regions.menu,
-                    &mut state,
-                );
-                self.menu_top = state.offset();
-            }
-            // The question over its options, which scroll as the list's do.
-            if !asked.is_empty() {
-                frame.render_widget(ratatui::widgets::Clear, regions.menu);
-                frame.render_widget(ratatui::widgets::Clear, regions.rule);
-                frame.render_widget(&menu_rule, regions.rule);
+                // A question's head over its options, which scroll as any
+                // list's do.
                 let head = asked.len() as u16;
                 frame.render_widget(
                     Rows(&asked),
@@ -384,18 +354,20 @@ impl Ui {
                     height: regions.menu.height - head,
                     ..regions.menu
                 };
+                // Kept full: ratatui won't pull back an offset that a taller
+                // screen or a changed list left past the end.
                 let room = list.height as usize;
                 let mut state = ListState::default()
-                    .with_offset(self.question_top.min(options.len().saturating_sub(room)))
-                    .with_selected(Some(question_picked));
+                    .with_offset(self.list.top.min(menu.len().saturating_sub(room)))
+                    .with_selected(Some(picked));
                 frame.render_stateful_widget(
-                    List::new(options)
+                    List::new(items)
                         .highlight_style(cursor)
                         .scroll_padding(MENU_PADDING),
                     list,
                     &mut state,
                 );
-                self.question_top = state.offset();
+                self.list.top = state.offset();
             }
             frame.render_widget(Rows(&jobs), regions.jobs);
             frame.render_widget(Rows(&bar), regions.bar);
@@ -424,13 +396,13 @@ impl Ui {
         }
     }
 
-    // The search's row, and the column the caret stands at in the query.
     // The line that parts whatever lies over the transcript from it.
     fn over_rule(&self, width: usize) -> Line<'static> {
         let rule = icons::OVER_RULE.repeat(width);
         Line::from(self.paint.span(&self.paint.theme.prompt.color, &rule))
     }
 
+    // The search's row, and the column the caret stands at in the query.
     fn search_line(&self) -> Option<(Line<'static>, u16)> {
         let (query, count) = self.search_prompt()?;
         let col = pi_store::text::width(&self.search_caret()?) as u16;
@@ -587,60 +559,46 @@ impl Ui {
         (rows, pending_rows)
     }
 
-    // `? judge #3 · tests failed, now what? · j/k move …`, then each option
-    // on a row of its own; the keys said only while they would answer.
-    pub(super) fn question_lines(
-        &self,
-        question: &Question,
-        checked: &std::collections::BTreeSet<usize>,
-        holds: bool,
-        width: usize,
-    ) -> Vec<Line<'static>> {
+    // `? judge #3 · tests failed, now what? · down/up move · tab take …`:
+    // the keys as bound, and as the mode reads them.
+    pub(super) fn question_head(&self, question: &Question) -> Line<'static> {
         let theme = &self.paint.theme;
         let key = |id| {
             (self.keys.keys_of(id).into_iter())
                 .min_by_key(|k| pi_store::text::width(k))
                 .unwrap_or_default()
         };
-        let mut head = vec![
-            self.paint
-                .span(&theme.muted, format!("{} ", icons::QUESTION_MARK)),
-        ];
-        let asker = format!("{}{}", question.from.name(), icons::PART_SEP);
-        head.push(self.paint.span(&theme.muted, asker));
-        head.push(self.paint.span(&theme.emphasis, question.text.clone()));
-        // While it holds the keyboard, which keys do what: none goes unsaid.
-        if holds {
-            let moves = [key("question.next"), key("question.previous")]
-                .into_iter()
-                .filter(|k| !k.is_empty())
-                .collect::<Vec<_>>()
-                .join("/");
-            let toggle = question.multiple.then(|| key("question.toggle"));
-            let hint: String = [
-                (moves, "move"),
-                (toggle.unwrap_or_default(), "mark"),
-                (key("question.accept"), "send"),
-                (key("question.write"), "write"),
-                (key("question.decline"), "close"),
-            ]
+        let normal = self.vim == Some(pi_store::keys::Mode::Normal);
+        let (next, previous, close) = match normal {
+            true => ("menu.down", "menu.up", "menu.quit"),
+            false => ("menu.next", "menu.previous", "menu.dismiss"),
+        };
+        let moves = [key(next), key(previous)]
             .into_iter()
-            .filter(|(k, _)| !k.is_empty())
-            .flat_map(|(k, what)| [icons::PART_SEP.to_string(), format!("{k} {what}")])
-            .collect();
-            head.push(self.paint.span(&theme.muted, hint));
-        }
-        let options = question.options.iter().enumerate().map(|(at, option)| {
-            let mark = match (question.multiple, checked.contains(&at)) {
-                (false, _) => "",
-                (true, true) => "[x] ",
-                (true, false) => "[ ] ",
-            };
-            // One row each, as the list's own rows are.
-            let row = pi_store::text::clip(&format!("  {} {mark}{option}", at + 1), width);
-            Line::from(self.paint.span(&theme.muted, row))
-        });
-        std::iter::once(Line::from(head)).chain(options).collect()
+            .filter(|k| !k.is_empty())
+            .collect::<Vec<_>>()
+            .join("/");
+        let take = match question.multiple {
+            true => "mark",
+            false => "take",
+        };
+        let hint: String = [
+            (moves, "move"),
+            (key("menu.accept"), take),
+            (key("line.submit"), "send"),
+            (key(close), "close"),
+        ]
+        .into_iter()
+        .filter(|(k, _)| !k.is_empty())
+        .flat_map(|(k, what)| [icons::PART_SEP.to_string(), format!("{k} {what}")])
+        .collect();
+        let asker = format!("{}{}", question.from.name(), icons::PART_SEP);
+        Line::from(vec![
+            (self.paint).span(&theme.muted, format!("{} ", icons::QUESTION_MARK)),
+            self.paint.span(&theme.muted, asker),
+            self.paint.span(&theme.emphasis, question.text.clone()),
+            self.paint.span(&theme.muted, hint),
+        ])
     }
 }
 

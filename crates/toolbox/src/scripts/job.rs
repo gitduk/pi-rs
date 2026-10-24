@@ -5,7 +5,9 @@
 //! `notice` is a line for the screen only, `choose` a question whose
 //! `options` the person picks one of (several with `multiple`), and `follow`
 //! asks to hear every turn. A turn an input opened, or any once it follows,
-//! is told back: `started`, then its whole `reply`.
+//! is told back: `started`, then its whole `reply`. One that follows is also
+//! told each `question` put on its checkout and when it is `closed`, and
+//! answers one with `answer`, its id, and the `picks` by place.
 
 use std::os::fd::AsRawFd;
 use std::process::{ExitStatus, Stdio};
@@ -44,6 +46,8 @@ enum Said {
     Notice(String),
     // A question, and the lines that answer it.
     Choose(Asked),
+    // A person's pick of a question's options, through the job.
+    Answer { question: u64, picks: Vec<usize> },
     Interrupt,
     Follow,
 }
@@ -231,6 +235,7 @@ async fn turn(
                 Said::Result(_)
                 | Said::Input(_)
                 | Said::Notice(_)
+                | Said::Answer { .. }
                 | Said::Interrupt
                 | Said::Follow => tracing::warn!(
                     target: "pi::scripts", script = name, "said before detach, dropped"
@@ -285,6 +290,7 @@ async fn go_on(
                     let _ = told.send(Told::Answer(Err(why.into())));
                 }
                 Said::Choose(asked) => job.choose(asked),
+                Said::Answer { question, picks } => job.answer(question, picks),
                 Said::Interrupt => job.interrupt(),
                 Said::Follow => job.follow(),
                 Said::Detach(_) => {}
@@ -329,6 +335,14 @@ async fn tell(mut to: OwnedWriteHalf, mut hear: UnboundedReceiver<Told>) {
             Told::Asked => serde_json::json!({ "asked": true }),
             Told::Answer(Ok(picked)) => serde_json::json!({ "answer": picked }),
             Told::Answer(Err(why)) => serde_json::json!({ "answer": null, "error": why }),
+            Told::Question { id, asked } => serde_json::json!({ "question": {
+                "id": id,
+                "text": asked.question,
+                "options": asked.options,
+                "multiple": asked.multiple,
+                "back": asked.back,
+            }}),
+            Told::Closed(id) => serde_json::json!({ "closed": id }),
         };
         if to.write_all(format!("{line}\n").as_bytes()).await.is_err() {
             return;
@@ -405,6 +419,16 @@ fn parse(line: &str) -> Option<Said> {
             multiple,
             back,
         }));
+    }
+    if let Some(question) = v.get("answer").and_then(Value::as_u64) {
+        let picks = (v
+            .get("picks")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten())
+        .map(|p| p.as_u64().map(|p| p as usize))
+        .collect::<Option<_>>()?;
+        return Some(Said::Answer { question, picks });
     }
     text("detach")
         .map(Said::Detach)
@@ -767,10 +791,11 @@ printf '%s\n' "$a" > heard"#;
 echo '{"input":"why did it fail"}' >&3
 echo '{"notice":"scan the QR"}' >&3
 echo '{"choose":"the task changed","options":["/compact","go on"]}' >&3
+echo '{"answer":3,"picks":[1]}' >&3
 echo '{"interrupt":true}' >&3
 echo '{"follow":true}' >&3
-read -r a <&3; read -r b <&3
-printf '%s\n%s\n' "$a" "$b" > heard"#,
+read -r a <&3; read -r b <&3; read -r c <&3; read -r d <&3
+printf '%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" > heard"#,
         );
         let ended = sink.ended.notified();
         run("bridge", cmd, Vec::new(), 5 * SECOND, &ctx, Some(&*sink))
@@ -779,21 +804,43 @@ printf '%s\n%s\n' "$a" "$b" > heard"#,
         let told = sink.told.lock().unwrap().clone().expect("it listens");
         told.send(Told::Started).unwrap();
         told.send(Told::Reply("parse.rs:40".into())).unwrap();
+        let asked = Asked {
+            question: "go on?".into(),
+            options: vec!["yes".into()],
+            multiple: false,
+            back: false,
+        };
+        told.send(Told::Question { id: 3, asked }).unwrap();
+        told.send(Told::Closed(3)).unwrap();
         tokio::time::timeout(5 * SECOND, ended)
             .await
             .expect("it ended");
         assert_eq!(
-            sink.said.lock().unwrap()[1..6],
+            sink.said.lock().unwrap()[1..7],
             [
                 "input why did it fail",
                 "notice scan the QR",
                 "choose the task changed: /compact | go on",
+                "answer 3: [1]",
                 "interrupt",
                 "follow"
             ]
         );
         let heard = std::fs::read_to_string(dir.path().join("heard")).unwrap();
-        assert_eq!(heard, "{\"started\":true}\n{\"reply\":\"parse.rs:40\"}\n");
+        let heard: Vec<Value> = (heard.lines())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            heard,
+            [
+                serde_json::json!({ "started": true }),
+                serde_json::json!({ "reply": "parse.rs:40" }),
+                serde_json::json!({ "question": {
+                    "id": 3, "text": "go on?", "options": ["yes"], "multiple": false, "back": false,
+                }}),
+                serde_json::json!({ "closed": 3 }),
+            ]
+        );
     }
 
     async fn assert_gone(pid_file: &std::path::Path) {

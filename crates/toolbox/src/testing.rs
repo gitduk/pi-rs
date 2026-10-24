@@ -93,6 +93,12 @@ impl JobHandle for Handle {
             asked.options.join(" | ")
         ));
     }
+    fn answer(&self, question: u64, picks: Vec<usize>) {
+        self.said
+            .lock()
+            .unwrap()
+            .push(format!("answer {question}: {picks:?}"));
+    }
     fn interrupt(&self) {
         self.said.lock().unwrap().push("interrupt".into());
     }

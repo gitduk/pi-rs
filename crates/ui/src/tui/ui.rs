@@ -9,7 +9,7 @@ use ratatui::text::Span;
 
 use super::browse::Read;
 use super::editor::Editor;
-use super::menu::Lists;
+use super::menu::{List, Lists};
 use super::mouse::{Regions, Target};
 use super::row::Row;
 use super::screen::Screen;
@@ -17,6 +17,7 @@ use super::view::View;
 use crate::render::Paint;
 use pi_core::core::Core;
 use pi_core::core::lane::Lane;
+use pi_core::core::question::Question;
 use pi_core::core::resolve::Resolved;
 use pi_core::input::commands::{Choice, Command};
 use pi_store::icons;
@@ -43,27 +44,20 @@ pub(super) struct Ui {
     // The bar's separator, painted once beside the two above it: the bar
     // is rebuilt every frame and this depends only on the theme.
     pub(super) tab_sep: Span<'static>,
-    // Which row of the list is highlighted; the list itself is derived
-    // from what's typed. `None` anchors a fresh list on its bottom row.
-    pub(super) picked: Option<usize>,
-    // The list's first shown row, kept across frames: rebuilt from zero, the
-    // window would pin the highlight to its bottom edge.
-    pub(super) menu_top: usize,
-    // The same for a question's options.
-    pub(super) question_top: usize,
-    // The line `picked` and `menu_top` were set against: both are positions
-    // in the list it grew, so another line starts over.
-    pub(super) picked_for: Option<String>,
-    // Text the list was dismissed at. Any edit brings the list back —
-    // Esc means "not that", not "never again".
-    pub(super) dismissed_at: Option<String>,
-    // A line a key put there, which dismissing its list takes back untouched.
-    pub(super) seeded: Option<String>,
+    // Where the list over the line stands; the list itself is derived from
+    // what's typed.
+    pub(super) list: List,
+    // The questions up where the front lane stands, as pi keeps them: the
+    // first one's options are the list over a line that completes to nothing
+    // else.
+    pub(super) questions: Vec<Question>,
     // What the front lane's user said, by entry id, for `/rewind`.
     pub(super) said: Vec<Choice>,
     // The line just submitted, carried to its answer: echoed only once the
     // answer is known to land under it. The recall list hears of it too.
     pub(super) submitted: Option<String>,
+    // Questions answered here, their pick sent as typed, for pi to take down.
+    pub(super) answered: Vec<u64>,
     // What `/model` can complete to. A copy rather than a borrow of the
     // config: the loop holds the session mutably while it draws.
     pub(super) choices: Vec<Choice>,
@@ -93,8 +87,6 @@ pub(super) struct Ui {
     pub(super) vim: Option<pi_store::keys::Mode>,
     pub(super) insert_cursor: pi_store::config::Cursor,
     pub(super) normal_cursor: pi_store::config::Cursor,
-    // A question holds the keyboard, which the caret shows as Normal's.
-    pub(super) question_holds: bool,
     // The segments the status line shows, in the order the config named them.
     pub(super) status: Vec<Segment>,
     // What the bar says, in ring order. Rebuilt before every draw.
@@ -204,11 +196,13 @@ pub(super) struct Tab {
 
 impl Ui {
     // What leaves with the checkout: the half-typed line, parked in its lane's
-    // view, and the state that was that lane's.
+    // view, and the state that was that lane's. A search found its hits
+    // there, and gives the line back first.
     pub(super) fn leave_lane(&mut self, view: &mut View) {
+        self.search_close(view);
         view.draft = self.editor.take_composing();
         self.flash = None;
-        self.seeded = None;
+        self.list.seeded = None;
         self.said.clear();
     }
 
@@ -229,6 +223,7 @@ impl Ui {
             screen,
             keys,
             submitted: None,
+            answered: Vec::new(),
             choices,
             commands,
             lists,
@@ -239,12 +234,8 @@ impl Ui {
             band,
             tty_bg: None,
             bang_prompt,
-            picked: None,
-            menu_top: 0,
-            question_top: 0,
-            picked_for: None,
-            dismissed_at: None,
-            seeded: None,
+            list: List::default(),
+            questions: Vec::new(),
             said: Vec::new(),
             read: None,
             search: None,
@@ -255,7 +246,6 @@ impl Ui {
             vim: None,
             insert_cursor: pi_store::config::Cursor::Default,
             normal_cursor: pi_store::config::Cursor::Default,
-            question_holds: false,
             spinner: 0,
             status: default_parts(),
             tabs: Vec::new(),

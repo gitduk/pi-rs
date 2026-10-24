@@ -47,6 +47,35 @@ impl Question {
         Ok(question)
     }
 
+    /// The question as a job that follows is told it.
+    pub fn asked(&self) -> toolbox::background::Asked {
+        toolbox::background::Asked {
+            question: self.text.clone(),
+            options: self.options.clone(),
+            multiple: self.multiple,
+            back: self.back,
+        }
+    }
+
+    /// The options at `picks` as the line they send, a line each; none when
+    /// nothing was picked. A place past the last, one picked twice, or
+    /// several where one may be picked, is no answer.
+    pub fn picked(&self, picks: &[usize]) -> Result<Option<String>, String> {
+        if picks.len() > 1 && !self.multiple {
+            return Err("only one of its options may be picked".into());
+        }
+        if (1..picks.len()).any(|i| picks[..i].contains(&picks[i])) {
+            return Err("an option is picked twice".into());
+        }
+        let lines = (picks.iter())
+            .map(|&at| {
+                (self.options.get(at).map(String::as_str))
+                    .ok_or_else(|| format!("it has no option {}", at + 1))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((!lines.is_empty()).then(|| lines.join("\n")))
+    }
+
     /// The question as asked, or why it cannot be: each option is one line,
     /// so picking it agrees to all of it, and with `multiple` none is a
     /// command, since the picks go to the model together.

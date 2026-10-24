@@ -57,6 +57,8 @@ pub struct Next {
     /// Set when the line is the model's own come back, not the user's: what
     /// the screen names it by. The note then rides with the ask.
     pub label: Option<String>,
+    /// Read as if typed, so a command runs; otherwise always a prompt.
+    pub as_typed: bool,
 }
 
 #[derive(Default)]
@@ -96,12 +98,21 @@ impl Drivers {
                 note: due.note,
                 origin: Origin::Job,
                 label: Some(due.label),
+                as_typed: false,
             },
-            Some((job, jobs::Back::Input { text, note })) => Next {
+            Some((
+                job,
+                jobs::Back::Input {
+                    text,
+                    note,
+                    as_typed,
+                },
+            )) => Next {
                 line: text,
                 note,
                 origin: Origin::Input(job),
                 label: None,
+                as_typed,
             },
             None => {
                 let due = self.loops.due(lane)?;
@@ -110,6 +121,7 @@ impl Drivers {
                     note: due.note,
                     origin: Origin::Loop,
                     label: None,
+                    as_typed: true,
                 }
             }
         })

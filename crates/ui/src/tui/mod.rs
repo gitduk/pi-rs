@@ -628,15 +628,12 @@ impl Tui {
                     self.ui.say(view, line.to_string());
                 }
             }
-            // Before what is new: a job started over may already ask again.
-            for question in jobs.take_withdrawn() {
-                for view in self.views.values_mut() {
-                    view.withdraw(question);
-                }
+            // Taken down first, or the copy would put them back up.
+            for question in std::mem::take(&mut self.ui.answered) {
+                jobs.answer(question, None);
             }
-            for question in jobs.take_questions(self.core.lane().root()) {
-                front_view(&mut self.views, self.core.lane()).ask(question);
-            }
+            self.ui
+                .sync_questions(jobs.questions(self.core.lane().root()));
             let root = self.core.lane().root();
             self.ui.every_job = jobs.jobs(root);
             self.ui.jobs = (self.ui.every_job.iter())
@@ -867,8 +864,9 @@ impl Tui {
         let view = front_view(&mut self.views, self.core.lane());
         view.surface.follow();
         // A job's result is relayed under its label; a loop's line is read as
-        // typed. A person's line through a job is always a prompt: what they
-        // send never runs here as a command, and every one is answered.
+        // typed. A person's line through a job is a prompt: what they send
+        // never runs here as a command, and every one is answered. Only their
+        // pick of offered options reads as typed, as it would picked here.
         let wake = match next.label {
             Some(label) => {
                 tracing::info!(
@@ -882,9 +880,9 @@ impl Tui {
                 Wake::Relay(next.line, relay)
             }
             None => {
-                let intent = match next.origin {
-                    Origin::Input(_) => Intent::Prompt(next.line.clone()),
-                    _ => input::read(&next.line, &self.core.commands),
+                let intent = match next.as_typed {
+                    true => input::read(&next.line, &self.core.commands),
+                    false => Intent::Prompt(next.line.clone()),
                 };
                 if !next.note.is_empty() {
                     self.core.lane_mut().push_note(&next.note);

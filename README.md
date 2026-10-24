@@ -202,8 +202,14 @@ refused, and resuming one from another directory moves it here.
   person's line, sent to the model as written, never run as a command,
   `notice` for a line on the screen the model never reads, `choose` with
   `options` to ask a question as the `choose` tool does (stopping the job
-  takes it back), and `interrupt` to stop the checkout's turn. A turn an
-  input opened is told back on fd 3: `started`, then its whole `reply`.
+  takes it back), `interrupt` to stop the checkout's turn, and `follow` to
+  hear every turn there. A turn an input opened, or any once it follows, is
+  told back on fd 3: `started`, then its whole `reply`. One that follows is
+  also told each question up on the checkout, as
+  `{"question": {"id", "text", "options", "multiple", "back"}}`, then
+  `{"closed": <id>}` once it is answered anywhere or withdrawn; it answers
+  one with `{"answer": <id>, "picks": [0]}`, by place, the pick going out as
+  if typed there, and an `input` closes every question that does not wait.
   `choose` works before a detach too, where pi answers it with one line on
   fd 3: `{"asked": true}` once it is up, or an `error` saying why not. There
   `"answer": "back"` keeps the pick from going out: it comes down fd 3 as
@@ -212,20 +218,24 @@ refused, and resuming one from another directory moves it here.
   such as one that asks before letting a command run.
 
   A question has up to 9 options, each the line you would send to pick it —
-  words for the model, or a command such as `/compact`. It opens just over
-  the input and holds the keyboard: `j`/`k` move, `enter` or a digit sends
-  one, `q` or `esc` closes it, and any other key does nothing. `i` hands you
-  the line to write your own answer, which closes the question once sent;
-  emptying the line returns you to the options. With `multiple`, `space` or
-  a digit marks several, and `enter` sends the marked ones as one prompt, a
-  line each; those options are words, never commands.
+  words for the model, or a command such as `/compact`. They are the list
+  over the input line, shown even when it is empty, as a completion list is
+  and with its keys: `↑`/`↓` (or `ctrl+j`/`ctrl+k`, and `j`/`k` in vim's
+  Normal) move, `enter` sends the highlighted one, `tab` takes it onto the
+  line to send as it is or changed, and `esc` (`q` in Normal) closes the
+  question unanswered. Typing narrows the options by their words or number;
+  words that match none are your own answer, sent with `enter`. With
+  `multiple`, `tab` marks several and `enter` sends the marked ones as one
+  prompt, a line each; those options are words, never commands.
   [`examples/tools/`](examples/tools/) has six to copy: `search`; `judge`,
   which reads its key from there; `later`, a prompt the model leaves itself
   for after a delay or on a period; `choose`, through which the model puts
   you a question and ends its turn; `wechat`, which bridges the session
   to a WeChat chat — ask for it, scan the QR the first time, and what you
-  send from the phone arrives as turns, `/stop` included; and `telegram`,
-  the same over a Telegram bot: put a token from @BotFather in `.env` as
+  send from the phone arrives as turns, `/stop` included, and a question
+  arrives numbered, answered by replying with its number; and `telegram`,
+  the same over a Telegram bot, a question's options as buttons: put a
+  token from @BotFather in `.env` as
   `TELEGRAM_BOT_TOKEN`, open the link or QR it shows the first time, and
   only the account that opened it is heard (delete `~/.pi/telegram.json` to
   pair another). Both are cargo scripts, `wechat.rs` and `telegram.rs`, so

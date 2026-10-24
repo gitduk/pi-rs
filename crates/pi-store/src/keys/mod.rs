@@ -30,14 +30,14 @@ pub enum Mode {
 /// the menu claims never reaches the editor underneath it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum When {
-    // A question's options over an empty line: they hold the keyboard
-    // until one is sent or the question is closed.
-    Question,
     // Something is being read — a page up over the transcript, or a search
     // on it: `esc` lets it go before it can reach the run.
     Page,
-    // A list's movement and dismissal keys, over the line while completing.
+    // A list's keys, over the line: what it completes, or a question's
+    // options, shown even on an empty line.
     Menu,
+    // Normal with a list up: nothing types, so the bare letters move it.
+    NormalMenu,
     // A turn is in flight.
     Run,
     // Only in that mode.
@@ -58,11 +58,9 @@ pub enum When {
 pub enum Surface {
     #[default]
     Editor,
-    // The line, a completion list over it: the list's keys first, and
-    // letters still type, to narrow it.
+    // The line, a list over it: the list's keys first, and letters still
+    // type, to narrow it.
     Completion,
-    // The line, empty, with a question's options over it.
-    Question,
 }
 
 /// Which layers are up when a key is pressed. One value rather than three
@@ -115,17 +113,6 @@ pub enum Action {
     MenuNext,
     MenuPrevious,
     MenuDismiss,
-    // A question's options: moved through, one sent as if typed, or let go.
-    QuestionNext,
-    QuestionPrevious,
-    QuestionAccept,
-    // The option a digit numbers; any other key picks the highlighted one.
-    QuestionPick,
-    // Where several may be picked: the highlighted one in or out.
-    QuestionToggle,
-    // The keyboard back to the line, to answer in one's own words.
-    QuestionWrite,
-    QuestionDecline,
     RunInterrupt,
     Rewind,
     // The page up searched, or the transcript with none: the query typed
@@ -293,7 +280,7 @@ const BINDINGS: &[Binding] = &[
         action: A::LineSubmit,
         when: W::Editor,
         keys: &["enter"],
-        note: "reaches the run in flight; a command waits for it",
+        note: "with a list up, sends the highlighted one, or the marked ones; reaches the run in flight; a command waits for it",
     },
     Binding {
         id: "line.clear",
@@ -314,7 +301,7 @@ const BINDINGS: &[Binding] = &[
         action: A::MenuAccept,
         when: W::Menu,
         keys: &["tab"],
-        note: "",
+        note: "takes the highlighted one and goes on: onto the line, or marked where several may be picked",
     },
     Binding {
         id: "menu.next",
@@ -335,56 +322,28 @@ const BINDINGS: &[Binding] = &[
         action: A::MenuDismiss,
         when: W::Menu,
         keys: &["esc"],
-        note: "until the next keystroke",
+        note: "until the next keystroke; a question's list closes the question unanswered",
     },
     Binding {
-        id: "question.next",
-        action: A::QuestionNext,
-        when: W::Question,
-        keys: &["j", "down", "ctrl+n"],
+        id: "menu.down",
+        action: A::MenuNext,
+        when: W::NormalMenu,
+        keys: &["j"],
         note: "",
     },
     Binding {
-        id: "question.previous",
-        action: A::QuestionPrevious,
-        when: W::Question,
-        keys: &["k", "up", "ctrl+p"],
+        id: "menu.up",
+        action: A::MenuPrevious,
+        when: W::NormalMenu,
+        keys: &["k"],
         note: "",
     },
     Binding {
-        id: "question.accept",
-        action: A::QuestionAccept,
-        when: W::Question,
-        keys: &["enter"],
-        note: "sends the highlighted option as if typed",
-    },
-    Binding {
-        id: "question.pick",
-        action: A::QuestionPick,
-        when: W::Question,
-        keys: &["1", "2", "3", "4", "5", "6", "7", "8", "9"],
-        note: "the option of that number",
-    },
-    Binding {
-        id: "question.toggle",
-        action: A::QuestionToggle,
-        when: W::Question,
-        keys: &["space"],
-        note: "where several may be picked; a digit then toggles too",
-    },
-    Binding {
-        id: "question.write",
-        action: A::QuestionWrite,
-        when: W::Question,
-        keys: &["i"],
-        note: "type your own answer; sending it closes the question, emptying the line returns",
-    },
-    Binding {
-        id: "question.decline",
-        action: A::QuestionDecline,
-        when: W::Question,
-        keys: &["q", "esc"],
-        note: "closes it unanswered; any other key does nothing while it is up",
+        id: "menu.quit",
+        action: A::MenuDismiss,
+        when: W::NormalMenu,
+        keys: &["q"],
+        note: "",
     },
     Binding {
         id: "run.interrupt",
@@ -943,8 +902,8 @@ impl Keys {
 // The layers consulted for `layers`, innermost first.
 fn live(layers: Layers) -> Vec<When> {
     let mut live = match layers.surface {
+        Surface::Completion if layers.mode == Mode::Normal => vec![When::Menu, When::NormalMenu],
         Surface::Completion => vec![When::Menu],
-        Surface::Question => vec![When::Question],
         Surface::Editor => Vec::with_capacity(8),
     };
     // `menu.dismiss`, `page.close` and `run.interrupt` all claim `esc`:
@@ -1198,41 +1157,26 @@ mod tests {
         }
     }
 
-    // Each press answers only while a question is up; without one, the same
-    // keys type, send and stop as ever.
+    // In Normal a list takes the bare letters that move it, since nothing
+    // types there; in Insert they type, to narrow it.
     #[test]
-    fn a_question_takes_its_keys_and_lends_them_back() {
+    fn normal_moves_a_list_with_bare_letters() {
         let k = Keys::default();
-        let asked = Layers {
-            surface: Surface::Question,
-            run: true,
+        let listed = Layers {
+            surface: Surface::Completion,
+            mode: Mode::Normal,
             ..Layers::default()
         };
-        for (key, action) in [
-            ("down", Action::QuestionNext),
-            ("up", Action::QuestionPrevious),
-            ("enter", Action::QuestionAccept),
-            ("3", Action::QuestionPick),
-            ("space", Action::QuestionToggle),
-            ("esc", Action::QuestionDecline),
-        ] {
-            assert_eq!(k.action(press(key), asked), Some(action), "`{key}`");
-        }
-        assert_eq!(k.action(press("j"), asked), Some(Action::QuestionNext));
-        assert_eq!(k.action(press("q"), asked), Some(Action::QuestionDecline));
-        assert_eq!(k.action(press("i"), asked), Some(Action::QuestionWrite));
-        assert_eq!(
-            k.action(press("y"), asked),
-            None,
-            "a letter not bound is nothing"
-        );
-        let free = Layers {
-            surface: Surface::Editor,
-            ..asked
+        assert_eq!(k.action(press("j"), listed), Some(Action::MenuNext));
+        assert_eq!(k.action(press("k"), listed), Some(Action::MenuPrevious));
+        assert_eq!(k.action(press("q"), listed), Some(Action::MenuDismiss));
+        assert_eq!(k.action(press("i"), listed), Some(Action::ModeInsert));
+        let typing = Layers {
+            mode: Mode::Insert,
+            ..listed
         };
-        assert_eq!(k.action(press("3"), free), None);
-        assert_eq!(k.action(press("esc"), free), Some(Action::RunInterrupt));
-        assert_eq!(k.action(press("ctrl+t"), asked), Some(Action::ThinkFold));
+        assert_eq!(k.action(press("j"), typing), None, "it types");
+        assert_eq!(k.action(press("ctrl+j"), typing), Some(Action::MenuNext));
     }
 
     #[test]
@@ -1243,7 +1187,7 @@ mod tests {
         for b in BINDINGS {
             // Both halves of Normal: about what it does to pre-vim bindings,
             // not the modal keys themselves.
-            if matches!(b.when, W::Mode(_) | W::NormalPage | W::Page) {
+            if matches!(b.when, W::Mode(_) | W::NormalPage | W::NormalMenu | W::Page) {
                 continue;
             }
             for spec in b.keys {
@@ -1254,7 +1198,6 @@ mod tests {
                 let insert = Layers {
                     surface: match b.when {
                         W::Menu => Surface::Completion,
-                        W::Question => Surface::Question,
                         _ => Surface::Editor,
                     },
                     run: b.when == W::Run,

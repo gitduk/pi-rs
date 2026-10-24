@@ -53,7 +53,7 @@ fn an_at_token_completes_by_tab_and_stays_on_enter() {
     // A changed query re-anchors the highlight on the best row: the
     // stale index sat on the worse of the two matches above.
     ui.editor.set_line("look at @at_probe");
-    ui.picked = Some(0);
+    ui.list.picked = Some(0);
     ui.key(&lane, &mut view, key(KeyCode::Tab), false);
     assert_eq!(ui.editor.text(), "look at @at_probe.rs ");
 }
@@ -500,6 +500,41 @@ fn turning_the_keys_off_drops_the_mode_rather_than_parking_it() {
         ..Default::default()
     });
     assert_eq!(mode(&ui), Some(Mode::Insert));
+}
+
+// The query is typed on the line itself: what was being typed there is set
+// aside and comes back, in the mode it was in, whether the query goes in or
+// is let go.
+#[test]
+fn a_search_sets_the_line_aside_and_gives_it_back() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let key = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+    let mut ui = vim_ui();
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    view.surface.scrollback = (1..=5)
+        .flat_map(|n| Row::answer(&format!("answer {n}"), &ui.paint))
+        .collect();
+    ui.flush(&lane, &mut view);
+    ui.editor.set_line("half a thought");
+    ui.vim = Some(Mode::Normal);
+    // Taken up again, the query that went in is back on the line to edit.
+    for (closing, query, typing) in [
+        (KeyCode::Enter, "", "answer 3"),
+        (KeyCode::Esc, "answer 3", "0"),
+    ] {
+        ui.key(&lane, &mut view, ctrl('s'), false);
+        assert_eq!(ui.editor.text(), query, "{closing:?}");
+        assert_eq!(ui.vim, Some(Mode::Insert), "and types");
+        for c in typing.chars() {
+            ui.key(&lane, &mut view, typed(c), false);
+        }
+        ui.flush(&lane, &mut view);
+        ui.key(&lane, &mut view, key(closing), false);
+        assert_eq!(ui.editor.text(), "half a thought", "{closing:?}");
+        assert_eq!(ui.vim, Some(Mode::Normal), "{closing:?}");
+    }
+    assert!(ui.search_prompt().is_none(), "esc let it go");
 }
 
 // `/` in Normal searches the transcript where it stands: no page opens, a
