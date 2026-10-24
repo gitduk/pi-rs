@@ -205,16 +205,20 @@ impl Ui {
         let chosen = self.rat_style(&self.paint.theme.menu.selected);
         let query = self.search_query().map(|(query, _)| query);
         let look = self.rat_style(&self.paint.theme.matched);
+        // The band says which row is picked; without colour there is none,
+        // and the mark says it instead, the other rows set in as far.
+        let marker = if self.paint.color { "" } else { MENU_MARK };
+        let indent = " ".repeat(pi_store::text::width(marker));
         menu.iter()
             .enumerate()
             .map(|(at, c)| {
                 if let (MenuEntry::Hit { show, k }, Some(query)) = (c, query) {
-                    let room = width.saturating_sub(pi_store::text::width(MENU_MARK));
+                    let room = width.saturating_sub(pi_store::text::width(marker));
                     let text = found_text(show, *k, query, room);
                     let line = if at == picked {
-                        Line::from(vec![Span::styled(MENU_MARK, mark), text.into()])
+                        Line::from(vec![Span::styled(marker, mark), text.into()])
                     } else {
-                        Line::from(Span::styled(format!("  {text}"), muted))
+                        Line::from(Span::styled(format!("{indent}{text}"), muted))
                     };
                     return ListItem::new(super::search::marked(line, query, None, look, look));
                 }
@@ -235,17 +239,17 @@ impl Ui {
                 let pad = head.saturating_sub(pi_store::text::width(show));
                 let lead = format!("{args}{}  ", " ".repeat(pad));
                 // Cut where the menu ends, marked, not mid-word at its edge.
-                let used = pi_store::text::width(MENU_MARK)
+                let used = pi_store::text::width(marker)
                     + pi_store::text::width(name)
                     + pi_store::text::width(&lead);
                 let help = pi_store::text::screen_line(c.help());
                 let help = pi_store::text::clip(&help, width.saturating_sub(used));
                 let rest = format!("{lead}{help}");
                 let line = if at != picked {
-                    Line::from(Span::styled(format!("  {name}{rest}"), muted))
+                    Line::from(Span::styled(format!("{indent}{name}{rest}"), muted))
                 } else {
                     Line::from(vec![
-                        Span::styled(MENU_MARK, mark),
+                        Span::styled(marker, mark),
                         Span::styled(name.to_string(), chosen),
                         rest.into(),
                     ])
@@ -378,7 +382,7 @@ impl MenuEntry {
     }
 }
 
-// What heads the picked row of a menu, in the prompt's colour.
+// What heads the picked row of a menu when no band can show it.
 const MENU_MARK: &str = "› ";
 
 // A hit as the list shows it in `room` columns: its whole row, cut on the

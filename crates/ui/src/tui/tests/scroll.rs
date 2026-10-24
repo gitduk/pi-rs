@@ -632,7 +632,11 @@ fn a_menu_entry_shows_no_escape_tail() {
     let mut buf = ratatui::buffer::Buffer::empty(area);
     ratatui::widgets::List::new(items).render(area, &mut buf);
     let row: String = (0..40).map(|x| buf[(x, 0)].symbol().to_string()).collect();
-    assert_eq!(row.trim_end(), "› red  bold");
+    assert_eq!(
+        row.trim_end(),
+        "red  bold",
+        "the band, not a mark, says it is picked"
+    );
 }
 
 // A view moved off the hit steps from where it is: `gg n` is the first
