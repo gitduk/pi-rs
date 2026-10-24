@@ -11,6 +11,7 @@ use crate::block;
 use crate::render::named;
 use crate::render::{self, Paint};
 use crate::tui::browse::PageLine;
+use crate::tui::screen;
 use pi_core::core::resolve::Resolved;
 use pi_store::icons;
 
@@ -113,9 +114,47 @@ enum Kind {
     Steps(Group),
 }
 
-/// What opening a closed line shows on the reading page: the line as it
-/// reads unlit, then what it opens onto.
-pub type Opening = (Line<'static>, Vec<PageLine>);
+/// What opening a closed line shows on the reading page: what it reads
+/// opened in place, whole.
+pub type Opening = Vec<PageLine>;
+
+/// A closed line's lines as opening it in place draws them, whole, each with
+/// the border a wrap repeats.
+pub type Opened = Vec<(PageLine, Option<Line<'static>>)>;
+
+// Opened lines as a page reads them: each border before its line, less the
+// indent they all share, which only sat them under the row's own line.
+fn page_of(lines: Opened) -> Opening {
+    let indent = |border: &Option<Line<'static>>| {
+        let lead = border.as_ref().map(screen::plain).unwrap_or_default();
+        lead.len() - lead.trim_start_matches(' ').len()
+    };
+    let shared = lines.iter().map(|(_, b)| indent(b)).min().unwrap_or(0);
+    (lines.into_iter())
+        .map(|(mut page, border)| {
+            let mut cut = shared;
+            let mut spans = border.as_ref().map(screen::spans_of).unwrap_or_default();
+            for span in &mut spans {
+                let k = span.content.len().min(cut);
+                span.content = span.content[k..].to_string().into();
+                cut -= k;
+            }
+            spans.retain(|s| !s.content.is_empty());
+            let lead: usize = spans
+                .iter()
+                .map(|s| pi_store::text::width(&s.content))
+                .sum();
+            if lead > 0 {
+                spans.extend(page.line.spans);
+                page.line = Line::from(spans);
+                for unit in &mut page.units {
+                    *unit = unit.start + lead..unit.end + lead;
+                }
+            }
+            page
+        })
+        .collect()
+}
 
 // A row that opens and closes. A new kind that folds implements this and
 // joins `Row::fold`; nothing else about folding names the kinds.
@@ -136,8 +175,13 @@ trait Fold {
             true
         }
     }
-    // What opening line `i` would show, while it is closed.
-    fn opening(&self, i: usize, paint: &Paint, width: usize) -> Option<Opening>;
+    // What opening line `i` in place would show while closed, whole since a
+    // page reads it wrapped; drawn in place by the same code.
+    fn opened(&self, i: usize, paint: &Paint) -> Option<Opened>;
+    // What the page reads for line `i`: what `opened` gives, as a page.
+    fn opening(&self, i: usize, paint: &Paint) -> Option<Opening> {
+        self.opened(i, paint).map(page_of)
+    }
     // Whether lines are cut at `width` that only its opening shows whole.
     fn clipped(&self, _width: usize) -> bool {
         false
@@ -311,15 +355,8 @@ impl Row {
     /// A lone block of reasoning, as a group of one.
     #[cfg(test)]
     pub fn thinking(block: u64, lines: Vec<Line<'static>>, folded: bool) -> Self {
-        Self::steps(
-            Step::Thinking {
-                block,
-                lines,
-                open: false,
-                live: false,
-            },
-            folded,
-        )
+        let step = Step::thinking(block, lines, false, &Paint::new(false));
+        Self::steps(step, folded)
     }
 
     /// Add a step to this row if it is a group; the step comes back if not.
@@ -379,8 +416,8 @@ impl Row {
     /// What opening line `i` would show, while it is closed: the line as
     /// it reads with nothing under the pointer, then what it opens onto — a
     /// step's reasoning or call, a result whole, a relayed turn's text.
-    pub fn opening(&self, i: usize, paint: &Paint, width: usize) -> Option<Opening> {
-        self.fold()?.opening(i, paint, width)
+    pub fn opening(&self, i: usize, paint: &Paint) -> Option<Opening> {
+        self.fold()?.opening(i, paint)
     }
 
     /// Whether lines are cut at `width` that only its opening shows whole.
@@ -665,6 +702,7 @@ impl Row {
         match &self.0 {
             Kind::Answer(_, units) => units.clone(),
             Kind::Relayed(r) => r.units(i).to_vec(),
+            Kind::Steps(g) => g.units(i, paint),
             Kind::Block(b) => b.units(paint, width),
             _ => Vec::new(),
         }
@@ -701,11 +739,11 @@ impl Row {
 
     /// Block `id` ended: folds to its first line if the group is folded,
     /// stays open if not; goes if it never had a line.
-    pub fn end_block(&mut self, id: u64) -> bool {
+    pub fn end_block(&mut self, id: u64, paint: &Paint) -> bool {
         let Kind::Steps(g) = &mut self.0 else {
             return false;
         };
-        let emptied = g.end_block(id);
+        let emptied = g.end_block(id, paint);
         self.1.clear();
         emptied
     }
@@ -876,8 +914,9 @@ mod height_tests {
 
         let long = Row::note_lines(&"word ".repeat(40)).remove(0);
         assert_eq!(long.click_line(0, 40), Some(0), "cut, so it opens");
-        let (head, body) = long.opening(0, &paint, 40).unwrap();
-        assert!(head.to_string().ends_with("word "), "uncut: {head}");
-        assert!(body.is_empty());
+        let page = long.opening(0, &paint).unwrap();
+        assert_eq!(page.len(), 1);
+        let head = page[0].line.to_string();
+        assert!(head.ends_with("word "), "uncut: {head}");
     }
 }

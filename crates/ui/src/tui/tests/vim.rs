@@ -429,7 +429,7 @@ fn a_page_takes_the_empty_lines_window_keys() {
         _ => usize::MAX,
     };
     ui.vim = Some(Mode::Normal);
-    ui.preview(
+    ui.open_page(
         (0..100)
             .map(|n| ratatui::text::Line::from(format!("line {n}")).into())
             .collect(),
@@ -593,7 +593,7 @@ fn a_page_borrows_normal_and_gives_it_back() {
     let mut view = View::default();
     assert_eq!(ui.vim, Some(Mode::Insert));
     let long = (0..100).map(|n| format!("row {n}"));
-    ui.open_slash(pi_store::listing::Listing::say(long));
+    ui.open_answer(pi_store::listing::Listing::say(long));
     ui.flush(&lane, &mut view);
     assert_eq!(ui.vim, Some(Mode::Normal));
     let scroll = |ui: &crate::tui::Ui| ui.read.as_ref().map(|r| r.scroll);

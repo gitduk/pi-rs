@@ -153,7 +153,7 @@ async fn the_rewind_of_a_lane_with_no_transcript_says_so() {
 async fn an_empty_command_page_is_not_opened() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    tui.ui.open_slash(Listing::default());
+    tui.ui.open_answer(Listing::default());
     assert!(tui.ui.read.is_none());
 }
 
@@ -164,7 +164,7 @@ async fn esc_closes_the_command_page_rather_than_reaching_the_run() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    tui.ui.open_slash(Listing::say(["/help answered this"]));
+    tui.ui.open_answer(Listing::say(["/help answered this"]));
 
     let token = tui.core.lane().token();
     let esc = crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -221,7 +221,7 @@ async fn the_line_keeps_the_keys_under_a_command_page() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    tui.ui.open_slash(Listing::say(["/status answered this"]));
+    tui.ui.open_answer(Listing::say(["/status answered this"]));
     let token = tui.core.lane().token();
     let press = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
 
@@ -254,7 +254,7 @@ async fn enter_and_the_stop_close_a_command_page() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     tui.ui.editor.set_line("what changed?");
-    tui.ui.open_slash(Listing::say(["/status answered this"]));
+    tui.ui.open_answer(Listing::say(["/status answered this"]));
 
     let token = tui.core.lane().token();
     let enter = crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -264,7 +264,7 @@ async fn enter_and_the_stop_close_a_command_page() {
     assert!(tui.ui.read.is_none(), "Enter closed it");
     assert_eq!(tui.ui.took_submit().as_deref(), Some("what changed?"));
 
-    tui.ui.open_slash(Listing::say(["/status answered this"]));
+    tui.ui.open_answer(Listing::say(["/status answered this"]));
     let ctrl_c =
         crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
     let lane = tui.core.lane_mut();
@@ -362,7 +362,7 @@ async fn the_stop_that_closed_a_command_page_is_not_half_a_quit() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    tui.ui.open_slash(Listing::say(["/status answered this"]));
+    tui.ui.open_answer(Listing::say(["/status answered this"]));
     let token = tui.core.lane().token();
     let ctrl_c =
         || crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
@@ -422,7 +422,7 @@ async fn the_esc_that_closed_a_command_page_is_not_half_a_rewind() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    tui.ui.open_slash(Listing::say(["/status answered this"]));
+    tui.ui.open_answer(Listing::say(["/status answered this"]));
     let token = tui.core.lane().token();
     let esc = || crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
@@ -479,10 +479,12 @@ async fn a_question_is_answered_from_the_list_over_the_line() {
     );
     let lane = tui.core.lane();
     tui.ui.flush(lane, view_at(&mut tui.views, token));
+    let regions = tui.ui.regions;
     assert!(
-        tui.ui.regions.menu.height >= 3,
-        "its head over its two options"
+        regions.asked.height == 1 && regions.asked.bottom() == regions.rule.y,
+        "its head over the rule"
     );
+    assert!(regions.menu.height >= 2, "its two options under it");
     let head = |tui: &crate::tui::Tui, width| -> String {
         let layers = tui.ui.layers_with(false, true);
         (tui.ui

@@ -175,6 +175,7 @@ impl Folds {
             Step::Thinking {
                 block,
                 lines: Vec::new(),
+                shown: Vec::new(),
                 open: false,
                 live: true,
             },
@@ -196,12 +197,12 @@ impl Folds {
     // The streaming block is over, folded if its group is. One that never
     // had a line leaves nothing, and neither does a group it was alone in:
     // the group's place stays, holding no line.
-    pub(super) fn close_block(&mut self, scrollback: &mut Scrollback) {
+    pub(super) fn close_block(&mut self, scrollback: &mut Scrollback, paint: &Paint) {
         let Some(id) = self.streaming.take() else {
             return;
         };
         if let Some(at) = scrollback.iter().rposition(|r| r.holds_block(id))
-            && scrollback[at].end_block(id)
+            && scrollback[at].end_block(id, paint)
         {
             scrollback[at] = Row::lines(Vec::new());
         }
@@ -539,15 +540,7 @@ pub(super) fn scrollback_from(
                             // From the live stream's id counter: lookups match
                             // by id, so every block needs a real, unique one.
                             let block = folds.take_id();
-                            folds.join(
-                                &mut out,
-                                Step::Thinking {
-                                    block,
-                                    lines,
-                                    open: false,
-                                    live: false,
-                                },
-                            );
+                            folds.join(&mut out, Step::thinking(block, lines, false, paint));
                         }
                     }
                 }

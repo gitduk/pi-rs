@@ -387,18 +387,9 @@ pub struct Rows<'a>(pub &'a [Line<'a>]);
 impl Widget for Rows<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let width = area.width.max(1) as usize;
-        let mut y = area.y;
-        for line in self.0 {
-            if y >= area.y + area.height {
-                break;
-            }
-            for piece in fit(line, width) {
-                if y >= area.y + area.height {
-                    break;
-                }
-                write_line(&piece, area.x, y, buf);
-                y += 1;
-            }
+        let pieces = self.0.iter().flat_map(|line| fit(line, width));
+        for (row, piece) in area.rows().zip(pieces) {
+            write_line(&piece, row.x, row.y, buf);
         }
     }
 }

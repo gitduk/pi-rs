@@ -4,7 +4,6 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 
 use super::Ui;
-use super::browse::{Page, TextClick};
 use super::screen;
 use super::select::{self, Drawn, Point, Selection};
 use super::ui::Press;
@@ -49,9 +48,10 @@ impl Ui {
 
     // What row of the job list is at screen row `row`.
     fn job_row_at(&self, row: u16) -> Option<super::call::JobRow> {
-        let jobs = self.regions.jobs;
-        let at = row.checked_sub(jobs.y).filter(|r| *r < jobs.height)? as usize;
-        self.job_rows.get(at).copied()
+        if self.over_menu(row) {
+            return None;
+        }
+        self.job_rows.get(row_in(self.regions.jobs, row)?).copied()
     }
 
     // Whether screen row `row` folds or unfolds the job list.
@@ -82,9 +82,8 @@ impl Ui {
     /// it: the side of the bar row that holds it.
     pub(super) fn flash_at(&self, col: u16, row: u16) -> Option<bool> {
         let (at, cols, cut) = self.flash_hit.as_ref()?;
-        let bar = self.regions.bar;
-        let r = row.checked_sub(bar.y).filter(|r| *r < bar.height)? as usize;
-        let c = col.checked_sub(bar.x)? as usize;
+        let r = row_in(self.regions.bar, row)?;
+        let c = col.checked_sub(self.regions.bar.x)? as usize;
         (r == *at && cols.contains(&c)).then_some(*cut)
     }
 
@@ -93,27 +92,34 @@ impl Ui {
             return None;
         }
         self.row_targets
-            .get(row.checked_sub(self.regions.history.y)? as usize)
+            .get(row_in(self.regions.history, row)?)
             .copied()
     }
 
-    // Whether `row` is under the list or its rule, which lie over the history.
+    // Whether a click on screen row `row` closes the page: its rule, or the
+    // transcript it lies over, which stands back while it is up.
+    pub(super) fn closes_page_at(&self, row: u16) -> bool {
+        self.read.is_some() && !matches!(self.target_at(row), None | Some(Target::Text(_)))
+    }
+
+    // Whether `row` is under the list, which lies over the history.
     fn over_menu(&self, row: u16) -> bool {
-        let menu = self.regions.menu;
-        (menu.y - self.regions.rule.height..menu.y + menu.height).contains(&row)
+        row_in(self.regions.overlay(), row).is_some()
     }
 
     /// The scrollback row and line under the cursor, if the cursor is over
     /// that line's own text.
     pub(super) fn hovered_row(&self, view: &View, col: u16, row: u16) -> Option<(usize, usize)> {
+        // Under a page the transcript only stands back: none of it answers.
+        if self.read.is_some() {
+            return None;
+        }
         let target = self.target_at(row)?;
         let Target::Scrollback(idx, line) = target else {
             return None;
         };
         // A drawn block is one line, its label the first row.
-        let below_top = *self
-            .row_of
-            .get(row.checked_sub(self.regions.history.y)? as usize)?;
+        let below_top = *self.row_of.get(row_in(self.regions.history, row)?)?;
         let row = view.surface.scrollback.get(idx)?;
         let width = self.screen.width();
         let clicked = line;
@@ -152,33 +158,37 @@ impl Ui {
             self.jobs_all = !self.jobs_all;
             return;
         }
-        if self.earlier_at(row).is_some() {
-            let body = self.job_open.as_ref().map_or("", |o| o.body.as_str());
-            let whole = pi_store::listing::Listing::say(body.lines().map(str::to_string));
-            self.open_slash(whole);
+        // The page shows the whole of it, so the job folds: its tail twice
+        // over would read as two outputs.
+        if let Some(id) = self.earlier_at(row) {
+            let open = self.job_open.take();
+            let job = self.jobs.iter().find(|j| j.id == id);
+            if let (Some(open), Some(job)) = (open, job) {
+                self.open_page(super::call::job_page(job, &open.body, &self.paint));
+            }
             return;
         }
-        // A cut flash opens whole, as an answer the click asked for.
+        // A cut flash opens whole on the page.
         if self.flash_at(col, row) == Some(true)
             && let Some((line, _)) = &self.flash
         {
-            let whole = pi_store::listing::Listing::say([line.clone()]);
-            self.open_slash(whole);
+            let whole = ratatui::text::Line::from(line.clone());
+            self.open_page(vec![whole.into()]);
+            return;
+        }
+        if self.closes_page_at(row) {
+            self.close_page();
             return;
         }
         match self.target_at(row) {
             // Live rows rebuild every frame, so a flag flip is enough.
             Some(Target::PendingTools(_)) => self.live_tools_shown = !self.live_tools_shown,
-            Some(Target::Text(n)) => match self.text_click(n) {
-                Some(TextClick::Copy(code)) => {
+            Some(Target::Text(n)) => {
+                if let Some(code) = self.page_copies(n) {
                     let said = copy_out(&code);
                     self.flash(said);
                 }
-                Some(TextClick::Close) => {
-                    self.close_page();
-                }
-                None => {}
-            },
+            }
             _ => {
                 let width = self.screen.width();
                 let hit = self.hovered_row(view, col, row);
@@ -197,13 +207,13 @@ impl Ui {
                     && let Some(row) = view.surface.scrollback.get_mut(idx)
                 {
                     // Too long or too wide to read in place: read on a page of
-                    // its own, the line clicked heading it, left folded here.
+                    // its own, left folded here. A lone line opens only cut.
+                    let half = (self.regions.history.height as usize / 2).max(1);
                     if self.read.is_none()
-                        && let Some((head, body)) = row.opening(line, &self.paint, width)
-                        && (body.len() > self.regions.history.height as usize / 2
-                            || row.clipped(width))
+                        && let Some(page) = row.opening(line, &self.paint)
+                        && (page.len() > half || row.clipped(width))
                     {
-                        self.preview(std::iter::once(head.into()).chain(body).collect());
+                        self.open_page(page);
                         return;
                     }
                     if !row.toggle_at(line, width) {
@@ -222,25 +232,20 @@ impl Ui {
         if self.over_menu(row) {
             return None;
         }
-        let mut before = 0;
-        for r in self.regions.readable() {
-            if (r.y..r.bottom()).contains(&row) {
-                return Some(Point {
-                    row: (before + row - r.y) as usize,
-                    col: col.saturating_sub(r.x) as usize,
-                });
-            }
-            before += r.height;
-        }
-        None
+        (self.regions.readable().into_iter()).find_map(|(r, base)| {
+            Some(Point {
+                row: base + row_in(r, row)?,
+                col: col.saturating_sub(r.x) as usize,
+            })
+        })
     }
 
     pub(super) fn on_press(&mut self, view: &mut View, col: u16, row: u16) {
         self.selection = None;
         // Only transcript rows hold text to select; the pending-calls toggle
         // and the like answer the press itself, as they always did.
-        let [_, jobs, bar] = self.regions.readable();
-        let in_bar = [jobs, bar].iter().any(|r| (r.y..r.bottom()).contains(&row));
+        let [_, (jobs, _), (bar, _)] = self.regions.readable();
+        let in_bar = [jobs, bar].into_iter().any(|r| row_in(r, row).is_some());
         let at = self.point(col, row).filter(|_| {
             in_bar
                 || matches!(
@@ -288,7 +293,8 @@ impl Ui {
     pub(super) fn on_drag(&mut self, col: u16, row: u16) {
         // Past the edge the drag holds at the edge row; between two stretches,
         // at the last row of the one above.
-        let row = (self.regions.readable().iter())
+        let row = (self.regions.readable().into_iter())
+            .map(|(r, _)| r)
             .rev()
             .find(|r| r.height > 0 && r.y <= row)
             .map_or(self.regions.history.y, |r| row.min(r.bottom() - 1));
@@ -342,10 +348,7 @@ impl Ui {
                 (line, border, row.units(*i, &self.paint, width))
             }
             Target::Text(n) => {
-                let Some(Page::Preview(lines)) = self.page() else {
-                    return None;
-                };
-                let page = lines.get(*n)?;
+                let page = self.page()?.get(*n)?;
                 (page.line.clone(), None, page.units.clone())
             }
             _ => return None,
@@ -490,7 +493,9 @@ pub(super) enum Target {
     Live(usize),
     // Line `n` of the text the reading page shows.
     Text(usize),
-    // Neither: the room over a page's output, and the rule parting the two.
+    // The rule heading the reading page: a click on it closes the page.
+    Rule,
+    // Neither: the room over a page's output.
     Gap,
 }
 
@@ -502,7 +507,10 @@ pub(super) struct Regions {
     pub(super) history: Rect,
     // The blank row under it, which says what is below once scrolled up.
     pub(super) gap: Rect,
-    // The row over the completion list, which parts it from the transcript.
+    // The question the completion list answers, over its rule.
+    pub(super) asked: Rect,
+    // The row over the completion list's options, parting them from the
+    // question or, with none, the transcript.
     pub(super) rule: Rect,
     // The completion list.
     pub(super) menu: Rect,
@@ -539,10 +547,24 @@ pub(super) fn at_row_name(path: &str, dir: bool) -> String {
 /// a panel or the bar — so its last line never reads as part of them.
 pub(super) const HISTORY_GAP: u16 = 1;
 
+// `row`'s place among `area`'s rows, if it is one of them.
+fn row_in(area: Rect, row: u16) -> Option<usize> {
+    (area.top()..area.bottom())
+        .contains(&row)
+        .then(|| (row - area.y) as usize)
+}
+
 impl Regions {
     /// The rows each part asks for, as many as `area` holds: the input line
     /// parts the conversation, jobs and all, from the bar under it.
-    pub(super) fn layout(area: Rect, menu: usize, jobs: usize, bar: usize, editor: usize) -> Self {
+    pub(super) fn layout(
+        area: Rect,
+        asked: usize,
+        menu: usize,
+        jobs: usize,
+        bar: usize,
+        editor: usize,
+    ) -> Self {
         // A short screen takes from the editor, then the jobs, then the bar;
         // a row of history and a row to type on stay.
         let mut left = (area.height as usize).saturating_sub(1 + HISTORY_GAP as usize);
@@ -560,26 +582,23 @@ impl Regions {
             Constraint::Length(bar as u16),
         ])
         .split(area);
-        // The list lies over the rows above the jobs, as a command's output
-        // does: nothing under it moves as it grows and shrinks. Half at most,
-        // so what it moves the view to stays in sight.
-        let menu = menu.min(left.div_ceil(2)) as u16;
-        let menu = Rect {
-            y: chunks[2].y - menu,
-            height: menu,
-            ..chunks[2]
-        };
-        let rule = match menu.height > 0 && menu.y > area.y {
-            true => Rect {
-                y: menu.y - 1,
-                height: 1,
-                ..menu
-            },
-            false => Rect::default(),
-        };
+        // The list lies over the jobs and the rows above them, next to the
+        // line it completes: nothing under it moves as it grows and shrinks.
+        // Half the history at most, so what it moves the view to stays in sight.
+        let shown = (asked + menu).min(jobs + left.div_ceil(2));
+        let asked = asked.min(shown);
+        let above = chunks[0].union(chunks[2]);
+        let [_, asked, rule, menu] = Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(asked as u16),
+            Constraint::Length(u16::from(shown > 0)),
+            Constraint::Length((shown - asked) as u16),
+        ])
+        .areas(above);
         Self {
             history: chunks[0],
             gap: chunks[1],
+            asked,
             rule,
             menu,
             jobs: chunks[2],
@@ -588,9 +607,19 @@ impl Regions {
         }
     }
 
-    // The rows text is selected in, top to bottom, each numbered on from
-    // the one before.
-    pub(super) fn readable(&self) -> [Rect; 3] {
-        [self.history, self.jobs, self.bar]
+    // The rows the completion list lies over: its question, rule and options.
+    pub(super) fn overlay(&self) -> Rect {
+        self.asked.union(self.rule).union(self.menu)
+    }
+
+    // The rows text is selected in, top to bottom, each with the index its
+    // first row takes among them all.
+    pub(super) fn readable(&self) -> [(Rect, usize); 3] {
+        let mut base = 0;
+        [self.history, self.jobs, self.bar].map(|r| {
+            let at = base;
+            base += r.height as usize;
+            (r, at)
+        })
     }
 }

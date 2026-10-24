@@ -186,12 +186,7 @@ impl Tail {
             return String::from_utf8_lossy(kept).into_owned();
         }
         let from = kept.iter().position(|b| *b == b'\n').map_or(0, |at| at + 1);
-        let shown = &kept[from..];
-        format!(
-            "… the first {} of {total} bytes not shown\n{}",
-            total - shown.len(),
-            String::from_utf8_lossy(shown)
-        )
+        String::from_utf8_lossy(&kept[from..]).into_owned()
     }
 
     /// `pipe`, with what is read from it also kept here.
@@ -297,7 +292,7 @@ impl Streams {
 mod tests {
     use super::*;
 
-    // Past the window, the view starts on a whole line and counts what went.
+    // Past the window, the view starts on a whole line.
     #[test]
     fn a_tail_past_its_window_starts_on_a_whole_line() {
         let tail = Tail::default();
@@ -306,12 +301,7 @@ mod tests {
             tail.push(line.as_bytes());
         }
         let seen = tail.read();
-        let (note, rest) = seen.split_once('\n').unwrap();
-        assert!(rest.split_inclusive('\n').all(|l| l == line), "{seen}");
-        let shown = rest.len();
-        assert_eq!(
-            note,
-            format!("… the first {} of 10000 bytes not shown", 10000 - shown)
-        );
+        assert!(!seen.is_empty() && seen.len() < 10000);
+        assert!(seen.split_inclusive('\n').all(|l| l == line), "{seen}");
     }
 }

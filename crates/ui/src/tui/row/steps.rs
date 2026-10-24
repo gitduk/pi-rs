@@ -3,7 +3,7 @@
 
 use ratatui::text::{Line, Span};
 
-use super::{Fold, Opening, count};
+use super::{Fold, Opened, count};
 use crate::render::{self, Outcome, Paint};
 use crate::tui::browse::PageLine;
 use crate::tui::{THINKING, screen};
@@ -214,6 +214,9 @@ pub enum Step {
         // The stream appends a block's lines to the row holding its id.
         block: u64,
         lines: Vec<Line<'static>>,
+        // Those lines as they read opened, rendered once the block ends;
+        // till then the lines themselves.
+        shown: Vec<render::Rendered>,
         open: bool,
         // Still streaming: the group is not done while it is.
         live: bool,
@@ -326,7 +329,30 @@ fn pending_head(p: &PendingTool, tick: usize, timed: bool) -> Head {
     }
 }
 
+// A block's lines as they read opened: markdown, muted as its lines are, so
+// it still steps back from what was said.
+fn shown_of(lines: &[Line<'static>], paint: &Paint) -> Vec<render::Rendered> {
+    let text: Vec<String> = lines.iter().map(screen::plain).collect();
+    let mut shown = render::render_coded(&text.join("\n"), paint);
+    let muted = crate::sgr::style_to_ratatui(&paint.theme.muted).fg;
+    for span in shown.iter_mut().flat_map(|r| r.line.spans.iter_mut()) {
+        span.style.fg = muted.or(span.style.fg);
+    }
+    shown
+}
+
 impl Step {
+    /// A block of reasoning, `live` while it still streams.
+    pub fn thinking(block: u64, lines: Vec<Line<'static>>, live: bool, paint: &Paint) -> Self {
+        Step::Thinking {
+            block,
+            shown: shown_of(&lines, paint),
+            lines,
+            open: false,
+            live,
+        }
+    }
+
     fn is_open(&self) -> bool {
         match self {
             Step::Tool(t) => t.open,
@@ -341,17 +367,48 @@ impl Step {
         }
     }
 
-    // The lines an opened step shows under its own.
-    fn body_len(&self) -> usize {
+    // The lines it shows opened: its own, then what it holds.
+    fn opened_len(&self) -> usize {
         match self {
-            Step::Tool(t) => t.body.len(),
-            Step::Thinking { lines, .. } => lines.len().saturating_sub(1),
+            Step::Tool(t) => 1 + t.body.len(),
+            Step::Thinking {
+                lines, live: true, ..
+            } => lines.len().max(1),
+            Step::Thinking { shown, .. } => shown.len().max(1),
         }
+    }
+
+    // Line `j` opened, whole, less the border its place gives: its own line,
+    // then what it holds; a finished block's lines as markdown.
+    fn opened_content(&self, j: usize, hovered: bool, paint: &Paint) -> PageLine {
+        let mut page: PageLine = match (self, j) {
+            (Step::Tool(t), 1..) => body_line(t, j - 1, paint).into(),
+            (
+                Step::Thinking {
+                    lines, live: true, ..
+                },
+                _,
+            ) if j < lines.len() => lines[j].clone().into(),
+            (
+                Step::Thinking {
+                    shown, live: false, ..
+                },
+                _,
+            ) if j < shown.len() => shown[j].clone().into(),
+            _ => self.head().line(true, false, paint, usize::MAX).into(),
+        };
+        // Bold as `span_hovered` bolds: only where there is colour.
+        if hovered && paint.color {
+            for span in &mut page.line.spans {
+                span.style = Paint::lit(span.style);
+            }
+        }
+        page
     }
 
     // The lines it takes in an unfolded group.
     fn len(&self) -> usize {
-        1 + if self.is_open() { self.body_len() } else { 0 }
+        if self.is_open() { self.opened_len() } else { 1 }
     }
 
     fn head(&self) -> Head {
@@ -381,7 +438,7 @@ impl Step {
     // the width shows.
     fn opens(&self, width: usize) -> bool {
         self.is_open()
-            || self.body_len() > 0
+            || self.opened_len() > 1
             || self.head().cut(width.saturating_sub(STEP_INDENT.len()))
     }
 }
@@ -509,6 +566,18 @@ fn body_line(t: &FoldedTool, j: usize, paint: &Paint) -> Line<'static> {
     }
 }
 
+// The indent line `j` of an opened step sits under: a lone step's, under
+// the group's line it opens from; a listed one's, under its own.
+fn opened_border(step: &Step, j: usize, lone: bool) -> Option<Line<'static>> {
+    let indent = match (step, j, lone) {
+        (Step::Thinking { .. }, _, true) | (Step::Tool(_), 0, true) => return None,
+        (Step::Tool(_), 1.., false) => STEP_BODY_INDENT,
+        // No mark to sit past: the block's lines run under its first.
+        _ => STEP_INDENT,
+    };
+    Some(Line::from(indent))
+}
+
 // Line `i` of an unfolded group's list, the calls in flight last, with the
 // indent it sits under as the border a wrap repeats.
 fn step_line(
@@ -519,23 +588,20 @@ fn step_line(
     tick: usize,
     paint: &Paint,
     width: usize,
-) -> (Line<'static>, Option<Line<'static>>) {
+) -> (PageLine, Option<Line<'static>>) {
     let room = width.saturating_sub(STEP_INDENT.len());
-    let (line, indent) = match unit_at(steps, pending, i) {
-        Some((Unit::Step(s), 0)) => (
-            s.head().line(s.is_open(), hovered, paint, room),
-            STEP_INDENT,
-        ),
-        Some((Unit::Step(Step::Tool(t)), j)) => (body_line(t, j - 1, paint), STEP_BODY_INDENT),
-        // No mark to sit past: the block's lines run under its first.
-        Some((Unit::Step(Step::Thinking { lines, .. }), j)) => (lines[j].clone(), STEP_INDENT),
-        Some((Unit::Pending(p), _)) => (
-            pending_head(p, tick, true).line(false, false, paint, room),
-            STEP_INDENT,
-        ),
-        None => (Line::default(), STEP_INDENT),
+    let line = match unit_at(steps, pending, i) {
+        Some((Unit::Step(s), j)) if s.is_open() => {
+            return (
+                s.opened_content(j, hovered, paint),
+                opened_border(s, j, false),
+            );
+        }
+        Some((Unit::Step(s), _)) => s.head().line(false, hovered, paint, room),
+        Some((Unit::Pending(p), _)) => pending_head(p, tick, true).line(false, false, paint, room),
+        None => Line::default(),
     };
-    (line, Some(Line::from(indent)))
+    (line.into(), Some(Line::from(STEP_INDENT)))
 }
 
 /// The run's working behind one fold: read-only calls that landed well and
@@ -581,9 +647,8 @@ impl Group {
             return 1;
         }
         match self.lone() {
-            // The block is the group: its lines, with no line above.
-            Some(Step::Thinking { lines, .. }) => lines.len(),
-            Some(Step::Tool(t)) => 1 + t.body.len(),
+            // The step is the group: its lines, the first its own.
+            Some(step) => step.opened_len(),
             None => 1 + self.steps.iter().map(Step::len).sum::<usize>() + self.pending.len(),
         }
     }
@@ -594,27 +659,29 @@ impl Group {
         paint: &Paint,
         width: usize,
     ) -> (Line<'static>, Option<Line<'static>>) {
+        let (page, border) = self.drawn(i, paint, width);
+        (page.line, border)
+    }
+
+    // What in line `i` reads as one, as the line `line` gives holds it.
+    pub(super) fn units(&self, i: usize, paint: &Paint) -> crate::unit::Units {
+        self.drawn(i, paint, usize::MAX).0.units
+    }
+
+    // Line `i` as drawn, with what in it reads as one, and its border.
+    fn drawn(&self, i: usize, paint: &Paint, width: usize) -> (PageLine, Option<Line<'static>>) {
         let open = self.open();
         let hover = |at: usize| self.hovered == Some(at);
         let (steps, pending, tick) = (&self.steps, &self.pending, self.spinner);
         match self.lone() {
-            Some(Step::Thinking { lines, .. }) if open => {
-                let mut line = lines[i].clone();
-                // Bold as `span_hovered` bolds: only where there is colour.
-                if hover(i) && paint.color {
-                    for span in &mut line.spans {
-                        span.style = Paint::lit(span.style);
-                    }
-                }
-                (line, None)
-            }
-            Some(Step::Tool(t)) if open && i > 0 => {
-                (body_line(t, i - 1, paint), Some(Line::from(STEP_INDENT)))
-            }
-            _ if !open || i == 0 => (
-                steps_header(steps, pending, open, hover(0), tick, paint, width),
-                None,
+            Some(step) if open => (
+                step.opened_content(i, hover(i), paint),
+                opened_border(step, i, true),
             ),
+            _ if !open || i == 0 => {
+                let line = steps_header(steps, pending, open, hover(0), tick, paint, width);
+                (line.into(), None)
+            }
             _ => step_line(steps, pending, i - 1, hover(i), tick, paint, width),
         }
     }
@@ -673,17 +740,19 @@ impl Group {
     }
 
     // Block `id` ended: whether the group is left with no step.
-    pub(super) fn end_block(&mut self, id: u64) -> bool {
+    pub(super) fn end_block(&mut self, id: u64, paint: &Paint) -> bool {
         let hidden = self.folded;
         self.steps.retain_mut(|s| match s {
             Step::Thinking {
                 block,
                 lines,
+                shown,
                 open,
                 live,
             } if *block == id => {
                 *open = !hidden && *open;
                 *live = false;
+                *shown = shown_of(lines, paint);
                 !lines.is_empty()
             }
             _ => true,
@@ -738,55 +807,26 @@ impl Fold for Group {
 
     // A step closed on line `i`: a lone one from the folded line, a
     // listed one from its own.
-    fn opening(&self, i: usize, paint: &Paint, width: usize) -> Option<Opening> {
-        let (head, step) = match self.lone() {
+    fn opened(&self, i: usize, paint: &Paint) -> Option<Opened> {
+        let (step, lone) = match self.lone() {
             // The group is the step: opening the group opens it.
-            Some(step) if i == 0 && self.folded => {
-                let head = steps_header(
-                    &self.steps,
-                    &self.pending,
-                    false,
-                    false,
-                    self.spinner,
-                    paint,
-                    width,
-                );
-                (head, step)
-            }
+            Some(step) if i == 0 && self.folded => (step, true),
             None if i > 0 => {
                 let step = &self.steps[self.listed_step(i)?];
                 if step.is_open() {
                     return None;
                 }
-                let head = step_line(
-                    &self.steps,
-                    &self.pending,
-                    i - 1,
-                    false,
-                    self.spinner,
-                    paint,
-                    width,
-                )
-                .0;
-                (head, step)
+                (step, false)
             }
             _ => return None,
         };
-        let body = match step {
-            // Read as an answer is, markdown and all: muted is for the
-            // transcript, where it steps back from what was said.
-            Step::Thinking { lines, .. } => {
-                let text: Vec<String> = lines.iter().map(screen::plain).collect();
-                render::render_coded(&text.join("\n"), paint)
-                    .into_iter()
-                    .map(PageLine::from)
-                    .collect()
-            }
-            Step::Tool(t) => (0..t.body.len())
-                .map(|j| body_line(t, j, paint).into())
-                .collect(),
-        };
-        Some((head, body))
+        let lines = (0..step.opened_len()).map(|j| {
+            (
+                step.opened_content(j, false, paint),
+                opened_border(step, j, lone),
+            )
+        });
+        Some(lines.collect())
     }
 }
 
@@ -881,12 +921,8 @@ mod tests {
     }
 
     fn think(block: u64, n: usize) -> Step {
-        Step::Thinking {
-            block,
-            lines: (1..=n).map(|i| Line::from(format!("line {i}"))).collect(),
-            open: false,
-            live: false,
-        }
+        let lines = (1..=n).map(|i| Line::from(format!("line {i}"))).collect();
+        Step::thinking(block, lines, false, &Paint::new(false))
     }
 
     // Each line as the screen draws it, border included.
@@ -899,6 +935,46 @@ mod tests {
                 border.map(|b| plain(&b)).unwrap_or_default() + &plain(&line)
             })
             .collect()
+    }
+
+    // What line `i` opens onto on a page is what opening it there shows, the
+    // indent it sat under aside; a long command included, whole.
+    #[test]
+    fn a_page_reads_what_opening_in_place_shows() {
+        use crate::tui::screen::plain;
+        let paint = Paint::new(false);
+        let opens_as_in_place = |mut row: Row, i: usize| {
+            let page: Vec<String> = (row.opening(i, &paint).expect("it opens").iter())
+                .map(|l| plain(&l.line))
+                .collect();
+            assert!(row.toggle_at(i, 80));
+            let drawn = &shown(&row, 80)[i..i + page.len()];
+            let indent = (drawn.iter())
+                .map(|l| l.len() - l.trim_start_matches(' ').len())
+                .min()
+                .unwrap_or(0);
+            let drawn: Vec<&str> = drawn.iter().map(|l| &l[indent..]).collect();
+            assert_eq!(page, drawn);
+        };
+        let long = format!(
+            "grep -rn banner {}",
+            "crates/ui/src/tui/tests/*.rs ".repeat(4)
+        );
+        let ran = FoldedTool::new("bash", &long, &long, "one\ntwo\n");
+        let mut listed = bundle(vec![tool("read", "a.rs")]);
+        assert!(listed.join(think(1, 3)).is_ok());
+        assert!(listed.join(Step::Tool(ran)).is_ok());
+        assert!(listed.toggle_expand());
+        opens_as_in_place(listed, 3);
+        opens_as_in_place(
+            Row::thinking(
+                2,
+                (1..=4).map(|i| Line::from(format!("l{i}"))).collect(),
+                true,
+            ),
+            0,
+        );
+        opens_as_in_place(Row::note_lines("first\nsecond\nthird").remove(0), 0);
     }
 
     // Folded is one line; unfolded, a line per step under that same line —

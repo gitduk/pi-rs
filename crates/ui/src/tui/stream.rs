@@ -83,7 +83,9 @@ impl Ui {
         if reasoning {
             // The block is over: it stops taking lines, and its group stays
             // where it is.
-            view.surface.folds.close_block(&mut view.surface.scrollback);
+            view.surface
+                .folds
+                .close_block(&mut view.surface.scrollback, &self.paint);
         }
         view.surface.stream.kind = StreamKind::Answer;
     }

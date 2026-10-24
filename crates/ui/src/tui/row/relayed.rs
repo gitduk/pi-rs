@@ -4,7 +4,7 @@
 use ratatui::text::Line;
 
 use super::steps::STEP_INDENT;
-use super::{CODE_INDENT, Fold, Opening, clip_beside, count};
+use super::{CODE_INDENT, Fold, Opened, clip_beside, count};
 use crate::render::{self, Paint};
 use crate::tui::browse::PageLine;
 use pi_store::icons;
@@ -45,18 +45,43 @@ impl Relayed {
         paint: &Paint,
         width: usize,
     ) -> (Line<'static>, Option<Line<'static>>) {
-        if i == 0 {
+        if i == 0 && !self.open {
             return (self.head(self.hovered, paint, width), None);
         }
-        let Some(r) = self.body.get(i - 1) else {
-            return (Line::default(), Some(Line::from(STEP_INDENT)));
+        let (page, indent) = self.opened_line(i, self.hovered && i == 0, paint);
+        (page.line, indent)
+    }
+
+    // Line `i` opened, whole, as the row draws it and a page reads it: its
+    // own line, then the text under it.
+    fn opened_line(
+        &self,
+        i: usize,
+        hovered: bool,
+        paint: &Paint,
+    ) -> (PageLine, Option<Line<'static>>) {
+        let Some(j) = i.checked_sub(1) else {
+            return (self.head(hovered, paint, usize::MAX).into(), None);
+        };
+        let Some(r) = self.body.get(j) else {
+            return (Line::default().into(), Some(Line::from(STEP_INDENT)));
         };
         let indent = if r.coded == render::Coded::Code {
             format!("{STEP_INDENT}{CODE_INDENT}")
         } else {
             STEP_INDENT.to_string()
         };
-        (r.line.clone(), Some(Line::from(indent)))
+        // Not `PageLine::from`: a code line's indent rides in the border here,
+        // so a wrap keeps it.
+        let page = PageLine {
+            line: r.line.clone(),
+            copies: match &r.coded {
+                render::Coded::Badge(code) => Some(code.clone()),
+                _ => None,
+            },
+            units: r.units.clone(),
+        };
+        (page, Some(Line::from(indent)))
     }
 
     // What in line `i` reads as one; its own line holds nothing such.
@@ -94,15 +119,14 @@ impl Fold for Relayed {
         self.open = !self.open;
     }
 
-    fn opening(&self, _i: usize, paint: &Paint, width: usize) -> Option<Opening> {
+    fn opened(&self, _i: usize, paint: &Paint) -> Option<Opened> {
         if self.open || !self.expandable() {
             return None;
         }
-        let body = self
-            .body
-            .iter()
-            .map(|r| PageLine::from(r.clone()))
-            .collect();
-        Some((self.head(false, paint, width), body))
+        Some(
+            (0..=self.body.len())
+                .map(|i| self.opened_line(i, false, paint))
+                .collect(),
+        )
     }
 }

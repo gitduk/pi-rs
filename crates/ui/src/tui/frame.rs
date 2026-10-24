@@ -8,7 +8,6 @@ use ratatui::widgets::{List, ListState};
 
 use super::Ui;
 use super::bar::Facts;
-use super::browse::{Page, Read};
 use super::call::{self, drawn, pending_line};
 use super::menu::MenuEntry;
 use super::mouse::{Regions, Target};
@@ -30,8 +29,7 @@ const MENU_PADDING: usize = 2;
 impl Ui {
     pub(super) fn flush(&mut self, lane: &Lane, view: &mut View) {
         let width = self.screen.width();
-        let alone = matches!(self.page(), Some(Page::Preview(_)));
-        let slash = matches!(self.page(), Some(Page::Slash(_)));
+        let paged = self.read.is_some();
         let text = self.page_lines();
         // The group live calls fold into, when it's the last scrollback
         // row: theirs to draw, so the live block leaves them alone.
@@ -57,16 +55,12 @@ impl Ui {
             let hovered = self.hovered_scrollback.filter(|h| h.0 == idx).map(|h| h.1);
             row.update_live(hovered, self.spinner, flight);
         }
-        let (live, pending_rows) = if alone {
-            (Vec::new(), 0)
-        } else {
-            self.live(lane, view, row_holds, now)
-        };
+        let (live, pending_rows) = self.live(lane, view, row_holds, now);
 
         // What the keys asked is answered before anything is laid out, so the
         // list, the bar and the line are drawn as the answer left them.
         if self.search_due() {
-            let laid: Vec<Laid> = ScrollbackRows::new(transcript(view, alone), &self.paint, width)
+            let laid: Vec<Laid> = ScrollbackRows::new(&view.surface.scrollback, &self.paint, width)
                 .indexed()
                 .map(|(piece, idx)| {
                     let line = match &piece {
@@ -124,12 +118,13 @@ impl Ui {
         let area = self.screen.area();
         let regions = Regions::layout(
             area,
-            menu.len() + asked.len(),
+            asked.len(),
+            menu.len(),
             jobs.len(),
             bar.len(),
             input.len(),
         );
-        asked.truncate(regions.menu.height as usize);
+        asked.truncate(regions.asked.height as usize);
         jobs.truncate(regions.jobs.height as usize);
         bar.truncate(regions.bar.height as usize);
         // A paste taller than the terminal keeps the caret's row in view.
@@ -148,6 +143,7 @@ impl Ui {
         // A line a click answers on is lit under the pointer, as a fold's
         // own line is.
         let lit = self.lit_text();
+        let ruled = self.on_closer();
         let bold = lit.filter(|_| self.paint.color);
         let text_stream = text.into_iter().enumerate().map(move |(at, mut line)| {
             if bold == Some(at) {
@@ -157,7 +153,7 @@ impl Ui {
             }
             (Piece::Live(screen::Ready { line, width }), Target::Text(at))
         });
-        let scrollback = ScrollbackRows::new(transcript(view, alone), &self.paint, width)
+        let scrollback = ScrollbackRows::new(&view.surface.scrollback, &self.paint, width)
             .indexed()
             .map(|(item, idx)| {
                 let line = match &item {
@@ -188,10 +184,11 @@ impl Ui {
         let at = top.map(|a| (move |t: &Target| Spot::of(*t).cmp(&Some(a.spot)), a.rows));
         // The history row a page's output starts on, the transcript above it.
         let mut output_at = None;
-        let (tagged_rows, scroll) = if slash {
-            // The output lies over the transcript's bottom rows: the
-            // transcript stays where it stood, not pushed up by it.
-            let (text, scroll) = screen::window_tagged(text_stream, hist_view, scroll, at, most);
+        let (tagged_rows, scroll) = if paged && hist_view > 0 {
+            // The page lies over the transcript's bottom rows, under a rule
+            // that a page taller than the region pushes up to its top row.
+            let (text, scroll) =
+                screen::window_tagged(text_stream, hist_view - 1, scroll, at, most);
             let surface = &view.surface;
             let under =
                 (surface.top).map(|a| (move |t: &Target| Spot::of(*t).cmp(&Some(a.spot)), a.rows));
@@ -202,27 +199,13 @@ impl Ui {
                 under,
                 usize::MAX,
             );
-            let room = hist_view.saturating_sub(text.len());
+            let room = (hist_view - 1).saturating_sub(text.len());
             output_at = Some(room);
             rows.truncate(room);
             rows.resize(room, (Line::default(), Target::Gap, 0));
-            // The row over the output parts it from the transcript.
-            if let Some(last) = rows.last_mut() {
-                *last = (self.over_rule(width), Target::Gap, 0);
-            }
+            let rule = self.over_rule(width, ruled && self.paint.color);
+            rows.push((rule, Target::Rule, 0));
             rows.extend(text);
-            (rows, scroll)
-        } else if alone {
-            // The head closes the page, so it stays on the top rows however
-            // far down the rest is read.
-            let mut text = text_stream;
-            let mut rows: Vec<_> = text.next().map_or_else(Vec::new, |(head, target)| {
-                let pieces = screen::Piece::pieces(head).into_iter().enumerate();
-                pieces.map(|(at, row)| (row, target, at)).collect()
-            });
-            let room = hist_view.saturating_sub(rows.len());
-            let (rest, scroll) = screen::window_tagged(text, room, scroll, at, most);
-            rows.extend(rest);
             (rows, scroll)
         } else {
             screen::window_tagged(
@@ -243,7 +226,7 @@ impl Ui {
             self.row_of.push(at);
         }
         self.search_settle();
-        // The query marked on the rows a search reads, a slash page's own.
+        // The query marked on the rows a search reads, a page's own.
         let look = self.rat_style(&self.paint.theme.matched);
         let here = self.rat_style(&self.paint.theme.match_current);
         let rows = match self.search_query() {
@@ -252,7 +235,7 @@ impl Ui {
                 rows.into_iter()
                     .zip(places)
                     .map(|(row, (target, &r))| {
-                        if slash && !matches!(target, Target::Text(_)) {
+                        if paged && !matches!(target, Target::Text(_)) {
                             return row;
                         }
                         let current = at
@@ -267,11 +250,7 @@ impl Ui {
         let plain = |l: &Line<'_>| l.spans.iter().map(|s| s.content.as_ref()).collect();
         // Each readable stretch's rows are selected under the one above, at
         // its full height.
-        let [history, jobs_at, _] = regions.readable();
-        let (jobs_base, bar_base) = (
-            history.height as usize,
-            (history.height + jobs_at.height) as usize,
-        );
+        let [_, (_, jobs_base), (_, bar_base)] = regions.readable();
         self.drawn = rows.iter().map(plain).collect();
         self.drawn.resize(jobs_base, String::new());
         self.drawn.extend(jobs.iter().map(plain));
@@ -318,7 +297,7 @@ impl Ui {
             .and_then(|_| self.paint.band(&self.paint.theme.prompt.panel.input))
             .unwrap_or_default();
         self.regions = regions;
-        let menu_rule = self.over_rule(width);
+        let menu_rule = self.over_rule(width, false);
         let _ = self.screen.draw(|frame| {
             // Laid out for the size last reported: a frame of another would
             // draw off its edge, and the resize on its way redraws.
@@ -332,7 +311,7 @@ impl Ui {
             if let Some(above) = output_at {
                 // Up to the rule, which keeps its colour.
                 let transcript = Rect {
-                    height: above.saturating_sub(1) as u16,
+                    height: above as u16,
                     ..regions.history
                 };
                 frame.buffer_mut().set_style(transcript, dim);
@@ -341,25 +320,12 @@ impl Ui {
             if let Some(below) = &below {
                 frame.render_widget(below, regions.gap);
             }
-            if regions.menu.height > 0 {
-                frame.render_widget(ratatui::widgets::Clear, regions.menu);
-                frame.render_widget(ratatui::widgets::Clear, regions.rule);
+            frame.render_widget(Rows(&jobs), regions.jobs);
+            if regions.rule.height > 0 {
+                frame.render_widget(ratatui::widgets::Clear, regions.overlay());
+                frame.render_widget(Rows(&asked), regions.asked);
                 frame.render_widget(&menu_rule, regions.rule);
-                // A question's head over its options, which scroll as any
-                // list's do.
-                let head = asked.len() as u16;
-                frame.render_widget(
-                    Rows(&asked),
-                    Rect {
-                        height: head,
-                        ..regions.menu
-                    },
-                );
-                let list = Rect {
-                    y: regions.menu.y + head,
-                    height: regions.menu.height - head,
-                    ..regions.menu
-                };
+                let list = regions.menu;
                 // Kept full: ratatui won't pull back an offset that a taller
                 // screen or a changed list left past the end.
                 let room = list.height as usize;
@@ -375,18 +341,11 @@ impl Ui {
                 );
                 self.list.top = state.offset();
             }
-            frame.render_widget(Rows(&jobs), regions.jobs);
             frame.render_widget(Rows(&bar), regions.bar);
             // Before the rows, so a span over the band keeps it: the columns the
             // input does not reach carry it too.
             if let Some(band) = self.band {
-                frame.buffer_mut().set_style(
-                    Rect {
-                        width: width as u16,
-                        ..regions.editor
-                    },
-                    band,
-                );
+                frame.buffer_mut().set_style(regions.editor, band);
             }
             frame.render_widget(Rows(&input_view), regions.editor);
             let caret_row = regions.editor.y + caret_in_view as u16;
@@ -396,16 +355,27 @@ impl Ui {
         let over = self
             .pointer
             .and_then(|(col, row)| self.hovered_row(view, col, row));
-        if over != self.hovered_scrollback || self.lit_text() != lit {
+        if over != self.hovered_scrollback || self.lit_text() != lit || self.on_closer() != ruled {
             self.hovered_scrollback = over;
             self.redraw = true;
         }
     }
 
-    // The line that parts whatever lies over the transcript from it.
-    fn over_rule(&self, width: usize) -> Line<'static> {
-        let rule = icons::OVER_RULE.repeat(width);
-        Line::from(self.paint.span(&self.paint.theme.prompt.color, &rule))
+    // The line that parts whatever lies over the transcript from it; `lit`,
+    // it says what a click on it does, since a thin line shows no bold.
+    fn over_rule(&self, width: usize, lit: bool) -> Line<'static> {
+        let color = &self.paint.theme.prompt.color;
+        let says = " click to close ";
+        let room = width.saturating_sub(pi_store::text::width(says));
+        if !lit || room < 2 {
+            return Line::from(self.paint.span(color, icons::OVER_RULE.repeat(width)));
+        }
+        Line::from(vec![
+            self.paint.span(color, icons::OVER_RULE.repeat(room / 2)),
+            self.paint.span_hovered(true, color, says),
+            self.paint
+                .span(color, icons::OVER_RULE.repeat(room - room / 2)),
+        ])
     }
 
     // The search's row, and the column the caret stands at in the query.
@@ -426,36 +396,31 @@ impl Ui {
         let Some(Target::Text(n)) = self.target_at(row) else {
             return None;
         };
-        self.text_click(n).map(|_| n)
+        self.page_copies(n).map(|_| n)
     }
 
-    // The page's own lines: a command's, set off from the transcript above it
-    // by a blank row, or a preview's without what a click on one copies.
+    // Whether the pointer is where a click closes the page.
+    fn on_closer(&self) -> bool {
+        self.pointer
+            .is_some_and(|(_, row)| self.closes_page_at(row))
+    }
+
+    // The page's own lines, without what a click on one copies.
     fn page_lines(&self) -> Vec<Line<'static>> {
-        match &self.read {
-            Some(Read {
-                page: Page::Slash(lines),
-                ..
-            }) => std::iter::once(Line::default())
-                .chain(lines.iter().cloned())
-                .collect(),
-            Some(Read {
-                page: Page::Preview(lines),
-                ..
-            }) => lines.iter().map(|l| l.line.clone()).collect(),
-            _ => Vec::new(),
-        }
+        (self.page().unwrap_or_default().iter())
+            .map(|l| l.line.clone())
+            .collect()
     }
 
-    // How far back the window may go. A slash page's stops at its head:
-    // the transcript under it is only what it was asked over.
+    // How far back the window may go. A page's stops at its head: the
+    // transcript under it is only what it was opened over.
     fn most(&self, text: &[Line], hist_view: usize, width: usize) -> usize {
         match self.page() {
-            Some(Page::Slash(_)) => {
+            Some(_) => {
                 let rows: usize = text.iter().map(|l| screen::rows(l, width)).sum();
-                rows.saturating_sub(hist_view)
+                rows.saturating_sub(hist_view.saturating_sub(1))
             }
-            _ => usize::MAX,
+            None => usize::MAX,
         }
     }
 
@@ -613,9 +578,4 @@ impl Ui {
             self.paint.span(&theme.muted, hint),
         ])
     }
-}
-
-// The transcript rows the window reads: none under a preview.
-fn transcript(view: &View, alone: bool) -> &[Row] {
-    if alone { &[] } else { &view.surface.scrollback }
 }

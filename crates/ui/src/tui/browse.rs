@@ -1,6 +1,6 @@
-//! The reading page: what the history region shows in the transcript's
-//! place, the line still under it with the keys. It reads lines of its own:
-//! what a command answered, or what a step opens.
+//! The reading page: lines of its own over the transcript's bottom rows,
+//! under a rule, the line still under it with the keys. It reads what a
+//! command answered, or what a click opens.
 //!
 //! The page keeps its own scroll, so the transcript's is where it was when
 //! the page closes.
@@ -31,14 +31,8 @@ impl From<Line<'static>> for PageLine {
     }
 }
 
-// What a click on a line of a text page does.
-pub(super) enum TextClick {
-    Copy(String),
-    Close,
-}
-
 pub(super) struct Read {
-    pub(super) page: Page,
+    pub(super) page: Vec<PageLine>,
     // Rows the page is scrolled up by, as the transcript's `scroll`.
     pub(super) scroll: usize,
     // The row the page opens on, as the transcript's `top`.
@@ -48,53 +42,31 @@ pub(super) struct Read {
     back: Option<Mode>,
 }
 
-pub(super) enum Page {
-    // A slash command's output, lying over the bottom of the transcript it was
-    // typed over.
-    Slash(Vec<Line<'static>>),
-    // What a closed line opens onto, standing alone: its first line is the
-    // one clicked, copied out when the page opened.
-    Preview(Vec<PageLine>),
-}
-
 impl Ui {
-    pub(super) fn page(&self) -> Option<&Page> {
-        match &self.read {
-            Some(read) => Some(&read.page),
-            _ => None,
-        }
+    pub(super) fn page(&self) -> Option<&[PageLine]> {
+        self.read.as_ref().map(|read| read.page.as_slice())
     }
 
-    // What a click on line `n` of a preview does: copy the block it is the
-    // badge of, or, on the line clicked to open it, close the page.
-    pub(super) fn text_click(&self, n: usize) -> Option<TextClick> {
-        let Some(Page::Preview(lines)) = self.page() else {
-            return None;
-        };
-        match &lines.get(n)?.copies {
-            Some(code) => Some(TextClick::Copy(code.clone())),
-            None => (n == 0).then_some(TextClick::Close),
-        }
+    // The code block a click on line `n` of the page copies, when it is
+    // that block's badge.
+    pub(super) fn page_copies(&self, n: usize) -> Option<String> {
+        self.page()?.get(n)?.copies.clone()
     }
 
-    // Read what a closed line opens onto, from its head.
-    pub(super) fn preview(&mut self, lines: Vec<PageLine>) {
-        self.open_page(Page::Preview(lines), super::screen::TOP);
-    }
-
-    /// Shows a command's output, replacing any prior one. Empty output opens
-    /// nothing, since dismissing an empty overlay is worse than silence.
-    pub(super) fn open_slash(&mut self, content: Listing) {
-        if !content.is_empty() {
-            let lines = super::slash::lines(&content, self.screen.width(), &self.paint);
-            // From its first line: the draw stops `TOP` at the output's head.
-            self.open_page(Page::Slash(lines), super::screen::TOP);
-        } else if matches!(self.page(), Some(Page::Slash(_))) {
+    /// Shows a command's answer, replacing any page up. An empty answer
+    /// opens nothing, since dismissing an empty page is worse than silence,
+    /// and closes what was up: the command moved on from it.
+    pub(super) fn open_answer(&mut self, content: Listing) {
+        if content.is_empty() {
             self.close_page();
+            return;
         }
+        let lines = super::slash::lines(&content, self.screen.width(), &self.paint);
+        self.open_page(lines.into_iter().map(PageLine::from).collect());
     }
 
-    fn open_page(&mut self, page: Page, scroll: usize) {
+    // Read `page` in the history region, from its first line.
+    pub(super) fn open_page(&mut self, page: Vec<PageLine>) {
         // Over an empty line in Insert, Normal: its letters move the page.
         // A page replacing a page keeps the mode the first came from.
         let back = match self.read.take() {
@@ -109,7 +81,8 @@ impl Ui {
         self.search = None;
         self.read = Some(Read {
             page,
-            scroll,
+            // The draw stops `TOP` at the page's head.
+            scroll: super::screen::TOP,
             top: None,
             back,
         });

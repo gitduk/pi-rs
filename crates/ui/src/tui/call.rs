@@ -7,6 +7,7 @@ use llm::message::ToolResult;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 
+use super::browse::PageLine;
 use super::row::{self, PendingTool, Row, Stage, StepMark};
 use super::scrollback::{Folds, Scrollback};
 use super::ui::OpenJob;
@@ -169,9 +170,6 @@ fn job_text(job: &Job) -> (String, String) {
 // Under an open job: the last this many lines of what it printed.
 const BODY_SHOWN: usize = 8;
 
-// One row per job, `hovered` bold; the `open` one whole, wrapped, with the
-// tail of `body` under it. Also the job whose own row each is, for a click
-// to find; what it printed under it is no one's.
 /// What a row of the job list is, for a click to find.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum JobRow {
@@ -184,6 +182,25 @@ pub(super) enum JobRow {
     Fold,
 }
 
+// What an open job printed, a line per row, blank ones left out.
+fn said(body: &str) -> Vec<String> {
+    (body.lines())
+        .map(pi_store::text::screen_line)
+        .filter(|l| !l.trim().is_empty())
+        .collect()
+}
+
+// A page of all an open job printed, headed by its row.
+pub(super) fn job_page(job: &Job, body: &str, paint: &Paint) -> Vec<PageLine> {
+    let (head, tail) = job_text(job);
+    let head = Line::from(paint.span(&paint.theme.muted, head + &tail));
+    let said = said(body).into_iter().map(|l| Line::from(l).into());
+    std::iter::once(head.into()).chain(said).collect()
+}
+
+// One row per job, `hovered` bold; the `open` one whole, wrapped, with the
+// tail of `body` under it. Also the job whose own row each is, for a click
+// to find; what it printed under it is no one's.
 pub(super) fn job_lines(
     jobs: &[Job],
     hovered: Option<JobRow>,
@@ -205,15 +222,12 @@ pub(super) fn job_lines(
         let rows = if let Some(OpenJob { body, .. }) = open.filter(|o| o.id == job.id) {
             let (head, tail) = job_text(job);
             let row = Line::from(paint.span_hovered(shine, &paint.theme.muted, head + &tail));
-            let said: Vec<String> = (body.lines())
-                .map(pi_store::text::screen_line)
-                .filter(|l| !l.trim().is_empty())
-                .collect();
+            let said = said(body);
             let from = said.len().saturating_sub(BODY_SHOWN);
             let mut rows = super::screen::fit(&row, room);
             ids.extend(std::iter::repeat_n(JobRow::Job(job.id), rows.len()));
             if from > 0 {
-                let more = format!("  {from} lines before · click to read all");
+                let more = format!("  {from} more");
                 let shine = hovered == Some(JobRow::Earlier(job.id));
                 rows.push(Line::from(paint.span_hovered(
                     shine,

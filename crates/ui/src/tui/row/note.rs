@@ -4,7 +4,7 @@
 
 use ratatui::text::{Line, Span};
 
-use super::{Fold, Opening, clip_beside, count};
+use super::{Fold, Opened, clip_beside, count};
 use crate::render::Paint;
 use crate::tui::browse::PageLine;
 use pi_store::icons;
@@ -31,25 +31,41 @@ impl Note {
         }
     }
 
-    // The mark leads the first line, its blank width every other, so a wrap
-    // hangs under the text, not the mark.
     pub(super) fn line(
         &self,
         i: usize,
         paint: &Paint,
         width: usize,
     ) -> (Line<'static>, Option<Line<'static>>) {
+        if !self.open {
+            return (
+                Line::from(self.head(paint, width)),
+                Some(self.lead(0, paint)),
+            );
+        }
+        let (page, lead) = self.opened_line(i, self.hovered && i == 0, paint);
+        (page.line, lead)
+    }
+
+    // The mark before the first line, its blank width before every other,
+    // so a wrap hangs under the text, not the mark.
+    fn lead(&self, i: usize, paint: &Paint) -> Line<'static> {
         let mark = icons::bar(icons::NOTE_MARK);
-        let lead = match i {
+        Line::from(match i {
             0 => paint.span(&paint.theme.prompt.color, mark),
             _ => Span::raw(" ".repeat(pi_store::text::width(&mark))),
-        };
-        let body = match i {
-            0 if !self.open => self.head(paint, width),
-            0 => paint.span_hovered(self.hovered, &paint.theme.muted, self.lines[0].clone()),
-            _ => paint.span(&paint.theme.muted, self.lines[i].clone()),
-        };
-        (Line::from(body), Some(Line::from(lead)))
+        })
+    }
+
+    // Line `i` opened, as the row draws it and a page reads it.
+    fn opened_line(
+        &self,
+        i: usize,
+        hovered: bool,
+        paint: &Paint,
+    ) -> (PageLine, Option<Line<'static>>) {
+        let body = paint.span_hovered(hovered, &paint.theme.muted, self.lines[i].clone());
+        (Line::from(body).into(), Some(self.lead(i, paint)))
     }
 
     // Closed, its first line cut to one row, and how much opening shows.
@@ -88,19 +104,15 @@ impl Fold for Note {
         (i == 0 && (self.expandable() || self.clipped(width))).then_some(0)
     }
 
-    // The whole note, uncut: a page wraps what the row would clip.
-    fn opening(&self, _i: usize, paint: &Paint, width: usize) -> Option<Opening> {
-        if self.open || !(self.expandable() || self.clipped(width)) {
+    fn opened(&self, _i: usize, paint: &Paint) -> Option<Opened> {
+        if self.open {
             return None;
         }
-        let head = Line::from(vec![
-            paint.span(&paint.theme.prompt.color, icons::bar(icons::NOTE_MARK)),
-            paint.span(&paint.theme.muted, self.lines[0].clone()),
-        ]);
-        let body = (self.lines[1..].iter())
-            .map(|l| PageLine::from(Line::from(paint.span(&paint.theme.muted, l.clone()))))
-            .collect();
-        Some((head, body))
+        Some(
+            (0..self.lines.len())
+                .map(|i| self.opened_line(i, false, paint))
+                .collect(),
+        )
     }
 
     fn clipped(&self, width: usize) -> bool {

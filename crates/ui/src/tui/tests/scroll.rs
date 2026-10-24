@@ -154,7 +154,7 @@ fn a_finished_group_keeps_its_fold_until_the_next_question() {
     streamed(&mut t, &mut scrollback);
     t.toggle_current(&mut scrollback);
     assert_eq!(scrollback[0].folded(), Some(false));
-    t.close_block(&mut scrollback);
+    t.close_block(&mut scrollback, &Paint::new(false));
     // Still last until the next question is asked.
     assert_eq!(scrollback[0].folded(), Some(false));
     t.fold_previous(&mut scrollback);
@@ -173,7 +173,7 @@ fn a_finished_group_follows_a_global_unfold() {
     };
     let mut scrollback = Scrollback::default();
     streamed(&mut t, &mut scrollback);
-    t.close_block(&mut scrollback);
+    t.close_block(&mut scrollback, &Paint::new(false));
     t.fold_previous(&mut scrollback);
     assert_eq!(scrollback[0].folded(), Some(false));
 }
@@ -185,13 +185,13 @@ fn a_block_after_a_call_joins_its_group() {
     let mut t = Folds::default();
     let mut scrollback = Scrollback::default();
     streamed(&mut t, &mut scrollback);
-    t.close_block(&mut scrollback);
+    t.close_block(&mut scrollback, &Paint::new(false));
     t.join(
         &mut scrollback,
         Step::Tool(FoldedTool::new("read", "a.rs", "", "")),
     );
     streamed(&mut t, &mut scrollback);
-    t.close_block(&mut scrollback);
+    t.close_block(&mut scrollback, &Paint::new(false));
     assert_eq!(scrollback.len(), 1);
     assert!(scrollback[0].holds_block(1) && scrollback[0].holds_block(2));
 }
@@ -204,7 +204,7 @@ fn a_block_after_an_answer_starts_a_group_and_inherits_the_flip() {
     let mut scrollback = Scrollback::default();
     streamed(&mut t, &mut scrollback);
     t.toggle_current(&mut scrollback);
-    t.close_block(&mut scrollback);
+    t.close_block(&mut scrollback, &Paint::new(false));
     scrollback.push(Row::notice("an answer"));
     streamed(&mut t, &mut scrollback);
     assert_eq!(scrollback[0].folded(), Some(true));
@@ -221,7 +221,7 @@ fn a_block_that_ends_without_a_line_leaves_nothing() {
     t.toggle_current(&mut scrollback);
     assert!(t.folded, "the switch itself is not touched");
     assert_eq!(scrollback[0].folded(), Some(false));
-    t.close_block(&mut scrollback);
+    t.close_block(&mut scrollback, &Paint::new(false));
     let drawn = ScrollbackRows::new(&scrollback, &Paint::new(false), 80).count();
     assert_eq!(drawn, 0, "nothing drawn");
     assert!(!scrollback.iter().any(Row::is_steps), "no group left");
@@ -264,7 +264,7 @@ fn flipping_every_group_moves_the_switch_with_them() {
     let mut scrollback = Scrollback::default();
     streamed(&mut t, &mut scrollback);
     t.toggle_current(&mut scrollback); // unfold the current group on its own
-    t.close_block(&mut scrollback);
+    t.close_block(&mut scrollback, &Paint::new(false));
     t.flip_all(&mut scrollback); // global fold
     assert!(!t.folded);
     assert!(scrollback.iter().all(|e| e.folded() == Some(false)));
@@ -289,7 +289,7 @@ fn a_flip_applies_to_each_new_last_group_until_flipped_back() {
     let mut scrollback = Scrollback::default();
     streamed(&mut t, &mut scrollback);
     assert_eq!(scrollback[0].folded(), Some(false));
-    t.close_block(&mut scrollback);
+    t.close_block(&mut scrollback, &Paint::new(false));
 
     // An answer ends the group; the next one is the new last, born
     // unfolded, and the first folds back to the switch.
@@ -428,7 +428,7 @@ fn a_panel_dims_the_transcript_under_it() {
     };
     ui.flush(&lane, &mut view);
     assert!(!dimmed(&ui));
-    ui.open_slash(pi_store::listing::Listing::say(["/status answered"]));
+    ui.open_answer(pi_store::listing::Listing::say(["/status answered"]));
     ui.flush(&lane, &mut view);
     assert!(dimmed(&ui), "under the panel");
     ui.read = None;
@@ -436,7 +436,7 @@ fn a_panel_dims_the_transcript_under_it() {
     assert!(!dimmed(&ui), "the panel closed");
 }
 
-// A found line comes up midway under the preview's pinned head, `n` / `N`
+// A found line comes up midway under the page's pinned rule, `n` / `N`
 // step round the lines holding it, and esc puts the view back where `/` found it.
 #[test]
 fn a_search_brings_each_line_holding_it_to_the_middle() {
@@ -444,7 +444,7 @@ fn a_search_brings_each_line_holding_it_to_the_middle() {
     let mut ui = vim_ui_at(30, 12);
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
-    ui.preview(
+    ui.open_page(
         (0..100)
             .map(|i| Line::from(format!("line {i}")).into())
             .collect(),
@@ -452,7 +452,8 @@ fn a_search_brings_each_line_holding_it_to_the_middle() {
     let press = |ui: &mut crate::tui::Ui, view: &mut View, event| {
         ui.key(&lane, view, event, false);
         ui.flush(&lane, view);
-        assert_eq!(ui.drawn[0].trim_end(), "line 0", "the head stays pinned");
+        let rule = pi_store::icons::OVER_RULE;
+        assert!(ui.drawn[0].starts_with(rule), "the rule stays pinned");
         current_hit(ui).map_or(String::new(), |(_, line)| line)
     };
     let key = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
@@ -460,7 +461,7 @@ fn a_search_brings_each_line_holding_it_to_the_middle() {
     press(&mut ui, &mut view, typed('/'));
     assert_eq!(
         ui.drawn[1].trim_end(),
-        "line 1",
+        "line 0",
         "nothing typed, nothing moved"
     );
     assert_eq!(press(&mut ui, &mut view, typed('4')), "line 4");
@@ -493,7 +494,7 @@ fn a_search_brings_each_line_holding_it_to_the_middle() {
     assert!(ui.read.is_some(), "esc leaves the query, not the page");
 }
 
-// A slash page searches its own lines, not the transcript it was typed
+// A page searches its own lines, not the transcript it was opened
 // over, though both hold the query.
 #[test]
 fn a_command_page_searches_only_its_own_lines() {
@@ -504,7 +505,7 @@ fn a_command_page_searches_only_its_own_lines() {
     view.surface.scrollback = vec![Row::notice("beta in the transcript")].into();
     let lines = ["alpha", "beta"].into_iter().map(String::from);
     let filler = (0..20).map(|n| format!("filler {n}"));
-    ui.open_slash(pi_store::listing::Listing::say(lines.chain(filler)));
+    ui.open_answer(pi_store::listing::Listing::say(lines.chain(filler)));
     ui.flush(&lane, &mut view);
     for c in "/beta".chars() {
         ui.key(&lane, &mut view, typed(c), false);
@@ -529,7 +530,7 @@ fn a_search_query_takes_the_line_editing_keys() {
     let mut ui = vim_ui_at(30, 12);
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
-    ui.preview(vec![Line::from("head").into()]);
+    ui.open_page(vec![Line::from("head").into()]);
     ui.flush(&lane, &mut view);
     for c in "/one two".chars() {
         ui.key(&lane, &mut view, typed(c), false);
@@ -555,7 +556,7 @@ fn a_search_counts_what_is_drawn_and_reaches_rows_below_the_window() {
         .map(|i| format!("w{i:03}"))
         .collect::<Vec<_>>()
         .join(" ");
-    ui.preview(vec![
+    ui.open_page(vec![
         Line::from("head").into(),
         Line::from("\x1b[31mred\x1b[0m").into(),
         Line::from(long).into(),
@@ -589,7 +590,7 @@ fn a_paste_goes_on_the_query() {
     let mut ui = vim_ui_at(30, 12);
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
-    ui.preview(vec![Line::from("head").into()]);
+    ui.open_page(vec![Line::from("head").into()]);
     ui.flush(&lane, &mut view);
     ui.key(&lane, &mut view, typed('/'), false);
     ui.key(
@@ -607,7 +608,7 @@ fn a_pasted_escape_does_not_reach_the_query() {
     let mut ui = vim_ui_at(30, 12);
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
-    ui.preview(vec![Line::from("head").into()]);
+    ui.open_page(vec![Line::from("head").into()]);
     ui.flush(&lane, &mut view);
     ui.key(&lane, &mut view, typed('/'), false);
     let paste = crate::tui::TermEvent::Paste("\x1b[31mone\x1b[0m".into());
@@ -650,7 +651,7 @@ fn a_step_after_moving_the_view_goes_from_the_view() {
     let mut view = View::default();
     // Filler first: a hit centred on its jump is not on the view `gg` gives.
     let filler = (0..30).map(|_| "filler".to_string());
-    ui.preview(
+    ui.open_page(
         (filler.chain((0..100).map(|i| format!("line {i}"))))
             .map(|l| Line::from(l).into())
             .collect(),
@@ -916,7 +917,7 @@ fn the_search_lists_its_hits_and_enter_keeps_the_pick() {
     let mut view = View::default();
     let lines = ["head", "a cat", "dog", "cat and cat", "bird", "the cat"];
     let filler = (0..30).map(|n| format!("filler {n}"));
-    ui.preview(
+    ui.open_page(
         (lines.into_iter().map(String::from).chain(filler))
             .map(|l| Line::from(l).into())
             .collect(),

@@ -11,7 +11,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
 use super::Ui;
-use super::browse::Page;
 use super::menu::MenuEntry;
 use super::mouse::{Regions, Target};
 use super::screen;
@@ -33,7 +32,7 @@ impl Spot {
             Target::Scrollback(idx, line) => Some(Spot::Row(idx, line)),
             Target::Text(n) => Some(Spot::Text(n)),
             Target::PendingTools(i) | Target::Live(i) => Some(Spot::Live(i)),
-            Target::Gap => None,
+            Target::Rule | Target::Gap => None,
         }
     }
 }
@@ -180,17 +179,11 @@ impl Ui {
     }
 
     // The top row the last frame drew, part of its line cut off above or not.
-    // A slash page's top is its own text's, the transcript under it aside.
+    // A page's top is its own text's, the transcript under it aside.
     pub(super) fn top_place(&self) -> Option<Place> {
         let n = match self.page() {
-            Some(Page::Slash(_)) => {
-                (self.row_targets.iter()).position(|t| matches!(t, Target::Text(_)))?
-            }
-            // Under the pinned head: the window scrolls the rest, if any.
-            Some(Page::Preview(_)) => (self.row_targets.iter())
-                .position(|t| !matches!(t, Target::Text(0)))
-                .unwrap_or(0),
-            _ => 0,
+            Some(_) => (self.row_targets.iter()).position(|t| matches!(t, Target::Text(_)))?,
+            None => 0,
         };
         self.place_at(n)
     }
@@ -330,8 +323,7 @@ impl Ui {
         else {
             return;
         };
-        let covered =
-            (regions.rule.height + regions.menu.height).saturating_sub(regions.gap.height);
+        let covered = regions.history.intersection(regions.overlay()).height;
         let shown = regions.history.height.saturating_sub(covered);
         *self.window_mut(view).1 = Some(Anchor {
             spot: hit.at.spot,
@@ -448,7 +440,7 @@ impl Ui {
     // line the window then opens on.
     pub(super) fn search_answer(&mut self, window: &mut View, laid: &[Laid]) {
         let view = self.view_places();
-        let slash = matches!(self.page(), Some(Page::Slash(_)));
+        let paged = self.page().is_some();
         let query = self.search_text().unwrap_or_default().to_string();
         let mut missed = None;
         let mut listed = None;
@@ -456,8 +448,8 @@ impl Ui {
         if let Some(search) = self.search.as_mut()
             && let Some(want) = search.want.take()
         {
-            // A slash page's own lines only, not the transcript over it.
-            let own = |spot: Spot| !slash || matches!(spot, Spot::Text(_));
+            // A page's own lines only, not the transcript under it.
+            let own = |spot: Spot| !paged || matches!(spot, Spot::Text(_));
             // Every match, row by row: a line's index, its row, which of the row's.
             let query = query.as_str();
             let hits: Vec<(usize, usize, usize)> = laid

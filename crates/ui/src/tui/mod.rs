@@ -75,10 +75,10 @@ const REWIND: &str = "/rewind ";
 const RESUME: &str = "/resume ";
 const NO_SESSIONS: &str = "no sessions recorded for this workspace";
 
-// What a `Step::Handled` leaves behind: its lines as the slash page, config
+// What a `Step::Handled` leaves behind: its lines as the page, config
 // changes applied. A free fn since a run in flight calls it mid-borrow.
 fn land_handled(ui: &mut Ui, core: &Core, view: &mut View, rows: Listing) {
-    ui.open_slash(rows);
+    ui.open_answer(rows);
     ui.adopt_config(core, view);
 }
 
@@ -836,7 +836,7 @@ impl Tui {
                     let lane = self.core.lane();
                     match self.drivers.command(drive, lane.token(), lane.ctx()) {
                         Said::Nothing => {}
-                        Said::Command(lines) => self.ui.open_slash(Listing::say(lines)),
+                        Said::Command(lines) => self.ui.open_answer(Listing::say(lines)),
                         Said::Notice(line) => self.notice(line),
                         Said::Noted(line, note) => {
                             self.notice(line);

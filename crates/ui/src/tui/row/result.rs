@@ -4,7 +4,7 @@ use std::cell::RefCell;
 
 use ratatui::text::Line;
 
-use super::{Fold, Opening};
+use super::{Fold, Opened};
 use crate::render::{self, Paint};
 use crate::tui::browse::PageLine;
 
@@ -120,18 +120,18 @@ impl Fold for ToolOut {
     }
 
     // The whole preview, uncut: a page wraps what the row would clip.
-    fn opening(&self, _i: usize, paint: &Paint, width: usize) -> Option<Opening> {
-        if self.expanded || !(self.expandable() || self.clipped(width)) {
+    fn opened(&self, _i: usize, paint: &Paint) -> Option<Opened> {
+        if self.expanded {
             return None;
         }
-        let mut rows = render::result_rows(
+        let rows = render::result_rows(
             &self.finished(),
             render::Shown::Page,
             false,
             paint,
             usize::MAX,
-        )
-        .into_iter();
-        Some((rows.next()?, rows.map(PageLine::from).collect()))
+        );
+        let rows = rows.into_iter().map(|row| (PageLine::from(row), None));
+        Some(rows.collect::<Opened>()).filter(|rows| !rows.is_empty())
     }
 }
