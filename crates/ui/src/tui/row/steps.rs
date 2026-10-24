@@ -480,8 +480,8 @@ fn step_index(steps: &[Step], i: usize) -> Option<usize> {
     }
 }
 
-// A group's own line, the same folded or open: its newest call as that
-// call's own line reads it, then how many more the group holds.
+// A group's own line, the same folded or open: its newest step as that
+// step's own line reads it, then how many more the group holds.
 fn steps_header(
     steps: &[Step],
     pending: &[PendingTool],
@@ -491,47 +491,34 @@ fn steps_header(
     paint: &Paint,
     width: usize,
 ) -> Line<'static> {
-    let calls = calls(steps, pending);
-    // The group's mark, not its newest call's: a block still streaming
-    // after the last call landed means the group is not done.
-    let thinking = thinking_now(steps).is_some() && !running(pending);
-    let mark = if running(pending) || thinking {
+    // The group's mark, not its newest step's: what is still out, else how
+    // its calls came out; reasoning alone wears none.
+    let mark = if running(pending) || thinking_now(steps).is_some() {
         StepMark::Out(tick)
+    } else if calls(steps, pending) == 0 {
+        StepMark::Thought
     } else {
         StepMark::Ended(ended(steps, pending))
     };
-    // The newest call's line; once it lands, less its time, which is the
-    // call's alone.
-    let newest = match pending.last() {
-        Some(p) => Some(pending_head(p, tick, !p.landed())),
-        None => steps.iter().rev().find_map(|s| match s {
-            Step::Tool(t) => Some(Head {
-                tail: t.placed(),
-                ..s.head()
-            }),
-            Step::Thinking { .. } => None,
-        }),
+    // A landed call's line less its time, which is the call's alone.
+    let newest = match (pending.last(), steps.last()) {
+        (Some(p), _) => pending_head(p, tick, !p.landed()),
+        (None, Some(s @ Step::Tool(t))) => Head {
+            tail: t.placed(),
+            ..s.head()
+        },
+        (None, Some(s)) => s.head(),
+        (None, None) => return Line::default(),
     };
-    let Some(Head {
-        text,
-        mut tail,
-        more,
-        ..
-    }) = newest
-    else {
-        return Line::from(paint.span_hovered(hovered, &paint.theme.muted, THINKING.to_string()));
-    };
-    if calls > 1 {
-        tail.push_str(&format!("{}{} more", icons::PART_SEP, calls - 1));
-    }
-    if thinking {
-        tail.push_str(&format!("{}{THINKING}", icons::PART_SEP));
+    let mut tail = newest.tail;
+    let others = steps.len() + pending.len() - 1;
+    if others > 0 {
+        tail.push_str(&format!("{}{others} more", icons::PART_SEP));
     }
     let head = Head {
         mark,
-        text,
         tail,
-        more,
+        ..newest
     };
     // Opened, a lone step is that step opened; a list's header stays as folded.
     head.line(
@@ -866,9 +853,9 @@ mod tests {
         }
     }
 
-    // What a header holding `calls` calls ends with.
-    fn more_tail(calls: usize) -> String {
-        format!("{}{} more", icons::PART_SEP, calls - 1)
+    // What a header holding `steps` steps ends with.
+    fn more_tail(steps: usize) -> String {
+        format!("{}{} more", icons::PART_SEP, steps - 1)
     }
 
     // Calls end in whatever order; the row is the only place one in
@@ -987,7 +974,7 @@ mod tests {
         assert!(row.join(think(1, 3)).is_ok());
         assert!(row.join(Step::Tool(ran)).is_ok());
         let (done, dots, sep) = (icons::DONE_MARK, icons::ELLIPSIS, icons::PART_SEP);
-        let header = format!("{done} bash cat <<EOF{dots}{}", more_tail(2));
+        let header = format!("{done} bash cat <<EOF{dots}{}", more_tail(3));
         assert_eq!(shown(&row, 80), std::slice::from_ref(&header));
         assert!(row.toggle_expand());
         let unfolded = [
@@ -1020,10 +1007,15 @@ mod tests {
     }
 
     // A group of one step has no list to open: opening it opens the step.
+    // Folded, it reads as the step's own line, turning while it streams.
     #[test]
     fn a_group_of_one_opens_its_step() {
+        let live = Step::thinking(2, vec![Line::from("line 1")], true, &Paint::new(false));
+        let turning = format!("{} line 1", StepMark::Out(0).glyph());
+        assert_eq!(shown(&Row::steps(live, true), 80), [turning]);
         let mut row = Row::steps(think(1, 2), true);
-        assert_eq!(shown(&row, 80), [THINKING]);
+        let dots = icons::ELLIPSIS;
+        assert_eq!(shown(&row, 80), [format!("line 1{dots}{}", lines_tail(2))]);
         assert!(row.toggle_expand());
         assert_eq!(shown(&row, 80), ["line 1", "line 2"]);
 
@@ -1052,10 +1044,11 @@ mod tests {
     #[test]
     fn a_long_call_fills_the_row_before_what_follows_it() {
         let long = "x".repeat(200);
-        let mut row = bundle(vec![tool("bash", &long), tool("bash", &long)]);
-        assert!(row.join(think(1, 1)).is_ok());
+        let mut row = Row::steps(think(1, 1), true);
+        assert!(row.join(Step::Tool(tool("bash", &long))).is_ok());
+        assert!(row.join(Step::Tool(tool("bash", &long))).is_ok());
         let line = &shown(&row, 80)[0];
-        let tail = format!("{}{}", icons::ELLIPSIS, more_tail(2));
+        let tail = format!("{}{}", icons::ELLIPSIS, more_tail(3));
         assert!(line.ends_with(&tail), "{line}");
         assert_eq!(pi_store::text::width(line), 79, "{line}");
 
