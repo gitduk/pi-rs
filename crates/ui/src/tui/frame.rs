@@ -310,10 +310,12 @@ impl Ui {
         let picked = self.list.highlighted(menu.len().max(1));
         let items = self.menu_items(&menu, picked, regions.menu.width as usize);
         // The picked row on the input's band, the menu's width: a bar the eye
-        // finds at once, where a mark in its text alone was not enough.
-        let cursor = self
-            .paint
-            .band(&self.paint.theme.prompt.panel.input)
+        // finds at once, where a mark in its text alone was not enough. Only
+        // a row enter takes wears it; one tab alone takes shows by its name.
+        let moved = self.list.picked.is_some();
+        let cursor = (menu.get(picked))
+            .filter(|e| e.taken_by_enter(moved))
+            .and_then(|_| self.paint.band(&self.paint.theme.prompt.panel.input))
             .unwrap_or_default();
         self.regions = regions;
         let menu_rule = self.over_rule(width);

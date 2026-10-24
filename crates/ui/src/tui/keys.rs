@@ -243,7 +243,8 @@ impl Ui {
                 self.close_overlay(view);
                 // Enter with a menu open runs what's highlighted, the typed
                 // text a mere prefix. Pick before draining the editor.
-                return match self.highlighted() {
+                let moved = self.list.picked.is_some();
+                return match self.highlighted().filter(|e| e.taken_by_enter(moved)) {
                     // What was marked, or with nothing marked the highlighted one.
                     Some(MenuEntry::Pick { at, .. }) => {
                         let picks: Vec<usize> = match self.list.marked.is_empty() {
@@ -252,9 +253,7 @@ impl Ui {
                         };
                         self.answer(&picks, None)
                     }
-                    Some(MenuEntry::Completion(c))
-                        if !c.picked_only || self.list.picked.is_some() =>
-                    {
+                    Some(MenuEntry::Completion(c)) => {
                         // The completion's line runs; the prefix that
                         // produced it goes, so it can't resubmit as a stray prompt.
                         self.editor.take();
@@ -266,18 +265,14 @@ impl Ui {
                         lead,
                         path,
                         dir,
-                        picked_only,
                         ..
-                    }) if !picked_only || self.list.picked.is_some() => {
+                    }) => {
                         // Enter on a path applies it and stays: the prompt
                         // is not done until the user says so.
                         self.apply_file(start, end, lead, &path, dir);
                         Asked::Own(Deed::Nothing)
                     }
-                    Some(
-                        MenuEntry::Completion(_) | MenuEntry::File { .. } | MenuEntry::Hit { .. },
-                    )
-                    | None => {
+                    Some(MenuEntry::Hit { .. }) | None => {
                         let typed = self.editor.take();
                         // Words matching none of a question's options answer it.
                         let own = !self.questions.is_empty()

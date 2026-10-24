@@ -373,6 +373,17 @@ impl MenuEntry {
         }
     }
 
+    // Whether enter takes this row when it is the highlighted one, `moved`
+    // to or not: one that would turn what was typed into something else
+    // waits to be moved to, and until then enter sends the line.
+    pub(super) fn taken_by_enter(&self, moved: bool) -> bool {
+        match self {
+            MenuEntry::Completion(c) => !c.picked_only || moved,
+            MenuEntry::File { picked_only, .. } => !picked_only || moved,
+            MenuEntry::Hit { .. } | MenuEntry::Pick { .. } => true,
+        }
+    }
+
     pub(super) fn help(&self) -> &str {
         match self {
             MenuEntry::Completion(c) => &c.help,
