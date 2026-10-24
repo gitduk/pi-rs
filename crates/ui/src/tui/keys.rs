@@ -152,12 +152,21 @@ impl Ui {
 
     // The layers the key table reads: the line's, a list or a page over it.
     fn layers(&mut self, running: bool) -> Layers {
+        let listed = !self.menu().is_empty();
+        self.layers_with(running, listed)
+    }
+
+    // `layers`, for a caller that already knows whether a list is up.
+    pub(super) fn layers_with(&self, running: bool, listed: bool) -> Layers {
         Layers {
-            surface: self.surface(),
+            surface: match listed {
+                true => Surface::Completion,
+                false => Surface::Editor,
+            },
             run: running,
             mode: self.vim.unwrap_or_default(),
             // Whether the line has anything on it, which the keys bound
-            // to an empty one read. Only Normal asks.
+            // to an empty one read.
             line_empty: self.editor.is_empty(),
             // A search reads the transcript as a page is read: `n` steps,
             // esc lets go.
@@ -165,17 +174,6 @@ impl Ui {
         }
     }
 
-    // A list over the line has its keys read first.
-    pub(super) fn surface(&mut self) -> Surface {
-        if self.menu().is_empty() {
-            Surface::Editor
-        } else {
-            Surface::Completion
-        }
-    }
-
-    // How long `press` waits for the second of a pair. A bare character is
-    // also text, so its pairs must come quickly or typing would trip them.
     // Until when the character the last press typed may still be taken
     // back by the press after it, if it may.
     pub(super) fn held(&self) -> Option<Instant> {
@@ -184,6 +182,8 @@ impl Ui {
         (Instant::now() < until).then_some(until)
     }
 
+    // How long `press` waits for the second of a pair. A bare character is
+    // also text, so its pairs must come quickly or typing would trip them.
     fn pair_window_after(&self, press: Press) -> std::time::Duration {
         if press.is_bare() {
             self.pair_window

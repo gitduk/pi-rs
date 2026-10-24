@@ -19,8 +19,9 @@ use super::search::{self, Anchor, Laid, Spot};
 use super::view::{StreamKind, View, snapshot};
 use crate::render;
 use crate::status;
-use pi_core::core::question::Question;
+use pi_core::core::question::{Asker, Question};
 use pi_store::icons;
+use pi_store::keys::{Action, Layers};
 
 // Rows kept between the pick and the list's edge while it scrolls, so what
 // comes next is in sight before the pick reaches it.
@@ -114,7 +115,10 @@ impl Ui {
         // none of them, since those answer it too; a command's list hides it.
         let picking = menu.iter().all(|e| matches!(e, MenuEntry::Pick { .. }));
         let mut asked: Vec<Line<'static>> = match self.questions.first() {
-            Some(q) if picking && !self.reading() => screen::fit(&self.question_head(q), width),
+            Some(q) if picking && !self.reading() => {
+                let layers = self.layers_with(lane.is_running(), !menu.is_empty());
+                screen::fit(&self.question_head(q, width, layers), width)
+            }
             _ => Vec::new(),
         };
         let area = self.screen.area();
@@ -559,44 +563,47 @@ impl Ui {
         (rows, pending_rows)
     }
 
-    // `? judge #3 · tests failed, now what? · down/up move · space mark …`:
-    // the keys as bound, and as the mode reads them.
-    pub(super) fn question_head(&self, question: &Question) -> Line<'static> {
+    // `judge #3 · tests failed, now what? · space mark · tab take …`: who
+    // asks only when it is a job, apart from the turn; then the keys that do
+    // each thing with `layers` up, as many as fit beside the question in
+    // `width`, the ones nobody would guess first.
+    pub(super) fn question_head(
+        &self,
+        question: &Question,
+        width: usize,
+        layers: Layers,
+    ) -> Line<'static> {
         let theme = &self.paint.theme;
-        let key = |id| {
-            (self.keys.keys_of(id).into_iter())
-                .min_by_key(|k| pi_store::text::width(k))
-                .unwrap_or_default()
-        };
-        let normal = self.vim == Some(pi_store::keys::Mode::Normal);
-        let (next, previous, mark, close) = match normal {
-            true => (
-                "menu.next.vim",
-                "menu.previous.vim",
-                "menu.mark.vim",
-                "menu.dismiss.vim",
-            ),
-            false => ("menu.next", "menu.previous", "menu.mark", "menu.dismiss"),
-        };
-        let moves = [key(next), key(previous)]
+        let key =
+            |action| (self.keys.live_keys(action, layers).into_iter().next()).unwrap_or_default();
+        let moves = [key(Action::MenuNext), key(Action::MenuPrevious)]
             .into_iter()
             .filter(|k| !k.is_empty())
             .collect::<Vec<_>>()
             .join("/");
+        let asker = match &question.from {
+            Asker::Job { name, .. } => format!("{name}{}", icons::PART_SEP),
+            Asker::Tool { .. } => String::new(),
+        };
+        let said = format!("{asker}{}", question.text);
+        let mut room = width.saturating_sub(pi_store::text::width(&said));
         let hint: String = [
+            (key(Action::MenuMark), "mark"),
+            (key(Action::MenuAccept), "take"),
+            (key(Action::MenuDismiss), "close"),
             (moves, "move"),
-            (key(mark), "mark"),
-            (key("menu.accept"), "take"),
-            (key("line.submit"), "send"),
-            (key(close), "close"),
+            (key(Action::LineSubmit), "send"),
         ]
         .into_iter()
         .filter(|(k, _)| !k.is_empty())
-        .flat_map(|(k, what)| [icons::PART_SEP.to_string(), format!("{k} {what}")])
+        .map(|(k, what)| format!("{}{k} {what}", icons::PART_SEP))
+        .take_while(|part| {
+            let fits = pi_store::text::width(part) <= room;
+            room = room.saturating_sub(pi_store::text::width(part));
+            fits
+        })
         .collect();
-        let asker = format!("{}{}", question.from.name(), icons::PART_SEP);
         Line::from(vec![
-            (self.paint).span(&theme.muted, format!("{} ", icons::QUESTION_MARK)),
             self.paint.span(&theme.muted, asker),
             self.paint.span(&theme.emphasis, question.text.clone()),
             self.paint.span(&theme.muted, hint),

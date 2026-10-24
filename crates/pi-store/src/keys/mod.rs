@@ -1249,6 +1249,51 @@ mod tests {
 
     // In Normal a list takes the bare letters that move it, since nothing
     // types there; in Insert they type, to narrow it.
+    // A hint says what a press would do: a key a
+    // narrower binding takes, or one the line is not empty enough for, is
+    // not said for the action it no longer reaches.
+    #[test]
+    fn live_keys_are_the_ones_a_press_reaches() {
+        let listed = Layers {
+            surface: Surface::Completion,
+            line_empty: true,
+            ..Layers::default()
+        };
+        let k = Keys::default();
+        assert_eq!(k.live_keys(Action::MenuMark, listed), ["space"]);
+        let typed = Layers {
+            line_empty: false,
+            ..listed
+        };
+        assert!(
+            k.live_keys(Action::MenuMark, typed).is_empty(),
+            "space types"
+        );
+
+        let overrides = |pairs: &[(&str, &[&str])]| -> BTreeMap<String, Vec<String>> {
+            (pairs.iter())
+                .map(|(id, keys)| (id.to_string(), keys.iter().map(|k| k.to_string()).collect()))
+                .collect()
+        };
+        let k = Keys::resolve(&overrides(&[("menu.accept", &["space"])])).unwrap();
+        assert!(
+            k.live_keys(Action::MenuAccept, listed).is_empty(),
+            "on an empty line, marking takes space"
+        );
+        assert_eq!(k.live_keys(Action::MenuAccept, typed), ["space"]);
+
+        let k = Keys::resolve(&overrides(&[("menu.mark.vim", &[])])).unwrap();
+        let normal = Layers {
+            mode: Mode::Normal,
+            ..listed
+        };
+        assert_eq!(
+            k.live_keys(Action::MenuMark, normal),
+            ["space"],
+            "the empty line's still marks"
+        );
+    }
+
     #[test]
     fn normal_moves_a_list_with_bare_letters() {
         let k = Keys::default();

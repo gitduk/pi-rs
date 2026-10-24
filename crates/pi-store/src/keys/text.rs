@@ -4,7 +4,7 @@
 //! Second half of `mod.rs`: that says what the table is, this says how a key
 //! is spelled in it — the config file's side, and the `/keys` listing's.
 
-use super::{BINDINGS, Chord, Key, Keys, Mode, Mods, On, Press, When};
+use super::{Action, BINDINGS, Chord, Key, Keys, Layers, Mode, Mods, On, Press, When};
 use crate::listing::{Listing, Row};
 use anyhow::{Result, bail};
 
@@ -24,6 +24,27 @@ impl Keys {
                 false => row.noting(&note),
             }
         }))
+    }
+
+    /// The keys that do `action` with `layers` up, as a config writes them,
+    /// shortest first: each read as a press is, so one a nearer or narrower
+    /// binding takes is not among them.
+    pub fn live_keys(&self, action: Action, layers: Layers) -> Vec<String> {
+        let mut keys: Vec<String> = (self.map.iter())
+            .filter(|(_, bound)| **bound == action)
+            .map(|((_, chord), _)| *chord)
+            .filter(|chord| {
+                let (prev, press, pair) = match *chord {
+                    Chord::One(p) => (None, p, false),
+                    Chord::Two(a, p) => (Some(a), p, true),
+                };
+                self.hit(prev, press, layers) == Some(super::Hit { action, pair })
+            })
+            .map(show_chord)
+            .collect();
+        keys.sort_by_key(|k| (crate::text::width(k), k.clone()));
+        keys.dedup();
+        keys
     }
 
     /// The keys bound to `id` now, as a config writes them, sorted.

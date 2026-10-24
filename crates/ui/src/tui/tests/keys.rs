@@ -483,13 +483,42 @@ async fn a_question_is_answered_from_the_list_over_the_line() {
         tui.ui.regions.menu.height >= 3,
         "its head over its two options"
     );
-    let head: String = (tui.ui.question_head(&tui.ui.questions[0]).spans.iter())
+    let head = |tui: &crate::tui::Tui, width| -> String {
+        let layers = tui.ui.layers_with(false, true);
+        (tui.ui
+            .question_head(&tui.ui.questions[0], width, layers)
+            .spans
+            .iter())
+        .map(|s| s.content.as_ref())
+        .collect()
+    };
+    assert_eq!(
+        head(&tui, 200),
+        "tests failed, now what? · space mark · tab take · esc close · down/up move · enter send"
+    );
+    // A job asks apart from the turn, so it is named.
+    let mut from_job = tui.ui.questions[0].clone();
+    from_job.from = Asker::Job {
+        id: 3,
+        name: "judge #3".into(),
+    };
+    let layers = tui.ui.layers_with(false, true);
+    let named: String = (tui.ui.question_head(&from_job, 40, layers).spans.iter())
         .map(|s| s.content.as_ref())
         .collect();
+    assert_eq!(named, "judge #3 · tests failed, now what?");
+    // Narrower, the keys anyone would guess go first; it stays one line.
     assert_eq!(
-        head,
-        "? choose · tests failed, now what? · down/up move · space mark · tab take · enter send · esc close"
+        head(&tui, 80),
+        "tests failed, now what? · space mark · tab take · esc close · down/up move"
     );
+    // With words typed, space types: it says nothing about marking.
+    tui.ui.editor.set_line("fix");
+    assert_eq!(
+        head(&tui, 200),
+        "tests failed, now what? · tab take · esc close · down/up move · enter send"
+    );
+    tui.ui.editor.clear();
     let asked = press(&mut tui, key(KeyCode::Enter));
     // Read as the line is: a command word runs as one.
     assert!(
