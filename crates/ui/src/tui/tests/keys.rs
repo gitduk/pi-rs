@@ -454,7 +454,7 @@ async fn a_question_is_answered_from_the_list_over_the_line() {
             name: "choose".into(),
         };
         let options = ["/compact".to_string(), "fix parse.rs".to_string()];
-        let mut q = Question::new(from, "tests failed, now what?", &options, false).unwrap();
+        let mut q = Question::new(from, "tests failed, now what?", &options).unwrap();
         q.id = id;
         tui.ui.sync_questions(vec![q]);
     };
@@ -488,7 +488,7 @@ async fn a_question_is_answered_from_the_list_over_the_line() {
         .collect();
     assert_eq!(
         head,
-        "? choose · tests failed, now what? · down/up move · tab take · enter send · esc close"
+        "? choose · tests failed, now what? · down/up move · space mark · tab take · enter send · esc close"
     );
     let asked = press(&mut tui, key(KeyCode::Enter));
     // Read as the line is: a command word runs as one.
@@ -555,8 +555,9 @@ async fn a_question_is_answered_from_the_list_over_the_line() {
     assert!(tui.ui.took_submit().is_none());
 }
 
-// Where several may be picked, tab marks and enter sends the marked ones
-// together as one prompt, a line each; with none marked, the highlighted one.
+// Space marks options on a line with nothing typed, and enter sends the
+// marked ones together as one prompt, a line each; with none marked, the
+// highlighted one. A command among several is refused, the question kept.
 #[tokio::test]
 async fn several_picks_go_together_as_one_prompt() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -568,8 +569,8 @@ async fn several_picks_go_together_as_one_prompt() {
         let from = Asker::Tool {
             name: "choose".into(),
         };
-        let options = ["fix parse.rs", "add tests", "update docs"].map(String::from);
-        let mut q = Question::new(from, "which first?", &options, true).unwrap();
+        let options = ["fix parse.rs", "add tests", "/compact"].map(String::from);
+        let mut q = Question::new(from, "which first?", &options).unwrap();
         q.id = id;
         tui.ui.sync_questions(vec![q]);
     };
@@ -579,29 +580,36 @@ async fn several_picks_go_together_as_one_prompt() {
             .key(lane, view_at(&mut tui.views, token), event, false)
     };
     let key = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+    let listed = |tui: &mut crate::tui::Tui| -> Vec<String> {
+        tui.ui.menu().iter().map(|e| e.show().to_string()).collect()
+    };
 
     call(&mut tui, 1);
-    press(&mut tui, key(KeyCode::Tab));
-    press(&mut tui, key(KeyCode::Up));
-    press(&mut tui, key(KeyCode::Up));
-    press(&mut tui, key(KeyCode::Tab));
-    let listed: Vec<String> = tui.ui.menu().iter().map(|e| e.show().to_string()).collect();
     assert_eq!(
-        listed,
-        ["3 [x] update docs", "2 [ ] add tests", "1 [x] fix parse.rs"]
+        listed(&mut tui),
+        ["3 /compact", "2 add tests", "1 fix parse.rs"],
+        "no boxes yet"
     );
+    press(&mut tui, typed(' '));
+    press(&mut tui, key(KeyCode::Up));
+    press(&mut tui, typed(' '));
+    assert_eq!(
+        listed(&mut tui),
+        ["3 [ ] /compact", "2 [x] add tests", "1 [x] fix parse.rs"]
+    );
+    assert!(tui.ui.editor.is_empty(), "space marked, it did not type");
     assert!(tui.ui.took_submit().is_none(), "a mark does not send");
     let asked = press(&mut tui, key(KeyCode::Enter));
     assert!(
-        matches!(&asked, Asked::Core(Intent::Prompt(p)) if p == "fix parse.rs\nupdate docs"),
+        matches!(&asked, Asked::Core(Intent::Prompt(p)) if p == "fix parse.rs\nadd tests"),
         "{asked:?}"
     );
     assert!(tui.ui.list.marked.is_empty(), "the marks went with it");
 
     call(&mut tui, 2);
-    press(&mut tui, key(KeyCode::Tab));
-    press(&mut tui, key(KeyCode::Tab));
-    assert!(tui.ui.list.marked.is_empty(), "tab twice is out again");
+    press(&mut tui, typed(' '));
+    press(&mut tui, typed(' '));
+    assert!(tui.ui.list.marked.is_empty(), "space twice is out again");
     press(&mut tui, key(KeyCode::Up));
     press(&mut tui, key(KeyCode::Enter));
     assert_eq!(
@@ -609,6 +617,23 @@ async fn several_picks_go_together_as_one_prompt() {
         Some("add tests"),
         "none marked: the highlighted"
     );
+
+    call(&mut tui, 3);
+    press(&mut tui, typed(' '));
+    press(&mut tui, key(KeyCode::Up));
+    press(&mut tui, key(KeyCode::Up));
+    press(&mut tui, typed(' '));
+    press(&mut tui, key(KeyCode::Enter));
+    assert!(tui.ui.took_submit().is_none(), "a command goes alone");
+    assert_eq!(tui.ui.questions.len(), 1, "still up");
+
+    // With words typed, space is a space.
+    tui.ui.list.marked.clear();
+    for c in "add t".chars() {
+        press(&mut tui, typed(c));
+    }
+    assert_eq!(tui.ui.editor.text(), "add t");
+    assert_eq!(listed(&mut tui), ["2 add tests"]);
 }
 
 // A question its asker waits on is answered back, never sent: the pick, the
@@ -624,13 +649,8 @@ async fn an_answer_goes_back_to_an_asker_that_waits() {
         let from = Asker::Tool {
             name: "guard".into(),
         };
-        let mut q = Question::new(
-            from,
-            "run rm -rf build?",
-            &["allow".into(), "deny".into()],
-            false,
-        )
-        .unwrap();
+        let mut q =
+            Question::new(from, "run rm -rf build?", &["allow".into(), "deny".into()]).unwrap();
         (q.id, q.back) = (id, true);
         q
     };

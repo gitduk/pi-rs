@@ -3,11 +3,12 @@
 //! job; after it, each `result` comes back as a turn, as does stdout at exit,
 //! `input` is a person's line, `interrupt` stops the checkout's turn, and
 //! `notice` is a line for the screen only, `choose` a question whose
-//! `options` the person picks one of (several with `multiple`), and `follow`
+//! `options` the person picks one or several of, and `follow`
 //! asks to hear every turn. A turn an input opened, or any once it follows,
 //! is told back: `started`, then its whole `reply`. One that follows is also
 //! told each `question` put on its checkout and when it is `closed`, and
-//! answers one with `answer`, its id, and the `picks` by place.
+//! answers one with `answer`, its id, and the `picks` by place; one not
+//! taken comes back `refused`, and `why`.
 
 use std::os::fd::AsRawFd;
 use std::process::{ExitStatus, Stdio};
@@ -339,10 +340,12 @@ async fn tell(mut to: OwnedWriteHalf, mut hear: UnboundedReceiver<Told>) {
                 "id": id,
                 "text": asked.question,
                 "options": asked.options,
-                "multiple": asked.multiple,
                 "back": asked.back,
             }}),
             Told::Closed(id) => serde_json::json!({ "closed": id }),
+            Told::Refused { question, why } => {
+                serde_json::json!({ "refused": question, "why": why })
+            }
         };
         if to.write_all(format!("{line}\n").as_bytes()).await.is_err() {
             return;
@@ -411,12 +414,10 @@ fn parse(line: &str) -> Option<Said> {
             .flatten())
         .filter_map(|o| o.as_str().map(str::to_string))
         .collect();
-        let multiple = v.get("multiple").and_then(Value::as_bool) == Some(true);
         let back = v.get("answer").and_then(Value::as_str) == Some("back");
         return Some(Said::Choose(Asked {
             question,
             options,
-            multiple,
             back,
         }));
     }
@@ -794,8 +795,8 @@ echo '{"choose":"the task changed","options":["/compact","go on"]}' >&3
 echo '{"answer":3,"picks":[1]}' >&3
 echo '{"interrupt":true}' >&3
 echo '{"follow":true}' >&3
-read -r a <&3; read -r b <&3; read -r c <&3; read -r d <&3
-printf '%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" > heard"#,
+read -r a <&3; read -r b <&3; read -r c <&3; read -r d <&3; read -r e <&3
+printf '%s\n%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" "$e" > heard"#,
         );
         let ended = sink.ended.notified();
         run("bridge", cmd, Vec::new(), 5 * SECOND, &ctx, Some(&*sink))
@@ -807,11 +808,15 @@ printf '%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" > heard"#,
         let asked = Asked {
             question: "go on?".into(),
             options: vec!["yes".into()],
-            multiple: false,
             back: false,
         };
         told.send(Told::Question { id: 3, asked }).unwrap();
         told.send(Told::Closed(3)).unwrap();
+        told.send(Told::Refused {
+            question: 3,
+            why: "it is no longer up".into(),
+        })
+        .unwrap();
         tokio::time::timeout(5 * SECOND, ended)
             .await
             .expect("it ended");
@@ -836,9 +841,10 @@ printf '%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" > heard"#,
                 serde_json::json!({ "started": true }),
                 serde_json::json!({ "reply": "parse.rs:40" }),
                 serde_json::json!({ "question": {
-                    "id": 3, "text": "go on?", "options": ["yes"], "multiple": false, "back": false,
+                    "id": 3, "text": "go on?", "options": ["yes"], "back": false,
                 }}),
                 serde_json::json!({ "closed": 3 }),
+                serde_json::json!({ "refused": 3, "why": "it is no longer up" }),
             ]
         );
     }

@@ -36,15 +36,26 @@ impl Ui {
         self.read.is_some() || self.search.is_some()
     }
 
-    // The first question let go, answered with the options at `picks`, or
-    // with the person's `own` words; with neither, closed unanswered.
+    // The first question let go, answered with the options at `picks` — the
+    // words that narrowed to them go too — or with the person's `own` words;
+    // with neither, closed unanswered. Picks that cannot go together leave
+    // it up, saying why.
     fn answer(&mut self, picks: &[usize], own: Option<String>) -> Asked {
         self.disarm();
         let Some(question) = self.questions.first().cloned() else {
             return Asked::Own(Deed::Nothing);
         };
+        let picked = match question.picked(picks) {
+            Ok(picked) => picked,
+            Err(why) => {
+                self.flash(why);
+                return Asked::Own(Deed::Nothing);
+            }
+        };
+        if picked.is_some() {
+            self.editor.clear();
+        }
         self.sync_questions(self.questions[1..].to_vec());
-        let picked = question.picked(picks).ok().flatten();
         tracing::info!(
             target: "pi::session", question = question.id, from = ?question.from, ?picks,
             own = own.is_some(), "question answered"
@@ -235,7 +246,6 @@ impl Ui {
                 return match self.highlighted() {
                     // What was marked, or with nothing marked the highlighted one.
                     Some(MenuEntry::Pick { at, .. }) => {
-                        self.editor.take();
                         let picks: Vec<usize> = match self.list.marked.is_empty() {
                             true => vec![at],
                             false => self.list.marked.iter().copied().collect(),
@@ -414,22 +424,22 @@ impl Ui {
                     ..
                 }) => self.apply_file(start, end, lead, &path, dir),
                 Some(MenuEntry::Hit { .. }) => self.search_enter(view),
-                // Several may be picked: marked. Else onto the line, to send
-                // as it is or changed.
-                Some(MenuEntry::Pick { at, .. }) => match self.questions.first() {
-                    Some(q) if q.multiple => {
-                        self.list.mark(at);
+                // Onto the line, to send as it is or changed.
+                Some(MenuEntry::Pick { at, .. }) => {
+                    let option = self.questions.first().and_then(|q| q.options.get(at));
+                    if let Some(option) = option.cloned() {
+                        self.editor.set_line(&option);
                     }
-                    Some(q) => {
-                        if let Some(option) = q.options.get(at).cloned() {
-                            self.editor.set_line(&option);
-                        }
-                    }
-                    None => {}
-                },
+                }
                 None => {}
             },
             Some(action @ (Action::MenuNext | Action::MenuPrevious)) => self.step_menu(action),
+            // Only a question's options are sent together.
+            Some(Action::MenuMark) => {
+                if let Some(MenuEntry::Pick { at, .. }) = self.highlighted() {
+                    self.list.mark(at);
+                }
+            }
             // A question's list is let go only by closing the question.
             Some(Action::MenuDismiss)
                 if matches!(self.highlighted(), Some(MenuEntry::Pick { .. })) =>

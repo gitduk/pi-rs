@@ -124,10 +124,11 @@ impl Ui {
                     || typed == (at + 1).to_string()
             })
             .map(|(at, option)| {
-                let mark = match (question.multiple, self.list.marked.contains(&at)) {
-                    (false, _) => "",
-                    (true, true) => "[x] ",
-                    (true, false) => "[ ] ",
+                // Boxes only once one is marked: until then it is a pick of one.
+                let mark = match (self.list.marked.is_empty(), self.list.marked.contains(&at)) {
+                    (true, _) => "",
+                    (false, true) => "[x] ",
+                    (false, false) => "[ ] ",
                 };
                 MenuEntry::Pick {
                     at,

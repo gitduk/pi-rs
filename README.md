@@ -206,10 +206,11 @@ refused, and resuming one from another directory moves it here.
   hear every turn there. A turn an input opened, or any once it follows, is
   told back on fd 3: `started`, then its whole `reply`. One that follows is
   also told each question up on the checkout, as
-  `{"question": {"id", "text", "options", "multiple", "back"}}`, then
+  `{"question": {"id", "text", "options", "back"}}`, then
   `{"closed": <id>}` once it is answered anywhere or withdrawn; it answers
   one with `{"answer": <id>, "picks": [0]}`, by place, the pick going out as
-  if typed there, and an `input` closes every question that does not wait.
+  if typed there, or hears `{"refused": <id>, "why"}` when it is not taken,
+  and an `input` closes every question that does not wait.
   `choose` works before a detach too, where pi answers it with one line on
   fd 3: `{"asked": true}` once it is up, or an `error` saying why not. There
   `"answer": "back"` keeps the pick from going out: it comes down fd 3 as
@@ -224,17 +225,19 @@ refused, and resuming one from another directory moves it here.
   Normal) move, `enter` sends the highlighted one, `tab` takes it onto the
   line to send as it is or changed, and `esc` (`q` in Normal) closes the
   question unanswered. Typing narrows the options by their words or number;
-  words that match none are your own answer, sent with `enter`. With
-  `multiple`, `tab` marks several and `enter` sends the marked ones as one
-  prompt, a line each; those options are words, never commands.
+  words that match none are your own answer, sent with `enter`. To pick
+  several, `space` marks them while nothing is typed (or in Normal), and
+  `enter` sends the marked ones as one prompt, a line each; a command is
+  only picked alone.
   [`examples/tools/`](examples/tools/) has six to copy: `search`; `judge`,
   which reads its key from there; `later`, a prompt the model leaves itself
   for after a delay or on a period; `choose`, through which the model puts
   you a question and ends its turn; `wechat`, which bridges the session
   to a WeChat chat — ask for it, scan the QR the first time, and what you
   send from the phone arrives as turns, `/stop` included, and a question
-  arrives numbered, answered by replying with its number; and `telegram`,
-  the same over a Telegram bot, a question's options as buttons: put a
+  arrives numbered, answered by replying with its number, or several such
+  as `1 3`; and `telegram`, the same over a Telegram bot, a question's
+  options as buttons, a tap answering with one: put a
   token from @BotFather in `.env` as
   `TELEGRAM_BOT_TOKEN`, open the link or QR it shows the first time, and
   only the account that opened it is heard (delete `~/.pi/telegram.json` to

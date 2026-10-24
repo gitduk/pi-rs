@@ -620,9 +620,7 @@ fn a_key_that_may_open_a_pair_holds_off_the_list() {
         name: "choose".into(),
     };
     let options = ["alpha".to_string(), "beta".to_string()];
-    ui.sync_questions(vec![
-        Question::new(from, "which?", &options, false).unwrap(),
-    ]);
+    ui.sync_questions(vec![Question::new(from, "which?", &options).unwrap()]);
     let listed = |ui: &mut crate::tui::Ui| ui.menu().len();
     assert_eq!(listed(&mut ui), 2);
     ui.list.picked = Some(0);

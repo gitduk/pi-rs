@@ -559,7 +559,7 @@ impl Ui {
         (rows, pending_rows)
     }
 
-    // `? judge #3 · tests failed, now what? · down/up move · tab take …`:
+    // `? judge #3 · tests failed, now what? · down/up move · space mark …`:
     // the keys as bound, and as the mode reads them.
     pub(super) fn question_head(&self, question: &Question) -> Line<'static> {
         let theme = &self.paint.theme;
@@ -569,22 +569,24 @@ impl Ui {
                 .unwrap_or_default()
         };
         let normal = self.vim == Some(pi_store::keys::Mode::Normal);
-        let (next, previous, close) = match normal {
-            true => ("menu.next.vim", "menu.previous.vim", "menu.dismiss.vim"),
-            false => ("menu.next", "menu.previous", "menu.dismiss"),
+        let (next, previous, mark, close) = match normal {
+            true => (
+                "menu.next.vim",
+                "menu.previous.vim",
+                "menu.mark.vim",
+                "menu.dismiss.vim",
+            ),
+            false => ("menu.next", "menu.previous", "menu.mark", "menu.dismiss"),
         };
         let moves = [key(next), key(previous)]
             .into_iter()
             .filter(|k| !k.is_empty())
             .collect::<Vec<_>>()
             .join("/");
-        let take = match question.multiple {
-            true => "mark",
-            false => "take",
-        };
         let hint: String = [
             (moves, "move"),
-            (key("menu.accept"), take),
+            (key(mark), "mark"),
+            (key("menu.accept"), "take"),
             (key("line.submit"), "send"),
             (key(close), "close"),
         ]

@@ -33,8 +33,6 @@ pub struct Question {
     pub from: Asker,
     pub text: String,
     pub options: Vec<String>,
-    /// Several may be picked, sent together as one prompt.
-    pub multiple: bool,
     /// The answer goes back to the asker, which waits on it, not out as typed.
     pub back: bool,
 }
@@ -42,7 +40,7 @@ pub struct Question {
 impl Question {
     /// The question a tool asked, checked as `new` checks one.
     pub fn of(from: Asker, asked: &toolbox::background::Asked) -> Result<Self, String> {
-        let mut question = Self::new(from, &asked.question, &asked.options, asked.multiple)?;
+        let mut question = Self::new(from, &asked.question, &asked.options)?;
         question.back = asked.back;
         Ok(question)
     }
@@ -52,18 +50,14 @@ impl Question {
         toolbox::background::Asked {
             question: self.text.clone(),
             options: self.options.clone(),
-            multiple: self.multiple,
             back: self.back,
         }
     }
 
     /// The options at `picks` as the line they send, a line each; none when
-    /// nothing was picked. A place past the last, one picked twice, or
-    /// several where one may be picked, is no answer.
+    /// nothing was picked. A place past the last, one picked twice, or a
+    /// command among several, is no answer: several go to the model as words.
     pub fn picked(&self, picks: &[usize]) -> Result<Option<String>, String> {
-        if picks.len() > 1 && !self.multiple {
-            return Err("only one of its options may be picked".into());
-        }
         if (1..picks.len()).any(|i| picks[..i].contains(&picks[i])) {
             return Err("an option is picked twice".into());
         }
@@ -73,18 +67,19 @@ impl Question {
                     .ok_or_else(|| format!("it has no option {}", at + 1))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        if let Some(command) = lines
+            .iter()
+            .find(|l| !crate::input::plain(l))
+            .filter(|_| lines.len() > 1)
+        {
+            return Err(format!("`{command}` is a command, so it goes alone"));
+        }
         Ok((!lines.is_empty()).then(|| lines.join("\n")))
     }
 
     /// The question as asked, or why it cannot be: each option is one line,
-    /// so picking it agrees to all of it, and with `multiple` none is a
-    /// command, since the picks go to the model together.
-    pub fn new(
-        from: Asker,
-        text: &str,
-        options: &[String],
-        multiple: bool,
-    ) -> Result<Self, String> {
+    /// so picking it agrees to all of it.
+    pub fn new(from: Asker, text: &str, options: &[String]) -> Result<Self, String> {
         let text = pi_store::text::collapsed(text);
         if text.is_empty() {
             return Err("the question is empty".into());
@@ -96,9 +91,6 @@ impl Question {
             .map(|o| match o.trim() {
                 "" => Err("an option is empty".to_string()),
                 o if o.contains(['\n', '\r']) => Err(format!("`{o}` is not one line")),
-                o if multiple && !crate::input::plain(o) => Err(format!(
-                    "`{o}` is a command, and several picks go to the model as words"
-                )),
                 o => Ok(o.to_string()),
             })
             .collect::<Result<_, _>>()?;
@@ -107,7 +99,6 @@ impl Question {
             from,
             text,
             options,
-            multiple,
             back: false,
         })
     }
@@ -122,33 +113,47 @@ mod tests {
         let from = || Asker::Tool {
             name: "choose".into(),
         };
-        let ask = |text: &str, options: &[&str], multiple: bool| {
+        let ask = |text: &str, options: &[&str]| {
             let options: Vec<String> = options.iter().map(|o| o.to_string()).collect();
-            Question::new(from(), text, &options, multiple)
+            Question::new(from(), text, &options)
         };
         let q = ask(
             "  tests   failed,\n now what? ",
             &[" /compact the failures ", "fix parse.rs first"],
-            false,
         )
         .unwrap();
         assert_eq!(q.text, "tests failed, now what?");
         assert_eq!(q.options, ["/compact the failures", "fix parse.rs first"]);
 
-        let refused = |text: &str, options: &[&str], multiple: bool| {
-            ask(text, options, multiple).unwrap_err()
+        let refused = |text: &str, options: &[&str]| ask(text, options).unwrap_err();
+        assert!(refused("?", &[]).contains("1 to 9"));
+        assert!(refused("?", &["a\nb"]).contains("one line"));
+        assert!(refused(" ", &["a"]).contains("empty"));
+        assert!(refused("?", &[" "]).contains("empty"));
+    }
+
+    // One or several may be picked; a command only alone, since several go
+    // to the model together as words.
+    #[test]
+    fn a_command_is_picked_alone() {
+        let options = ["fix it", "/compact", "!ls", " /api is prose", "!"].map(String::from);
+        let from = Asker::Tool {
+            name: "choose".into(),
         };
-        assert!(refused("?", &[], false).contains("1 to 9"));
-        assert!(refused("?", &["a\nb"], false).contains("one line"));
-        assert!(refused(" ", &["a"], false).contains("empty"));
-        assert!(refused("?", &[" "], false).contains("empty"));
-        assert!(refused("?", &["fix it", "/compact"], true).contains("is a command"));
-        assert!(refused("?", &["!ls"], true).contains("is a command"));
-        // Trimmed, a leading space no longer keeps a slash from naming a command.
-        assert!(refused("?", &[" /api is prose"], true).contains("is a command"));
-        assert!(
-            ask("?", &["fix parse.rs", "!"], true).unwrap().multiple,
+        let q = Question::new(from, "?", &options).unwrap();
+        assert_eq!(q.picked(&[1]), Ok(Some("/compact".into())));
+        assert_eq!(
+            q.picked(&[0, 4]),
+            Ok(Some("fix it\n!".into())),
             "a bang alone is prose"
         );
+        assert_eq!(q.picked(&[]), Ok(None));
+        for several in [[0, 1], [0, 2], [0, 3]] {
+            // Trimmed, a leading space no longer keeps a slash from naming a command.
+            let why = q.picked(&several).unwrap_err();
+            assert!(why.contains("goes alone"), "{several:?}: {why}");
+        }
+        assert!(q.picked(&[0, 0]).unwrap_err().contains("twice"));
+        assert!(q.picked(&[9]).is_err());
     }
 }

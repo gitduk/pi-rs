@@ -52,7 +52,6 @@ impl Ask for NoOne {
 pub struct Asked {
     pub question: String,
     pub options: Vec<String>,
-    pub multiple: bool,
     pub back: bool,
 }
 
@@ -109,4 +108,7 @@ pub enum Told {
     Question { id: u64, asked: Asked },
     /// Question `id` no longer stands: answered anywhere, or withdrawn.
     Closed(u64),
+    /// Its answer to `question` was not taken, and why: the person, who
+    /// gave it, is owed the reason.
+    Refused { question: u64, why: String },
 }

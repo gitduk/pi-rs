@@ -42,8 +42,8 @@ mod bridge {
     //! telegram as a pi job: what the paired account sends goes up fd 3 as
     //! `input` (or `interrupt` for `/stop`). It follows, so every turn on the
     //! checkout comes back as `started`, then one `reply`, sent to the chat;
-    //! each question put there comes too, its options as buttons, a press on
-    //! one going up as its `answer`.
+    //! each question put there comes too, its options as buttons: a press
+    //! answers with that one, a reply of numbers only with several.
     //!
     //! Anyone can message a bot, and a turn here can run commands, so only
     //! the account that sent the pairing code shown on screen is heard.
@@ -128,8 +128,6 @@ mod bridge {
         id: u64,
         text: String,
         options: Vec<String>,
-        multiple: bool,
-        checked: BTreeSet<usize>,
         // On its way to the chat or there: one asked while a turn runs waits
         // for that turn's reply, which it follows on from.
         shown: bool,
@@ -150,8 +148,6 @@ mod bridge {
                 id: q.get("id")?.as_u64()?,
                 text: q.get("text")?.as_str()?.to_string(),
                 options,
-                multiple: q.get("multiple").and_then(Value::as_bool) == Some(true),
-                checked: BTreeSet::new(),
                 shown: false,
                 message: None,
                 answered: false,
@@ -164,44 +160,28 @@ mod bridge {
                 .map(|(i, o)| format!("{}. {o}", i + 1))
                 .collect::<Vec<_>>()
                 .join("\n");
-            format!("? {}\n\n{options}", self.text)
+            let how = "tap one, or reply with numbers such as 1 3 for several";
+            format!("? {}\n\n{options}\n\n({how})", self.text)
         }
 
-        // A row per option, then the row that sends the marked or closes it.
+        // A row per option, then the one that closes it unanswered.
         fn buttons(&self) -> Vec<Vec<Button>> {
             let button = |text: String, what: &str| Button {
                 text,
                 callback_data: format!("{}:{what}", self.id),
             };
-            let mut rows: Vec<Vec<Button>> = (self.options.iter().enumerate())
-                .map(|(i, o)| {
-                    let mark = match (self.multiple, self.checked.contains(&i)) {
-                        (false, _) => "",
-                        (true, true) => "☑ ",
-                        (true, false) => "☐ ",
-                    };
-                    vec![button(format!("{mark}{}. {o}", i + 1), &i.to_string())]
-                })
-                .collect();
-            let mut last = Vec::new();
-            if self.multiple {
-                last.push(button("send".into(), "send"));
-            }
-            last.push(button("close".into(), "close"));
-            rows.push(last);
-            rows
+            (self.options.iter().enumerate())
+                .map(|(i, o)| vec![button(format!("{}. {o}", i + 1), &i.to_string())])
+                .chain([vec![button("close".into(), "close")]])
+                .collect()
         }
     }
 
     const CLOSED: &str = "this question is closed";
 
-    // A message, and the buttons to show under it now.
-    type Redraw = (i64, Vec<Vec<Button>>);
-
-    // What a press says: a pick, or none, goes up as the answer; where
-    // several may be picked it marks one instead, and the buttons to show
-    // come back. A press on what is no longer up says why not.
-    fn pressed(asking: &Asking, pi: &Pi, data: &str) -> Result<Option<Redraw>, &'static str> {
+    // A press goes up as the answer: its option, or none to close it. One on
+    // what is no longer up, or already answered, says why not.
+    fn pressed(asking: &Asking, pi: &Pi, data: &str) -> Result<(), &'static str> {
         let (id, what) = data.split_once(':').ok_or(CLOSED)?;
         let id: u64 = id.parse().map_err(|_| CLOSED)?;
         let mut up = asking.lock();
@@ -211,37 +191,41 @@ mod bridge {
         }
         let picks: Vec<usize> = match what {
             "close" => Vec::new(),
-            "send" if q.checked.is_empty() => return Err("mark one first"),
-            "send" => q.checked.iter().copied().collect(),
             at => {
                 let at = (at.parse().ok())
                     .filter(|at| *at < q.options.len())
                     .ok_or(CLOSED)?;
-                if q.multiple {
-                    if !q.checked.remove(&at) {
-                        q.checked.insert(at);
-                    }
-                    return Ok(q.message.map(|m| (m, q.buttons())));
-                }
                 vec![at]
             }
         };
         q.answered = true;
         pi.say(json!({ "answer": id, "picks": picks }));
-        Ok(None)
+        Ok(())
     }
 
-    async fn press(client: &Client, chat: i64, asking: &Asking, pi: &Pi, click: Click) {
+    async fn press(client: &Client, asking: &Asking, pi: &Pi, click: Click) {
         let said = pressed(asking, pi, click.data.as_deref().unwrap_or_default());
-        let note = match said {
-            Ok(Some((message, rows))) => {
-                let _ = client.set_buttons(chat, message, &rows).await;
-                None
-            }
-            Ok(None) => None,
-            Err(why) => Some(why),
-        };
-        let _ = client.settle(&click.id, note).await;
+        let _ = client.settle(&click.id, said.err()).await;
+    }
+
+    // A line of option numbers only answers the latest question shown and not
+    // yet answered, by place; anything else is the person's own words.
+    fn picks_of(asking: &Asking, line: &str) -> Option<(u64, Vec<usize>)> {
+        let mut up = asking.lock();
+        let q = up.iter_mut().rev().find(|q| q.shown && !q.answered)?;
+        let picks = (line.split(|c: char| c.is_whitespace() || ",，、".contains(c)))
+            .filter(|w| !w.is_empty())
+            .map(|w| {
+                (w.parse::<usize>().ok())
+                    .filter(|n| (1..=q.options.len()).contains(n))
+                    .map(|n| n - 1)
+            })
+            .collect::<Option<BTreeSet<_>>>()?;
+        if picks.is_empty() {
+            return None;
+        }
+        q.answered = true;
+        Some((q.id, picks.into_iter().collect()))
     }
 
     // Questions not yet shown go out, marked first so the other task does
@@ -414,16 +398,14 @@ mod bridge {
             let failed = match client.get_updates(offset).await {
                 Ok(updates) => {
                     failures = 0;
-                    let (paired, clicks) = heard(kept, pi, &mut code, updates);
+                    let (paired, clicks) = heard(kept, asking, pi, &mut code, updates);
                     if let Some(chat) = paired {
                         let hello = "connected to pi: what you send here arrives as turns, and /stop stops one";
                         let _ = client.send_message(chat, hello, &[]).await;
                         show_held(client, chat, asking, pi).await;
                     }
                     for click in clicks {
-                        if let Some(chat) = kept.chat() {
-                            press(client, chat, asking, pi, click).await;
-                        }
+                        press(client, asking, pi, click).await;
                     }
                     continue;
                 }
@@ -454,6 +436,7 @@ mod bridge {
     // buttons in that chat. Saved only on change.
     fn heard(
         kept: &Kept,
+        asking: &Asking,
         pi: &Pi,
         code: &mut Option<String>,
         updates: Vec<Update>,
@@ -504,7 +487,10 @@ mod bridge {
                     match command(line) {
                         Some("stop" | "esc") => pi.say(json!({ "interrupt": true })),
                         Some("start") => {}
-                        _ => pi.say(json!({ "input": text })),
+                        _ => match picks_of(asking, line) {
+                            Some((id, picks)) => pi.say(json!({ "answer": id, "picks": picks })),
+                            None => pi.say(json!({ "input": text })),
+                        },
                     }
                 }
                 Some(_) => {}
@@ -560,9 +546,19 @@ mod bridge {
                         let at = up.iter().position(|q| q.id == id);
                         gone = at.and_then(|at| up.remove(at).message);
                     }
+                    // Not taken: it may be answered again, and the person hears why.
+                    let refused = told.get("refused").and_then(Value::as_u64).map(|id| {
+                        if let Some(q) = asking.lock().iter_mut().find(|q| q.id == id) {
+                            q.answered = false;
+                        }
+                        told.get("why").and_then(Value::as_str).unwrap_or_default().to_string()
+                    });
                     let Some(chat) = kept.chat() else {
                         continue;
                     };
+                    if let Some(why) = refused {
+                        send(client, chat, pi, &format!("not taken: {why}")).await;
+                    }
                     if told.get("started").and_then(Value::as_bool) == Some(true) {
                         typing = Some(chat);
                         tick.reset_immediately();
@@ -670,8 +666,10 @@ mod bridge {
             let (tx, mut rx) = mpsc::unbounded_channel();
             let pi = Pi(tx);
             let mut code = Some("12345678".to_string());
+            let asking = Asking::default();
             let (paired, _) = heard(
                 &kept,
+                &asking,
                 &pi,
                 &mut code,
                 vec![
@@ -688,6 +686,7 @@ mod bridge {
 
             heard(
                 &kept,
+                &asking,
                 &pi,
                 &mut code,
                 vec![
@@ -710,8 +709,8 @@ mod bridge {
         }
 
         // Only the paired account's presses, in its chat, count; a press
-        // picks, marks where several may be picked, or closes, and one on
-        // what is no longer up says so.
+        // answers with its option, or closes, once; one on what is no longer
+        // up says so. A reply of numbers only answers with several.
         #[test]
         fn a_press_answers_only_for_the_paired_account() {
             let (_dir, kept) = kept();
@@ -722,6 +721,7 @@ mod bridge {
             };
             let (tx, mut rx) = mpsc::unbounded_channel();
             let pi = Pi(tx);
+            let asking = Asking::default();
             let click = |id: i64, from: i64, chat: i64, data: &str| -> Update {
                 serde_json::from_value(json!({
                     "update_id": id,
@@ -736,6 +736,7 @@ mod bridge {
             };
             let (_, clicks) = heard(
                 &kept,
+                &asking,
                 &pi,
                 &mut None,
                 vec![
@@ -747,39 +748,40 @@ mod bridge {
             assert_eq!(clicks.len(), 1);
             assert!(rx.try_recv().is_err(), "a press says nothing by itself");
 
-            let asking = Asking::default();
-            let told = |id: u64, multiple: bool| {
+            let told = |id: u64| {
                 json!({ "question": {
-                    "id": id, "text": "which?", "options": ["a", "b"], "multiple": multiple, "back": false,
+                    "id": id, "text": "which?", "options": ["a", "b", "c"], "back": false,
                 }})
             };
-            asking.lock().push(Up::of(&told(3, false)).unwrap());
-            let mut several = Up::of(&told(4, true)).unwrap();
-            several.message = Some(11);
-            asking.lock().push(several);
-
-            assert_eq!(pressed(&asking, &pi, "3:2"), Err(CLOSED));
-            assert_eq!(pressed(&asking, &pi, "3:1"), Ok(None));
+            asking.lock().push(Up::of(&told(3)).unwrap());
+            assert_eq!(pressed(&asking, &pi, "3:3"), Err(CLOSED));
+            assert_eq!(pressed(&asking, &pi, "3:1"), Ok(()));
             assert_eq!(rx.try_recv().unwrap(), json!({ "answer": 3, "picks": [1] }));
             assert!(pressed(&asking, &pi, "3:close").is_err(), "answered once");
-            assert!(rx.try_recv().is_err());
-            asking.lock().push(Up::of(&told(5, false)).unwrap());
-            assert_eq!(pressed(&asking, &pi, "5:close"), Ok(None));
+            asking.lock().push(Up::of(&told(5)).unwrap());
+            assert_eq!(pressed(&asking, &pi, "5:close"), Ok(()));
             assert_eq!(rx.try_recv().unwrap(), json!({ "answer": 5, "picks": [] }));
             assert_eq!(pressed(&asking, &pi, "9:0"), Err(CLOSED));
 
-            assert!(pressed(&asking, &pi, "4:send").is_err(), "nothing marked");
-            let Ok(Some((11, rows))) = pressed(&asking, &pi, "4:1") else {
-                panic!("a mark redraws its buttons");
+            let mut shown = Up::of(&told(6)).unwrap();
+            shown.shown = true;
+            asking.lock().push(shown);
+            let says = |text: &str| {
+                heard(
+                    &kept,
+                    &asking,
+                    &pi,
+                    &mut None,
+                    vec![update(9, 7, 7, "private", text)],
+                );
             };
-            assert_eq!(rows[1][0].text, "☑ 2. b");
-            assert!(rx.try_recv().is_err(), "a mark is not an answer");
-            pressed(&asking, &pi, "4:0").unwrap();
-            assert_eq!(pressed(&asking, &pi, "4:send"), Ok(None));
+            says("3，1 3");
             assert_eq!(
                 rx.try_recv().unwrap(),
-                json!({ "answer": 4, "picks": [0, 1] })
+                json!({ "answer": 6, "picks": [0, 2] })
             );
+            says("1 more");
+            assert_eq!(rx.try_recv().unwrap(), json!({ "input": "1 more" }));
         }
 
         #[test]

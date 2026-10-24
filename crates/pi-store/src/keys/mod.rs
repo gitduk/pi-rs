@@ -152,6 +152,8 @@ pub enum Action {
     MenuNext,
     MenuPrevious,
     MenuDismiss,
+    // The highlighted option in or out of the ones sent together.
+    MenuMark,
     RunInterrupt,
     Rewind,
     // The page up searched, or the transcript with none: the query typed
@@ -318,7 +320,7 @@ const BINDINGS: &[Binding] = &[
         action: A::LineSubmit,
         when: LINE,
         keys: &["enter"],
-        note: "with a list up, sends the highlighted one, or the marked ones; reaches the run in flight; a command waits for it",
+        note: "with a list up, sends the marked ones, or else the highlighted one; reaches the run in flight; a command waits for it",
     },
     Binding {
         id: "line.clear",
@@ -339,7 +341,7 @@ const BINDINGS: &[Binding] = &[
         action: A::MenuAccept,
         when: LIST,
         keys: &["tab"],
-        note: "takes the highlighted one and goes on: onto the line, or marked where several may be picked",
+        note: "takes the highlighted one onto the line, and goes on",
     },
     Binding {
         id: "menu.next",
@@ -361,6 +363,20 @@ const BINDINGS: &[Binding] = &[
         when: LIST,
         keys: &["esc"],
         note: "until the next keystroke; a question's list closes the question unanswered",
+    },
+    Binding {
+        id: "menu.mark",
+        action: A::MenuMark,
+        when: LIST.empty(),
+        keys: &["space"],
+        note: "a question's option in or out, to send several",
+    },
+    Binding {
+        id: "menu.mark.vim",
+        action: A::MenuMark,
+        when: LIST.normal(),
+        keys: &["space"],
+        note: "",
     },
     Binding {
         id: "menu.next.vim",

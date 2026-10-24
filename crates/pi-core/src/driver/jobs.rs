@@ -466,8 +466,8 @@ impl Table {
             Told::Answer(answer) => {
                 tracing::info!(target: "pi::job", job = id, ?answer, "told answer")
             }
-            // Told every follower at once, where the question goes up or down.
-            Told::Question { .. } | Told::Closed(_) => {}
+            // Said where they happen: a question up or down, an answer refused.
+            Told::Question { .. } | Told::Closed(_) | Told::Refused { .. } => {}
         }
         if let Some(to) = self
             .lock()
@@ -987,8 +987,11 @@ impl JobHandle for Handle {
             Ok(picked) => picked,
             Err(why) => {
                 tracing::warn!(
-                    target: "pi::job", job = self.id, question, ?picks, %why, "an answer dropped"
+                    target: "pi::job", job = self.id, question, ?picks, %why, "an answer refused"
                 );
+                if let Some(to) = &inner.items[at].told {
+                    let _ = to.send(Told::Refused { question, why });
+                }
                 return;
             }
         };
@@ -1232,7 +1235,6 @@ mod tests {
         Asked {
             question: question.into(),
             options: options.iter().map(|o| o.to_string()).collect(),
-            multiple: false,
             back,
         }
     }
@@ -1383,10 +1385,14 @@ mod tests {
         let first = table.questions(&root)[0].id;
         assert!(matches!(rx.try_recv(), Ok(Told::Question { id, .. }) if id == first));
 
-        bridge.answer(first, vec![5]);
-        bridge.answer(first, vec![0, 1]);
-        bridge.answer(first, vec![0, 0]);
-        assert_eq!(table.questions(&root).len(), 1, "no such pick, still up");
+        for picks in [vec![5], vec![0, 1], vec![0, 0]] {
+            bridge.answer(first, picks.clone());
+            assert!(
+                matches!(rx.try_recv(), Ok(Told::Refused { question, .. }) if question == first),
+                "{picks:?} is told back why not"
+            );
+        }
+        assert_eq!(table.questions(&root).len(), 1, "no such answer, still up");
         bridge.answer(first, vec![0]);
         assert_eq!(rx.try_recv(), Ok(Told::Closed(first)));
         let Some((_, Back::Input { text, as_typed, .. })) = table.take_back(&root) else {
@@ -1395,6 +1401,10 @@ mod tests {
         assert_eq!((text.as_str(), as_typed), ("/compact", true));
         bridge.answer(first, vec![1]);
         assert!(table.take_back(&root).is_none(), "answered once");
+        assert!(
+            matches!(rx.try_recv(), Ok(Told::Refused { .. })),
+            "and told so"
+        );
 
         let mut waits = jobs
             .ask(root.clone(), "guard", asked("allow?", &["yes", "no"], true))

@@ -51,7 +51,8 @@ mod bridge {
     //! turn on the checkout comes back as `started`, then one `reply`, cut into
     //! messages and sent on to the phone — not only the ones the phone opened.
     //! Each question put there goes too, its options numbered; a reply of
-    //! numbers only goes up as the `answer` to the latest one shown.
+    //! numbers only goes up as the `answer` to the latest one shown, one
+    //! number or several.
 
     use std::os::fd::FromRawFd;
     use std::path::PathBuf;
@@ -146,10 +147,11 @@ mod bridge {
         id: u64,
         text: String,
         options: Vec<String>,
-        multiple: bool,
         // Sent: one asked while a turn runs waits for that turn's reply,
         // which it follows on from.
         shown: bool,
+        // Its answer went up; pi closes it soon.
+        answered: bool,
     }
 
     impl Up {
@@ -163,8 +165,8 @@ mod bridge {
                 id: q.get("id")?.as_u64()?,
                 text: q.get("text")?.as_str()?.to_string(),
                 options,
-                multiple: q.get("multiple").and_then(Value::as_bool) == Some(true),
                 shown: false,
+                answered: false,
             })
         }
 
@@ -173,19 +175,16 @@ mod bridge {
                 .map(|(i, o)| format!("{}. {o}", i + 1))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let how = match self.multiple {
-                true => "reply with their numbers, such as 1 3",
-                false => "reply with its number",
-            };
+            let how = "reply with its number, or with several such as 1 3";
             format!("? {}\n\n{options}\n\n({how})", self.text)
         }
     }
 
-    // A line of option numbers only answers the latest question shown, by
-    // place; anything else is the person's own words.
+    // A line of option numbers only answers the latest question shown and not
+    // yet answered, by place; anything else is the person's own words.
     fn picks_of(asking: &Asking, line: &str) -> Option<(u64, Vec<usize>)> {
-        let up = asking.lock();
-        let q = up.iter().rev().find(|q| q.shown)?;
+        let mut up = asking.lock();
+        let q = up.iter_mut().rev().find(|q| q.shown && !q.answered)?;
         let picks = (line.split(|c: char| c.is_whitespace() || ",，、".contains(c)))
             .filter(|w| !w.is_empty())
             .map(|w| {
@@ -194,20 +193,29 @@ mod bridge {
                     .map(|n| n - 1)
             })
             .collect::<Option<std::collections::BTreeSet<_>>>()?;
-        let picks: Vec<usize> = picks.into_iter().collect();
-        (!picks.is_empty() && (q.multiple || picks.len() == 1)).then_some((q.id, picks))
+        if picks.is_empty() {
+            return None;
+        }
+        q.answered = true;
+        Some((q.id, picks.into_iter().collect()))
     }
 
-    // Questions not yet shown go out, after whatever went before them.
+    // Questions not yet shown go out, after whatever went before them:
+    // marked first so the other task does not send them too, and unmarked
+    // again if the send failed, to go with the next.
     async fn show_held(client: &Client, to: &Target, asking: &Asking, pi: &Pi) {
-        let held: Vec<Up> = (asking.lock().iter())
+        let held: Vec<Up> = (asking.lock().iter_mut())
             .filter(|q| !q.shown)
-            .cloned()
+            .map(|q| {
+                q.shown = true;
+                q.clone()
+            })
             .collect();
         for q in held {
-            send(client, to, pi, &q.shown()).await;
-            if let Some(up) = asking.lock().iter_mut().find(|u| u.id == q.id) {
-                up.shown = true;
+            if !send(client, to, pi, &q.shown()).await
+                && let Some(up) = asking.lock().iter_mut().find(|u| u.id == q.id)
+            {
+                up.shown = false;
             }
         }
     }
@@ -440,9 +448,22 @@ mod bridge {
             } else if let Some(id) = told.get("closed").and_then(Value::as_u64) {
                 asking.lock().retain(|q| q.id != id);
             }
+            // Not taken: it may be answered again, and the person hears why.
+            let refused = told.get("refused").and_then(Value::as_u64).map(|id| {
+                if let Some(q) = asking.lock().iter_mut().find(|q| q.id == id) {
+                    q.answered = false;
+                }
+                told.get("why")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            });
             let Some(to) = kept.target() else {
                 continue;
             };
+            if let Some(why) = refused {
+                send(client, &to, pi, &format!("not taken: {why}")).await;
+            }
             if told.get("started").and_then(Value::as_bool) == Some(true) {
                 running = true;
                 tickets.typing(client, &to, true).await;
@@ -458,10 +479,11 @@ mod bridge {
         }
     }
 
-    async fn send(client: &Client, to: &Target, pi: &Pi, reply: &str) {
+    // Whether it all went: a failure is told to pi, here.
+    async fn send(client: &Client, to: &Target, pi: &Pi, reply: &str) -> bool {
         let text = format_markdown(reply);
         if text.trim().is_empty() {
-            return;
+            return true;
         }
         let context_token = to.context_token.as_deref().unwrap_or_default();
         let pieces = split(&text, MESSAGE_LIMIT);
@@ -488,9 +510,10 @@ mod bridge {
                     ""
                 };
                 pi.notice(&format!("wechat send failed{part}: {e:#}{hint}"));
-                return;
+                return false;
             }
         }
+        true
     }
 
     // Typing tickets, one peer's at a time: fetched once, kept until a send
@@ -611,27 +634,24 @@ mod bridge {
             );
         }
 
-        // Numbers only answer the latest question shown; anything else, or
-        // a number with nothing shown, is the person's own words.
+        // Numbers only answer the latest question shown, once, one or
+        // several; anything else, or a number with nothing shown, is the
+        // person's own words.
         #[test]
         fn a_reply_of_numbers_picks_the_latest_questions_options() {
             let asking = Asking::default();
-            let told = |id: u64, multiple: bool| {
+            let told = |id: u64| {
                 json!({ "question": {
-                    "id": id, "text": "which?", "options": ["a", "b", "c"], "multiple": multiple, "back": false,
+                    "id": id, "text": "which?", "options": ["a", "b", "c"], "back": false,
                 }})
             };
-            asking.lock().push(Up::of(&told(3, false)).unwrap());
+            asking.lock().push(Up::of(&told(3)).unwrap());
             assert_eq!(picks_of(&asking, "2"), None, "not shown yet");
             asking.lock()[0].shown = true;
-            assert_eq!(picks_of(&asking, "2"), Some((3, vec![1])));
-            assert_eq!(picks_of(&asking, "1 3"), None, "only one may be picked");
             assert_eq!(picks_of(&asking, "4"), None);
             assert_eq!(picks_of(&asking, "2 please"), None);
-            let mut several = Up::of(&told(4, true)).unwrap();
-            several.shown = true;
-            asking.lock().push(several);
-            assert_eq!(picks_of(&asking, "3，1 3"), Some((4, vec![0, 2])));
+            assert_eq!(picks_of(&asking, "3，1 3"), Some((3, vec![0, 2])));
+            assert_eq!(picks_of(&asking, "2"), None, "answered once");
         }
 
         // A poll that changes nothing leaves the file alone.
