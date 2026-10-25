@@ -14,8 +14,8 @@ mod html;
 
 use html::{detag, named_on, tidy};
 
-const DEFAULT_TIMEOUT_MS: u64 = 30_000;
-const MAX_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const MAX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 // The most that will be pulled off the wire. Well above any page worth
 // reading and well below anything that would cost the run its memory.
@@ -232,13 +232,7 @@ impl Tool for Fetch {
                 url.host_str().unwrap_or_default()
             )));
         }
-        // A zero would otherwise abort the request before it was sent.
-        let timeout = std::time::Duration::from_millis(
-            args.timeout_ms
-                .filter(|ms| *ms > 0)
-                .unwrap_or(DEFAULT_TIMEOUT_MS)
-                .min(MAX_TIMEOUT_MS),
-        );
+        let timeout = tool::limit::timeout(args.timeout_ms, DEFAULT_TIMEOUT, MAX_TIMEOUT);
 
         let got = tokio::select! {
             r = self.get(url.clone(), timeout) => r?,

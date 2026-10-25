@@ -7,7 +7,7 @@ use tokio::process::Command;
 use crate::background::{Again, JobHandle, JobSink, Rerun};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput, output};
 
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 #[derive(Deserialize)]
 struct Args {
@@ -65,12 +65,7 @@ impl Tool for Bash {
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let args: Args = tool::parse_args_hinted(args, ARGS_HINT)?;
-        // A zero would otherwise kill the command before it started.
-        let timeout = std::time::Duration::from_millis(
-            args.timeout_ms
-                .filter(|ms| *ms > 0)
-                .unwrap_or(DEFAULT_TIMEOUT_MS),
-        );
+        let timeout = tool::limit::timeout(args.timeout_ms, DEFAULT_TIMEOUT, tool::limit::MAX_CALL);
         // The preview names the command as asked: rtk's rewrite is how it
         // ran, which the journal keeps, not what the call said.
         let preview = first_line(&args.command).to_string();

@@ -30,7 +30,10 @@ of calling it done.
 A check whose result only comes later — a CI run, a deploy, a long build — is
 still yours to finish. When a tool here can keep it running in the background,
 start it there and report what it showed once it comes back, rather than
-handing the user something to go and look at.
+handing the user something to go and look at. Do not sleep to wait for it: a
+sleep guesses how long the job takes. If your answer needs its result, wait on
+the job itself, which returns the moment it ends; otherwise end the turn, and
+its result opens the next one.
 
 Some steps cannot be taken back: deleting files, discarding uncommitted work
 (`git reset --hard`, `git checkout --`, `git clean`), rewriting or pushing

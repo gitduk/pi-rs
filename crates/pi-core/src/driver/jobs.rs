@@ -24,6 +24,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tool::limit::MAX_CALL;
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 use toolbox::background::{Again, Answer, Ask, Asked, JobHandle, JobSink, Peek, Rerun, Told};
 
@@ -40,6 +41,8 @@ const MAX_WAITING: usize = 100;
 pub struct Table {
     inner: Mutex<Inner>,
     changed: Notify,
+    // Every call waiting on a job, woken together: `changed` wakes one.
+    moved: Notify,
 }
 
 #[derive(Default)]
@@ -281,12 +284,7 @@ impl Item {
         if let Some(peek) = &self.output {
             return peek.clone();
         }
-        let texts: Vec<&str> = (self.waiting.iter())
-            .map(|back| match back {
-                Back::Result(due) => due.text.as_str(),
-                Back::Input { text, .. } => text.as_str(),
-            })
-            .collect();
+        let texts: Vec<&str> = (self.waiting.iter()).map(Back::text).collect();
         let text = texts.join("\n");
         Arc::new(move || text.clone())
     }
@@ -410,6 +408,16 @@ pub enum Back {
     },
 }
 
+impl Back {
+    /// What the job said, as it said it.
+    pub fn text(&self) -> &str {
+        match self {
+            Back::Result(due) => &due.text,
+            Back::Input { text, .. } => text,
+        }
+    }
+}
+
 /// What a lane is sent when something it left comes back: the line to
 /// submit and the note before it.
 pub struct Due {
@@ -430,6 +438,67 @@ impl Table {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn wake(&self) {
+        self.changed.notify_one();
+        self.moved.notify_waiters();
+    }
+
+    /// Wait, up to `within`, for job `id` of `root`'s to stop: what it said,
+    /// taken so it does not come back as a turn too; None while it runs.
+    pub async fn wait(
+        &self,
+        root: &Path,
+        id: u64,
+        within: std::time::Duration,
+    ) -> Result<Option<Vec<String>>, String> {
+        let deadline = Instant::now() + within;
+        loop {
+            // Enabled before looking, so an end between the two still wakes it.
+            let moved = self.moved.notified();
+            tokio::pin!(moved);
+            moved.as_mut().enable();
+            if let Some(said) = self.take_results(root, id)? {
+                return Ok(Some(said));
+            }
+            if tokio::time::timeout_at(deadline, moved).await.is_err() {
+                return Ok(None);
+            }
+        }
+    }
+
+    // What job `id` of `root`'s said, taken, once it no longer runs; a
+    // person's words through it stay in line for the lane.
+    fn take_results(&self, root: &Path, id: u64) -> Result<Option<Vec<String>>, String> {
+        let mut inner = self.lock();
+        let at = (inner.items.iter())
+            .position(|i| i.id == id && i.root == root)
+            .ok_or_else(|| format!("no job #{id} here"))?;
+        let item = &mut inner.items[at];
+        match item.state() {
+            State::Running => return Ok(None),
+            State::Back => {}
+            State::Stopped => return Err(format!("#{id} was stopped; it has nothing to say")),
+            State::Exited => {
+                return Err(format!(
+                    "#{id} already ended; what it said came back as a turn of its own"
+                ));
+            }
+        }
+        let mut said = Vec::new();
+        item.waiting.retain(|back| match back {
+            Back::Result(_) => {
+                said.push(back.text().to_string());
+                false
+            }
+            Back::Input { .. } => true,
+        });
+        tracing::info!(target: "pi::job", job = id, results = said.len(), "delivered to a wait");
+        settle(&mut inner.items, at);
+        drop(inner);
+        self.wake();
+        Ok(Some(said))
     }
 
     /// Now, if a job for `root` has something waiting.
@@ -496,7 +565,7 @@ impl Table {
         let mut inner = self.lock();
         inner.answered(id, "answered on the screen", picked);
         drop(inner);
-        self.changed.notify_one();
+        self.wake();
     }
 
     /// Tell job `id` about a turn its input opened, if it is still here.
@@ -573,10 +642,7 @@ impl Table {
         Some(
             item.waiting
                 .iter()
-                .map(|back| match back {
-                    Back::Result(due) => due.text.clone(),
-                    Back::Input { text, .. } => text.clone(),
-                })
+                .map(|back| back.text().to_string())
                 .collect(),
         )
     }
@@ -657,7 +723,7 @@ impl Table {
         }
         inner.withdraw(id, "its job stopped");
         drop(inner);
-        self.changed.notify_one();
+        self.wake();
         Ok(what)
     }
 
@@ -695,7 +761,7 @@ impl Table {
         inner.withdraw(id, "its job started over");
         drop(inner);
         tracing::info!(target: "pi::job", job = id, "restarting");
-        self.changed.notify_one();
+        self.wake();
         tokio::spawn(async move {
             // What the last run held, a port say, is let go before the next.
             if tokio::time::timeout(LET_GO, gone.cancelled())
@@ -769,7 +835,7 @@ impl Table {
         item.gone.cancel();
         inner.items.push(item);
         drop(inner);
-        self.changed.notify_one();
+        self.wake();
     }
 
     /// Whether a job for `root` is running or has something to deliver:
@@ -813,7 +879,7 @@ impl Table {
             *at = to.to_path_buf();
         }
         drop(inner);
-        self.changed.notify_one();
+        self.wake();
     }
 
     /// Stop and forget every job of checkouts at or under `root`, saying how
@@ -842,7 +908,7 @@ impl Table {
         }
         let gone = had - inner.items.len();
         drop(inner);
-        self.changed.notify_one();
+        self.wake();
         gone
     }
 
@@ -866,7 +932,7 @@ impl Table {
         let gone = item.gone.clone();
         inner.items.push(item);
         drop(inner);
-        self.changed.notify_one();
+        self.wake();
         (id, gone)
     }
 
@@ -879,7 +945,7 @@ impl Table {
             settle(&mut inner.items, at);
         }
         drop(inner);
-        self.changed.notify_one();
+        self.wake();
     }
 }
 
@@ -920,7 +986,7 @@ impl Ask for Jobs {
         });
         inner.put(root, question);
         drop(inner);
-        self.table.changed.notify_one();
+        self.table.wake();
         Ok(answer)
     }
 }
@@ -1005,7 +1071,7 @@ impl JobHandle for Handle {
             as_typed: false,
         });
         drop(inner);
-        self.table.changed.notify_one();
+        self.table.wake();
     }
 
     fn choose(&self, asked: Asked) {
@@ -1032,7 +1098,7 @@ impl JobHandle for Handle {
         let root = inner.items[at].root.clone();
         inner.put(root, question);
         drop(inner);
-        self.table.changed.notify_one();
+        self.table.wake();
     }
 
     fn answer(&self, question: u64, picks: Vec<usize>) {
@@ -1067,7 +1133,7 @@ impl JobHandle for Handle {
             });
         }
         drop(inner);
-        self.table.changed.notify_one();
+        self.table.wake();
     }
 
     fn interrupt(&self) {
@@ -1103,7 +1169,7 @@ impl JobHandle for Handle {
             });
         }
         drop(inner);
-        self.table.changed.notify_one();
+        self.table.wake();
     }
 
     fn rerun(&self, how: Rerun, again: Option<Again>) {
@@ -1131,7 +1197,10 @@ impl Tool for Jobs {
          show the latest a command printed with `output`, `stop` some by id, \
          or `stop_all`. A stopped job's results never come back. `restart` \
          runs a background command again under its id, stopped first if it \
-         still runs; a stopped or exited one stays listed for that."
+         still runs; a stopped or exited one stays listed for that. When you \
+         need a job's result before going on, `wait` for it — never sleep in \
+         a shell: wait returns the moment it ends, with what it said, and \
+         that result does not come back again as a turn."
     }
 
     fn tier(&self) -> Tier {
@@ -1156,6 +1225,14 @@ impl Tool for Jobs {
                 "output": {
                     "type": "integer",
                     "description": "The id of one whose latest output to show, as it runs.",
+                },
+                "wait": {
+                    "type": "integer",
+                    "description": "The id of one to wait for until it ends; past `timeout_ms` it shows the latest output instead.",
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "description": "How long `wait` waits. Default and max 600000.",
                 },
             },
         })
@@ -1214,6 +1291,25 @@ impl Tool for Jobs {
                 self.table.stop_each(root, if all { &[] } else { &ids }),
             );
         }
+        if let Some(v) = args.get("wait").filter(|v| !v.is_null()) {
+            let id = id(v)?;
+            let asked = args.get("timeout_ms").and_then(Value::as_u64);
+            let within = tool::limit::timeout(asked, MAX_CALL, MAX_CALL);
+            let waited = tokio::select! {
+                w = self.table.wait(root, id, within) => w.map_err(ToolError::Invalid)?,
+                _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+            };
+            let out = match waited {
+                Some(said) if said.is_empty() => format!("#{id} ended, saying nothing"),
+                Some(said) => format!("#{id} ended:\n{}", said.join("\n\n")),
+                None => {
+                    let latest = self.table.output(root, id).unwrap_or_else(|why| why);
+                    let secs = within.as_secs();
+                    format!("#{id} still running after {secs}s; latest output:\n{latest}")
+                }
+            };
+            return Ok(ToolOutput::text(out).with_preview(named("wait", &[id])));
+        }
         if let Some(v) = args.get("output").filter(|v| !v.is_null()) {
             let id = id(v)?;
             return (self.table.output(root, id))
@@ -1248,6 +1344,47 @@ mod tests {
             Back::Result(due) => Some(due),
             Back::Input { .. } => panic!("an input, not a result"),
         }
+    }
+
+    // A wait wakes when its job ends, and takes the result from the lane.
+    #[tokio::test]
+    async fn a_wait_takes_the_result_its_job_ends_with() {
+        let table = Arc::new(Table::default());
+        let root = PathBuf::from("/checkout");
+        let job = start(&table, &root, "build");
+        let id = job.id();
+        let waiting = {
+            let (table, root) = (table.clone(), root.clone());
+            tokio::spawn(async move {
+                table
+                    .wait(&root, id, std::time::Duration::from_secs(5))
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "it waits while the job runs");
+        job.input("a person's line".into());
+        job.result("exited 0".into());
+        job.end();
+        let said = waiting.await.expect("the wait ran");
+        assert_eq!(said, Ok(Some(vec!["exited 0".to_string()])));
+        assert!(
+            matches!(table.take_back(&root), Some((_, Back::Input { .. }))),
+            "a person's line still goes to the lane"
+        );
+        assert!(table.take_back(&root).is_none(), "the result went once");
+    }
+
+    #[tokio::test]
+    async fn a_wait_gives_up_on_a_job_still_running() {
+        let table = Arc::new(Table::default());
+        let root = PathBuf::from("/checkout");
+        let job = start(&table, &root, "server");
+        let waited = table
+            .wait(&root, job.id(), std::time::Duration::from_millis(20))
+            .await;
+        assert_eq!(waited, Ok(None));
+        assert!(table.wait(&root, 99, Default::default()).await.is_err());
     }
 
     // A person's line and a result keep the order they were said in, and the
