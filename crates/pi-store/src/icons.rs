@@ -20,9 +20,13 @@ pub const SAID_RULE: &str = PROMPT_BAR; // the rule beside a line the user said
 pub const VERSION_BANNER: &str = concat!("π ", env!("CARGO_PKG_VERSION"));
 pub const PENDING_MARK: &str = "→"; // a call started, on a progress line that cannot animate
 pub const STOPPED_MARK: &str = "✘"; // a call made and never answered: stopped before it landed
-// A call in flight: out and back, holding a frame at each end. `*` over
-// `✳`, which some fonts draw as an emoji.
-pub const CALL_FRAMES: [&str; 12] = ["·", "✢", "*", "✶", "✻", "✽", "✽", "✻", "✶", "*", "✢", "·"];
+// A call in flight: a different turn from reasoning's, so the two never read
+// alike. A ring of dots in the cell's middle rows, clear of the line above.
+pub const CALL_FRAMES: [&str; 4] = ["⠴", "⠦", "⠖", "⠲"];
+// Reasoning still streaming: out and back, holding a frame at each end.
+// `*` over `✳`, which some fonts draw as an emoji.
+pub const THINK_FRAMES: [&str; 12] = ["·", "✢", "*", "✶", "✻", "✽", "✽", "✻", "✶", "*", "✢", "·"];
+pub const THINK_MARK: &str = THINK_FRAMES[5]; // reasoning ended: the frame the turn holds
 pub const DONE_MARK: &str = "✔"; // a tool row that finished well
 pub const RELAYED_MARK: &str = "◆"; // a turn pi sent for the model: a `later`, a subagent's answer
 pub const NOTE_MARK: &str = "≡"; // a fact filed for the model to read; nothing ran

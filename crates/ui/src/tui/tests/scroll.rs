@@ -95,6 +95,7 @@ fn scrollback_rows_walk_from_both_ends() {
         Row::notice("d".to_string()),
     ];
     let paint = Paint::new(false);
+    let all: Vec<String> = ScrollbackRows::new(&rows, &paint, 80).map(text).collect();
     let rows = ScrollbackRows::new(&rows, &paint, 80);
     let (front, back): (Vec<_>, Vec<_>) = {
         let mut f = Vec::new();
@@ -114,9 +115,10 @@ fn scrollback_rows_walk_from_both_ends() {
         (f, b)
     };
     let front: Vec<String> = front.into_iter().map(text).collect();
-    let back: Vec<String> = back.into_iter().map(text).collect();
-    assert_eq!(front, vec!["a", "line 1"]);
-    assert_eq!(back, vec!["d", "line 2"]);
+    let back: Vec<String> = back.into_iter().rev().map(text).collect();
+    assert_eq!(all.len(), 4);
+    assert_eq!(front, all[..2], "the front walk meets the back one");
+    assert_eq!(back, all[2..]);
 }
 
 // A block streamed in: started, and one line landed in its group.

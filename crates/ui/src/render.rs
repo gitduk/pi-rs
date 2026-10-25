@@ -811,7 +811,7 @@ impl Renderer {
 }
 
 /// A tool name plus the one argument its summary picked out; the caller
-/// draws the prefix (spinner, ⚙, or a finished mark) itself.
+/// draws the prefix (spinner, queued mark, or finished mark) itself.
 pub fn named(name: &str, summary: &str) -> String {
     if summary.is_empty() {
         name.to_string()

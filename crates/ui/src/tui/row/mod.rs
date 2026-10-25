@@ -866,7 +866,7 @@ mod height_tests {
     #[test]
     fn a_lines_height_counts_its_wraps() {
         let paint = Paint::new(false);
-        let row = Row::thinking(1, vec![Line::from("abcdef"), Line::from("gh")], false);
+        let row = Row::lines(vec![Line::from("abcdef"), Line::from("gh")]);
         assert_eq!(row.line_height(0, &paint, 2), 3, "abcdef wraps to three");
         assert_eq!(row.line_height(1, &paint, 2), 1);
         assert_eq!(row.line_height(0, &paint, 80), 1);
