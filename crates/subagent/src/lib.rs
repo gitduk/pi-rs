@@ -154,11 +154,46 @@ struct Heard {
     spent: llm::stream::Usage,
     // The turn in flight's own count so far, until its end folds it into `spent`.
     turn: llm::stream::Usage,
+    doing: Doing,
+}
+
+// The child's latest call as the row names it, held at least `HOLD` so a
+// run of short calls does not make the row jump with each.
+#[derive(Default)]
+struct Doing {
+    shown: String,
+    at: Option<Instant>,
+    next: Option<String>,
+}
+
+const HOLD: Duration = Duration::from_secs(1);
+
+impl Doing {
+    fn want(&mut self, call: String, now: Instant) {
+        self.next = Some(call);
+        self.settle(now);
+    }
+
+    // When a held call is owed the row, if one is waiting.
+    fn due(&self) -> Option<Instant> {
+        self.next.as_ref()?;
+        Some(self.at? + HOLD)
+    }
+
+    fn settle(&mut self, now: Instant) {
+        if self.at.is_some_and(|at| now.duration_since(at) < HOLD) {
+            return;
+        }
+        if let Some(next) = self.next.take() {
+            self.shown = next;
+            self.at = Some(now);
+        }
+    }
 }
 
 impl Heard {
-    // `turn 3 · 41.2k/3.1k`: where the child is, for the caller's row. No call
-    // name: short calls one after another made the row jump with each.
+    // `turn 3 · 41.2k/3.1k · read src/lib.rs`: where the child is, for the
+    // caller's row. The call goes last, so a narrow row clips it first.
     fn progress(&self) -> String {
         let mut spent = self.spent;
         spent.add(&self.turn);
@@ -166,7 +201,28 @@ impl Heard {
         if spent.input + spent.output > 0 {
             parts.push(llm::figures::slash(spent.input, spent.output));
         }
+        if !self.doing.shown.is_empty() {
+            parts.push(self.doing.shown.clone());
+        }
         parts.join(" · ")
+    }
+}
+
+// The caller's row gets the child's progress only when it reads differently.
+fn tell(caller: &Ctx, heard: &Heard, said: &mut String) {
+    let progress = heard.progress();
+    if progress != *said {
+        caller.progress(progress.clone());
+        *said = progress;
+    }
+}
+
+// `read src/lib.rs`: the call's name and the one argument worth showing,
+// cut to its first line since the row is drawn one line at a time.
+fn call_line(name: &str, args: &Value) -> String {
+    match tool::asked(args).lines().next().map(str::trim) {
+        Some(asked) if !asked.is_empty() => format!("{name} {asked}"),
+        _ => name.to_string(),
     }
 }
 
@@ -321,8 +377,23 @@ impl Subagent {
         let heard = tokio::spawn(async move {
             let mut heard = Heard::default();
             let mut said = String::new();
-            while let Some(event) = rx.recv().await {
-                let _ = ticked.send(Instant::now());
+            loop {
+                // A held call is shown when its hold ends, even if the child
+                // falls silent then, as it does under a long command.
+                let event = match heard.doing.due() {
+                    Some(due) => tokio::select! {
+                        event = rx.recv() => event,
+                        _ = tokio::time::sleep_until(due.into()) => {
+                            heard.doing.settle(Instant::now());
+                            tell(&caller, &heard, &mut said);
+                            continue;
+                        }
+                    },
+                    None => rx.recv().await,
+                };
+                let Some(event) = event else { break };
+                let now = Instant::now();
+                let _ = ticked.send(now);
                 match event {
                     Event::TurnStart { turn } => {
                         heard.turns = turn;
@@ -339,13 +410,13 @@ impl Subagent {
                         heard.spent.add(&usage);
                         heard.turn = Default::default();
                     }
+                    Event::ToolQueued { name, args, .. } => {
+                        heard.doing.want(call_line(&name, &args), now)
+                    }
                     _ => {}
                 }
-                let now = heard.progress();
-                if now != said {
-                    caller.progress(now.clone());
-                    said = now;
-                }
+                heard.doing.settle(now);
+                tell(&caller, &heard, &mut said);
             }
             heard
         });
@@ -592,5 +663,23 @@ fn check_line(check: &Checked) -> String {
             format!("[verify `{command}`: no verdict — killed after {ms}ms, having run that long]")
         }
         Outcome::NoVerdict(why) => format!("[verify `{command}`: no verdict — {why}]"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_call_inside_the_hold_waits_for_it_to_pass() {
+        let start = Instant::now();
+        let mut doing = Doing::default();
+        doing.want("read a".into(), start);
+        doing.want("read b".into(), start + HOLD / 2);
+        assert_eq!(doing.shown, "read a");
+        assert_eq!(doing.due(), Some(start + HOLD));
+        doing.want("read c".into(), start + HOLD / 2);
+        doing.settle(start + HOLD);
+        assert_eq!(doing.shown, "read c", "the newest waiting call wins");
     }
 }
