@@ -955,3 +955,44 @@ fn the_search_lists_its_hits_and_enter_keeps_the_pick() {
         "and the pick stayed"
     );
 }
+
+// A page is read over the whole conversation: the rows the jobs held are
+// its own while it is up, so a click there lands on the page, not a job.
+#[test]
+fn a_page_lies_over_the_jobs() {
+    use pi_core::driver::jobs::{Job, State};
+    let mut ui = test_ui(80, 24);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    ui.jobs = vec![Job {
+        id: 1,
+        description: "serve".into(),
+        progress: String::new(),
+        started: tokio::time::Instant::now(),
+        started_at: std::time::SystemTime::now(),
+        state: State::Running,
+        last: String::new(),
+    }];
+    ui.flush(&lane, &mut view);
+    let talk = ui.regions.history.height;
+    assert_eq!(ui.regions.jobs.height, 1, "the job has its row");
+
+    ui.open_page(
+        (0..60)
+            .map(|i| Line::from(format!("line {i}")).into())
+            .collect(),
+    );
+    ui.flush(&lane, &mut view);
+    assert_eq!(
+        ui.regions.history.height,
+        talk + 1,
+        "the job's row is the page's"
+    );
+    let last = ui.regions.history.bottom() - 1;
+    assert!(
+        matches!(ui.target_at(last), Some(crate::tui::mouse::Target::Text(_))),
+        "{:?}",
+        ui.target_at(last)
+    );
+    assert!((0..24).all(|row| ui.job_at(row).is_none()));
+}

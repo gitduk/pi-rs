@@ -1,7 +1,7 @@
 //! Where a mouse event landed, and what that row means: the frame's four
 //! regions, and the row under the pointer.
 
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 
 use super::Ui;
 use super::screen;
@@ -146,7 +146,7 @@ impl Ui {
     // Whether screen row `row` is the one that jumps to the bottom.
     pub(super) fn jump_at(&self, row: u16) -> bool {
         let gap = self.regions.gap;
-        self.below > 0 && (gap.y..gap.bottom()).contains(&row)
+        self.below > 0 && row_in(gap, row).is_some()
     }
 
     pub(super) fn on_mouse_click(&mut self, view: &mut View, col: u16, row: u16) {
@@ -548,17 +548,17 @@ pub(super) fn at_row_name(path: &str, dir: bool) -> String {
 pub(super) const HISTORY_GAP: u16 = 1;
 
 // `row`'s place among `area`'s rows, if it is one of them.
-fn row_in(area: Rect, row: u16) -> Option<usize> {
-    (area.top()..area.bottom())
-        .contains(&row)
-        .then(|| (row - area.y) as usize)
+pub(super) fn row_in(area: Rect, row: u16) -> Option<usize> {
+    (area.contains(Position::new(area.x, row))).then(|| (row - area.y) as usize)
 }
 
 impl Regions {
     /// The rows each part asks for, as many as `area` holds: the input line
-    /// parts the conversation, jobs and all, from the bar under it.
+    /// parts the conversation, jobs and all, from the bar under it. A `page`
+    /// up is read over all of the conversation, so the jobs get no rows.
     pub(super) fn layout(
         area: Rect,
+        page: bool,
         asked: usize,
         menu: usize,
         jobs: usize,
@@ -570,7 +570,11 @@ impl Regions {
         let mut left = (area.height as usize).saturating_sub(1 + HISTORY_GAP as usize);
         let bar = bar.min(left.saturating_sub(1));
         left -= bar;
-        let jobs = jobs.min(left.saturating_sub(1));
+        let jobs = if page {
+            0
+        } else {
+            jobs.min(left.saturating_sub(1))
+        };
         left -= jobs;
         let editor = editor.min(left);
         left -= editor;

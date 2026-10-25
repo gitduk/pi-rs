@@ -10,7 +10,7 @@ use super::Ui;
 use super::bar::Facts;
 use super::call::{self, drawn, pending_line};
 use super::menu::MenuEntry;
-use super::mouse::{Regions, Target};
+use super::mouse::{Regions, Target, row_in};
 use super::row::{PendingTool, Row, count};
 use super::screen::{self, Rows};
 use super::scrollback::{Piece, ScrollbackRows, body};
@@ -118,6 +118,7 @@ impl Ui {
         let area = self.screen.area();
         let regions = Regions::layout(
             area,
+            paged,
             asked.len(),
             menu.len(),
             jobs.len(),
@@ -268,7 +269,7 @@ impl Ui {
         let below = (scroll > 0).then(|| {
             let shine = self
                 .pointer
-                .is_some_and(|(_, row)| (regions.gap.y..regions.gap.bottom()).contains(&row));
+                .is_some_and(|(_, row)| row_in(regions.gap, row).is_some());
             let more = format!("{scroll} more below");
             Line::from(
                 self.paint
