@@ -564,3 +564,21 @@ fn mouse_event(kind: crossterm::event::MouseEventKind, row: u16) -> crossterm::e
         modifiers: crossterm::event::KeyModifiers::NONE,
     })
 }
+
+// An open job's tail stays within its rows, and every line not shown whole
+// is counted for the page.
+#[test]
+fn an_open_jobs_tail_counts_what_it_leaves_out() {
+    use crate::tui::call::tail_rows;
+    let many: Vec<String> = (0..10).map(|_| "word ".repeat(30)).collect();
+    let per = tail_rows(&many[..1], 40).1.len();
+    let (from, rows) = tail_rows(&many, 40);
+    assert!(rows.len() <= 8);
+    assert_eq!(rows.len() % per, 0);
+    assert_eq!(from + rows.len() / per, many.len());
+
+    // A last line taller than the rows keeps its own last ones.
+    let huge = vec!["word ".repeat(200)];
+    let (from, rows) = tail_rows(&huge, 40);
+    assert_eq!((from, rows.len()), (1, 8));
+}

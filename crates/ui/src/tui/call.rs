@@ -167,8 +167,29 @@ fn job_text(job: &Job) -> (String, String) {
     (head, state)
 }
 
-// Under an open job: the last this many lines of what it printed.
+// Under an open job: the last this many rows of what it printed.
 const BODY_SHOWN: usize = 8;
+
+// The last lines of `said` wrapped in `room`, in at most `BODY_SHOWN` rows,
+// and how many lines are not shown whole: the page has those.
+pub(super) fn tail_rows(said: &[String], room: usize) -> (usize, Vec<Line<'static>>) {
+    let indent = Line::from("  ");
+    let (mut from, mut rows) = (said.len(), Vec::new());
+    for l in said.iter().rev() {
+        let mut wrapped = super::screen::wrap(Some(&indent), &Line::from(l.clone()), room);
+        if rows.len() + wrapped.len() > BODY_SHOWN {
+            // A last line taller than all the room keeps its own last rows.
+            if rows.is_empty() {
+                rows = wrapped.split_off(wrapped.len() - BODY_SHOWN);
+            }
+            break;
+        }
+        wrapped.append(&mut rows);
+        rows = wrapped;
+        from -= 1;
+    }
+    (from, rows)
+}
 
 /// What a row of the job list is, for a click to find.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -222,8 +243,7 @@ pub(super) fn job_lines(
         let rows = if let Some(OpenJob { body, .. }) = open.filter(|o| o.id == job.id) {
             let (head, tail) = job_text(job);
             let row = Line::from(paint.span_hovered(shine, &paint.theme.muted, head + &tail));
-            let said = said(body);
-            let from = said.len().saturating_sub(BODY_SHOWN);
+            let (from, tail) = tail_rows(&said(body), room);
             let mut rows = super::screen::fit(&row, room);
             ids.extend(std::iter::repeat_n(JobRow::Job(job.id), rows.len()));
             if from > 0 {
@@ -236,8 +256,6 @@ pub(super) fn job_lines(
                 )));
                 ids.push(JobRow::Earlier(job.id));
             }
-            let tail = (said[from..].iter())
-                .map(|l| Line::from(pi_store::text::clip(&format!("  {l}"), room)));
             let own = rows.len();
             rows.extend(tail);
             ids.extend(std::iter::repeat_n(JobRow::Under, rows.len() - own));
