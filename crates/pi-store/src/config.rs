@@ -52,12 +52,6 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tier: Option<TierArg>,
 
-    /// Absolute directories every tool above the read tier may reach beyond
-    /// the workspace root — `bash` may work in one, not only `write` and
-    /// `edit`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub write_roots: Vec<String>,
-
     /// Facts about a model the defaults get wrong, keyed by the model's own
     /// name. Every field has a default, so a model needs an entry only where
     /// it differs — and needs none at all to be usable.
@@ -310,12 +304,13 @@ impl Binds {
 }
 
 impl Config {
-    /// Where runs may write besides the workspace: `write_roots`, and pi's
-    /// own home, so a tool or a skill can be written where pi reads it.
+    /// Where runs may write besides the workspace: pi's own home, so a tool
+    /// or a skill can be written where pi reads it.
     pub fn writable(&self) -> Vec<PathBuf> {
-        let mut out: Vec<PathBuf> = self.write_roots.iter().map(PathBuf::from).collect();
-        out.extend(crate::dir().filter(|home| home.is_absolute()));
-        out
+        crate::dir()
+            .filter(|home| home.is_absolute())
+            .into_iter()
+            .collect()
     }
 
     fn key_map(&self) -> Result<crate::keys::Keys> {
@@ -778,14 +773,7 @@ pub fn project_file(workspace: &Path) -> Option<PathBuf> {
 
 /// Keys a project file may set that reach past its checkout: they start
 /// programs, delete sessions, widen writes, or choose where a key is sent.
-const REACHING: &[&str] = &[
-    "mcp",
-    "hooks",
-    "keep_days",
-    "write_roots",
-    "base_url",
-    "api_key",
-];
+const REACHING: &[&str] = &["mcp", "hooks", "keep_days", "base_url", "api_key"];
 
 /// The keys of a project `tree` that reach past its checkout, as spelled
 /// there, each with its value as shown when it loads.

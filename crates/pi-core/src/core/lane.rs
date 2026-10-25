@@ -810,7 +810,7 @@ impl Core {
         let settings = Settings::load(self.pinned.config.as_deref(), &target).map_err(failed)?;
         let config = settings.config().map_err(failed)?;
         let ws = tool::Workspace::new(&target)
-            .and_then(|ws| ws.with_write_roots(&config.writable()))
+            .and_then(|ws| crate::core::resolve::fence(ws, &config, &self.pinned))
             .map_err(|e| failed(anyhow::anyhow!("{}: {e}", target.display())))?;
         let to = ws.root().to_path_buf();
         if to == from {
@@ -943,7 +943,7 @@ impl Core {
         let mut said = Vec::new();
         for (root, id) in lanes {
             let ws = match tool::Workspace::new(root)
-                .and_then(|ws| ws.with_write_roots(&self.config.writable()))
+                .and_then(|ws| crate::core::resolve::fence(ws, &self.config, &self.pinned))
             {
                 Ok(ws) => ws,
                 Err(e) => {

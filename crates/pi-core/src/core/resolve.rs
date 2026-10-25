@@ -202,6 +202,24 @@ fn changed<'a, K: PartialEq>(
         .map(|f| &f.0)
 }
 
+/// `workspace` held to the boundary the run's ceiling calls for. A run with a
+/// shell reaches everywhere through it, so a fence would only make write and
+/// edit refuse what bash then does without their checks.
+pub fn fence(
+    workspace: tool::Workspace,
+    config: &config::Config,
+    pinned: &Pinned,
+) -> std::io::Result<tool::Workspace> {
+    let settled = config.settle(config::Flags {
+        effort: pinned.effort,
+        tier: pinned.tier,
+    });
+    match tool::Tier::from(settled.tier) {
+        tool::Tier::Exec => Ok(workspace.unfenced()),
+        _ => workspace.with_write_roots(&config.writable()),
+    }
+}
+
 /// Fails whole or not at all. A half-applied config is worse than a stale one,
 /// which is why a reload computes all of this before touching anything.
 ///
@@ -353,7 +371,7 @@ pub fn resolve(
     // change within a run, and the system prompt is what a provider caches.
     let standing = crate::core::prompt::Standing {
         workspace: root.to_path_buf(),
-        write_paths: workspace.write_roots().to_vec(),
+        fenced: workspace.fenced(),
         pi_home,
         instructions: prompt_files.instructions.clone(),
         memory: prompt_files.memory.clone(),

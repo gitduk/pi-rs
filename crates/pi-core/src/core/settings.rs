@@ -171,9 +171,9 @@ impl Core {
         let config = (settings.as_ref().unwrap_or(&self.settings))
             .config()
             .map_err(|e| format!("nothing reloaded — {}", refused("settings", e)))?;
-        // `write_roots` widen the workspace, so it is built again from them.
+        // The tier fences the workspace, so it is built again from the config.
         let workspace = tool::Workspace::new(self.lane().root())
-            .and_then(|ws| ws.with_write_roots(&config.writable()))
+            .and_then(|ws| resolve::fence(ws, &config, &self.pinned))
             .map_err(|e| format!("nothing reloaded — {}", refused("reload", e.into())))?;
         let prompt_files = self.lane().resolved().prompt_files.clone();
         self.adopt(config, workspace, settings, Some(prompt_files))

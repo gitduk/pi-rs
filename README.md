@@ -58,7 +58,7 @@ refused at load.
 
 A `.pi.toml` between the workspace and the repository root overrides the same
 keys, every one of them. The keys that reach past the checkout — `mcp`,
-`hooks`, `keep_days`, `write_roots`, `base_url`, `api_key`, and a model's own
+`hooks`, `keep_days`, `base_url`, `api_key`, and a model's own
 `base_url` or `api_key` — are named under the banner when pi starts, and so
 are the checkout's own script tools. Read both in a checkout you did not write
 before running pi there.
@@ -129,12 +129,13 @@ pi -C ~/repo --tier read  # another directory, read-only
 | `exec`  | everything, through a shell. **The default.** |
 | `net`   | `read`, plus the web                          |
 
-**`bash` is not sandboxed.** `write` and `edit` are held inside the workspace,
-`write_roots` and pi's home, symlinks resolved. The home is writable so the
-model can make its own tools and skills, which means it can also edit
-`settings.toml`, and an edit there takes effect within a second. `bash` runs
-`sh -c` with only its working directory held there, and pi never asks before a
-call. Use `--tier` when that is too much.
+**`bash` is not sandboxed.** It runs `sh -c` anywhere, and pi never asks
+before a call. Under `exec` nothing is fenced, so `write` and `edit` reach
+anywhere too rather than refuse what `bash` would do. Under `write` they are
+held inside the workspace and pi's home, symlinks resolved. The home is
+writable so the model can make its own tools and skills, which means it can
+also edit `settings.toml`, and an edit there takes effect within a second. Use
+`--tier` when that is too much.
 
 A run has no turn cap. It ends when the model stops calling tools or you press
 Esc. A session is open in one pi at a time: resuming one another pi holds is

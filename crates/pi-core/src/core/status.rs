@@ -101,7 +101,10 @@ impl Core {
         }
         rows.push(Row::new(["workspace".into(), workspace]));
         let extra = lane.workspace().write_roots();
-        if tool::Tier::Write.under(resolved.ceiling) && !extra.is_empty() {
+        if tool::Tier::Write.under(resolved.ceiling)
+            && lane.workspace().fenced()
+            && !extra.is_empty()
+        {
             let extra: Vec<_> = extra.iter().map(|p| short(p, root)).collect();
             rows.push(Row::new(["also writes".into(), extra.join(", ")]));
         }

@@ -4,12 +4,13 @@ use crate::{Tier, ToolError};
 
 /// The workspace root every relative tool path is resolved against. Absolute
 /// paths pass through untouched; nothing else in this crate calls the
-/// filesystem directly. `write_roots` widen the boundary every tier above
+/// filesystem directly. Write roots widen the boundary every tier above
 /// read is held to: where a command runs, and what a write touches.
 #[derive(Debug, Clone)]
 pub struct Workspace {
     root: PathBuf,
     write_roots: Vec<PathBuf>,
+    fenced: bool,
 }
 
 // Collapse `.` and `..` without touching the filesystem, so a path that does
@@ -77,7 +78,20 @@ impl Workspace {
         Ok(Self {
             root: root.as_ref().canonicalize()?,
             write_roots: Vec::new(),
+            fenced: true,
         })
+    }
+
+    /// Drop the boundary: every tier may then change or run anywhere. For a
+    /// run that has a shell, which reaches everywhere whatever this says.
+    pub fn unfenced(mut self) -> Self {
+        self.fenced = false;
+        self
+    }
+
+    /// Whether writes and commands are held to the root and write roots.
+    pub fn fenced(&self) -> bool {
+        self.fenced
     }
 
     /// Widen the boundary to extra absolute directories, for every tier above
@@ -89,20 +103,20 @@ impl Workspace {
             if !dir.is_absolute() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("`write_roots` entries must be absolute: {}", dir.display()),
+                    format!("a write root must be absolute: {}", dir.display()),
                 ));
             }
             let (real, tail) = real_until_missing(dir).ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("`write_roots` entry cannot be resolved: {}", dir.display()),
+                    format!("a write root cannot be resolved: {}", dir.display()),
                 )
             })?;
             if tail_crosses_a_link(&real, &tail) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!(
-                        "`write_roots` entry goes through a symlink that does not resolve: {}",
+                        "a write root goes through a symlink that does not resolve: {}",
                         dir.display()
                     ),
                 ));
@@ -143,7 +157,7 @@ impl Workspace {
             return Err(ToolError::Invalid(format!("{why}: `{input}`")));
         }
         let resolved = rejoin(real, &tail);
-        if tier.fenced() && !self.allows(&resolved) {
+        if tier.fenced() && self.fenced && !self.allows(&resolved) {
             return Err(ToolError::Escape(input.into()));
         }
         Ok(resolved)
@@ -153,7 +167,7 @@ impl Workspace {
         path.starts_with(&self.root) || self.write_roots.iter().any(|root| path.starts_with(root))
     }
 
-    /// The configured write roots beyond the workspace root, absolute and
+    /// The write roots beyond the workspace root, absolute and
     /// link-resolved. A symlinked root is already stored reduced to what it
     /// points at, so what is returned is what `resolve` actually admits.
     pub fn write_roots(&self) -> &[PathBuf] {
@@ -269,6 +283,16 @@ mod tests {
             ws.resolve(&format!("{}/x.txt", other.path().display()), Tier::Write),
             Err(ToolError::Escape(_))
         ));
+    }
+
+    #[test]
+    fn an_unfenced_workspace_writes_anywhere() {
+        let (_d, ws) = ws();
+        let other = tempfile::tempdir().unwrap();
+        let target = format!("{}/x.txt", other.path().display());
+        assert!(ws.resolve(&target, Tier::Write).is_err());
+        let p = ws.unfenced().resolve(&target, Tier::Write).unwrap();
+        assert_eq!(p, other.path().join("x.txt"));
     }
 
     #[test]

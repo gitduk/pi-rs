@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use agent::NoteOutcome as _;
 use pi_core::args::Args;
 use pi_core::core::dial::{dial, summary_writer};
-use pi_core::core::resolve::resolve;
+use pi_core::core::resolve::{fence, resolve};
 use pi_core::core::{self, Core, archive, lane, worktree};
 use pi_core::input::expand;
 use pi_store::icons;
@@ -130,13 +130,11 @@ async fn run(updated_from: Option<String>) -> Result<ExitCode> {
     let prompt = read_prompt(&args)?;
     let within = || format!("cannot use {} as a workspace", args.cwd);
     let workspace = tool::Workspace::new(&args.cwd).with_context(within)?;
-    // The project file is found from the workspace, and the write roots it may
-    // name widen that same workspace: read between the two steps.
+    // The project file is found from the workspace, and the tier it may set
+    // fences that same workspace: read between the two steps.
     let settings = Settings::load(args.config.as_deref(), workspace.root())?;
     let config = Arc::new(settings.config()?);
-    let workspace = workspace
-        .with_write_roots(&config.writable())
-        .with_context(within)?;
+    let workspace = fence(workspace, &config, &args.pinned()).with_context(within)?;
 
     let store = session::Store::default();
     // Held for the whole run: two pi saving one session would each erase

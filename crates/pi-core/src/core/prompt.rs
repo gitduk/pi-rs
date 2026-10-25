@@ -22,8 +22,8 @@ pub const REPLACEABLE: [(&str, &str); 2] = [
 pub struct Standing {
     /// The directory the run works in.
     pub workspace: PathBuf,
-    /// Directories beyond the workspace that write and edit may reach.
-    pub write_paths: Vec<PathBuf>,
+    /// Whether write and edit are held to the workspace and pi's home.
+    pub fenced: bool,
     /// pi's home, set only when the run may add tools and skills to it.
     pub pi_home: Option<PathBuf>,
     /// Instructions files by path, most general first.
@@ -41,7 +41,6 @@ impl Standing {
     pub fn render(&self) -> String {
         let mut out = String::new();
         self.workspace(&mut out);
-        self.write_paths(&mut out);
         self.pi_home(&mut out);
         self.instructions(&mut out);
         self.memory(&mut out);
@@ -52,34 +51,25 @@ impl Standing {
     fn workspace(&self, out: &mut String) {
         out.push_str(&format!(
             "\n\n<workspace path=\"{}\"/>\n\nThe workspace is the directory you work in. \
-Every path you name is relative to it, and commands start in it. Writing stays inside it \
-unless a `<write_paths>` block names more places; reading may go further — an absolute \
-path reaches the rest of this machine, a URL the rest of the world.",
+Every path you name is relative to it, and commands start in it. What you make along the way \
+— scripts, downloads, state files — goes in the workspace too, even when it feels throwaway: \
+the user looks for it there. Reading may go further — an absolute path reaches the rest of \
+this machine, a URL the rest of the world.",
             escaped(self.workspace.display())
         ));
-    }
-
-    // Spelled out so the escape refusal is not the model's first hint of the
-    // boundary; nothing to add when the workspace is the whole of it.
-    fn write_paths(&self, out: &mut String) {
-        if !tool::Tier::Write.under(self.tier) || self.write_paths.is_empty() {
+        if !tool::Tier::Write.under(self.tier) {
             return;
         }
-        out.push_str(&format!(
-            "\n\n<write_paths root=\"{}\">",
-            escaped(self.workspace.display())
-        ));
-        for root in &self.write_paths {
-            out.push_str(&format!("\n  {}", escaped(root.display())));
-        }
-        out.push_str(
-            "\n</write_paths>\n\nPaths inside these directories are writable; elsewhere write \
-and edit refuse.",
-        );
-        // Said only where it holds: a run capped below `exec` may not run `sh`.
-        if tool::Tier::Exec.under(self.tier) {
-            out.push_str(" bash can still write anywhere its redirections name.");
-        }
+        out.push_str(match self.fenced {
+            true => {
+                " write and edit stay inside the workspace, and pi's home when a `<pi_home>` \
+block names it."
+            }
+            false => {
+                " write and edit reach anywhere, but a file outside the workspace is changed \
+only when the user asks for it."
+            }
+        });
     }
 
     fn pi_home(&self, out: &mut String) {
@@ -169,7 +159,7 @@ mod tests {
     fn standing(tier: tool::Tier) -> Standing {
         Standing {
             workspace: "/w".into(),
-            write_paths: vec!["/extra".into()],
+            fenced: true,
             pi_home: Some("/h/.pi".into()),
             instructions: vec![("/w/AGENTS.md".into(), "be terse\n".into())],
             memory: vec![("user.md".into(), "- likes rust\n".into())],
@@ -179,21 +169,18 @@ mod tests {
     }
 
     #[test]
-    fn the_write_block_claims_only_what_the_ceiling_allows() {
+    fn the_write_boundary_claims_only_what_the_ceiling_allows() {
         for tier in [tool::Tier::Read, tool::Tier::Net] {
-            assert!(!standing(tier).render().contains("<write_paths root"));
+            assert!(!standing(tier).render().contains("write and edit"));
         }
-        let write = standing(tool::Tier::Write).render();
-        assert!(write.contains("\n  /extra\n"), "{write}");
-        assert!(!write.contains("bash"), "{write}");
-        assert!(standing(tool::Tier::Exec).render().contains("bash"));
-
-        // The workspace alone is the whole boundary: `<workspace>` says so.
-        let bare = Standing {
-            write_paths: Vec::new(),
+        let fenced = standing(tool::Tier::Write).render();
+        let open = Standing {
+            fenced: false,
             ..standing(tool::Tier::Exec)
-        };
-        assert!(!bare.render().contains("<write_paths root"));
+        }
+        .render();
+        assert!(fenced.contains("write and edit stay inside"), "{fenced}");
+        assert!(open.contains("write and edit reach anywhere"), "{open}");
     }
 
     // Blocks point at each other ("below"), and the prompt is cached by
@@ -204,7 +191,6 @@ mod tests {
         let at = |tag: &str| text.find(tag).unwrap_or_else(|| panic!("{tag}: {text}"));
         let order = [
             "<workspace",
-            "<write_paths root",
             "<pi_home",
             "<instructions path",
             "<memory>",

@@ -65,15 +65,6 @@ idle_timeout = 300
 # everything.
 # keep_days = 90
 
-# Absolute directories the tools above the read tier may reach besides the
-# workspace root — this widens where `bash` may work as well as what write and
-# edit may touch, so grant it the way you would a shell. Entries must be
-# absolute; a directory that does not exist yet is created on first write.
-# pi's home (`$PI_HOME`, else ~/.pi) is always among them, so the model can
-# write its own tools and skills; that includes settings.toml, which it can
-# then change. Read tools already reach anywhere.
-# write_roots = ["/tmp", "/home/me/scratch"]
-
 # Which parts the status line under the answer shows, in this order. One
 # list: the line repaints while a turn runs and stays in the scrollback once it
 # ends. Naming none keeps this default.
