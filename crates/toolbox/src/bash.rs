@@ -72,19 +72,19 @@ impl Tool for Bash {
         let (command, cwd) = prepare(args, self.tier(), ctx).await?;
 
         let before = crate::drift::before(ctx);
-        let ran = run(&command, &cwd, timeout, ctx).await;
-        crate::drift::absorb(ctx, before);
-        let ran = ran?;
+        // A failed call tells nothing, so what it changed is left for drift.
+        let ran = run(&command, &cwd, timeout, ctx).await?;
+        let moved = crate::drift::absorb(ctx, before);
         let mut body = ran.body;
         if ran.code != 0 {
             body.push_str(&format!("exit {}\n", ran.code));
         }
         if body.is_empty() {
-            // Preview stays set: without it the row falls back to body, hiding
-            // what a silent command was asked to do.
-            return Ok(ToolOutput::text("exit 0, no output").with_preview(preview));
+            body.push_str("exit 0, no output");
         }
-        let out = ToolOutput::text(body).with_preview(preview);
+        // Preview stays set: without it the row falls back to body, hiding
+        // what a silent command was asked to do.
+        let out = crate::drift::tell(ToolOutput::text(body).with_preview(preview), &moved);
         Ok(if ran.code != 0 { out.warned() } else { out })
     }
 }

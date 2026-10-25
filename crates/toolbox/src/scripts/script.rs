@@ -177,7 +177,6 @@ impl Tool for Script {
             .envs(shared.iter().map(|(k, v)| (k, v)))
             .envs(self.env(&args, &shared));
         let input = serde_json::to_vec(&args).unwrap_or_default();
-        // A detach ends the foreground: what the job writes after it is drift.
         let before = crate::drift::before(ctx);
         let ran = super::job::run(
             &self.name,
@@ -188,7 +187,8 @@ impl Tool for Script {
             self.jobs.as_deref(),
         )
         .await;
-        crate::drift::absorb(ctx, before);
+        // Absorbed only on the path that tells it; a detach or a failure
+        // leaves what changed for drift.
         let exited = match ran? {
             super::job::Ran::Exited(exited) => exited,
             super::job::Ran::Detached { said, id } => {
@@ -206,11 +206,13 @@ impl Tool for Script {
             return Err(ToolError::Invalid(message));
         }
 
+        let moved = crate::drift::absorb(ctx, before);
         let captured = exited.stdout;
-        if captured.text.trim().is_empty() {
-            return Ok(ToolOutput::text(format!("{}: no output", self.name)));
-        }
-        Ok(ToolOutput::text(captured.noted()).with_preview(self.name.clone()))
+        let out = match captured.text.trim().is_empty() {
+            true => ToolOutput::text(format!("{}: no output", self.name)),
+            false => ToolOutput::text(captured.noted()).with_preview(self.name.clone()),
+        };
+        Ok(crate::drift::tell(out, &moved))
     }
 }
 
