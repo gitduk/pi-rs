@@ -132,7 +132,7 @@ pub(super) fn push_tool_row(
             name,
             row.tool_preview().unwrap_or_default(),
             asked,
-            &row::result_text(result),
+            &llm::message::flatten(&result.content),
         )
         .at(row.place().map(str::to_string))
         .ended(outcome)

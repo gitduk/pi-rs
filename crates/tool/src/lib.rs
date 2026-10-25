@@ -7,6 +7,24 @@ pub fn name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
 }
 
+/// The one argument of a call worth showing, whole.
+pub fn asked(args: &Value) -> &str {
+    // Order is priority: `pattern` beats `path` because a grep carries both,
+    // and `description`, written for this line, beats the prompt it names.
+    [
+        "description",
+        "pattern",
+        "command",
+        "path",
+        "query",
+        "prompt",
+        "name",
+    ]
+    .into_iter()
+    .find_map(|key| args.get(key).and_then(|v| v.as_str()))
+    .unwrap_or_default()
+}
+
 /// Parse a tool's arguments with a serde path on any error, so a missing or
 /// misspelled field says which one (`items[1].status`) instead of a bare
 /// `missing field 'status'` that could be any of a hundred places.
@@ -209,27 +227,24 @@ impl ToolOutput {
     /// Falls back to the first line of the result, which is right for tools
     /// whose result opens with content rather than a marker.
     pub fn preview(&self) -> String {
-        match &self.preview {
-            Some(p) => p.clone(),
-            None => self
-                .flatten()
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .to_string(),
-        }
+        preview_of(self.preview.as_deref(), &self.content)
     }
 
     pub fn flatten(&self) -> String {
-        self.content
-            .iter()
-            .map(|c| match c {
-                ToolResultContent::Text(t) => t.text.clone(),
-                ToolResultContent::Json { value } => value.to_string(),
-                ToolResultContent::Image(_) => "[image]".into(),
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        llm::message::flatten(&self.content)
+    }
+}
+
+/// The one line a result shows folded: the tool's own `preview` if it made
+/// one, else the content's first line.
+pub fn preview_of(preview: Option<&str>, content: &[ToolResultContent]) -> String {
+    match preview {
+        Some(p) => p.to_string(),
+        None => llm::message::flatten(content)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string(),
     }
 }
 

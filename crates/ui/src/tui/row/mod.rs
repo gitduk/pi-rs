@@ -3,7 +3,7 @@
 
 use std::cell::RefCell;
 
-use llm::message::{ToolResult, ToolResultContent};
+use llm::message::ToolResult;
 use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
 
@@ -509,13 +509,7 @@ impl Row {
         outcome: crate::render::Outcome,
         took: Option<std::time::Duration>,
     ) -> Self {
-        let preview = preview.map(str::to_string).unwrap_or_else(|| {
-            let body = result_text(r);
-            match body.split_once('\n') {
-                Some((h, _)) => h.to_string(),
-                None => body,
-            }
-        });
+        let preview = tool::preview_of(preview, &r.content);
         Self::result(outcome, r.name.clone(), preview).timed(took)
     }
 
@@ -816,16 +810,6 @@ impl Row {
 pub const CODE_INDENT: &str = " ";
 
 /// What a result says in text, its other parts left out.
-pub fn result_text(r: &ToolResult) -> String {
-    r.content
-        .iter()
-        .filter_map(|c| match c {
-            ToolResultContent::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect()
-}
-
 fn tool_start_line(name: &str, summary: &str) -> String {
     format!("{} {}", icons::STOPPED_MARK, named(name, summary))
 }

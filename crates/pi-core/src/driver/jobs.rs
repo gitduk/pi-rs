@@ -1136,36 +1136,48 @@ impl Tool for Jobs {
                 "stop or restart in one call, not both".into(),
             ));
         }
+        let named = |verb: &str, ids: &[u64]| {
+            let ids: Vec<String> = ids.iter().map(|id| format!("#{id}")).collect();
+            format!("{verb} {}", ids.join(", "))
+        };
         // What was done, then each that was not; an error when none was.
-        let reply = |verb: &str, (failed, done): (Vec<String>, Vec<String>)| {
+        let reply = |asked: String, verb: &str, (failed, done): (Vec<String>, Vec<String>)| {
             if done.is_empty() {
                 return Err(ToolError::Invalid(failed.join("\n")));
             }
             let said = std::iter::once(format!("{verb} {}", done.join(", ")));
-            Ok(ToolOutput::text(
-                said.chain(failed).collect::<Vec<_>>().join("\n"),
-            ))
+            Ok(
+                ToolOutput::text(said.chain(failed).collect::<Vec<_>>().join("\n"))
+                    .with_preview(asked),
+            )
         };
         if !restart.is_empty() {
-            return reply("restarted", self.table.restart_each(root, &restart));
+            let asked = named("restart", &restart);
+            return reply(asked, "restarted", self.table.restart_each(root, &restart));
         }
         if all || !ids.is_empty() {
+            let asked = match all {
+                true => "stop all".to_string(),
+                false => named("stop", &ids),
+            };
             return reply(
+                asked,
                 "stopped",
                 self.table.stop_each(root, if all { &[] } else { &ids }),
             );
         }
         if let Some(v) = args.get("output").filter(|v| !v.is_null()) {
-            return (self.table.output(root, id(v)?))
-                .map(ToolOutput::text)
+            let id = id(v)?;
+            return (self.table.output(root, id))
+                .map(|out| ToolOutput::text(out).with_preview(named("output", &[id])))
                 .map_err(ToolError::Invalid);
         }
         let jobs = self.table.listing(root);
-        Ok(ToolOutput::text(if jobs.is_empty() {
-            "nothing in the background".to_string()
-        } else {
-            jobs.join("\n")
-        }))
+        let out = match jobs.is_empty() {
+            true => "nothing in the background".to_string(),
+            false => jobs.join("\n"),
+        };
+        Ok(ToolOutput::text(out).with_preview("list"))
     }
 }
 

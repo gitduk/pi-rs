@@ -820,24 +820,6 @@ pub fn named(name: &str, summary: &str) -> String {
     }
 }
 
-/// The one argument worth showing, whole.
-pub fn asked(args: &serde_json::Value) -> &str {
-    // Order is priority: `pattern` beats `path` because a grep carries both,
-    // and `description`, written for this line, beats the prompt it names.
-    [
-        "description",
-        "pattern",
-        "command",
-        "path",
-        "query",
-        "prompt",
-        "name",
-    ]
-    .into_iter()
-    .find_map(|key| args.get(key).and_then(|v| v.as_str()))
-    .unwrap_or_default()
-}
-
 /// Where a call ran, when that is not the workspace `root`: the `cwd` it
 /// named, relative to `root` when it lies inside.
 pub fn place(args: &serde_json::Value, root: &std::path::Path) -> Option<String> {
@@ -881,7 +863,7 @@ pub fn ran_for(took: Option<std::time::Duration>) -> String {
 /// The one argument worth showing in a progress line: its first line, `…`
 /// saying there is more of it.
 pub fn summarize(args: &serde_json::Value) -> String {
-    let v = asked(args);
+    let v = tool::asked(args);
     let first = v.lines().next().unwrap_or_default();
     pi_store::text::clip_more(first, 80, first.len() < v.trim_end().len())
 }

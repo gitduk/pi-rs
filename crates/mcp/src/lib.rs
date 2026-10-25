@@ -406,6 +406,7 @@ async fn list(server: &Arc<Server>, epoch: u64, peer: &Peer<RoleClient>) {
             let tools = listed
                 .into_iter()
                 .map(|t| {
+                    let (schema, described) = with_description((*t.input_schema).clone());
                     Arc::new(Remote {
                         name: tool_name(&server.name, &t.name),
                         remote: t.name.to_string(),
@@ -414,7 +415,8 @@ async fn list(server: &Arc<Server>, epoch: u64, peer: &Peer<RoleClient>) {
                             server.name,
                             t.description.as_deref().unwrap_or("")
                         ),
-                        schema: Value::Object((*t.input_schema).clone()),
+                        schema,
+                        described,
                         peer: peer.clone(),
                     }) as Arc<dyn Tool>
                 })
@@ -502,7 +504,35 @@ struct Remote {
     remote: String,
     description: String,
     schema: Value,
+    // Whether `DESCRIPTION` is pi's, to take off before the call goes out.
+    described: bool,
     peer: Peer<RoleClient>,
+}
+
+// The argument the model says what a call is for in: a server's own
+// arguments can't be read the same way for every tool.
+const DESCRIPTION: &str = "description";
+
+// A server's schema with `DESCRIPTION` among its properties, and whether it
+// was added; a tool that takes one of its own keeps it.
+fn with_description(mut schema: serde_json::Map<String, Value>) -> (Value, bool) {
+    let properties = schema
+        .entry("properties")
+        .or_insert_with(|| Value::Object(Default::default()));
+    let added = match properties {
+        Value::Object(props) if !props.contains_key(DESCRIPTION) => {
+            props.insert(
+                DESCRIPTION.into(),
+                serde_json::json!({
+                    "type": "string",
+                    "description": "A few words on what this call is for. Not sent to the tool.",
+                }),
+            );
+            true
+        }
+        _ => false,
+    };
+    (Value::Object(schema), added)
 }
 
 #[async_trait]
@@ -526,7 +556,11 @@ impl Tool for Remote {
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let mut params = CallToolRequestParams::new(self.remote.clone());
-        if let Value::Object(map) = args {
+        let preview = tool::asked(&args).to_string();
+        if let Value::Object(mut map) = args {
+            if self.described {
+                map.remove(DESCRIPTION);
+            }
             params = params.with_arguments(map);
         }
         // As long as any call may run: past that, a server is wedged, not busy.
@@ -553,14 +587,14 @@ impl Tool for Remote {
             out.push(llm::message::ToolResultContent::Json { value: structured });
         }
         if result.is_error == Some(true) {
-            return Err(ToolError::Invalid(flatten(&out)));
+            return Err(ToolError::Invalid(llm::message::flatten(&out)));
         }
         if out.is_empty() {
             out.push(text(format!("{}: no output", self.name)));
         }
         Ok(ToolOutput {
             content: out,
-            preview: None,
+            preview: Some(preview),
             spent: Default::default(),
             warned: false,
         })
@@ -599,17 +633,6 @@ fn blocks(content: &Value) -> Vec<llm::message::ToolResultContent> {
 
 fn text(body: String) -> llm::message::ToolResultContent {
     llm::message::ToolResultContent::Text(llm::message::Text { text: body })
-}
-
-fn flatten(out: &[llm::message::ToolResultContent]) -> String {
-    out.iter()
-        .map(|c| match c {
-            llm::message::ToolResultContent::Text(t) => t.text.clone(),
-            llm::message::ToolResultContent::Json { value } => value.to_string(),
-            llm::message::ToolResultContent::Image(_) => "[image]".into(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 // Each argument a typed word in turn, however much space between them; the
@@ -681,6 +704,23 @@ mod tests {
         assert_eq!(tool_name("a", &"x".repeat(100)).len(), 64);
     }
 
+    // The server never sees the argument pi added, nor loses one of its own.
+    #[test]
+    fn a_description_is_added_only_where_the_tool_has_none() {
+        let bare = serde_json::json!({ "type": "object" });
+        let (schema, added) = with_description(bare.as_object().unwrap().clone());
+        assert!(added);
+        assert_eq!(schema["properties"][DESCRIPTION]["type"], "string");
+
+        let own = serde_json::json!({
+            "type": "object",
+            "properties": { "description": { "type": "string", "description": "PR body" } },
+        });
+        let (schema, added) = with_description(own.as_object().unwrap().clone());
+        assert!(!added);
+        assert_eq!(schema["properties"][DESCRIPTION]["description"], "PR body");
+    }
+
     #[test]
     fn content_blocks_keep_text_and_images() {
         let content = serde_json::json!([
@@ -690,8 +730,8 @@ mod tests {
         ]);
         let out = blocks(&content);
         assert_eq!(out.len(), 3);
-        assert_eq!(flatten(&out[..1]), "hello");
+        assert_eq!(llm::message::flatten(&out[..1]), "hello");
         assert!(matches!(&out[1], llm::message::ToolResultContent::Image(_)));
-        assert!(flatten(&out[2..]).contains("file:///x"));
+        assert!(llm::message::flatten(&out[2..]).contains("file:///x"));
     }
 }

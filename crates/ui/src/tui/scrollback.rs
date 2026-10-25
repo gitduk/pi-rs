@@ -131,7 +131,7 @@ impl Folds {
         root: &std::path::Path,
     ) -> Option<String> {
         let place = render::place(args, root);
-        let asked = (render::asked(args).to_string(), place.clone());
+        let asked = (tool::asked(args).to_string(), place.clone());
         self.asked.insert(id.to_string(), asked);
         place
     }

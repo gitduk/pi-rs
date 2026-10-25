@@ -179,6 +179,13 @@ impl Tool for Remember {
             args.get_mut("changes").map(Value::take).unwrap_or_default(),
             "`changes` is a list of {file, add?, remove?}",
         )?;
+        let mut touched: Vec<&str> = Vec::new();
+        for c in &changes {
+            if !touched.contains(&c.file.as_str()) {
+                touched.push(&c.file);
+            }
+        }
+        let preview = touched.join(", ");
         let project = main_root(ctx.workspace.root());
         let Some(_held) = self.memory.lock() else {
             return Err(ToolError::Invalid(
@@ -216,7 +223,7 @@ impl Tool for Remember {
         let mut out = plan.done;
         out.extend(plan.missed.iter().map(|m| format!("not done: {m}")));
         out.push(format!("memory now {} of {BUDGET} bytes", plan.after));
-        Ok(ToolOutput::text(out.join("\n")))
+        Ok(ToolOutput::text(out.join("\n")).with_preview(preview))
     }
 }
 

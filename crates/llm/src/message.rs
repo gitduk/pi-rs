@@ -296,14 +296,19 @@ impl ToolResult {
 
     /// Flattened text for wires that accept only a string result body.
     pub fn flatten_text(&self) -> String {
-        self.content
-            .iter()
-            .map(|c| match c {
-                ToolResultContent::Text(t) => t.text.clone(),
-                ToolResultContent::Json { value } => value.to_string(),
-                ToolResultContent::Image(_) => "[image]".to_string(),
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        flatten(&self.content)
     }
+}
+
+/// A result's content as one text: JSON as written, an image as `[image]`.
+pub fn flatten(content: &[ToolResultContent]) -> String {
+    content
+        .iter()
+        .map(|c| match c {
+            ToolResultContent::Text(t) => t.text.clone(),
+            ToolResultContent::Json { value } => value.to_string(),
+            ToolResultContent::Image(_) => "[image]".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
