@@ -12,38 +12,36 @@ use agent::Event;
 use agent::session::Entry as LogEntry;
 use pi_core::core::lane::Lane;
 use pi_store::icons;
-use ratatui::text::Line;
+use ratatui::text::{Line, Text};
 use std::time::Instant;
 
+// `text` as pi's own word: the mark before its first line, that width blank
+// before the rest. In the text, so a kept line redraws with it.
+pub(super) fn by_pi(text: &str) -> String {
+    let (mark, blank) = (icons::bar(icons::PI_MARK), icons::under_bar(icons::PI_MARK));
+    (text.lines().enumerate())
+        .map(|(i, line)| format!("{}{line}", if i == 0 { &mark } else { &blank }))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 impl Ui {
-    pub(super) fn say(&mut self, view: &mut View, line: impl Into<String>) {
-        let text = line.into();
-        if text.is_empty() {
-            view.surface.scrollback.push(Row::aside(String::new()));
-            return;
+    // Rows the screen alone draws, gone on a rebuild or a tidy: a string
+    // splits at its newlines. Only a lone line folds: a block, a QR, is whole.
+    pub(super) fn say(&self, view: &mut View, text: impl Into<Text<'static>>) {
+        let Text { lines, style, .. } = text.into();
+        let lone = lines.len() == 1;
+        for line in lines {
+            let line = line.patch_style(style);
+            if lone
+                && line.width() > 0
+                && let Some(last) = view.surface.scrollback.last_mut()
+                && last.repeated(&line)
+            {
+                continue;
+            }
+            view.surface.scrollback.push(Row::aside(line));
         }
-        for text_line in text.lines().map(str::to_string) {
-            self.say_line(view, Line::from(text_line));
-        }
-    }
-
-    // `say` in the muted voice.
-    pub(super) fn say_muted(&mut self, view: &mut View, line: impl Into<String>) {
-        for text in line.into().lines() {
-            let line = Line::from(self.paint.span(&self.paint.theme.muted, text));
-            self.say_line(view, line);
-        }
-    }
-
-    // A line already built in spans — the styled word a run ends on, say —
-    // landing as one row. Plain text goes through `say`, which splits it.
-    pub(super) fn say_line(&mut self, view: &mut View, line: Line<'static>) {
-        if let Some(last) = view.surface.scrollback.last_mut()
-            && last.repeated(&line)
-        {
-            return;
-        }
-        view.surface.scrollback.push(Row::aside(line));
     }
 
     // A short answer nobody reads back, for the bar row: no scrollback
@@ -163,7 +161,7 @@ impl Ui {
             // it, since it is about that reply and stays true of it.
             Event::Warning(w) => {
                 self.close(view);
-                self.say_kept(lane, view, w);
+                self.say_kept(lane, view, &by_pi(w));
             }
             // State, not rows: the usage line marks it, `/status` says why.
             Event::Refit(_) => {}
@@ -172,7 +170,7 @@ impl Ui {
             Event::Compacted(r) => {
                 self.close(view);
                 let line = pi_core::core::meter::compaction_line(r);
-                self.say_kept(lane, view, &line);
+                self.say_kept(lane, view, &by_pi(&line));
             }
             // A call's events are one line here: queued takes a place in the
             // group or live region, start sets its clock, end settles it,
@@ -239,7 +237,7 @@ impl Ui {
                         render::fmt_delay(*delay_ms)
                     ));
                 }
-                self.say_muted(view, reason.as_str());
+                self.say(view, self.paint.muted(&by_pi(reason)));
             }
             _ => {
                 self.close(view);

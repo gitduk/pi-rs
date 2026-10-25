@@ -56,10 +56,9 @@ fn a_retry_waits_on_the_status_line_and_leaves_its_reason_in_a_row() {
     let (live, _) = ui.live(&lane, &view, false, std::time::Instant::now());
     let status = plain(live.last().expect("a status line"));
     assert!(status.contains("retry"), "{status:?}");
-    assert_eq!(
-        drawn_rows(&view),
-        vec!["502 Bad Gateway: upstream connect error".to_string()]
-    );
+    let rows = drawn_rows(&view);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].ends_with("502 Bad Gateway: upstream connect error"));
 
     ui.on_event(&mut lane, &mut view, agent::Event::TextDelta("ok".into()));
     let (live, _) = ui.live(&lane, &view, false, std::time::Instant::now());
@@ -80,4 +79,19 @@ fn a_status_line_with_nothing_to_say_draws_no_row() {
     ui.status = Vec::new();
     let (gone, _) = ui.live(&lane, &view, false, std::time::Instant::now());
     assert!(gone.is_empty(), "{gone:?}");
+}
+
+// A lone line said again folds into the row before it; a block, a QR's
+// rows say, keeps every row even where two of its lines match.
+#[test]
+fn only_a_lone_line_folds_into_the_one_before() {
+    let ui = test_ui(80, 24);
+    let mut view = View::default();
+    ui.say(&mut view, "reloaded");
+    ui.say(&mut view, "reloaded");
+    assert_eq!(drawn_rows(&view).len(), 1);
+
+    let mut view = View::default();
+    ui.say(&mut view, "██  ██\n██  ██\n\n\n██  ██");
+    assert_eq!(drawn_rows(&view).len(), 5);
 }

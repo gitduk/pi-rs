@@ -15,9 +15,19 @@ pub fn bar(icon: &str) -> String {
     format!("{icon} ")
 }
 
+/// The blank as wide as [`bar`] of `icon`, before each line after a barred
+/// one, so its wrap hangs under the text, not the mark.
+pub fn under_bar(icon: &str) -> String {
+    " ".repeat(crate::text::width(&bar(icon)))
+}
+
 pub const SAID_RULE: &str = PROMPT_BAR; // the rule beside a line the user said
-// The version line that opens the scrollback.
-pub const VERSION_BANNER: &str = concat!("π ", env!("CARGO_PKG_VERSION"));
+pub const PI_MARK: &str = "π"; // what pi itself says, and the banner it opens on
+
+/// The version line that opens the scrollback.
+pub fn version_banner() -> String {
+    format!("{PI_MARK} {}", env!("CARGO_PKG_VERSION"))
+}
 pub const PENDING_MARK: &str = "→"; // a call started, on a progress line that cannot animate
 pub const STOPPED_MARK: &str = "✘"; // a call made and never answered: stopped before it landed
 // A call in flight: a different turn from reasoning's, so the two never read

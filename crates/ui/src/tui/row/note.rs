@@ -53,7 +53,7 @@ impl Note {
         let mark = icons::bar(icons::NOTE_MARK);
         Line::from(match i {
             0 => paint.span(&paint.theme.prompt.color, mark),
-            _ => Span::raw(" ".repeat(pi_store::text::width(&mark))),
+            _ => Span::raw(icons::under_bar(icons::NOTE_MARK)),
         })
     }
 

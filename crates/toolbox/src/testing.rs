@@ -83,9 +83,6 @@ impl JobHandle for Handle {
     fn input(&self, text: String) {
         self.said.lock().unwrap().push(format!("input {text}"));
     }
-    fn notice(&self, text: String) {
-        self.said.lock().unwrap().push(format!("notice {text}"));
-    }
     fn choose(&self, asked: crate::background::Asked) {
         self.said.lock().unwrap().push(format!(
             "choose {}: {}",

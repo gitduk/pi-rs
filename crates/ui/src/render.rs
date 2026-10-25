@@ -63,6 +63,13 @@ impl Paint {
         }
     }
 
+    /// `body` in the muted voice, a line per line it holds.
+    pub fn muted(&self, body: &str) -> ratatui::text::Text<'static> {
+        (body.lines())
+            .map(|l| Line::from(self.span(&self.theme.muted, l)))
+            .collect()
+    }
+
     /// `body` in `style`, as a span, with bold added while hovered — hover
     /// strengthens the row without changing its colour, so a green check
     /// stays green and a grey body stays grey under the cursor.

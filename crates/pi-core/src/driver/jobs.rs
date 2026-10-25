@@ -4,7 +4,8 @@
 //! as if typed, whose turn's answer goes back to the job.
 //!
 //! What comes back goes only when the lane is free and nothing typed is
-//! waiting. Nothing here outlives this process; past it, use cron.
+//! waiting. Nothing here outlives this process but a job no longer running
+//! that a restarted pi can start over; past that, use cron.
 //!
 //! The questions such calls put to the person stand here too, jobs' and
 //! those of calls still in their turn alike: numbered, up until answered
@@ -24,12 +25,10 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
-use toolbox::background::{Answer, Ask, Asked, JobHandle, JobSink, Peek, Rerun, Told};
+use toolbox::background::{Again, Answer, Ask, Asked, JobHandle, JobSink, Peek, Rerun, Told};
 
 use crate::core::question::{Asker, Question};
 
-// Screen lines a job may have waiting before the oldest give way.
-const MAX_NOTICES: usize = 200;
 // How long a restart waits for the last run to let go before giving up.
 const LET_GO: std::time::Duration = std::time::Duration::from_secs(10);
 // What a job may have waiting at once; past it they are counted, not kept,
@@ -165,13 +164,11 @@ struct Item {
     listens: Listens,
     // It asked to stop its checkout's running turn, not yet acted on.
     interrupt: bool,
-    // Lines for the screen, not yet shown.
-    notices: VecDeque<String>,
     // Reads the latest of what it printed; None for one that keeps none.
     output: Option<Peek>,
-    // How it runs again. One that has it is kept once it ends, to be
-    // started over; one without leaves.
-    rerun: Option<Rerun>,
+    // How it runs again, and the same as data for a restart to carry. One
+    // that has it is kept once it ends, to be started over; one without leaves.
+    rerun: Option<(Rerun, Option<Again>)>,
     // Which run of it this is: a handle from an earlier one is not heard.
     run: u64,
     // Cancelled once this run's task has let go of what it held.
@@ -210,17 +207,35 @@ enum Phase {
 }
 
 impl Item {
+    // Started now, running nothing yet and with nothing to say.
+    fn blank(id: u64, root: PathBuf, description: String, phase: Phase) -> Self {
+        Item {
+            id,
+            root,
+            description,
+            progress: String::new(),
+            started: Instant::now(),
+            started_at: SystemTime::now(),
+            phase,
+            waiting: VecDeque::new(),
+            dropped: 0,
+            listens: Listens::Never,
+            interrupt: false,
+            output: None,
+            rerun: None,
+            run: 0,
+            gone: CancellationToken::new(),
+        }
+    }
+
     fn running(&self) -> bool {
         matches!(self.phase, Phase::Running { .. })
     }
 
-    // Stopped, with nothing left for the lane or the screen, and no way to
-    // start over: nothing here is anyone's any more.
+    // Stopped, with nothing left for the lane, and no way to start over:
+    // nothing here is anyone's any more.
     fn spent(&self) -> bool {
-        !self.running()
-            && self.waiting.is_empty()
-            && self.notices.is_empty()
-            && self.rerun.is_none()
+        !self.running() && self.waiting.is_empty() && self.rerun.is_none()
     }
 
     fn state(&self) -> State {
@@ -237,7 +252,6 @@ impl Item {
         self.progress.clear();
         self.waiting.clear();
         self.dropped = 0;
-        self.notices.clear();
     }
 
     // The job as a person reads it: `judge #3`.
@@ -305,6 +319,38 @@ fn settle(items: &mut Vec<Item>, at: usize) {
     if items[at].spent() {
         items.remove(at);
     }
+}
+
+/// A job no longer running that a restarted pi lists again, under the
+/// same id, to be started over there.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Carried {
+    pub id: u64,
+    pub root: PathBuf,
+    pub description: String,
+    /// Stopped by the user, not ended by itself.
+    pub stopped: bool,
+    pub started_at: SystemTime,
+    pub again: Again,
+}
+
+/// Write `jobs` where the pi started next can read them: the file, for it
+/// to be told of. None when there is nothing to carry.
+pub fn hand_over(jobs: &[Carried]) -> anyhow::Result<Option<PathBuf>> {
+    if jobs.is_empty() {
+        return Ok(None);
+    }
+    let dir = pi_store::dir().ok_or_else(|| anyhow::anyhow!("no home to write to"))?;
+    let path = dir.join(format!("carried-{}.json", std::process::id()));
+    std::fs::write(&path, serde_json::to_vec(jobs)?)?;
+    Ok(Some(path))
+}
+
+/// The jobs [`hand_over`] wrote to `path`, taken: the file goes once read.
+pub fn take_over(path: &Path) -> anyhow::Result<Vec<Carried>> {
+    let read = std::fs::read(path);
+    let _ = std::fs::remove_file(path);
+    Ok(serde_json::from_slice(&read?)?)
 }
 
 /// A job as a surface lists it.
@@ -433,11 +479,6 @@ impl Table {
             .collect()
     }
 
-    /// The screen lines `root`'s jobs left since last asked, oldest first.
-    pub fn take_notices(&self, root: &Path) -> Vec<String> {
-        self.take(root, |i| std::mem::take(&mut i.notices))
-    }
-
     /// The questions up at `root`, oldest first.
     pub fn questions(&self, root: &Path) -> Vec<Question> {
         let mut inner = self.lock();
@@ -456,22 +497,6 @@ impl Table {
         inner.answered(id, "answered on the screen", picked);
         drop(inner);
         self.changed.notify_one();
-    }
-
-    // What `root`'s jobs kept for the surface, taken; a job it was all that
-    // held leaves with it.
-    fn take<T, I: IntoIterator<Item = T>>(
-        &self,
-        root: &Path,
-        from: impl FnMut(&mut Item) -> I,
-    ) -> Vec<T> {
-        let mut inner = self.lock();
-        let taken = (inner.items.iter_mut())
-            .filter(|i| i.root == root)
-            .flat_map(from)
-            .collect();
-        inner.items.retain(|i| !i.spent());
-        taken
     }
 
     /// Tell job `id` about a turn its input opened, if it is still here.
@@ -643,7 +668,7 @@ impl Table {
         let item = (inner.items.iter_mut())
             .find(|i| i.id == id && i.root == root)
             .ok_or_else(|| format!("no job #{id} here"))?;
-        let Some(rerun) = item.rerun.clone() else {
+        let Some((rerun, _)) = item.rerun.clone() else {
             return Err(format!(
                 "#{id} ({}) cannot be started over",
                 item.description
@@ -699,6 +724,52 @@ impl Table {
     /// and those restarted, as `#id (what)`.
     pub fn restart_each(self: &Arc<Self>, root: &Path, ids: &[u64]) -> (Vec<String>, Vec<String>) {
         each(ids, |id| self.restart(root, id))
+    }
+
+    /// Every job a restart can carry: over, nothing waiting, and able to
+    /// say as data how it runs again.
+    pub fn carried(&self) -> Vec<Carried> {
+        (self.lock().items.iter())
+            .filter_map(|i| match (&i.phase, &i.rerun) {
+                (Phase::Over { stopped }, Some((_, Some(again)))) if i.waiting.is_empty() => {
+                    Some(Carried {
+                        id: i.id,
+                        root: i.root.clone(),
+                        description: i.description.clone(),
+                        stopped: *stopped,
+                        started_at: i.started_at,
+                        again: again.clone(),
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// List `job`, carried from the pi this one replaced, as it was there,
+    /// started over through `rerun`. Ids given out later come after it.
+    pub fn revive(&self, job: Carried, rerun: Rerun) {
+        let mut inner = self.lock();
+        inner.next_id = inner.next_id.max(job.id);
+        let ago = job.started_at.elapsed().unwrap_or_default();
+        tracing::info!(
+            target: "pi::job", job = job.id, name = %job.description,
+            root = %job.root.display(), "carried over"
+        );
+        let phase = Phase::Over {
+            stopped: job.stopped,
+        };
+        let item = Item {
+            started: Instant::now().checked_sub(ago).unwrap_or_else(Instant::now),
+            started_at: job.started_at,
+            rerun: Some((rerun, Some(job.again))),
+            ..Item::blank(job.id, job.root, job.description, phase)
+        };
+        // No last run here to let go of.
+        item.gone.cancel();
+        inner.items.push(item);
+        drop(inner);
+        self.changed.notify_one();
     }
 
     /// Whether a job for `root` is running or has something to deliver:
@@ -785,28 +856,15 @@ impl Table {
         let mut inner = self.lock();
         inner.next_id += 1;
         let id = inner.next_id;
-        let gone = CancellationToken::new();
         tracing::info!(
             target: "pi::job", job = id, name = %description, root = %root.display(), "started"
         );
-        inner.items.push(Item {
-            id,
-            root,
-            description,
-            progress: String::new(),
-            started: Instant::now(),
-            started_at: SystemTime::now(),
-            phase: Phase::Running { stop },
-            waiting: VecDeque::new(),
-            dropped: 0,
+        let item = Item {
             listens: told.map_or(Listens::Never, Listens::Inputs),
-            interrupt: false,
-            notices: VecDeque::new(),
-            output: None,
-            rerun: None,
-            run: 0,
-            gone: gone.clone(),
-        });
+            ..Item::blank(id, root, description, Phase::Running { stop })
+        };
+        let gone = item.gone.clone();
+        inner.items.push(item);
         drop(inner);
         self.changed.notify_one();
         (id, gone)
@@ -913,7 +971,7 @@ impl JobHandle for Handle {
     }
 
     fn status(&self, text: String) {
-        tracing::debug!(target: "pi::job", job = self.id, status = %text, "status");
+        tracing::info!(target: "pi::job", job = self.id, status = %text, "status");
         self.table.update(self.id, self.run, |i| i.progress = text);
     }
 
@@ -948,16 +1006,6 @@ impl JobHandle for Handle {
         });
         drop(inner);
         self.table.changed.notify_one();
-    }
-
-    fn notice(&self, text: String) {
-        tracing::info!(target: "pi::job", job = self.id, text = %text, "notice");
-        self.table.update(self.id, self.run, |i| {
-            if i.notices.len() >= MAX_NOTICES {
-                i.notices.pop_front();
-            }
-            i.notices.push_back(text);
-        });
     }
 
     fn choose(&self, asked: Asked) {
@@ -1058,9 +1106,9 @@ impl JobHandle for Handle {
         self.table.changed.notify_one();
     }
 
-    fn rerun(&self, how: Rerun) {
+    fn rerun(&self, how: Rerun, again: Option<Again>) {
         self.table
-            .update(self.id, self.run, |i| i.rerun = Some(how));
+            .update(self.id, self.run, |i| i.rerun = Some((how, again)));
     }
 
     fn end(&self) {
@@ -1252,16 +1300,6 @@ mod tests {
         assert!(!text.contains("dropped"), "{text}");
     }
 
-    #[tokio::test]
-    async fn a_notice_is_shown_once_on_its_own_checkout() {
-        let table = Arc::new(Table::default());
-        let job = start(&table, Path::new("/checkout"), "wechat");
-        job.notice("scan this".into());
-        assert!(table.take_notices(Path::new("/elsewhere")).is_empty());
-        assert_eq!(table.take_notices(Path::new("/checkout")), ["scan this"]);
-        assert!(table.take_notices(Path::new("/checkout")).is_empty());
-    }
-
     fn asked(question: &str, options: &[&str], back: bool) -> Asked {
         Asked {
             question: question.into(),
@@ -1282,7 +1320,6 @@ mod tests {
             &["/compact\nand what was not shown"],
             false,
         ));
-        job.notice("judged".into());
         job.end();
         assert!(table.questions(Path::new("/elsewhere")).is_empty());
         let up = table.questions(Path::new("/checkout"));
@@ -1294,7 +1331,6 @@ mod tests {
             "{:?}",
             up[0].from
         );
-        assert_eq!(table.take_notices(Path::new("/checkout")), ["judged"]);
         assert!(
             table.jobs(Path::new("/checkout")).is_empty(),
             "spent, so gone"
@@ -1623,10 +1659,13 @@ mod tests {
     fn rerunnable(table: &Arc<Table>, root: &Path) -> (Arc<dyn JobHandle>, Reruns) {
         let job = start(table, root, "serve");
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        job.rerun(Arc::new(move |job, stop| {
-            let _ = tx.send((job, stop));
-            Ok(())
-        }));
+        job.rerun(
+            Arc::new(move |job, stop| {
+                let _ = tx.send((job, stop));
+                Ok(())
+            }),
+            None,
+        );
         (job, rx)
     }
 
@@ -1660,6 +1699,50 @@ mod tests {
         new.result("exited 1".into());
         new.end();
         assert_eq!(table.jobs(&root)[0].state, State::Running);
+    }
+
+    // A stopped job that says as data how it runs again crosses a restart:
+    // listed there under its id, still stopped, and it starts over; ids given
+    // out later pass it. One that cannot say it is left behind.
+    #[tokio::test]
+    async fn a_stopped_job_is_carried_to_the_next_pi() {
+        let old = Arc::new(Table::default());
+        let root = PathBuf::from("/checkout");
+        let (plain, _reruns) = rerunnable(&old, &root);
+        let job = start(&old, &root, "serve");
+        let again = Again {
+            command: "python3 serve.py".into(),
+            cwd: root.clone(),
+        };
+        job.rerun(Arc::new(|_, _| Ok(())), Some(again.clone()));
+        old.stop(&root, plain.id()).unwrap();
+        old.stop(&root, job.id()).unwrap();
+
+        let carried = old.carried();
+        assert_eq!(carried.len(), 1, "{carried:?}");
+        assert_eq!((carried[0].id, carried[0].stopped), (job.id(), true));
+        assert_eq!(carried[0].again, again);
+        let wire = serde_json::to_vec(&carried).unwrap();
+        let back: Vec<Carried> = serde_json::from_slice(&wire).unwrap();
+
+        let new = Arc::new(Table::default());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for c in back {
+            let tx = tx.clone();
+            new.revive(
+                c,
+                Arc::new(move |job, _| {
+                    let _ = tx.send(job.id());
+                    Ok(())
+                }),
+            );
+        }
+        let listed = new.jobs(&root);
+        assert_eq!(listed.len(), 1);
+        assert_eq!((listed[0].id, listed[0].state), (job.id(), State::Stopped));
+        new.restart(&root, job.id()).unwrap();
+        assert_eq!(rx.recv().await, Some(job.id()));
+        assert!(start(&new, &root, "next").id() > job.id());
     }
 
     // One that ended by itself is kept to start over; a stop leaves it be.

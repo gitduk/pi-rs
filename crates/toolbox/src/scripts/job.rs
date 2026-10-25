@@ -1,14 +1,13 @@
 //! A script call that may outlive its turn. Fd 3 is a socket of JSON lines:
 //! `status` says how far it has got; `detach` ends the call and runs on as a
 //! job; after it, each `result` comes back as a turn, as does stdout at exit,
-//! `input` is a person's line, `interrupt` stops the checkout's turn, and
-//! `notice` is a line for the screen only, `choose` a question whose
-//! `options` the person picks one or several of, and `follow`
-//! asks to hear every turn. A turn an input opened, or any once it follows,
-//! is told back: `started`, then its whole `reply`. One that follows is also
-//! told each `question` put on its checkout and when it is `closed`, and
-//! answers one with `answer`, its id, and the `picks` by place; one not
-//! taken comes back `refused`, and `why`.
+//! `input` is a person's line, `interrupt` stops the checkout's turn,
+//! `choose` is a question whose `options` the person picks one or several
+//! of, and `follow` asks to hear every turn. A turn an input opened, or any
+//! once it follows, is told back: `started`, then its whole `reply`. One
+//! that follows is also told each `question` put on its checkout and when it
+//! is `closed`, and answers one with `answer`, its id, and the `picks` by
+//! place; one not taken comes back `refused`, and `why`.
 
 use std::os::fd::AsRawFd;
 use std::process::{ExitStatus, Stdio};
@@ -44,7 +43,6 @@ enum Said {
     Detach(String),
     Result(String),
     Input(String),
-    Notice(String),
     // A question, and the lines that answer it.
     Choose(Asked),
     // A person's pick of a question's options, through the job.
@@ -92,10 +90,9 @@ pub async fn run(
     // Owned before the task is first polled: a shutdown that drops it unrun
     // still takes what the script started.
     let group = child.id().map(Group);
-    let name = name.to_string();
     tokio::spawn(async move {
         let _group = group;
-        go_on(name, child, fd3, streams, job, stop, told).await;
+        go_on(child, fd3, streams, job, stop, told).await;
     });
     Ok(Ran::Detached { said, id })
 }
@@ -235,7 +232,6 @@ async fn turn(
                 }
                 Said::Result(_)
                 | Said::Input(_)
-                | Said::Notice(_)
                 | Said::Answer { .. }
                 | Said::Interrupt
                 | Said::Follow => tracing::warn!(
@@ -268,7 +264,6 @@ async fn turn(
 
 // A detached script, from its detach to its exit or its stop.
 async fn go_on(
-    name: String,
     mut child: Child,
     mut fd3: Fd3,
     mut streams: Streams,
@@ -284,7 +279,6 @@ async fn go_on(
                 Said::Status(text) => job.status(text),
                 Said::Result(text) => job.result(text),
                 Said::Input(text) => job.input(text),
-                Said::Notice(text) => job.notice(text),
                 // A job outlives its turn: nothing is kept to bring an answer back.
                 Said::Choose(asked) if asked.back => {
                     let why = "a question asked after detach cannot have its answer back";
@@ -310,10 +304,11 @@ async fn go_on(
     // One turn for one ending: what it printed, then how it failed, if it did.
     let failed = match status {
         Ok(status) if !status.success() => {
-            Some(format!("{name} exited {status}; {}", err.noted().trim()))
+            let code = status.code().unwrap_or(-1);
+            Some(format!("exited {code}; {}", err.noted().trim()))
         }
         Ok(_) => None,
-        Err(e) => Some(format!("{name} could not be waited on: {e}")),
+        Err(e) => Some(format!("could not be waited on: {e}")),
     };
     let said: Vec<String> = [Some(out.noted()), failed]
         .into_iter()
@@ -435,7 +430,6 @@ fn parse(line: &str) -> Option<Said> {
         .map(Said::Detach)
         .or_else(|| text("result").map(Said::Result))
         .or_else(|| text("input").map(Said::Input))
-        .or_else(|| text("notice").map(Said::Notice))
         .or_else(|| text("status").map(Said::Status))
 }
 
@@ -537,7 +531,7 @@ echo 'all done'"#,
         let said = sink.said.lock().unwrap();
         assert!(
             said.iter()
-                .any(|s| s.contains("exit status: 4") && s.contains("broke")),
+                .any(|s| s.contains("exited 4") && s.contains("broke")),
             "{said:?}"
         );
     }
@@ -790,7 +784,6 @@ printf '%s\n' "$a" > heard"#;
             dir.path(),
             r#"echo '{"detach":"connected"}' >&3
 echo '{"input":"why did it fail"}' >&3
-echo '{"notice":"scan the QR"}' >&3
 echo '{"choose":"the task changed","options":["/compact","go on"]}' >&3
 echo '{"answer":3,"picks":[1]}' >&3
 echo '{"interrupt":true}' >&3
@@ -821,10 +814,9 @@ printf '%s\n%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" "$e" > heard"#,
             .await
             .expect("it ended");
         assert_eq!(
-            sink.said.lock().unwrap()[1..7],
+            sink.said.lock().unwrap()[1..6],
             [
                 "input why did it fail",
-                "notice scan the QR",
                 "choose the task changed: /compact | go on",
                 "answer 3: [1]",
                 "interrupt",

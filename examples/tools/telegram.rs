@@ -1,7 +1,7 @@
 ---
 [package]
 edition = "2024"
-description = "Bridge this session to Telegram: what the user sends to their bot arrives here as turns, and each answer goes back to the chat. Use when the user asks to connect Telegram. It needs TELEGRAM_BOT_TOKEN, a bot token from @BotFather, in the tools' .env. It runs in the background until `jobs` stops it; the first time, a link and a QR show on the screen for the user to pair their account, and the pairing is kept for next time."
+description = "Bridge this session to Telegram: what the user sends to their bot arrives here as turns, and each answer goes back to the chat. Use when the user asks to connect Telegram. It needs TELEGRAM_BOT_TOKEN, a bot token from @BotFather, in the tools' .env. It runs in the background until `jobs` stops it; the first time, a link and a QR show in its job for the user to pair their account, and the pairing is kept for next time."
 
 [dependencies]
 pulldown-cmark = { version = "0.13", default-features = false }
@@ -46,7 +46,7 @@ mod bridge {
     //! answers with that one, a reply of numbers only with several.
     //!
     //! Anyone can message a bot, and a turn here can run commands, so only
-    //! the account that sent the pairing code shown on screen is heard.
+    //! the account that sent the pairing code shown in the job is heard.
 
     use std::collections::BTreeSet;
     use std::os::fd::FromRawFd;
@@ -264,7 +264,7 @@ mod bridge {
                     {
                         u.stage = Stage::Held;
                     }
-                    pi.notice(&format!("telegram could not show a question: {e}"));
+                    pi.status(&format!("telegram could not show a question: {e}"));
                 }
             }
         }
@@ -279,8 +279,8 @@ mod bridge {
             let _ = self.0.send(line);
         }
 
-        fn notice(&self, text: &str) {
-            self.say(json!({ "notice": text }));
+        fn status(&self, text: &str) {
+            self.say(json!({ "status": text }));
         }
     }
 
@@ -350,7 +350,7 @@ mod bridge {
             pi.say(json!({ "status": "connected" }));
         } else {
             pi.say(json!({ "detach": format!(
-                "waiting for the user to pair @{bot}: a link and a QR are on the screen; once they open it, messages from their account arrive here as turns"
+                "waiting for the user to pair @{bot}: a link and a QR are in this job; once they open it, messages from their account arrive here as turns"
             )}));
             let fresh = format!("{:08}", rand::random::<u32>() % 100_000_000);
             show_pairing(&pi, &bot, &fresh);
@@ -377,14 +377,14 @@ mod bridge {
             .map(|root| root.join("telegram.json"))
     }
 
-    // The deep link sends `/start <code>` by itself; the QR lets a phone camera open it.
+    // The deep link sends `/start <code>` by itself; the QR lets a phone camera
+    // open it. Both on stderr, read by opening the job; the model reads neither.
     fn show_pairing(pi: &Pi, bot: &str, code: &str) {
         let link = format!("https://t.me/{bot}?start={code}");
-        pi.notice(&format!(
-            "pair Telegram with this session: open {link} and press Start, or send `/start {code}` to @{bot}"
-        ));
+        pi.status("pair Telegram with this session: the link and QR are in this job");
+        eprintln!("open {link} and press Start, or send `/start {code}` to @{bot}");
         if let Some(qr) = render_qr(&link) {
-            pi.notice(&qr);
+            eprintln!("{qr}");
         }
     }
 
@@ -431,7 +431,7 @@ mod bridge {
             };
             failures += 1;
             if failures == 3 {
-                pi.notice(&format!(
+                pi.status(&format!(
                     "telegram getUpdates failing — backing off: {failed}"
                 ));
             }
@@ -483,11 +483,10 @@ mod bridge {
                         s.chat = Some(msg.chat.id);
                         *code = None;
                         paired = Some(msg.chat.id);
-                        pi.say(json!({ "status": "connected" }));
                         let who = from
                             .username
                             .map_or(from.id.to_string(), |u| format!("@{u}"));
-                        pi.notice(&format!("telegram paired with {who}"));
+                        pi.status(&format!("connected, paired with {who}"));
                     }
                 }
                 Some(user) if user == from.id && s.chat == Some(msg.chat.id) => {
@@ -611,7 +610,7 @@ mod bridge {
                 } else {
                     String::new()
                 };
-                pi.notice(&format!("telegram send failed{part}: {e}"));
+                pi.status(&format!("telegram send failed{part}: {e}"));
                 return;
             }
         }
@@ -692,8 +691,7 @@ mod bridge {
             );
             assert_eq!(paired, Some(7));
             assert_eq!(code, None);
-            assert_eq!(rx.try_recv().unwrap(), json!({ "status": "connected" }));
-            assert!(rx.try_recv().unwrap().get("notice").is_some());
+            assert!(rx.try_recv().unwrap().get("status").is_some());
             assert!(rx.try_recv().is_err());
 
             heard(

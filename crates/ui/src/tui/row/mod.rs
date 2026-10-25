@@ -263,8 +263,8 @@ impl Row {
     /// Plain text as notice rows, one per line — shared by the live
     /// stream (which also files it) and a rebuild (from the archived text).
     pub fn notice_lines(text: &str, paint: &Paint) -> Vec<Self> {
-        text.lines()
-            .map(|l| Self::notice(Line::from(paint.span(&paint.theme.muted, l))))
+        (paint.muted(text).lines.into_iter())
+            .map(Self::notice)
             .collect()
     }
 
@@ -796,7 +796,7 @@ impl Row {
             muted(&format!("{}  {value}", pi_store::text::pad(label, width)))
         };
         Self::lines(
-            std::iter::once(muted(icons::VERSION_BANNER))
+            std::iter::once(muted(&icons::version_banner()))
                 .chain(facts.iter().map(|(label, value)| fact(label, value)))
                 .chain((!resolved.notes.is_empty()).then(|| muted("")))
                 .chain(resolved.notes.iter().map(|note| muted(note)))

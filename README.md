@@ -199,8 +199,9 @@ refused, and resuming one from another directory moves it here.
   A script may also write JSON lines to fd 3 (`PI_EVENTS_FD`): `status` for
   its progress, `detach` to end the call and run on as a job, then `result`
   for each turn it sends back (its stdout at exit is the last), `input` for a
-  person's line, sent to the model as written, never run as a command,
-  `notice` for a line on the screen the model never reads, `choose` with
+  person's line, sent to the model as written, never run as a command
+  (what only the person reads, a QR say, goes to stderr: they open the job
+  to see it), `choose` with
   `options` to ask a question as the `choose` tool does (stopping the job
   takes it back), `interrupt` to stop the checkout's turn, and `follow` to
   hear every turn there. A turn an input opened, or any once it follows, is

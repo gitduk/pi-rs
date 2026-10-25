@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::process::Command;
 
-use crate::background::{JobHandle, JobSink};
+use crate::background::{Again, JobHandle, JobSink, Rerun};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput, output};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -176,18 +176,25 @@ impl Tool for WithBackground {
             None,
         );
         let id = job.id();
-        let (name, ctx) = (preview.clone(), spills_only(ctx));
-        job.rerun(Arc::new(move |job, stop| {
-            supervise(launch(&command, &cwd, &ctx)?, name.clone(), job, stop);
-            Ok(())
-        }));
-        supervise(launched, preview.clone(), job, stop);
+        let again = Again { command, cwd };
+        job.rerun(rerun(again.clone(), ctx), Some(again));
+        supervise(launched, job, stop);
         Ok(ToolOutput::text(format!(
             "running in the background as job #{id}; its exit status and output come back on \
              their own later."
         ))
         .with_preview(format!("{preview} [background #{id}]")))
     }
+}
+
+/// How the background command `again` runs again under `ctx`: the first
+/// run's way, or a restarted pi's.
+pub fn rerun(again: Again, ctx: &Ctx) -> Rerun {
+    let ctx = spills_only(ctx);
+    Arc::new(move |job, stop| {
+        supervise(launch(&again.command, &again.cwd, &ctx)?, job, stop);
+        Ok(())
+    })
 }
 
 // What a rerun keeps of the call's context: where output spills, not the
@@ -229,9 +236,9 @@ fn launch(command: &str, cwd: &std::path::Path, ctx: &Ctx) -> Result<Launched, T
 }
 
 // Report `launched` as `job` until it exits, or `stop` takes its group.
+// The job already names the command: what ends it says only how it ended.
 fn supervise(
     launched: Launched,
-    name: String,
     job: Arc<dyn JobHandle>,
     stop: tokio_util::sync::CancellationToken,
 ) {
@@ -257,8 +264,8 @@ fn supervise(
             return;
         };
         let ended = match status {
-            Ok(status) => format!("`{name}` exited {}", status.code().unwrap_or(-1)),
-            Err(e) => format!("`{name}` could not be waited on: {e}"),
+            Ok(status) => format!("exited {}", status.code().unwrap_or(-1)),
+            Err(e) => format!("could not be waited on: {e}"),
         };
         let said = body(&out, &err);
         job.result(if said.is_empty() {

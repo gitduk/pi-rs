@@ -108,10 +108,9 @@ is `3` when pi is listening. A script that never writes fd 3 is a plain tool.
 
 | It writes | Meaning |
 |---|---|
-| `{"status": "..."}` | how far it has got: the call's progress, then, once detached, the job's |
+| `{"status": "..."}` | how far it has got: the call's progress, then, once detached, the line on the job's row; a newer one replaces it |
 | `{"detach": "..."}` | the call returns now with this text; the script runs on as a job |
 | `{"result": "..."}` | after detaching: one result, a turn of its own on its checkout |
-| `{"notice": "..."}` | a line on the screen only, which the model never reads: a QR to scan |
 | `{"input": "..."}` | a person's words, sent to the model as written, never run as a command |
 | `{"interrupt": true}` | stop the turn running on its checkout, as the user's stop does |
 | `{"follow": true}` | be told of every turn on its checkout from now on, not only those its `input` opened |
@@ -154,6 +153,10 @@ while True:
   group along each time.
 - `result`, `input`, `interrupt` and `follow` count only after `detach`.
 - Its stdout at exit is its last result; a non-zero exit adds stderr.
+- For the person alone, a detached job has two places, neither of which
+  the model reads: `status` for what they need to know or do now ("scan
+  the QR — open the job"), stderr for what they open the job to see, a QR
+  say. Only a failing exit sends stderr on.
 - What it saves between runs, it keeps itself, under `$PI_HOME`. A login
   token is written readable by its owner alone.
 - `input` is a person's voice: use it only for words a person typed to this

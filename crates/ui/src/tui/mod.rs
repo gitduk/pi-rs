@@ -19,6 +19,7 @@ mod search;
 mod select;
 mod slash;
 mod stream;
+use stream::by_pi;
 mod term;
 mod ui;
 mod view;
@@ -38,7 +39,7 @@ use pi_core::driver::{Drivers, Origin, Said};
 use pi_core::input::commands::Choice;
 use pi_core::input::{self, Fate, Intent, Rewound, Step};
 use pi_store::listing::Listing;
-use ratatui::text::Line;
+use ratatui::text::Text;
 use screen::Screen;
 use std::sync::Arc;
 
@@ -174,7 +175,9 @@ pub struct Tui {
 }
 
 impl Tui {
-    pub fn new(mut core: Core, drivers: Drivers) -> Result<Self> {
+    /// `last` lands under everything the lanes open with, kept, where a
+    /// resumed transcript cannot push it out of sight.
+    pub fn new(mut core: Core, drivers: Drivers, last: Option<String>) -> Result<Self> {
         // The screen first, for raw mode: the answer to the background query
         // carries no newline, so a cooked read would wait for one forever.
         let screen = Screen::new()?;
@@ -213,6 +216,15 @@ impl Tui {
             // screen is rebuildable now, so there is no reason to hide it.
             if let Some(session) = lane.session().filter(|s| !s.is_empty()) {
                 ui.rebuild(view, session, lane.root());
+            }
+        }
+        if let Some(line) = last.map(|l| by_pi(&l)) {
+            let lane = core.lane_mut();
+            let view = view_at(&mut views, lane.token());
+            // Kept only under a transcript: alone, it would file one.
+            match lane.session().is_some_and(|s| !s.is_empty()) {
+                true => ui.say_kept(lane, view, &line),
+                false => ui.say(view, ui.paint.muted(&line)),
             }
         }
         let (events, hold) = reader();
@@ -455,9 +467,9 @@ impl Tui {
 
     // A lane's news goes to its own screen, never the one in front; a
     // never-drawn lane gets its banner first so it can't replace the row.
-    fn say_of(&mut self, lane: usize, what: impl Into<Line<'static>>) {
+    fn say_of(&mut self, lane: usize, what: impl Into<Text<'static>>) {
         let view = view::opened(&mut self.views, &self.core.lanes[lane], &self.ui.paint);
-        self.ui.say_line(view, what.into());
+        self.ui.say(view, what);
     }
 
     // Deeds the screen keeps for itself: only the surface can move the
@@ -598,7 +610,7 @@ impl Tui {
             let core = &self.core;
             for said in self.drivers.retain(|t| core.position_of(t).is_some()) {
                 self.ui
-                    .say(front_view(&mut self.views, self.core.lane()), said);
+                    .say(front_view(&mut self.views, self.core.lane()), by_pi(&said));
             }
             // What changed on disk is taken up within a second: settings
             // resolve the lane again, a skill's word starts to answer. Not on
@@ -608,7 +620,7 @@ impl Tui {
                 if let Some(said) = self.core.refresh_config() {
                     let view = front_view(&mut self.views, self.core.lane());
                     for line in said {
-                        self.ui.say_muted(view, line);
+                        self.ui.say(view, self.ui.paint.muted(&by_pi(&line)));
                     }
                     self.ui.adopt_config(&self.core, view);
                 }
@@ -619,7 +631,7 @@ impl Tui {
                     self.ui.commands = self.core.commands.clone();
                     let view = front_view(&mut self.views, self.core.lane());
                     for line in said {
-                        self.ui.say_muted(view, line);
+                        self.ui.say(view, self.ui.paint.muted(&by_pi(&line)));
                     }
                 }
             }
@@ -628,13 +640,6 @@ impl Tui {
             let jobs = self.drivers.jobs();
             for root in jobs.take_interrupts() {
                 self.interrupt_at(&root);
-            }
-            // Where it lasts and can be re-read, as a QR has to.
-            for text in jobs.take_notices(self.core.lane().root()) {
-                let view = front_view(&mut self.views, self.core.lane());
-                for line in text.lines() {
-                    self.ui.say(view, line.to_string());
-                }
             }
             // Taken down first, or the copy would put them back up.
             for question in std::mem::take(&mut self.ui.answered) {
@@ -721,7 +726,8 @@ impl Tui {
                     }
                     Some(out) = self.bar.rx.recv() => {
                         if let Some(why) = self.bar.land(out, &mut self.ui.layout) {
-                            self.ui.say_muted(front_view(&mut self.views, self.core.lane()), why);
+                            let muted = self.ui.paint.muted(&by_pi(&why));
+                            self.ui.say(front_view(&mut self.views, self.core.lane()), muted);
                         }
                         Wake::Nothing
                     }
@@ -846,7 +852,7 @@ impl Tui {
                         }
                         Said::Transcript(line) => self
                             .ui
-                            .say(front_view(&mut self.views, self.core.lane()), line),
+                            .say(front_view(&mut self.views, self.core.lane()), by_pi(&line)),
                     }
                 }
                 // Queued-during-run entries are taken one at a time at the
@@ -861,7 +867,7 @@ impl Tui {
             {
                 let started = self.core.lanes[at].is_running();
                 if let Some(said) = self.drivers.dispatched(origin, asked_on, started, prompt) {
-                    self.say_of(at, said);
+                    self.say_of(at, by_pi(&said));
                 }
             }
         }
@@ -950,8 +956,9 @@ impl Tui {
             }
         };
         self.rebuild_front();
+        let muted = self.ui.paint.muted(&by_pi(&said));
         self.ui
-            .say_muted(front_view(&mut self.views, self.core.lane()), &said);
+            .say(front_view(&mut self.views, self.core.lane()), muted);
     }
 
     // `/rewind ` on the line, what the user said completing it.

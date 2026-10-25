@@ -33,11 +33,13 @@ use pi_store::session::Store;
 use pi_store::settings::Settings;
 
 /// What the next pi is started with: every lane as `(root, filed session)`
-/// in order, `front` in front, with the flags in force now (`/effort` moves one).
+/// in order, `front` in front, with the flags in force now (`/effort` moves one),
+/// and the jobs no longer running that it can still start over.
 pub struct Restart {
     pub lanes: Vec<(std::path::PathBuf, Option<String>)>,
     pub front: usize,
     pub flags: Vec<String>,
+    pub jobs: Vec<crate::driver::jobs::Carried>,
 }
 
 /// Ask rtk what it is now, in the background, so `/status` can say before
@@ -282,7 +284,24 @@ impl Core {
             lanes,
             front: self.current,
             flags: self.pinned.args(),
+            jobs: self.jobs.as_ref().map(|j| j.carried()).unwrap_or_default(),
         })
+    }
+
+    /// List again the jobs the pi this one replaced carried, each under the
+    /// lane of its checkout; one whose checkout is not open here is dropped.
+    pub fn revive_jobs(&self, carried: Vec<crate::driver::jobs::Carried>) {
+        let Some(table) = &self.jobs else {
+            return;
+        };
+        for job in carried {
+            let Some(lane) = self.lanes.iter().find(|l| l.root() == job.root) else {
+                tracing::warn!(target: "pi::job", job = job.id, root = %job.root.display(), "no lane to carry it to");
+                continue;
+            };
+            let rerun = toolbox::bash::rerun(job.again.clone(), lane.ctx());
+            table.revive(job, rerun);
+        }
     }
 
     // Whether `goal` would start a turn. A skill is looked up, not

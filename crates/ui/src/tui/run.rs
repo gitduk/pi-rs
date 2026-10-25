@@ -11,6 +11,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use super::row::Row;
+use super::stream::by_pi;
 use super::term::{Deafened, EXIT_GRACE, external_editor, scratch_file};
 use super::view::{Doing, Work, front_view, tail_of, view_at};
 use super::{NO_TRANSCRIPT, Tui};
@@ -135,7 +136,7 @@ impl Tui {
         if let Some(said) = self.core.refresh_prompt_files() {
             let view = front_view(&mut self.views, self.core.lane());
             for line in said {
-                self.ui.say_muted(view, line);
+                self.ui.say(view, self.ui.paint.muted(&by_pi(&line)));
             }
         }
         if let Some(note) = self.core.lane().drift() {
@@ -354,7 +355,7 @@ impl Tui {
             && let Some(at) = self.core.position_of(token)
             && let Some(said) = self.drivers.dispatched(from, token, started, true)
         {
-            self.say_of(at, said);
+            self.say_of(at, by_pi(&said));
         }
     }
 
@@ -451,7 +452,7 @@ impl Tui {
         if let Err(e) = resumed {
             self.say_of(
                 self.core.current,
-                format!("the screen did not come back: {e}"),
+                by_pi(&format!("the screen did not come back: {e}")),
             );
         }
         let said = match ran {
@@ -535,7 +536,7 @@ impl Tui {
         // in the scrollback, where a flash's going cannot take it.
         if let Some(line) = said {
             if keep {
-                self.say_of(self.core.current, line);
+                self.say_of(self.core.current, by_pi(&line));
             } else {
                 self.notice(line);
             }
@@ -670,7 +671,7 @@ impl Tui {
         // Last, and outside the split: a rewind rebuilds the whole surface, and
         // a row landed before it would go with the old drawing.
         if let Some(ended) = ended {
-            self.say_of(lane, ended);
+            self.say_of(lane, by_pi(&ended));
         }
     }
 
@@ -729,17 +730,19 @@ impl Tui {
                 self.core.lanes[lane].return_session(stored.into_session());
                 self.say_of(
                     lane,
-                    format!("the {verb} did not finish — back to the transcript as last saved"),
+                    by_pi(&format!(
+                        "the {verb} did not finish — back to the transcript as last saved"
+                    )),
                 );
                 true
             }
             Err(why) => {
                 self.say_of(
                     lane,
-                    format!(
+                    by_pi(&format!(
                         "the {verb} did not finish and its transcript could not be read back \
                          ({why}) — /new or /resume to use this checkout again"
-                    ),
+                    )),
                 );
                 false
             }
@@ -770,7 +773,7 @@ impl Tui {
             Ok(_) => {}
             Err(AgentError::Cancelled) if parts.is_empty() => {
                 let stopped = Line::from(self.ui.paint.span(&self.ui.paint.theme.muted, "stopped"));
-                self.ui.say_line(view, stopped);
+                self.ui.say(view, stopped);
             }
             Err(AgentError::Cancelled) => {
                 let line = format!("stopped{}{}", icons::PART_SEP, parts.join(icons::PART_SEP));
@@ -779,7 +782,7 @@ impl Tui {
             Err(e) => {
                 let mark = self.ui.paint.span(&self.ui.paint.theme.status.err, "error");
                 let rest = Span::from(format!(" {e}"));
-                self.ui.say_line(view, Line::from(vec![mark, rest]));
+                self.ui.say(view, Line::from(vec![mark, rest]));
                 if !parts.is_empty() {
                     self.ui.say_kept(on, view, &parts.join(icons::PART_SEP));
                 }
@@ -804,7 +807,7 @@ impl Tui {
         }
         self.ui.say(
             front_view(&mut self.views, self.core.lane()),
-            "stopping — saving what the runs have written",
+            by_pi("stopping — saving what the runs have written"),
         );
         self.ui.flush(
             self.core.lane(),

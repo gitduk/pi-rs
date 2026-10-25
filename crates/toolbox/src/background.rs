@@ -17,6 +17,14 @@ pub type Peek = Arc<dyn Fn() -> String + Send + Sync>;
 pub type Rerun =
     Arc<dyn Fn(Arc<dyn JobHandle>, CancellationToken) -> Result<(), tool::ToolError> + Send + Sync>;
 
+/// A `Rerun` as data, for a pi started in this one's place, which has none
+/// of this one's closures: a shell command and where it ran.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Again {
+    pub command: String,
+    pub cwd: PathBuf,
+}
+
 /// Where a call that will outlive its turn is kept: a job of the checkout at
 /// `root`, which the host lists, stops through `stop`, and delivers from.
 /// What the host has to tell the job goes to `told`, when it listens.
@@ -67,8 +75,6 @@ pub trait JobHandle: Send + Sync {
     fn status(&self, text: String);
     fn result(&self, text: String);
     fn input(&self, text: String);
-    /// A line for the person, never the model: a code to scan, say.
-    fn notice(&self, text: String);
     /// A question for the person, each option the line that picks it, the
     /// pick going out as if typed.
     fn choose(&self, asked: Asked);
@@ -84,8 +90,9 @@ pub trait JobHandle: Send + Sync {
     /// the ones its `input` opened.
     fn follow(&self);
     /// How it runs again once stopped or ended; one that never says is
-    /// gone then, and cannot be started over.
-    fn rerun(&self, _how: Rerun) {}
+    /// gone then, and cannot be started over. With `again`, a restarted pi
+    /// can still start it over.
+    fn rerun(&self, _how: Rerun, _again: Option<Again>) {}
     fn end(&self);
 }
 

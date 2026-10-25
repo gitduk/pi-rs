@@ -1,7 +1,7 @@
 ---
 [package]
 edition = "2024"
-description = "Bridge this session to WeChat: what the user sends from their phone arrives here as turns, and each answer goes back to the phone. Use when the user asks to connect WeChat. It runs in the background until `jobs` stops it; the first time, a QR shows on the screen for the user to scan, and the login is kept for next time."
+description = "Bridge this session to WeChat: what the user sends from their phone arrives here as turns, and each answer goes back to the phone. Use when the user asks to connect WeChat. It runs in the background until `jobs` stops it; the first time, a QR shows in its job for the user to scan, and the login is kept for next time."
 
 [dependencies]
 base64 = "0.22"
@@ -236,8 +236,8 @@ mod bridge {
             let _ = self.0.send(line);
         }
 
-        fn notice(&self, text: &str) {
-            self.say(json!({ "notice": text }));
+        fn status(&self, text: &str) {
+            self.say(json!({ "status": text }));
         }
     }
 
@@ -283,7 +283,7 @@ mod bridge {
         pi.say(json!({ "detach": if logged_in {
             "connecting to WeChat with the saved login; messages from the phone will arrive here as turns"
         } else {
-            "logging in to WeChat: a QR is on the screen for the user to scan; once they do, messages from the phone arrive here as turns"
+            "logging in to WeChat: a QR is in this job for the user to scan; once they do, messages from the phone arrive here as turns"
         }}));
         let mut client = Client::new(base_of(&state));
         let kept = Kept {
@@ -318,14 +318,14 @@ mod bridge {
         }
     }
 
-    // QR → confirm → credentials. The QR and progress go to the screen, where
-    // they stay long enough to be scanned; the model never reads them.
+    // QR → confirm → credentials. The QR goes to stderr, read by opening the
+    // job; progress to its status. The model reads neither.
     async fn login(client: &mut Client, kept: &Kept, pi: &Pi) -> Result<(), String> {
         pi.say(json!({ "status": "waiting for the QR to be scanned" }));
-        let (qr, note) = (pi.clone(), pi.clone());
+        let note = pi.clone();
         let mut view = crate::LoginView {
-            show_qr: Box::new(move |rendered: &str| qr.notice(rendered)),
-            notice: Box::new(move |text: &str| note.notice(text)),
+            show: Box::new(|text: &str| eprintln!("{text}")),
+            status: Box::new(move |text: &str| note.status(text)),
         };
         let credentials = crate::login_flow(client, &mut view)
             .await
@@ -380,7 +380,7 @@ mod bridge {
             };
             failures += 1;
             if failures == 3 {
-                pi.notice(&format!(
+                pi.status(&format!(
                     "wechat getupdates failing — backing off: {failed}"
                 ));
             }
@@ -518,7 +518,7 @@ mod bridge {
                 } else {
                     ""
                 };
-                pi.notice(&format!("wechat send failed{part}: {e:#}{hint}"));
+                pi.status(&format!("wechat send failed{part}: {e:#}{hint}"));
                 return false;
             }
         }
@@ -1070,12 +1070,12 @@ mod login {
 
     pub type Result<T> = std::result::Result<T, LoginError>;
 
-    /// How a person sees the login. `show_qr` receives the rendered QR (text);
-    /// `notice` receives one-line progress messages including the fallback URL.
+    /// How a person sees the login. `show` receives what they look up to
+    /// scan: the rendered QR, and the link it holds; `status`, one-line progress.
     /// Owned boxes so the flow can run inside a spawned task.
     pub struct LoginView {
-        pub show_qr: Box<dyn FnMut(&str) + Send>,
-        pub notice: Box<dyn FnMut(&str) + Send>,
+        pub show: Box<dyn FnMut(&str) + Send>,
+        pub status: Box<dyn FnMut(&str) + Send>,
     }
 
     /// How long the whole login may take before `Timeout`.
@@ -1106,19 +1106,19 @@ mod login {
                 QrStatus::Wait => {}
                 QrStatus::Scanned => {
                     if !said_scanned {
-                        (view.notice)("scanned — confirm it on the phone");
+                        (view.status)("scanned — confirm it on the phone");
                         said_scanned = true;
                     }
                 }
                 QrStatus::NeedVerifyCode => return Err(LoginError::VerifyCodeUnsupported),
                 QrStatus::VerifyCodeBlocked => {
-                    (view.notice)("the verification code was refused; refreshing the QR");
+                    (view.status)("the verification code was refused; refreshing the QR");
                     qrcode = refresh_qrcode(client, view, &mut refresh).await?;
                     said_scanned = false;
                     continue;
                 }
                 QrStatus::Expired => {
-                    (view.notice)("the QR expired; refreshing");
+                    (view.status)("the QR expired; refreshing");
                     qrcode = refresh_qrcode(client, view, &mut refresh).await?;
                     said_scanned = false;
                     continue;
@@ -1132,17 +1132,17 @@ mod login {
                     let plausible = reqwest::Url::parse(&format!("https://{host}"))
                         .is_ok_and(|u| u.host_str() == Some(host.as_str()));
                     if !plausible {
-                        (view.notice)(&format!(
+                        (view.status)(&format!(
                             "the server named an implausible redirect host `{host}`; staying put"
                         ));
                         continue;
                     }
                     let base = format!("https://{host}");
-                    (view.notice)(&format!("redirected to {base}"));
+                    (view.status)(&format!("redirected to {base}"));
                     *client = Client::new(base);
                 }
                 QrStatus::Redirect { .. } => {
-                    (view.notice)("the server asked to redirect but named no host; continuing");
+                    (view.status)("the server asked to redirect but named no host; continuing");
                 }
                 QrStatus::Confirmed(credentials) => return Ok(credentials),
             }
@@ -1163,11 +1163,11 @@ mod login {
             .fetch_qrcode(&[])
             .await
             .map_err(|e| LoginError::Failed(e.to_string()))?;
-        (view.notice)("scan the QR with WeChat to connect this session");
+        (view.status)("scan the QR in this job with WeChat to connect this session");
         if let Some(rendered) = render_qr(&qr.qrcode_img_content) {
-            (view.show_qr)(&rendered);
+            (view.show)(&rendered);
         }
-        (view.notice)(&format!(
+        (view.show)(&format!(
             "if the QR does not render, open: {}",
             qr.qrcode_img_content
         ));
@@ -1189,9 +1189,9 @@ mod login {
             .fetch_qrcode(&[])
             .await
             .map_err(|e| LoginError::Failed(e.to_string()))?;
-        (view.notice)("a fresh QR follows — scan it");
+        (view.status)("the QR was refreshed — scan the new one in this job");
         if let Some(rendered) = render_qr(&qr.qrcode_img_content) {
-            (view.show_qr)(&rendered);
+            (view.show)(&rendered);
         }
         Ok(qr)
     }
