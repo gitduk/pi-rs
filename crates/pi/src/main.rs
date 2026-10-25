@@ -11,7 +11,6 @@ use pi_core::args::Args;
 use pi_core::core::dial::{dial, summary_writer};
 use pi_core::core::resolve::resolve;
 use pi_core::core::{self, Core, archive, lane, worktree};
-use pi_core::driver::jobs;
 use pi_core::input::expand;
 use pi_store::icons;
 use pi_store::settings::Settings;
@@ -67,34 +66,18 @@ fn restart(
         lanes,
         front,
         flags,
-        jobs,
     }: core::Restart,
 ) -> Result<ExitCode> {
     let launcher = core::update::launcher().context("cannot tell which pi to start again")?;
     let mut cmd = std::process::Command::new(launcher);
     cmd.args(pi_core::args::restart(&lanes, front, &flags))
         .env(UPDATED_FROM, env!("CARGO_PKG_VERSION"));
-    // Losing them is no reason not to restart: they are only listed again.
-    let carried = match jobs::hand_over(&jobs) {
-        Ok(path) => path,
-        Err(e) => {
-            tracing::warn!(target: "pi::job", error = %e, jobs = jobs.len(), "not carried");
-            None
-        }
-    };
-    if let Some(path) = &carried {
-        cmd.env(CARRIED, path);
-    }
     let id = lanes[front].1.as_deref();
     tracing::info!(target: "pi::session", path = %launcher.display(), session = ?id, lanes = lanes.len(), "restarting");
     #[cfg(unix)]
     let e = std::os::unix::process::CommandExt::exec(&mut cmd);
     #[cfg(not(unix))]
     let e = std::io::Error::from(std::io::ErrorKind::Unsupported);
-    // Still here: nobody will read the file.
-    if let Some(path) = carried {
-        let _ = std::fs::remove_file(path);
-    }
     let again = id.map_or("pi".to_string(), |id| format!("pi --resume {id}"));
     Err(e).with_context(|| format!("cannot start {} — run `{again}`", launcher.display()))
 }
@@ -131,27 +114,18 @@ fn paint(
 // The version a pi restarting into this one ran, for this one to say so.
 // The environment, not a flag: an older pi would refuse a flag it lacks.
 const UPDATED_FROM: &str = "PI_UPDATED_FROM";
-// The file holding the jobs that pi carried, for this one to list again.
-const CARRIED: &str = "PI_CARRIED_JOBS";
 
 fn main() -> Result<ExitCode> {
     let updated_from = std::env::var(UPDATED_FROM).ok();
-    let jobs_file = std::env::var_os(CARRIED).map(std::path::PathBuf::from);
     // SAFETY: no other thread exists yet to read the environment.
-    unsafe {
-        std::env::remove_var(UPDATED_FROM);
-        std::env::remove_var(CARRIED);
-    }
+    unsafe { std::env::remove_var(UPDATED_FROM) };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run(updated_from, jobs_file))
+        .block_on(run(updated_from))
 }
 
-async fn run(
-    updated_from: Option<String>,
-    jobs_file: Option<std::path::PathBuf>,
-) -> Result<ExitCode> {
+async fn run(updated_from: Option<String>) -> Result<ExitCode> {
     let args = std::sync::Arc::new(Args::parse());
     let prompt = read_prompt(&args)?;
     let within = || format!("cannot use {} as a workspace", args.cwd);
@@ -332,14 +306,7 @@ async fn run(
         let drivers = pi_core::driver::Drivers::default();
         core.enable_jobs(drivers.jobs());
         core.reopen(&args.lanes());
-        if let Some(path) = &jobs_file {
-            match jobs::take_over(path) {
-                Ok(jobs) => core.revive_jobs(jobs),
-                Err(e) => {
-                    tracing::warn!(target: "pi::job", error = %e, path = %path.display(), "carried jobs lost")
-                }
-            }
-        }
+        core.revive_jobs();
         core::update::watch();
         core::update::check(env!("CARGO_PKG_REPOSITORY"));
         let out = tui::Tui::new(core, drivers, updated(updated_from.as_deref()))?

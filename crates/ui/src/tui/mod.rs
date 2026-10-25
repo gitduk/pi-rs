@@ -873,6 +873,7 @@ impl Tui {
         }
         self.save_history();
         self.settle_all(&mut done_rx).await;
+        self.core.hand_over_jobs();
         Ok(ended)
     }
 

@@ -255,6 +255,7 @@ pub fn key_of(path: &Path) -> String {
 // would be a session that quietly stops being found.
 const TRANSCRIPT: &str = "session.json";
 const LOCK: &str = ".lock";
+const JOBS: &str = "jobs.json";
 
 /// One session held by this process; the system lets go if pi dies.
 pub struct Claim {
@@ -397,6 +398,14 @@ impl Store {
         self.dir_of(workspace)
             .join(tool::state::file_stem(id))
             .join(super::journal::JOURNAL_FILE)
+    }
+
+    /// Where a session's background jobs wait for the pi that opens it
+    /// next, beside its transcript, so they go when the session does.
+    pub fn jobs_path(&self, workspace: &Path, id: &str) -> PathBuf {
+        self.dir_of(workspace)
+            .join(tool::state::file_stem(id))
+            .join(JOBS)
     }
 
     /// Moves with every write that can change what [`Store::choices`]

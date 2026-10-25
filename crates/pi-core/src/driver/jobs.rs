@@ -319,34 +319,44 @@ fn settle(items: &mut Vec<Item>, at: usize) {
     }
 }
 
-/// A job no longer running that a restarted pi lists again, under the
-/// same id, to be started over there.
+/// A job a pi leaves behind that the next pi lists again, under the same
+/// id where it is free, stopped, to be started over there.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Carried {
     pub id: u64,
     pub root: PathBuf,
     pub description: String,
-    /// Stopped by the user, not ended by itself.
+    /// Stopped by the user or by pi leaving, not ended by itself.
     pub stopped: bool,
     pub started_at: SystemTime,
     pub again: Again,
 }
 
-/// Write `jobs` where the pi started next can read them: the file, for it
-/// to be told of. None when there is nothing to carry.
-pub fn hand_over(jobs: &[Carried]) -> anyhow::Result<Option<PathBuf>> {
+/// Write `jobs` to `path` for the next pi to take over; with none, what an
+/// earlier pi left there goes, so it is not listed again later.
+pub fn hand_over(path: &Path, jobs: &[Carried]) -> anyhow::Result<()> {
     if jobs.is_empty() {
-        return Ok(None);
+        return match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        };
     }
-    let dir = pi_store::dir().ok_or_else(|| anyhow::anyhow!("no home to write to"))?;
-    let path = dir.join(format!("carried-{}.json", std::process::id()));
-    std::fs::write(&path, serde_json::to_vec(jobs)?)?;
-    Ok(Some(path))
+    let mut file = std::fs::OpenOptions::new();
+    file.write(true).create(true).truncate(true);
+    // Command lines can carry secrets, as transcripts can.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut file, 0o600);
+    std::io::Write::write_all(&mut file.open(path)?, &serde_json::to_vec(jobs)?)?;
+    tracing::info!(target: "pi::job", jobs = jobs.len(), path = %path.display(), "handed over");
+    Ok(())
 }
 
 /// The jobs [`hand_over`] wrote to `path`, taken: the file goes once read.
 pub fn take_over(path: &Path) -> anyhow::Result<Vec<Carried>> {
-    let read = std::fs::read(path);
+    let read = match std::fs::read(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        read => read,
+    };
     let _ = std::fs::remove_file(path);
     Ok(serde_json::from_slice(&read?)?)
 }
@@ -792,30 +802,40 @@ impl Table {
         each(ids, |id| self.restart(root, id))
     }
 
-    /// Every job a restart can carry: over, nothing waiting, and able to
-    /// say as data how it runs again.
-    pub fn carried(&self) -> Vec<Carried> {
+    /// Every job of `root`'s that says as data how it runs again, for the
+    /// next pi; one still running counts as stopped, since leaving stops it.
+    pub fn carried(&self, root: &Path) -> Vec<Carried> {
         (self.lock().items.iter())
-            .filter_map(|i| match (&i.phase, &i.rerun) {
-                (Phase::Over { stopped }, Some((_, Some(again)))) if i.waiting.is_empty() => {
-                    Some(Carried {
-                        id: i.id,
-                        root: i.root.clone(),
-                        description: i.description.clone(),
-                        stopped: *stopped,
-                        started_at: i.started_at,
-                        again: again.clone(),
-                    })
-                }
-                _ => None,
+            .filter(|i| i.root == root)
+            .filter_map(|i| {
+                let Some((_, Some(again))) = &i.rerun else {
+                    return None;
+                };
+                let stopped = match i.phase {
+                    Phase::Running { .. } => true,
+                    Phase::Over { stopped } => stopped,
+                };
+                Some(Carried {
+                    id: i.id,
+                    root: i.root.clone(),
+                    description: i.description.clone(),
+                    stopped,
+                    started_at: i.started_at,
+                    again: again.clone(),
+                })
             })
             .collect()
     }
 
-    /// List `job`, carried from the pi this one replaced, as it was there,
+    /// List `job`, carried from the pi before this one, as it was there,
     /// started over through `rerun`. Ids given out later come after it.
-    pub fn revive(&self, job: Carried, rerun: Rerun) {
+    pub fn revive(&self, mut job: Carried, rerun: Rerun) {
         let mut inner = self.lock();
+        // Lanes reopened from different pis can bring the same id.
+        if inner.items.iter().any(|i| i.id == job.id) {
+            inner.next_id += 1;
+            job.id = inner.next_id;
+        }
         inner.next_id = inner.next_id.max(job.id);
         let ago = job.started_at.elapsed().unwrap_or_default();
         tracing::info!(
@@ -1838,11 +1858,12 @@ mod tests {
         assert_eq!(table.jobs(&root)[0].state, State::Running);
     }
 
-    // A stopped job that says as data how it runs again crosses a restart:
-    // listed there under its id, still stopped, and it starts over; ids given
-    // out later pass it. One that cannot say it is left behind.
+    // A job that says as data how it runs again crosses to the next pi
+    // through its file: listed there under its id, stopped even if it was
+    // running, and it starts over; ids given out later pass it. One that
+    // cannot say it is left behind, and the file is read once.
     #[tokio::test]
-    async fn a_stopped_job_is_carried_to_the_next_pi() {
+    async fn a_job_is_carried_to_the_next_pi() {
         let old = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
         let (plain, _reruns) = rerunnable(&old, &root);
@@ -1852,15 +1873,22 @@ mod tests {
             cwd: root.clone(),
         };
         job.rerun(Arc::new(|_, _| Ok(())), Some(again.clone()));
+        let running = start(&old, &root, "watch");
+        running.rerun(Arc::new(|_, _| Ok(())), Some(again.clone()));
         old.stop(&root, plain.id()).unwrap();
         old.stop(&root, job.id()).unwrap();
 
-        let carried = old.carried();
-        assert_eq!(carried.len(), 1, "{carried:?}");
+        let carried = old.carried(&root);
+        assert_eq!(carried.len(), 2, "{carried:?}");
         assert_eq!((carried[0].id, carried[0].stopped), (job.id(), true));
+        assert_eq!((carried[1].id, carried[1].stopped), (running.id(), true));
         assert_eq!(carried[0].again, again);
-        let wire = serde_json::to_vec(&carried).unwrap();
-        let back: Vec<Carried> = serde_json::from_slice(&wire).unwrap();
+        assert!(old.carried(Path::new("/elsewhere")).is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.json");
+        hand_over(&path, &carried[..1]).unwrap();
+        let back = take_over(&path).unwrap();
+        assert!(take_over(&path).unwrap().is_empty(), "read once");
 
         let new = Arc::new(Table::default());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1880,6 +1908,16 @@ mod tests {
         new.restart(&root, job.id()).unwrap();
         assert_eq!(rx.recv().await, Some(job.id()));
         assert!(start(&new, &root, "next").id() > job.id());
+
+        // Another lane's pi gave out the same id: this one takes a free one.
+        new.revive(carried[0].clone(), Arc::new(|_, _| Ok(())));
+        let ids: Vec<_> = new.jobs(&root).iter().map(|j| j.id).collect();
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "{ids:?}");
+
+        hand_over(&path, &carried).unwrap();
+        hand_over(&path, &[]).unwrap();
+        assert!(!path.exists(), "nothing to carry clears what was left");
     }
 
     // One that ended by itself is kept to start over; a stop leaves it be.
