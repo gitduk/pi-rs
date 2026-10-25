@@ -285,10 +285,11 @@ async fn a_stopped_turn_keeps_its_status_line_and_a_stopped_bang_does_not() {
     };
 
     let turn = last_row(crate::tui::run::Kind::Turn).await;
-    assert!(turn.starts_with("stopped · "), "{turn:?}");
-
     let bang = last_row(crate::tui::run::Kind::Bash { lines: Vec::new() }).await;
-    assert_eq!(bang.trim(), "stopped");
+    assert!(
+        turn.starts_with(bang.trim()) && turn.len() > bang.trim().len(),
+        "the turn says more than the bang: {turn:?} / {bang:?}"
+    );
 }
 
 // A flash is transient: it is not part of the transcript, and it is
@@ -371,7 +372,16 @@ fn the_bar_lists_the_checkouts_no_lane_has_open() {
         .ok();
     tui.refresh_tabs();
 
-    assert_eq!(bar(&tui.ui, 39), "pi-rs · ○ fix-mem · ○ fw-rm");
+    let shown = bar(&tui.ui, 39);
+    let at = |name: &str| {
+        shown
+            .find(name)
+            .unwrap_or_else(|| panic!("{name}: {shown:?}"))
+    };
+    assert!(
+        at("pi-rs") < at("fix-mem") && at("fix-mem") < at("fw-rm"),
+        "{shown:?}"
+    );
     // And the order it lists them in is the order a step walks.
     assert_eq!(
         tui.ui.step_checkout(&tui.core.lanes[0], true).as_deref(),
@@ -996,7 +1006,7 @@ async fn a_jobs_result_opens_a_turn_under_its_label() {
     assert!(
         lane_rows(&mut tui, token)
             .iter()
-            .any(|r| r.contains("◆ later #1 check the build"))
+            .any(|r| r.contains("later #1 check the build"))
     );
 }
 

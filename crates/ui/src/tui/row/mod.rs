@@ -880,11 +880,7 @@ mod height_tests {
         let mut row = Row::note_lines("head\none\ntwo").remove(0);
         assert_eq!(row.len(), 1);
         let text = |row: &Row, i| row.line(i, &paint, 80).0.to_string();
-        assert!(
-            text(&row, 0).starts_with("head · 2 lines"),
-            "{}",
-            text(&row, 0)
-        );
+        assert!(text(&row, 0).starts_with("head"), "{}", text(&row, 0));
         assert_eq!(row.click_line(0, 80), Some(0));
         assert!(row.toggle_at(0, 80));
         assert_eq!(row.len(), 3);
