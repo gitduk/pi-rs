@@ -51,8 +51,17 @@ impl Editor {
         &self.history
     }
 
+    /// Seed recall from `lines`, oldest first; a repeated line keeps only its
+    /// latest place.
     pub fn seed_history(&mut self, lines: Vec<String>) {
-        self.history = lines;
+        let mut seen = std::collections::HashSet::new();
+        let mut kept: Vec<String> = lines
+            .into_iter()
+            .rev()
+            .filter(|l| seen.insert(l.clone()))
+            .collect();
+        kept.reverse();
+        self.history = kept;
         self.at = self.history.len();
     }
 
@@ -72,10 +81,11 @@ impl Editor {
         line
     }
 
-    /// File a handed-over line for recall. A line identical to the last is
-    /// not worth a second history slot.
+    /// File a handed-over line for recall. A line sent before moves to the
+    /// end rather than taking a second history slot.
     pub fn remember(&mut self, line: &str) {
-        if !line.trim().is_empty() && self.history.last().map(String::as_str) != Some(line) {
+        if !line.trim().is_empty() {
+            self.history.retain(|l| l != line);
             self.history.push(line.to_string());
         }
         self.at = self.history.len();
@@ -759,6 +769,21 @@ mod tests {
         let line = e.take();
         e.remember(&line);
         assert_eq!(e.history.len(), 1);
+    }
+
+    #[test]
+    fn a_line_sent_again_moves_to_the_end_of_history() {
+        let mut e = Editor::default();
+        for line in ["a", "b", "a"] {
+            e.remember(line);
+        }
+        assert_eq!(e.history, ["b", "a"]);
+        e.seed_history(vec!["x".into(), "y".into(), "x".into(), "y".into()]);
+        assert_eq!(
+            e.history,
+            ["x", "y"],
+            "a seeded repeat keeps its latest place"
+        );
     }
 
     #[test]
