@@ -760,6 +760,8 @@ fn a_saved_settings_file_lands_without_being_asked_and_a_broken_one_once() {
 
     let view = front_view(&mut tui.views, tui.core.lane());
     view.state.work = a_turn(false);
+    view.state.work.as_mut().expect("a running turn").since =
+        std::time::Instant::now() - std::time::Duration::from_secs(2);
     let before = drawn_rows(view);
     std::fs::write(&file, "effort = \"high\"\nstatus = [\"elapsed\"]\n").expect("an edit");
     tui.refresh_files();
@@ -789,7 +791,7 @@ fn a_saved_settings_file_lands_without_being_asked_and_a_broken_one_once() {
         "the bar carries the notice"
     );
     assert!(
-        (0..bar.y).any(|y| row(y).contains("0s")),
+        (0..bar.y).any(|y| row(y).contains("2s")),
         "the running status stays above the notice"
     );
 

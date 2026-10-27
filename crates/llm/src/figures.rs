@@ -95,11 +95,12 @@ pub fn slash(input: u64, output: u64) -> String {
 }
 
 /// How long something took, in the one wording every line that shows one uses:
-/// seconds, and the minutes once there are any.
+/// milliseconds below a second, then seconds, minutes, hours, and days.
 pub fn elapsed(d: Duration) -> String {
     let s = d.as_secs();
     match s {
-        0..60 => format!("{s}s"),
+        0 => format!("{}ms", d.as_millis()),
+        1..60 => format!("{s}s"),
         60..3_600 => format!("{}m{:02}s", s / 60, s % 60),
         3_600..86_400 => format!("{}h{:02}m", s / 3_600, s % 3_600 / 60),
         _ => format!("{}d{:02}h", s / 86_400, s % 86_400 / 3_600),

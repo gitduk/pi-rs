@@ -160,7 +160,10 @@ pub enum ToolError {
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("timed out after {ms}ms; the command and everything it spawned were killed")]
+    #[error(
+        "timed out after {}; the command and everything it spawned were killed",
+        llm::figures::elapsed(std::time::Duration::from_millis(*.ms))
+    )]
     Timeout { ms: u64 },
 
     #[error("could not spill oversized output: {0}")]
