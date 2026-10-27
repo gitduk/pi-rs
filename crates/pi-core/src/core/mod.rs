@@ -428,7 +428,7 @@ impl Core {
                 Step::Handled(Listing::say(self.listing()))
             }
             Intent::Builtin(Builtin::Model(name)) => Step::Notice(notice(self.switch(&name))),
-            Intent::Builtin(Builtin::Cd(dir)) => match dir.trim() {
+            Intent::Builtin(Builtin::Mv(dir)) => match dir.trim() {
                 "" => Step::Handled(Listing::say([self.lane().root().display().to_string()])),
                 dir => self.move_to(dir).unwrap_or_else(Step::Notice),
             },
@@ -701,7 +701,7 @@ mod tests {
             Intent::Builtin(Builtin::New),
             Intent::Builtin(Builtin::Resume("1756240000-1".into())),
             Intent::Builtin(Builtin::Compact(String::new())),
-            Intent::Builtin(Builtin::Cd("~/elsewhere".into())),
+            Intent::Builtin(Builtin::Mv("~/elsewhere".into())),
         ] {
             assert!(
                 matches!(intent.fate(), Fate::Refused(_)),

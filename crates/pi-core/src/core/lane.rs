@@ -821,11 +821,11 @@ impl Core {
             None => Vec::new(),
         }
     }
-    /// `/cd`: the conversation in front carries on in `dir`, and all the tree
+    /// `/mv`: the conversation in front carries on in `dir`, and all the tree
     /// decides is decided again there; whole or not at all.
     pub(super) fn move_to(&mut self, dir: &str) -> Result<Step, String> {
         let from = self.lane().root().to_path_buf();
-        let failed = |e: anyhow::Error| format!("not moved — {}", refused("cd", e));
+        let failed = |e: anyhow::Error| format!("not moved — {}", refused("mv", e));
         let target = match dir.strip_prefix('~') {
             Some(rest) if rest.is_empty() || rest.starts_with('/') => {
                 let home = crate::core::instructions::home()

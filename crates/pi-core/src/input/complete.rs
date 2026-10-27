@@ -97,18 +97,18 @@ pub fn home_candidates(query: &str, home: &Path) -> Vec<FileEntry> {
     listed(query, home, "~/", false)
 }
 
-/// The argument of `/cd` under the caret: from after the word's spacing to
+/// The argument of `/mv` under the caret: from after the word's spacing to
 /// the caret, spaces and all, since a directory name may hold them.
-pub fn cd_prefix(line: &str, cursor: usize) -> Option<(usize, usize, &str)> {
-    let rest = line.strip_prefix("/cd")?;
+pub fn mv_prefix(line: &str, cursor: usize) -> Option<(usize, usize, &str)> {
+    let rest = line.strip_prefix("/mv")?;
     let arg = rest.trim_start();
     let start = line.len() - arg.len();
     (arg.len() < rest.len() && start <= cursor).then(|| (start, cursor, &line[start..cursor]))
 }
 
-/// Directories `/cd` could go to, spelled as typed: from `~/` under `home`,
+/// Directories `/mv` could go to, spelled as typed: from `~/` under `home`,
 /// from `/` absolute, otherwise against `root` — `..` included.
-pub fn cd_candidates(query: &str, root: &Path, home: Option<&Path>) -> Vec<FileEntry> {
+pub fn mv_candidates(query: &str, root: &Path, home: Option<&Path>) -> Vec<FileEntry> {
     if let Some(rest) = query.strip_prefix("~/") {
         return home.map_or_else(Vec::new, |home| listed(rest, home, "~/", true));
     }
@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn home_paths_spell_from_the_tilde_and_hide_dot_entries() {
         let (_dir, root) = tree();
-        assert_eq!(home_prefix("/cd ~/src/m", 11), Some((4, 11, "src/m")));
+        assert_eq!(home_prefix("/mv ~/src/m", 11), Some((4, 11, "src/m")));
         assert_eq!(home_prefix("~5 min", 2), None);
         assert_eq!(
             names(&home_candidates("", &root)),
@@ -281,24 +281,24 @@ mod tests {
     }
 
     #[test]
-    fn cd_offers_directories_against_the_root_or_as_spelled() {
+    fn mv_offers_directories_against_the_root_or_as_spelled() {
         let (_dir, root) = tree();
-        assert_eq!(cd_prefix("/cd src/l", 9), Some((4, 9, "src/l")));
-        assert_eq!(cd_prefix("/cd", 3), None);
-        assert_eq!(cd_prefix("/cdx", 4), None);
+        assert_eq!(mv_prefix("/mv src/l", 9), Some((4, 9, "src/l")));
+        assert_eq!(mv_prefix("/mv", 3), None);
+        assert_eq!(mv_prefix("/mvx", 4), None);
         assert_eq!(
-            names(&cd_candidates("", &root, None)),
+            names(&mv_candidates("", &root, None)),
             vec!["src", "target"]
         );
-        assert_eq!(names(&cd_candidates("src/", &root, None)), vec!["src/lib"]);
+        assert_eq!(names(&mv_candidates("src/", &root, None)), vec!["src/lib"]);
         assert_eq!(
-            names(&cd_candidates("src/../s", &root, None)),
+            names(&mv_candidates("src/../s", &root, None)),
             vec!["src/../src"]
         );
-        assert_eq!(names(&cd_candidates("~/", &root, Some(&root)))[0], "~/src");
+        assert_eq!(names(&mv_candidates("~/", &root, Some(&root)))[0], "~/src");
         let abs = format!("{}/s", root.display());
         assert_eq!(
-            names(&cd_candidates(&abs, &root, None)),
+            names(&mv_candidates(&abs, &root, None)),
             vec![format!("{}/src", root.display())]
         );
     }

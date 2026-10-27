@@ -47,7 +47,7 @@ pub enum Builtin {
     // The name to work in, or empty to list what there is.
     Worktree(String),
     // The directory this conversation carries on in, or empty to say the one now.
-    Cd(String),
+    Mv(String),
     // Bare `/settings`: the project's `.pi.toml` in `$EDITOR`. An argument
     // after the word is refused.
     Settings(String),
@@ -111,7 +111,7 @@ impl Intent {
             Intent::Builtin(Builtin::Mcp(_)) => Fate::Now,
             // Bare, these only list what there is.
             Intent::Builtin(
-                Builtin::Resume(name) | Builtin::Worktree(name) | Builtin::Cd(name),
+                Builtin::Resume(name) | Builtin::Worktree(name) | Builtin::Mv(name),
             ) if name.trim().is_empty() => Fate::Now,
             Intent::Builtin(Builtin::Resume(_)) => Fate::Refused(
                 "/resume would replace the transcript this run is writing — stop the run first",
@@ -122,8 +122,8 @@ impl Intent {
             // A lane of its own to move to, and the one being left keeps
             // working in the tree it was already in.
             Intent::Builtin(Builtin::Worktree(_)) => Fate::Now,
-            Intent::Builtin(Builtin::Cd(_)) => {
-                Fate::Refused("/cd would move the tree this run is working in — stop the run first")
+            Intent::Builtin(Builtin::Mv(_)) => {
+                Fate::Refused("/mv would move the tree this run is working in — stop the run first")
             }
             Intent::Builtin(Builtin::New) => Fate::Refused(
                 "/new would replace the transcript this run is writing — stop the run first",

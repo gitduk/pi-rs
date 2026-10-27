@@ -31,9 +31,9 @@ impl Ui {
         // A path token outranks the word completions: the filesystem holds
         // the answer, not the command tables.
         use pi_core::input::complete as path;
-        // `/cd`'s argument is read first, `~/` and all: only a directory
+        // `/mv`'s argument is read first, `~/` and all: only a directory
         // is somewhere to go there.
-        let found = (path::cd_prefix(text, cursor).map(|t| (t, Path::Cd)))
+        let found = (path::mv_prefix(text, cursor).map(|t| (t, Path::Mv)))
             .or_else(|| path::at_prefix(text, cursor).map(|t| (t, Path::At)))
             .or_else(|| path::home_prefix(text, cursor).map(|t| (t, Path::Home)));
         if let Some(((start, end, query), kind)) = found {
@@ -45,7 +45,7 @@ impl Ui {
                 let items = match kind {
                     Path::At => path::candidates(query, &self.at_root),
                     Path::Home => home.map_or_else(Vec::new, |h| path::home_candidates(query, &h)),
-                    Path::Cd => path::cd_candidates(query, &self.at_root, home.as_deref()),
+                    Path::Mv => path::mv_candidates(query, &self.at_root, home.as_deref()),
                 };
                 self.at_menu = Some((kind, token.to_string(), items));
             }
@@ -272,7 +272,7 @@ impl Ui {
 pub(super) enum Path {
     At,
     Home,
-    Cd,
+    Mv,
 }
 
 // Where the list over the line stands: its highlight and window, kept
