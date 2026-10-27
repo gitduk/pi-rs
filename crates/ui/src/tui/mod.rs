@@ -151,7 +151,7 @@ enum Wake {
     // Something only the screen cares about.
     Nothing,
     // Leave. Not a `break` at the arm: the way out has lanes to settle.
-    Leave,
+    Leave(&'static str),
 }
 
 /// How the surface was left.
@@ -613,7 +613,7 @@ impl Tui {
         // late tick then ordinary cadence avoids a catch-up spin.
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let update = core::update::changed();
-        loop {
+        let leaving = loop {
             self.serve_lanes().await;
             // Before the bar rebuilds, so a vanished tab goes with its lane.
             self.drop_vanished_lanes();
@@ -687,7 +687,7 @@ impl Tui {
                 && let Some(restart) = self.restart_into_update()
             {
                 ended = restart;
-                break;
+                break "pi restarted into an update.";
             }
             let lane = self.core.lane();
             let woke = if let Some((from, wake)) = driven {
@@ -736,7 +736,7 @@ impl Tui {
                     // Left the way `/exit` leaves: runs settled, jobs taken down.
                     () = hangup.recv() => {
                         tracing::info!(target: "pi::session", "hung up");
-                        Wake::Leave
+                        Wake::Leave("The terminal hung up; pi exited.")
                     }
                     _ = tokio::time::sleep_until(due_back.unwrap_or_else(tokio::time::Instant::now)),
                         if due_back.is_some() => Wake::Nothing,
@@ -751,7 +751,7 @@ impl Tui {
                             }
                             self.admit(intent, Origin::Typed, line)
                         }
-                        None => Wake::Leave,
+                        None => Wake::Leave("The terminal input closed; pi exited."),
                     },
                 }
             } else {
@@ -770,7 +770,7 @@ impl Tui {
                     continue;
                 }
                 Wake::Nothing => continue,
-                Wake::Leave => break,
+                Wake::Leave(why) => break why,
                 // Its driver hears nothing of the turn, so nothing follows.
                 Wake::Relay(line, relay) => {
                     self.start_relayed(line, relay, &done_tx);
@@ -801,7 +801,14 @@ impl Tui {
             // Its turn starts when the server answers; drivers hear then.
             let deferred = matches!(step, Step::McpPrompt { .. });
             match step {
-                Step::Quit => break,
+                Step::Quit => {
+                    break match origin {
+                        Origin::Typed => "The user exited pi.",
+                        Origin::Loop | Origin::Job | Origin::Input(_) => {
+                            "pi exited in response to a background command."
+                        }
+                    };
+                }
                 Step::Notice(line) => self.notice(line),
                 Step::Bash(command) => self.start_bash(command, &done_tx),
                 Step::McpPrompt {
@@ -864,9 +871,9 @@ impl Tui {
                     self.say_of(at, by_pi(&said));
                 }
             }
-        }
+        };
         self.save_history();
-        self.settle_all(&mut done_rx).await;
+        self.settle_all(&mut done_rx, leaving).await;
         self.core.hand_over_jobs();
         Ok(ended)
     }

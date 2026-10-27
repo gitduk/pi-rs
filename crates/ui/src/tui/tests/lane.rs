@@ -901,7 +901,7 @@ async fn leaving_with_a_run_in_flight_takes_the_transcript_back() {
     })
     .expect("the job reports");
 
-    tui.settle_all(&mut rx).await;
+    tui.settle_all(&mut rx, "The user exited pi.").await;
 
     assert!(!tui.core.lane().is_running(), "the lane is idle again");
     assert_eq!(
@@ -1082,16 +1082,87 @@ async fn leaving_saves_what_an_idle_lane_filed() {
     let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Nothing said: leaving writes no empty session to be offered back.
-    tui.settle_all(&mut rx).await;
+    tui.settle_all(&mut rx, "The user exited pi.").await;
     assert!(!path.exists());
 
     tui.core
         .lane_mut()
         .push_note("The user stopped background job #2.");
-    tui.settle_all(&mut rx).await;
+    tui.settle_all(&mut rx, "The user exited pi.").await;
     let stored = pi_store::session::Store::read(&path).expect("saved on the way out");
     assert!(stored.session.entries().iter().any(|e| matches!(
         e,
         agent::session::Entry::Note { note, .. } if note.contains("job #2")
     )));
+}
+
+// A job stopped by leaving has a cause in the resumed model context, even
+// when the transcript was lent to a turn as shutdown began.
+#[tokio::test]
+async fn leaving_with_a_job_preserves_its_stop_cause_on_resume() {
+    use toolbox::background::{Again, JobSink as _};
+
+    for running in [false, true] {
+        let dir = tempfile::tempdir().expect("a checkout");
+        let mut tui = surface(dir.path());
+        let mut carried = agent::session::Session::new();
+        carried.prompt("run sleep 30 in the background");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        if running {
+            tx.send(crate::tui::run::Done {
+                token: tui.core.lane().token(),
+                kind: crate::tui::run::Kind::Turn,
+                ran: Some((carried, Err(agent::AgentError::Cancelled))),
+            })
+            .unwrap();
+        } else {
+            tui.core.lane_mut().finish();
+            tui.core.lane_mut().return_session(carried);
+        }
+        tui.core.enable_jobs(tui.drivers.jobs());
+        let stop = tokio_util::sync::CancellationToken::new();
+        let job = pi_core::driver::jobs::Jobs::new(tui.drivers.jobs()).start(
+            dir.path().into(),
+            "sleep 30; echo done".into(),
+            stop.clone(),
+            None,
+        );
+        job.rerun(
+            std::sync::Arc::new(|_, _| Ok(())),
+            Some(Again {
+                command: "sleep 30; echo done".into(),
+                cwd: dir.path().into(),
+            }),
+        );
+        let path = tui.core.store.path_of(dir.path(), tui.core.lane().id());
+
+        tui.settle_all(&mut rx, "The user exited pi.").await;
+        tui.core.hand_over_jobs();
+        assert!(stop.is_cancelled());
+
+        let stored = pi_store::session::Store::read(&path).expect("saved on exit");
+        let context = serde_json::to_string(&stored.session.context()).unwrap();
+        assert!(context.contains("The user exited pi."), "{context}");
+        assert!(context.contains("#1 (sleep 30; echo done)"), "{context}");
+        assert!(context.contains("during shutdown"), "{context}");
+        assert!(context.contains("did not finish normally"), "{context}");
+
+        let mut resumed = surface(dir.path());
+        resumed.core.lane_mut().finish();
+        resumed
+            .core
+            .lane_mut()
+            .return_session(stored.into_session());
+        resumed.core.enable_jobs(resumed.drivers.jobs());
+        resumed.core.revive_jobs();
+        let jobs = resumed.drivers.jobs();
+        assert_eq!(
+            jobs.jobs(dir.path())[0].state,
+            pi_core::driver::jobs::State::Stopped
+        );
+        assert!(
+            resumed.driver_line().is_none(),
+            "resuming does not restart the job"
+        );
+    }
 }

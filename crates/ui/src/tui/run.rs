@@ -788,9 +788,8 @@ impl Tui {
         }
     }
 
-    // Stops every working lane and settles it, so leaving can't drop a
-    // transcript living in a task. Cancels rather than waits for it to finish.
-    pub(super) async fn settle_all(&mut self, done: &mut UnboundedReceiver<Done>) {
+    // Shutdown must preserve transcripts and the cause of stopped jobs.
+    pub(super) async fn settle_all(&mut self, done: &mut UnboundedReceiver<Done>, why: &str) {
         // A note filed while idle would otherwise wait for a turn that never comes.
         self.core.save_filed();
         let mut left = 0;
@@ -800,31 +799,42 @@ impl Tui {
                 left += 1;
             }
         }
-        if left == 0 {
-            return;
-        }
-        self.notice("stopping — saving what the runs have written".to_string());
-        self.ui.flush(
-            self.core.lane(),
-            front_view(&mut self.views, self.core.lane()),
-        );
-        let waited = tokio::time::timeout(EXIT_GRACE, async {
-            while left > 0 {
-                match done.recv().await {
-                    Some(ended) => {
-                        self.settle(ended).await;
-                        left -= 1;
+        if left > 0 {
+            self.notice("stopping — saving what the runs have written".to_string());
+            self.ui.flush(
+                self.core.lane(),
+                front_view(&mut self.views, self.core.lane()),
+            );
+            let waited = tokio::time::timeout(EXIT_GRACE, async {
+                while left > 0 {
+                    match done.recv().await {
+                        Some(ended) => {
+                            self.settle(ended).await;
+                            left -= 1;
+                        }
+                        None => break,
                     }
-                    None => break,
                 }
+            })
+            .await;
+            if waited.is_err() {
+                // A transcript still held by a run cannot be saved here.
+                self.ui.screen.leave();
+                eprintln!("{left} run(s) did not stop in time; their last save is what is on disk");
             }
-        })
-        .await;
-        if waited.is_err() {
-            // On the terminal we are about to give back: a transcript that did
-            // not come home is one the user should know is short.
-            self.ui.screen.leave();
-            eprintln!("{left} run(s) did not stop in time; their last save is what is on disk");
         }
+        // A settling turn may detach one last job; collect after it returns.
+        let jobs = self.drivers.jobs();
+        for lane in &mut self.core.lanes {
+            let stopped = jobs.stop_running(lane.root(), why);
+            if !stopped.is_empty() {
+                lane.push_note(&format!(
+                    "{why} pi stopped running background jobs {} during shutdown. \
+                     They did not finish normally; their results will not be reported.",
+                    stopped.join(", ")
+                ));
+            }
+        }
+        self.core.save_filed();
     }
 }

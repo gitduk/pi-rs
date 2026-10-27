@@ -147,6 +147,32 @@ impl Inner {
         question.id = self.next_question;
         question
     }
+
+    fn stop(&mut self, at: usize, why: &str) -> Result<String, String> {
+        let item = &mut self.items[at];
+        let id = item.id;
+        let what = item.description.clone();
+        match (&item.phase, item.rerun.is_some()) {
+            (Phase::Over { .. }, true) => return Err(format!("#{id} ({what}) is not running")),
+            (Phase::Running { stop }, true) => {
+                stop.cancel();
+                item.phase = Phase::Over { stopped: true };
+                // What the stopped run still says is no one's to hear.
+                item.run += 1;
+                item.clear_run();
+                tracing::info!(target: "pi::job", job = id, why, "stopped");
+            }
+            (phase, false) => {
+                if let Phase::Running { stop } = phase {
+                    stop.cancel();
+                }
+                self.items.remove(at);
+                tracing::info!(target: "pi::job", job = id, why, "stopped and forgotten");
+            }
+        }
+        self.withdraw(id, "its job stopped");
+        Ok(what)
+    }
 }
 
 struct Item {
@@ -711,30 +737,31 @@ impl Table {
             .iter()
             .position(|i| i.id == id && i.root == root)
             .ok_or_else(|| format!("no job #{id} here"))?;
-        let item = &mut inner.items[at];
-        let what = item.description.clone();
-        match (&item.phase, item.rerun.is_some()) {
-            (Phase::Over { .. }, true) => return Err(format!("#{id} ({what}) is not running")),
-            (Phase::Running { stop }, true) => {
-                stop.cancel();
-                item.phase = Phase::Over { stopped: true };
-                // What the stopped run still says is no one's to hear.
-                item.run += 1;
-                item.clear_run();
-                tracing::info!(target: "pi::job", job = id, "stopped");
-            }
-            (phase, false) => {
-                if let Phase::Running { stop } = phase {
-                    stop.cancel();
-                }
-                inner.items.remove(at);
-                tracing::info!(target: "pi::job", job = id, "stopped and forgotten");
-            }
-        }
-        inner.withdraw(id, "its job stopped");
+        let what = inner.stop(at, "requested")?;
         drop(inner);
         self.wake();
         Ok(what)
+    }
+
+    /// Stop only jobs still running on `root`, returning their labels. The
+    /// caller supplies the cause so it can be kept with the state change.
+    pub fn stop_running(&self, root: &Path, why: &str) -> Vec<String> {
+        let mut inner = self.lock();
+        let mut stopped = Vec::new();
+        for at in (0..inner.items.len()).rev() {
+            let item = &inner.items[at];
+            if item.root == root && item.running() {
+                let id = item.id;
+                let what = inner.stop(at, why).expect("the job is running");
+                stopped.push(format!("#{id} ({what})"));
+            }
+        }
+        stopped.reverse();
+        drop(inner);
+        if !stopped.is_empty() {
+            self.wake();
+        }
+        stopped
     }
 
     /// Start `id` of `root`'s over under the same id, stopping it first if
@@ -1824,6 +1851,41 @@ mod tests {
             None,
         );
         (job, rx)
+    }
+
+    // Shutdown must preserve completed results and ignore late reports.
+    #[tokio::test]
+    async fn shutdown_stops_only_running_jobs_on_its_checkout() {
+        let table = Arc::new(Table::default());
+        let root = Path::new("/checkout");
+        let (running, _) = rerunnable(&table, root);
+        let (finished, _) = rerunnable(&table, root);
+        finished.result("done".into());
+        finished.end();
+        let stop = CancellationToken::new();
+        let plain = Jobs::new(table.clone()).start(root.into(), "plain".into(), stop.clone(), None);
+        let elsewhere = start(&table, Path::new("/elsewhere"), "elsewhere");
+
+        let stopped = table.stop_running(root, "process exiting");
+        assert_eq!(stopped.len(), 2);
+        assert!(stopped[0].starts_with(&format!("#{} ", running.id())));
+        assert!(stopped[1].starts_with(&format!("#{} ", plain.id())));
+        assert!(stop.is_cancelled());
+        assert!(table.stop_running(root, "process exiting").is_empty());
+        assert_eq!(table.jobs(root)[0].state, State::Stopped);
+        assert_eq!(table.jobs(root)[1].state, State::Back);
+        assert_eq!(table.jobs(Path::new("/elsewhere"))[0].id, elsewhere.id());
+
+        running.result("late".into());
+        plain.result("late".into());
+        running.end();
+        assert_eq!(table.waiting(root, running.id()), Some(vec![]));
+        assert_eq!(table.waiting(root, plain.id()), None);
+        let Some((id, Back::Result(due))) = table.take_back(root) else {
+            panic!("the completed result is still due")
+        };
+        assert_eq!(id, finished.id());
+        assert_eq!(due.text, "done");
     }
 
     // Stopped, it stays listed; restarted, it runs again under its id once
