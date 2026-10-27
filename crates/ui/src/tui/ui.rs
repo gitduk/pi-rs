@@ -128,8 +128,7 @@ pub(super) struct Ui {
     // Whether the live block lists every call in flight or just the newest
     // with a count; a click flips it. Outlives the calls themselves.
     pub(super) live_tools_shown: bool,
-    // The front checkout's jobs running or with something to deliver,
-    // drawn over the input line.
+    // The front checkout's running jobs, drawn over the input line.
     pub(super) jobs: Vec<pi_core::driver::jobs::Job>,
     // Every job of the front checkout, kept ones too, for `/job` to complete.
     pub(super) every_job: Vec<pi_core::driver::jobs::Job>,

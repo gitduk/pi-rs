@@ -550,19 +550,36 @@ impl Ui {
                 rows.extend(screen::fit(&painted, width));
             }
         }
-        // Typed lines waiting their turn, muted under the said rule: off the
-        // transcript until they start, and up takes them back.
-        for line in view.queued.iter().filter_map(|q| q.line.as_deref()) {
+        // Typed lines precede job results to match delivery priority.
+        let jobs = self
+            .every_job
+            .iter()
+            .filter(|job| job.state == pi_core::driver::jobs::State::Back)
+            .map(|job| {
+                let result = match job.last.as_str() {
+                    "" => String::new(),
+                    last => format!("{}{last}", icons::PART_SEP),
+                };
+                format!("#{} {}{result}", job.id, job.description)
+            });
+        let waiting = |mark: &str, line: &str| {
             let first = line.lines().next().unwrap_or_default();
             let more = if line.trim_end().contains('\n') {
                 icons::ELLIPSIS
             } else {
                 ""
             };
-            let text = format!("{} {first}{more}", icons::SAID_RULE);
+            let text = format!("{mark} {first}{more}");
             let muted = Line::from(self.paint.span(&self.paint.theme.muted, text));
-            rows.extend(screen::fit(&muted, width));
-        }
+            screen::fit(&muted, width)
+        };
+        rows.extend(
+            view.queued
+                .iter()
+                .filter_map(|q| q.line.as_deref())
+                .flat_map(|line| waiting(icons::SAID_RULE, line)),
+        );
+        rows.extend(jobs.flat_map(|line| waiting(icons::RELAYED_MARK, &line)));
 
         (rows, pending_rows)
     }

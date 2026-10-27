@@ -645,7 +645,7 @@ impl Tui {
             let root = self.core.lane().root();
             self.ui.every_job = jobs.jobs(root);
             self.ui.jobs = (self.ui.every_job.iter())
-                .filter(|j| j.state.busy())
+                .filter(|j| j.state == pi_core::driver::jobs::State::Running)
                 .cloned()
                 .collect();
             self.ui.tools = Some(self.core.lane().agent().brief.clone());
