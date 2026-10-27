@@ -1,5 +1,5 @@
 use crate::tui::row::Row;
-use crate::tui::{Asked, Deed, Intent, Origin, View, view_at};
+use crate::tui::{Asked, Deed, Intent, Origin, View, front_view, view_at};
 use agent::Event;
 use pi_core::core::lane::Lane;
 use pi_core::input::commands::Choice;
@@ -747,8 +747,7 @@ async fn an_edited_project_file_reaches_the_surface_and_names_what_outranks_it()
     assert_eq!(tui.ui.status, vec![Segment::Model]);
 }
 
-// Saving a file is the whole gesture: it lands within a look, a broken one
-// is named once rather than every second, and fixing it lands again.
+// File changes must not add transcript rows or repeat a refusal on every look.
 #[test]
 fn a_saved_settings_file_lands_without_being_asked_and_a_broken_one_once() {
     let dir = tempfile::tempdir().expect("a checkout");
@@ -756,24 +755,59 @@ fn a_saved_settings_file_lands_without_being_asked_and_a_broken_one_once() {
     let file = dir.path().join("settings.toml");
     std::fs::write(&file, "").expect("a settings file");
     tui.core.pinned.config = Some(file.display().to_string());
-    tui.core.refresh_config();
+    tui.refresh_files();
     assert_eq!(tui.core.refresh_config(), None, "nothing moved");
 
-    std::fs::write(&file, "effort = \"high\"\n").expect("an edit");
-    let said = tui.core.refresh_config().expect("the edit is taken up");
-    assert!(said[0].starts_with("reloaded — "), "{said:?}");
+    let view = front_view(&mut tui.views, tui.core.lane());
+    view.state.work = a_turn(false);
+    let before = drawn_rows(view);
+    std::fs::write(&file, "effort = \"high\"\nstatus = [\"elapsed\"]\n").expect("an edit");
+    tui.refresh_files();
+    let (said, _) = tui.ui.flash.as_ref().expect("the edit is taken up");
+    assert!(said.starts_with("reloaded — "), "{said:?}");
+    assert_eq!(tui.ui.status, vec![Segment::Elapsed]);
     assert_eq!(
         tui.core.lane().agent().brief.effort,
         llm::request::Effort::High
     );
+    let view = front_view(&mut tui.views, tui.core.lane());
+    tui.ui.flush(tui.core.lane(), view);
+    assert_eq!(
+        drawn_rows(view),
+        before,
+        "reload leaves the transcript alone"
+    );
+    let bar = tui.ui.regions.bar;
+    let buf = tui.ui.screen.test_buffer();
+    let row = |y| {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<String>()
+    };
+    assert!(
+        row(bar.y).contains("reloaded"),
+        "the bar carries the notice"
+    );
+    assert!(
+        (0..bar.y).any(|y| row(y).contains("0s")),
+        "the running status stays above the notice"
+    );
 
     std::fs::write(&file, "effort = ").expect("a half-written file");
-    let said = tui.core.refresh_config().expect("said once");
-    assert!(said[0].starts_with("nothing reloaded"), "{said:?}");
-    assert_eq!(tui.core.refresh_config(), None, "and not again");
+    tui.refresh_files();
+    let said = tui.ui.flash.clone().expect("said once");
+    assert!(said.0.starts_with("nothing reloaded"), "{said:?}");
+    tui.refresh_files();
+    assert_eq!(tui.ui.flash.as_ref(), Some(&said), "and not again");
+    assert_eq!(
+        drawn_rows(front_view(&mut tui.views, tui.core.lane())),
+        before,
+        "a failed reload also stays out of the transcript"
+    );
 
     std::fs::write(&file, "effort = \"low\"\n").expect("the fix");
-    assert!(tui.core.refresh_config().is_some());
+    tui.refresh_files();
+    assert!(tui.ui.flash.as_ref().unwrap().0.starts_with("reloaded — "));
     assert_eq!(
         tui.core.lane().agent().brief.effort,
         llm::request::Effort::Low

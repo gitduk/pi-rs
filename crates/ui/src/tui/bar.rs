@@ -500,7 +500,9 @@ impl BarScript {
     ) -> Option<String> {
         match out {
             Ok(found) => {
-                self.failing = false;
+                if std::mem::take(&mut self.failing) {
+                    tracing::info!(target: "pi::bar", "script recovered");
+                }
                 let due = (found.refresh)
                     .filter(|s| s.is_finite() && *s > 0.0)
                     .map(|s| Instant::now() + Duration::from_secs_f64(s.max(MIN_REFRESH)));
@@ -514,6 +516,9 @@ impl BarScript {
                     due: Some(Instant::now() + RETRY),
                 };
                 let first = !std::mem::replace(&mut self.failing, true);
+                if first {
+                    tracing::warn!(target: "pi::bar", error = %why, "script failed");
+                }
                 // Cargo's own warnings come first; the error is what to show.
                 let head = why
                     .lines()

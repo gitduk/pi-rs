@@ -133,10 +133,7 @@ impl Tui {
 
     fn begin(&mut self, ask: Ask, done: &UnboundedSender<Done>) {
         if let Some(said) = self.core.refresh_prompt_files() {
-            let view = front_view(&mut self.views, self.core.lane());
-            for line in said {
-                self.ui.say(view, self.ui.paint.muted(&by_pi(&line)));
-            }
+            self.notice(pi_core::input::notice(said));
         }
         if let Some(note) = self.core.lane().drift() {
             let lane = self.core.lane_mut();
@@ -806,10 +803,7 @@ impl Tui {
         if left == 0 {
             return;
         }
-        self.ui.say(
-            front_view(&mut self.views, self.core.lane()),
-            by_pi("stopping — saving what the runs have written"),
-        );
+        self.notice("stopping — saving what the runs have written".to_string());
         self.ui.flush(
             self.core.lane(),
             front_view(&mut self.views, self.core.lane()),

@@ -175,8 +175,7 @@ pub struct Tui {
 }
 
 impl Tui {
-    /// `last` lands under everything the lanes open with, kept, where a
-    /// resumed transcript cannot push it out of sight.
+    /// `last` appears in the bar, without adding to the resumed transcript.
     pub fn new(mut core: Core, drivers: Drivers, last: Option<String>) -> Result<Self> {
         // The screen first, for raw mode: the answer to the background query
         // carries no newline, so a cooked read would wait for one forever.
@@ -218,14 +217,8 @@ impl Tui {
                 ui.rebuild(view, session, lane.root());
             }
         }
-        if let Some(line) = last.map(|l| by_pi(&l)) {
-            let lane = core.lane_mut();
-            let view = view_at(&mut views, lane.token());
-            // Kept only under a transcript: alone, it would file one.
-            match lane.session().is_some_and(|s| !s.is_empty()) {
-                true => ui.say_kept(lane, view, &line),
-                false => ui.say(view, ui.paint.muted(&line)),
-            }
+        if let Some(line) = last {
+            ui.flash(line);
         }
         let (events, hold) = reader();
         Ok(Self {
@@ -350,6 +343,24 @@ impl Tui {
         let view = front_view(&mut self.views, self.core.lane());
         self.ui.adopt_config(&self.core, view);
         self.notice(said);
+    }
+
+    // A skill warning must not hide the reload that made it visible.
+    fn refresh_files(&mut self) {
+        let mut notes = Vec::new();
+        if let Some(said) = self.core.refresh_config() {
+            notes.extend(said);
+            let view = front_view(&mut self.views, self.core.lane());
+            self.ui.adopt_config(&self.core, view);
+        }
+        if self.core.refresh_prompts() {
+            self.ui.commands = self.core.commands.clone();
+        }
+        if let Some(said) = self.core.refresh_skills() {
+            self.ui.commands = self.core.commands.clone();
+            notes.extend(said);
+        }
+        self.notice(pi_core::input::notice(notes));
     }
 
     fn land_swap(&mut self, said: String) {
@@ -617,23 +628,7 @@ impl Tui {
             // every frame: each look is a walk.
             if looked.elapsed() >= std::time::Duration::from_secs(1) {
                 looked = std::time::Instant::now();
-                if let Some(said) = self.core.refresh_config() {
-                    let view = front_view(&mut self.views, self.core.lane());
-                    for line in said {
-                        self.ui.say(view, self.ui.paint.muted(&by_pi(&line)));
-                    }
-                    self.ui.adopt_config(&self.core, view);
-                }
-                if self.core.refresh_prompts() {
-                    self.ui.commands = self.core.commands.clone();
-                }
-                if let Some(said) = self.core.refresh_skills() {
-                    self.ui.commands = self.core.commands.clone();
-                    let view = front_view(&mut self.views, self.core.lane());
-                    for line in said {
-                        self.ui.say(view, self.ui.paint.muted(&by_pi(&line)));
-                    }
-                }
+                self.refresh_files();
             }
             self.refresh_tabs();
             self.bar.poke(self.core.lane());
@@ -726,8 +721,7 @@ impl Tui {
                     }
                     Some(out) = self.bar.rx.recv() => {
                         if let Some(why) = self.bar.land(out, &mut self.ui.layout) {
-                            let muted = self.ui.paint.muted(&by_pi(&why));
-                            self.ui.say(front_view(&mut self.views, self.core.lane()), muted);
+                            self.notice(why);
                         }
                         Wake::Nothing
                     }
@@ -920,17 +914,15 @@ impl Tui {
         self.land_rewound(outcome, saved.err().map(|e| core::not_saved(&e)));
     }
 
-    // The transcript went back: the view follows it, and says where it ends.
-    // Written or not, it went back; a failed write is a notice on top.
+    // A save failure must remain visible beside the rewind confirmation.
     fn land_rewound(&mut self, outcome: Rewound, unsaved: Option<String>) {
-        if let Some(why) = unsaved {
-            self.notice(why);
-        }
+        let mut notes: Vec<String> = unsaved.into_iter().collect();
         // Past a rewind the transcript is truth again: the whole view is
         // rebuilt from it, back to the node the conversation returned to.
         let said = match outcome {
             Rewound::Nothing => {
-                self.ui.flash(NOTHING_TO_REWIND);
+                notes.push(NOTHING_TO_REWIND.to_string());
+                self.notice(input::notice(notes));
                 return;
             }
             Rewound::Unsent(_) if !self.ui.editor.is_empty() => {
@@ -941,6 +933,7 @@ impl Tui {
             Rewound::Unsent(text) => {
                 self.rebuild_front();
                 self.ui.editor.set_line(&text);
+                self.notice(input::notice(notes));
                 return;
             }
             Rewound::Kept => {
@@ -957,9 +950,8 @@ impl Tui {
             }
         };
         self.rebuild_front();
-        let muted = self.ui.paint.muted(&by_pi(&said));
-        self.ui
-            .say(front_view(&mut self.views, self.core.lane()), muted);
+        notes.insert(0, said);
+        self.notice(input::notice(notes));
     }
 
     // `/rewind ` on the line, what the user said completing it.

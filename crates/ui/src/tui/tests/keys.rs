@@ -91,29 +91,49 @@ async fn an_idle_lane_opens_the_rewind_selector() {
 async fn an_unsent_prompt_survives_a_failed_write() {
     use agent::session::Session;
 
-    let dir = tempfile::tempdir().expect("a checkout");
-    let mut tui = surface(dir.path());
-    let mut session = Session::new();
-    session.prompt("the first question");
-    let token = tui.core.lanes[0].token();
-    tui.settle(crate::tui::run::Done {
-        token,
-        kind: crate::tui::run::Kind::Turn,
-        ran: Some((session, Ok(llm::stream::Usage::default()))),
-    })
-    .await;
-    // A file where the store's directory goes: no write gets under it.
-    let state = dir.path().join("state");
-    let _ = std::fs::remove_dir_all(&state);
-    std::fs::write(&state, "").expect("a file in the way");
-    tui.ui.flash = None;
+    for draft in ["", "a draft already being typed"] {
+        let dir = tempfile::tempdir().expect("a checkout");
+        let mut tui = surface(dir.path());
+        let mut session = Session::new();
+        session.prompt("the first question");
+        let token = tui.core.lanes[0].token();
+        tui.settle(crate::tui::run::Done {
+            token,
+            kind: crate::tui::run::Kind::Turn,
+            ran: Some((session, Ok(llm::stream::Usage::default()))),
+        })
+        .await;
+        // A file where the store's directory goes: no write gets under it.
+        let state = dir.path().join("state");
+        let _ = std::fs::remove_dir_all(&state);
+        std::fs::write(&state, "").expect("a file in the way");
+        tui.ui.flash = None;
+        tui.ui.editor.set_line(draft);
 
-    let id = tui.core.lane().last_ask().expect("the prompt");
-    tui.rewind_turn(id);
+        let id = tui.core.lane().last_ask().expect("the prompt");
+        tui.rewind_turn(id);
 
-    assert_eq!(tui.ui.editor.text(), "the first question");
-    let flash = tui.ui.flash.as_ref().map(|(text, _)| text.as_str());
-    assert!(flash.is_some_and(|f| f.contains("not saved")), "{flash:?}");
+        let expected = if draft.is_empty() {
+            "the first question"
+        } else {
+            draft
+        };
+        assert_eq!(tui.ui.editor.text(), expected);
+        let flash = tui.ui.flash.as_ref().map(|(text, _)| text.as_str());
+        assert!(flash.is_some_and(|f| f.contains("not saved")), "{flash:?}");
+        if !draft.is_empty() {
+            assert!(
+                flash.unwrap().contains("unsent"),
+                "the confirmation shares the notice"
+            );
+        }
+        let rows = drawn_rows(view_at(&mut tui.views, token));
+        assert!(
+            rows.iter()
+                .all(|r| !r.contains("unsent") && !r.contains("not saved")),
+            "rewind notices stay out of the transcript: {rows:?}"
+        );
+    }
 }
 
 // A panicked job leaves the lane idle with nothing in it (`NO_TRANSCRIPT`).
