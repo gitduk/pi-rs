@@ -591,12 +591,15 @@ pub fn opening(
     root: &Path,
     prior: Option<&crate::session::Stored>,
 ) {
+    let config_path = config_path
+        .map(std::path::PathBuf::from)
+        .or_else(crate::config::global_path);
     tracing::info!(
         target: "pi::session",
         version = env!("CARGO_PKG_VERSION"),
         argv = %std::env::args().skip(1).collect::<Vec<_>>().join(" "),
         workspace = %root.display(),
-        config = config_path.unwrap_or("~/.pi/settings.toml"),
+        config = %config_path.map_or_else(|| "-".into(), |p| p.display().to_string()),
         models = config.names().len(),
         rebound_keys = config.keys.len(),
         model = config.model.as_deref().unwrap_or("-"),

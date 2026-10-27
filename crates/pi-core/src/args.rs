@@ -18,7 +18,8 @@ pub struct Args {
     /// The prompt. Reads stdin when omitted. Runs once and keeps nothing.
     pub prompt: Option<String>,
 
-    /// Defaults and locally-defined models. Defaults to ~/.pi/settings.toml.
+    /// Defaults and locally-defined models. Defaults to $PI_HOME/settings.toml
+    /// (usually ~/.pi/settings.toml).
     #[arg(long, value_name = "FILE", env = "PI_CONFIG")]
     pub config: Option<String>,
 

@@ -33,6 +33,11 @@ pub fn short(path: &Path, root: &Path) -> String {
     if let Ok(rel) = path.strip_prefix(root) {
         return rel.display().to_string();
     }
+    home_relative(path)
+}
+
+/// A path under the user's home with `~`, otherwise as given.
+pub fn home_relative(path: &Path) -> String {
     if let Some(h) = home()
         && let Ok(rel) = path.strip_prefix(&h)
     {

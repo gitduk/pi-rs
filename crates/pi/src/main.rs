@@ -204,7 +204,20 @@ async fn run(updated_from: Option<String>) -> Result<Ended> {
         prior.as_ref().map(|p| p.model.as_str()),
         settings.project_sets("model").is_some(),
     ) else {
-        bail!("no model to run. Define one in ~/.pi/settings.toml — see examples/pi.toml.");
+        let path = args
+            .config
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .or_else(pi_store::config::global_path);
+        let file = path.map_or_else(
+            || "a config file".into(),
+            |p| core::instructions::home_relative(&p),
+        );
+        let example = concat!(
+            env!("CARGO_PKG_REPOSITORY"),
+            "/blob/master/examples/pi.toml"
+        );
+        bail!("no model to run. Define one in {file} — see {example}");
     };
     let pinned = args.pinned();
     let dialled = dial(&pinned, &config, &named, named_by)?;
