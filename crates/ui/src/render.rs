@@ -61,17 +61,25 @@ impl Paint {
         };
         let mut spans = vec![self.span_hovered(hovered, &self.theme.prompt.color, name)];
         let args = if name == "bash" {
-            let mut args = crate::markdown::shell(args, self.theme.syntax);
-            if hovered {
-                for span in &mut args {
-                    span.style = Self::lit(span.style);
-                }
-            }
-            args
+            self.shell(args, hovered)
         } else {
             vec![self.span_hovered(hovered, &self.theme.code, args)]
         };
         spans.extend(args);
+        spans
+    }
+
+    /// A shell command, with the same syntax colours on every surface.
+    pub(super) fn shell(&self, text: &str, hovered: bool) -> Vec<Span<'static>> {
+        if !self.color {
+            return vec![Span::raw(text.to_string())];
+        }
+        let mut spans = crate::markdown::shell(text, self.theme.syntax);
+        if hovered {
+            for span in &mut spans {
+                span.style = Self::lit(span.style);
+            }
+        }
         spans
     }
 

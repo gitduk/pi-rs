@@ -12,7 +12,7 @@
 //! from the screen or through a job that follows, and withdrawn once their
 //! asker is gone.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
@@ -489,19 +489,39 @@ impl Table {
         id: u64,
         within: std::time::Duration,
     ) -> Result<Option<Vec<String>>, String> {
+        self.wait_each(root, &[id], within)
+            .await
+            .pop()
+            .expect("one job was waited for")
+    }
+
+    /// Wait for all named jobs under one deadline, returning each result in
+    /// order. Keep results queued until the wait ends so cancellation loses none.
+    pub async fn wait_each(
+        &self,
+        root: &Path,
+        ids: &[u64],
+        within: std::time::Duration,
+    ) -> Vec<Result<Option<Vec<String>>, String>> {
         let deadline = Instant::now() + within;
         loop {
             // Enabled before looking, so an end between the two still wakes it.
             let moved = self.moved.notified();
             tokio::pin!(moved);
             moved.as_mut().enable();
-            if let Some(said) = self.take_results(root, id)? {
-                return Ok(Some(said));
+            let running = self
+                .lock()
+                .items
+                .iter()
+                .any(|i| i.root == root && ids.contains(&i.id) && i.running());
+            if !running {
+                break;
             }
             if tokio::time::timeout_at(deadline, moved).await.is_err() {
-                return Ok(None);
+                break;
             }
         }
+        ids.iter().map(|&id| self.take_results(root, id)).collect()
     }
 
     // What job `id` of `root`'s said, taken, once it no longer runs; a
@@ -1245,9 +1265,10 @@ impl Tool for Jobs {
          or `stop_all`. A stopped job's results never come back. `restart` \
          runs a background command again under its id, stopped first if it \
          still runs; a stopped or exited one stays listed for that. When you \
-         need a job's result before going on, `wait` for it — never sleep in \
-         a shell: wait returns the moment it ends, with what it said, and \
-         that result does not come back again as a turn. A shell call past \
+         need jobs' results before going on, `wait` takes one id or an array \
+         of ids and waits for all of them under one timeout — never sleep in \
+         a shell. It returns their results in the requested order, and those \
+         results do not come back again as turns. A shell call past \
          its soft timeout is still running under the returned id: inspect its \
          output, wait longer, or stop it; do not start the command again."
     }
@@ -1276,8 +1297,10 @@ impl Tool for Jobs {
                     "description": "The id of one whose latest output to show, as it runs.",
                 },
                 "wait": {
-                    "type": "integer",
-                    "description": "The id of one to wait for until it ends; past `timeout_ms` it shows the latest output instead.",
+                    "type": ["integer", "array"],
+                    "items": { "type": "integer" },
+                    "minItems": 1,
+                    "description": "One job id or an array of ids to wait for together until all end. Duplicates are ignored. One shared timeout_ms; on timeout, completed jobs return their results and running jobs show their latest output. Results stay in the requested order; an invalid id does not discard other jobs' results.",
                 },
                 "timeout_ms": {
                     "type": "integer",
@@ -1289,7 +1312,7 @@ impl Tool for Jobs {
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let root = ctx.workspace.root();
-        // A lone id, as the field once took, still names one; so does `"#3"`.
+        // A lone id still names one; so does `"#3"`.
         let id = |v: &Value| {
             v.as_u64()
                 .or_else(|| parse_id(v.as_str()?))
@@ -1340,24 +1363,45 @@ impl Tool for Jobs {
                 self.table.stop_each(root, if all { &[] } else { &ids }),
             );
         }
-        if let Some(v) = args.get("wait").filter(|v| !v.is_null()) {
-            let id = id(v)?;
+        if args.get("wait").is_some_and(|v| !v.is_null()) {
+            let mut ids = ids_of("wait")?;
+            let mut seen = HashSet::new();
+            ids.retain(|id| seen.insert(*id));
+            if ids.is_empty() {
+                return Err(ToolError::Invalid(
+                    "`wait` needs at least one job id".into(),
+                ));
+            }
             let asked = args.get("timeout_ms").and_then(Value::as_u64);
             let within = tool::limit::timeout(asked, MAX_CALL, MAX_CALL);
             let waited = tokio::select! {
-                w = self.table.wait(root, id, within) => w.map_err(ToolError::Invalid)?,
+                w = self.table.wait_each(root, &ids, within) => w,
                 _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
             };
-            let out = match waited {
-                Some(said) if said.is_empty() => format!("#{id} ended, saying nothing"),
-                Some(said) => format!("#{id} ended:\n{}", said.join("\n\n")),
-                None => {
-                    let latest = self.table.output(root, id).unwrap_or_else(|why| why);
-                    let elapsed = llm::figures::elapsed(within);
-                    format!("#{id} still running after {elapsed}; latest output:\n{latest}")
-                }
-            };
-            return Ok(ToolOutput::text(out).with_preview(named("wait", &[id])));
+            let failed = waited.iter().filter(|w| w.is_err()).count();
+            let out = ids
+                .iter()
+                .zip(waited)
+                .map(|(id, waited)| match waited {
+                    Ok(Some(said)) if said.is_empty() => format!("#{id} ended, saying nothing"),
+                    Ok(Some(said)) => format!("#{id} ended:\n{}", said.join("\n\n")),
+                    Ok(None) => {
+                        let latest = self.table.output(root, *id).unwrap_or_else(|why| why);
+                        let elapsed = llm::figures::elapsed(within);
+                        format!("#{id} still running after {elapsed}; latest output:\n{latest}")
+                    }
+                    Err(why) => why,
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if failed == ids.len() {
+                return Err(ToolError::Invalid(out));
+            }
+            let out = ToolOutput::text(out).with_preview(named("wait", &ids));
+            return Ok(match failed {
+                0 => out,
+                _ => out.warned(),
+            });
         }
         if let Some(v) = args.get("output").filter(|v| !v.is_null()) {
             let id = id(v)?;
@@ -1434,6 +1478,159 @@ mod tests {
             .await;
         assert_eq!(waited, Ok(None));
         assert!(table.wait(&root, 99, Default::default()).await.is_err());
+    }
+
+    fn context() -> (tempfile::TempDir, Ctx) {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        (dir, ctx)
+    }
+
+    #[tokio::test]
+    async fn a_batch_wait_keeps_request_order_and_takes_each_result_once() {
+        let (_dir, ctx) = context();
+        let root = ctx.workspace.root();
+        let table = Arc::new(Table::default());
+        let jobs = Jobs::new(table.clone());
+        let first = start(&table, root, "first");
+        let second = start(&table, root, "second");
+        let mut waiting =
+            Box::pin(jobs.execute(json!({"wait": [first.id(), second.id(), first.id()]}), &ctx));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        second.input("a person's line".into());
+        second.result("second result".into());
+        second.end();
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        assert_eq!(
+            table.waiting(root, second.id()).unwrap(),
+            ["a person's line", "second result"]
+        );
+        first.result("first result".into());
+        first.end();
+        let out = waiting.await.unwrap();
+        assert_eq!(out.preview(), "wait #1, #2");
+        assert_eq!(
+            out.flatten(),
+            "#1 ended:\nfirst result\n\n#2 ended:\nsecond result"
+        );
+        assert!(!out.warned);
+        assert!(matches!(
+            table.take_back(root),
+            Some((_, Back::Input { .. }))
+        ));
+        assert!(
+            table.take_back(root).is_none(),
+            "results were delivered once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_batch_wait_uses_one_deadline_and_keeps_completed_results() {
+        let (_dir, ctx) = context();
+        let root = ctx.workspace.root();
+        let table = Arc::new(Table::default());
+        let jobs = Jobs::new(table.clone());
+        let first = start(&table, root, "first");
+        let second = start(&table, root, "second");
+        let done = start(&table, root, "done");
+        done.result("ready".into());
+        done.end();
+        let mut waiting = Box::pin(jobs.execute(
+            json!({"wait": [first.id(), second.id(), done.id()], "timeout_ms": 20}),
+            &ctx,
+        ));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        // Poll explicitly: a separate timeout per job would start the second
+        // job's clock now and leave this pending for another timeout.
+        let std::task::Poll::Ready(out) = futures::poll!(waiting.as_mut()) else {
+            panic!("all jobs share the same deadline");
+        };
+        let text = out.unwrap().flatten();
+        assert!(text.starts_with("#1 still running after"), "{text}");
+        assert!(text.contains("#2 still running after"), "{text}");
+        assert!(text.ends_with("#3 ended:\nready"), "{text}");
+        assert!(table.jobs(root).iter().all(|j| j.state == State::Running));
+        assert!(table.take_back(root).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_batch_wait_reports_bad_ids_without_discarding_valid_results() {
+        let (_dir, ctx) = context();
+        let root = ctx.workspace.root();
+        let table = Arc::new(Table::default());
+        let jobs = Jobs::new(table.clone());
+        let job = start(&table, root, "build");
+        let elsewhere = start(&table, Path::new("/elsewhere"), "other checkout");
+        job.result("built".into());
+        job.end();
+        elsewhere.result("private".into());
+        elsewhere.end();
+        let out = jobs
+            .execute(json!({"wait": [99, job.id(), elsewhere.id()]}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.flatten(),
+            "no job #99 here\n\n#1 ended:\nbuilt\n\nno job #2 here"
+        );
+        assert!(out.warned);
+        assert_eq!(
+            table
+                .waiting(Path::new("/elsewhere"), elsewhere.id())
+                .unwrap(),
+            ["private"]
+        );
+        assert!(matches!(
+            jobs.execute(json!({"wait": [98, 99]}), &ctx).await,
+            Err(ToolError::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_batch_wait_leaves_completed_results_queued() {
+        let (_dir, ctx) = context();
+        let root = ctx.workspace.root();
+        let table = Arc::new(Table::default());
+        let jobs = Jobs::new(table.clone());
+        let done = start(&table, root, "done");
+        let running = start(&table, root, "running");
+        let mut waiting = Box::pin(jobs.execute(json!({"wait": [done.id(), running.id()]}), &ctx));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        done.result("keep this".into());
+        done.end();
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        ctx.cancel.cancel();
+        assert!(matches!(waiting.await, Err(ToolError::Cancelled)));
+        assert!(result_of(&table, root).unwrap().line.contains("keep this"));
+        assert_eq!(table.jobs(root)[0].state, State::Running);
+    }
+
+    #[tokio::test]
+    async fn wait_still_accepts_single_ids_and_rejects_bad_arrays_before_taking_results() {
+        let (_dir, ctx) = context();
+        let table = Arc::new(Table::default());
+        let jobs = Jobs::new(table.clone());
+        for string_id in [false, true] {
+            let job = start(&table, ctx.workspace.root(), "build");
+            job.result("built".into());
+            job.end();
+            for ids in [json!([]), json!([job.id(), false])] {
+                assert!(matches!(
+                    jobs.execute(json!({"wait": ids}), &ctx).await,
+                    Err(ToolError::Invalid(_))
+                ));
+            }
+            let id = if string_id {
+                json!(format!("#{}", job.id()))
+            } else {
+                json!(job.id())
+            };
+            let out = jobs.execute(json!({"wait": id}), &ctx).await.unwrap();
+            assert_eq!(out.flatten(), format!("#{} ended:\nbuilt", job.id()));
+            assert_eq!(out.preview(), format!("wait #{}", job.id()));
+            assert!(!out.warned);
+        }
     }
 
     // A person's line and a result keep the order they were said in, and the

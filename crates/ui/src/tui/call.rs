@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use llm::message::ToolResult;
 use ratatui::style::Stylize;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 
 use super::browse::PageLine;
 use super::row::{self, PendingTool, Row, Stage, StepMark};
@@ -172,6 +172,23 @@ fn job_text(job: &Job) -> (String, String) {
     (head, state)
 }
 
+// The visible head may end anywhere, even inside the id. Only the command
+// carries shell colours; progress after it keeps its own muted voice.
+fn job_head(job: &Job, head: &str, hovered: bool, paint: &Paint) -> Vec<Span<'static>> {
+    let id = format!("#{} ", job.id);
+    let Some(rest) = head.strip_prefix(&id) else {
+        return vec![paint.span_hovered(hovered, &paint.theme.prompt.color, head)];
+    };
+    let (command, progress) = match rest.strip_prefix(&job.description) {
+        Some(progress) => (job.description.as_str(), progress),
+        None => (rest, ""),
+    };
+    let mut spans = vec![paint.span_hovered(hovered, &paint.theme.prompt.color, id)];
+    spans.extend(paint.shell(command, hovered));
+    spans.push(paint.span_hovered(hovered, &paint.theme.muted, progress));
+    spans
+}
+
 // Under an open job: the last this many rows of what it printed.
 const BODY_SHOWN: usize = 8;
 
@@ -219,7 +236,9 @@ fn said(body: &str) -> Vec<String> {
 // A page of all an open job printed, headed by its row.
 pub(super) fn job_page(job: &Job, body: &str, paint: &Paint) -> Vec<PageLine> {
     let (head, tail) = job_text(job);
-    let head = Line::from(paint.span(&paint.theme.muted, head + &tail));
+    let mut spans = job_head(job, &head, false, paint);
+    spans.push(paint.span(&paint.theme.muted, tail));
+    let head = Line::from(spans);
     let said = said(body).into_iter().map(|l| Line::from(l).into());
     std::iter::once(head.into()).chain(said).collect()
 }
@@ -247,7 +266,9 @@ pub(super) fn job_lines(
         let shine = hovered == Some(JobRow::Job(job.id));
         let rows = if let Some(OpenJob { body, .. }) = open.filter(|o| o.id == job.id) {
             let (head, tail) = job_text(job);
-            let row = Line::from(paint.span_hovered(shine, &paint.theme.muted, head + &tail));
+            let mut spans = job_head(job, &head, shine, paint);
+            spans.push(paint.span_hovered(shine, &paint.theme.muted, tail));
+            let row = Line::from(spans);
             let (from, tail) = tail_rows(&said(body), room);
             let mut rows = super::screen::fit(&row, room);
             ids.extend(std::iter::repeat_n(JobRow::Job(job.id), rows.len()));
@@ -275,7 +296,9 @@ pub(super) fn job_lines(
             if paint.color {
                 said = said.italic();
             }
-            let row = Line::from(vec![muted(head), muted(sep), said, muted(tail)]);
+            let mut spans = job_head(job, &head, shine, paint);
+            spans.extend([muted(sep), said, muted(tail)]);
+            let row = Line::from(spans);
             ids.push(JobRow::Job(job.id));
             vec![row]
         };
