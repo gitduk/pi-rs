@@ -106,9 +106,8 @@ enum Kind {
         aside: bool,
     },
     Note(Note),
-    // Painted lines that come and go together: the banner, or none at all
-    // where a row was that is gone.
-    Lines(Vec<Line<'static>>),
+    // The banner is replaced whole; an empty group marks a removed row.
+    Lines(Vec<(Line<'static>, Option<Line<'static>>)>),
     Result(ToolOut),
     Relayed(Relayed),
     Steps(Group),
@@ -241,7 +240,9 @@ impl Row {
     /// Painted lines kept as one row: replaced whole, they leave the rows
     /// under them where they were.
     pub fn lines(lines: Vec<Line<'static>>) -> Self {
-        Self::new(Kind::Lines(lines))
+        Self::new(Kind::Lines(
+            lines.into_iter().map(|line| (line, None)).collect(),
+        ))
     }
 
     /// The blank line a turn after the first opens on.
@@ -654,8 +655,8 @@ impl Row {
         h
     }
 
-    /// What the screen renders for row `i` at this width: text, plus the
-    /// border continuation rows repeat (a said row only; others have none).
+    /// What the screen renders for row `i` at this width: text, plus an
+    /// optional prefix. `hangs` decides whether wraps blank that prefix.
     pub fn line(
         &self,
         i: usize,
@@ -665,7 +666,7 @@ impl Row {
         let (line, border) = match &self.0 {
             Kind::Said { border, body, .. } => (body.clone(), Some(border.clone())),
             Kind::Answer(text, _) => (text.clone(), None),
-            Kind::Lines(lines) => (lines[i].clone(), None),
+            Kind::Lines(lines) => lines[i].clone(),
             Kind::CodeLine(line) => (line.clone(), Some(Line::from(CODE_INDENT))),
             Kind::Note(n) => n.line(i, paint, width),
             Kind::Code(c) => (c.line(paint), None),
@@ -711,7 +712,7 @@ impl Row {
     /// Whether a wrap of this row shows its border on the first piece only,
     /// blanking it on the rest; the columns it takes stay the same.
     pub fn hangs(&self) -> bool {
-        matches!(self.0, Kind::Note(_))
+        matches!(self.0, Kind::Note(_) | Kind::Lines(_))
     }
 
     /// What in line `i` reads as one — a stretch of code, a link, a table's
@@ -838,15 +839,18 @@ impl Row {
         let width = pi_store::text::widest(facts.iter().map(|(label, _)| *label));
         let muted = |line: &str| Line::from(paint.span(&paint.theme.muted, line));
         let fact = |label: &str, value: &str| {
-            muted(&format!("{}  {value}", pi_store::text::pad(label, width)))
+            (
+                muted(value),
+                Some(muted(&format!("{}  ", pi_store::text::pad(label, width)))),
+            )
         };
-        Self::lines(
-            std::iter::once(muted(&icons::version_banner()))
+        Self::new(Kind::Lines(
+            std::iter::once((muted(&icons::version_banner()), None))
                 .chain(facts.iter().map(|(label, value)| fact(label, value)))
-                .chain((!resolved.notes.is_empty()).then(|| muted("")))
-                .chain(resolved.notes.iter().map(|note| muted(note)))
+                .chain((!resolved.notes.is_empty()).then(|| (muted(""), None)))
+                .chain(resolved.notes.iter().map(|note| (muted(note), None)))
                 .collect(),
-        )
+        ))
     }
 }
 

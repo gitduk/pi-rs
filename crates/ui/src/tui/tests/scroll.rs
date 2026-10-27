@@ -5,6 +5,40 @@ use crate::tui::{View, following_terminal};
 use pi_store::theme::{Color, Theme};
 
 #[test]
+fn banner_height_tracks_wrapping_after_resizing() {
+    use crate::tui::screen::{Piece, plain};
+
+    let paint = Paint::new(false);
+    let mut resolved = (*pi_core::core::lane::a_resolved("")).clone();
+    resolved.instructions = vec!["~/.pi/AGENTS.md".into()];
+    resolved.project = vec![
+        (
+            "tools".into(),
+            "addr-watch, four-watch, loom-buy, loom-sell".into(),
+        ),
+        ("skills".into(), "order-flow, trade-direction".into()),
+    ];
+    resolved.notes = vec!["startup note".into()];
+    let history = vec![Row::banner(&resolved, &paint)];
+    let mut heights = Vec::new();
+
+    for width in [40, 60, 100, 40] {
+        let pieces: Vec<_> = ScrollbackRows::new(&history, &paint, width).collect();
+        let measured: usize = pieces.iter().map(Piece::height).sum();
+        let rows: Vec<String> = pieces
+            .into_iter()
+            .flat_map(Piece::pieces)
+            .map(|line| plain(&line))
+            .collect();
+        assert_eq!(measured, rows.len(), "width {width}");
+        assert!(rows.iter().all(|line| pi_store::text::width(line) <= width));
+        heights.push(measured);
+    }
+    assert!(heights[0] > heights[2]);
+    assert_eq!(heights[0], heights[3]);
+}
+
+#[test]
 fn markdown_continuations_align_in_live_and_settled_rows() {
     use crate::tui::screen::{Piece, plain};
     use crate::tui::scrollback::{Folds, Scrollback, ScrollbackRows, body};
