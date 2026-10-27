@@ -8,12 +8,11 @@ use crate::background::{Again, JobHandle, JobSink, Rerun};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput, output};
 
 const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const FOREGROUND_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Deserialize)]
 struct Args {
     command: String,
-    #[serde(default)]
-    timeout_ms: Option<u64>,
     #[serde(default = "workspace_root")]
     cwd: String,
 }
@@ -25,58 +24,25 @@ fn workspace_root() -> String {
 
 const ARGS_HINT: &str = "bash takes `command`, plus `cwd` to run anywhere but the workspace root";
 
-pub struct Bash;
+const DESCRIPTION: &str = "Run a shell command where cwd says, in a fresh shell each call: cd and \
+    environment changes do not carry over. Prefer read and write over cat \
+    and heredocs, and edit over sed when the lines are picked by what they \
+    say: those report failures you can act on. A substitution picked by \
+    pattern or position belongs here (sed, perl, awk), and so do moves and \
+    deletions (mv, rm).";
 
-impl Bash {
-    pub const NAME: &'static str = "bash";
-}
-
-#[async_trait]
-impl Tool for Bash {
-    fn name(&self) -> &str {
-        Self::NAME
-    }
-
-    fn description(&self) -> &str {
-        "Run a shell command where cwd says, in a fresh shell each call: cd and \
-         environment changes do not carry over. Prefer read and write over cat \
-         and heredocs, and edit over sed when the lines are picked by what they \
-         say: those report failures you can act on. A substitution picked by \
-         pattern or position belongs here (sed, perl, awk), and so do moves and \
-         deletions (mv, rm)."
-    }
-
-    fn schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "command": { "type": "string" },
-                "timeout_ms": { "type": "integer", "description": "Default 120000, max 600000." },
-                "cwd": { "type": "string", "description": "Where the command runs, as a workspace-relative or absolute directory; omit it for the workspace root." },
-            },
-            "required": ["command"],
-            "additionalProperties": false,
-        })
-    }
-
-    fn tier(&self) -> Tier {
-        Tier::Exec
-    }
-
-    async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let args: Args = tool::parse_args_hinted(args, ARGS_HINT)?;
-        let timeout = tool::limit::timeout(args.timeout_ms, DEFAULT_TIMEOUT, tool::limit::MAX_CALL);
-        // The preview names the command as asked: rtk's rewrite is how it
-        // ran, which the journal keeps, not what the call said.
-        let preview = first_line(&args.command).to_string();
-        let (command, cwd) = prepare(args, self.tier(), ctx).await?;
-
-        let before = crate::drift::before(ctx);
-        // A failed call tells nothing, so what it changed is left for drift.
-        let ran = run(&command, &cwd, timeout, ctx).await?;
-        let moved = crate::drift::absorb(ctx, before);
-        Ok(crate::drift::tell(ran.output(preview), &moved))
-    }
+/// Run a command to completion under the workspace's checks and rewrite.
+pub async fn foreground(command: &str, cwd: &str, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
+    let preview = first_line(command).to_string();
+    let args = Args {
+        command: command.to_string(),
+        cwd: cwd.to_string(),
+    };
+    let (command, cwd) = prepare(args, Tier::Exec, ctx).await?;
+    let before = crate::drift::before(ctx);
+    let ran = run(&command, &cwd, DEFAULT_TIMEOUT, ctx).await?;
+    let moved = crate::drift::absorb(ctx, before);
+    Ok(crate::drift::tell(ran.output(preview), &moved))
 }
 
 // One line: whoever reads the preview, and the log, treat further newlines
@@ -102,17 +68,27 @@ async fn prepare(
 
 /// `bash` for a run that keeps jobs: a soft timeout returns the still-running
 /// command's id; `background` can return it immediately.
-pub struct WithBackground {
+pub struct Bash {
     jobs: Arc<dyn JobSink>,
     background: bool,
+    description: String,
 }
 
-impl WithBackground {
+impl Bash {
+    pub const NAME: &'static str = "bash";
+
     /// The shell whose background calls are kept by `jobs`.
     pub fn new(jobs: Arc<dyn JobSink>) -> Self {
         Self {
             jobs,
             background: true,
+            description: format!(
+                "{} After at most {} seconds, return a running job id and its latest output; \
+                 the command keeps running until it exits or you stop the job. For long-running \
+                 commands, leave progress output unredirected instead of piping it through head or tail.",
+                DESCRIPTION,
+                FOREGROUND_WAIT.as_secs()
+            ),
         }
     }
 
@@ -120,31 +96,32 @@ impl WithBackground {
     /// without offering to start commands apart from it.
     pub fn scoped(jobs: Arc<dyn JobSink>) -> Self {
         Self {
-            jobs,
             background: false,
+            ..Self::new(jobs)
         }
     }
 }
 
 #[async_trait]
-impl Tool for WithBackground {
+impl Tool for Bash {
     fn name(&self) -> &str {
         Bash::NAME
     }
 
     fn description(&self) -> &str {
-        Bash.description()
+        &self.description
     }
 
     fn schema(&self) -> Value {
-        let mut schema = Bash.schema();
-        schema["properties"]["timeout_ms"]["description"] = json!(format!(
-            "Soft timeout: how long to wait before returning a running job id and its latest \
-             output. Default {}, max {}; 0 uses the default. The command keeps running \
-             until it exits or you stop the job. Decide whether to wait longer or stop it.",
-            DEFAULT_TIMEOUT.as_millis(),
-            tool::limit::MAX_CALL.as_millis()
-        ));
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "command": { "type": "string" },
+                "cwd": { "type": "string", "description": "Where the command runs, as a workspace-relative or absolute directory; omit it for the workspace root." },
+            },
+            "required": ["command"],
+            "additionalProperties": false,
+        });
         if !self.background {
             return schema;
         }
@@ -175,7 +152,7 @@ impl Tool for WithBackground {
             ));
         }
         let args: Args = tool::parse_args_hinted(args, ARGS_HINT)?;
-        let timeout = tool::limit::timeout(args.timeout_ms, DEFAULT_TIMEOUT, tool::limit::MAX_CALL);
+        let timeout = FOREGROUND_WAIT;
         let preview = first_line(&args.command).to_string();
         let (command, cwd) = prepare(args, self.tier(), ctx).await?;
         let before = crate::drift::before(ctx);
@@ -223,7 +200,7 @@ impl Tool for WithBackground {
                 &output
             };
             let lifetime = if self.background {
-                "Its exit status and output come back on their own later."
+                "Report the current progress; its exit status and output come back on their own later."
             } else {
                 "This run owns the job; wait for it or stop it before finishing your task."
             };
@@ -435,14 +412,21 @@ mod background_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    // Only the shell that can leave its turn offers to; the plain one, which
-    // a child or a one-shot run gets, never shows the choice.
     #[test]
     fn only_the_backgroundable_shell_offers_background() {
-        assert!(Bash.schema()["properties"].get("background").is_none());
         assert!(
-            WithBackground::new(Arc::new(Sink::default())).schema()["properties"]["background"]
-                .is_object()
+            Bash::scoped(Arc::new(Sink::default())).schema()["properties"]
+                .get("background")
+                .is_none()
+        );
+        for shell in [
+            Bash::new(Arc::new(Sink::default())),
+            Bash::scoped(Arc::new(Sink::default())),
+        ] {
+            assert!(shell.schema()["properties"].get("timeout_ms").is_none());
+        }
+        assert!(
+            Bash::new(Arc::new(Sink::default())).schema()["properties"]["background"].is_object()
         );
     }
 
@@ -454,7 +438,7 @@ mod background_tests {
         let sink = Arc::new(Sink::default());
         let ctx = ctx(dir.path());
         let ended = sink.ended.notified();
-        let out = WithBackground::new(sink.clone())
+        let out = Bash::new(sink.clone())
             .execute(
                 json!({"cwd": ".", "command": "sleep 0.2; echo imported 40 rows; exit 3", "background": true}),
                 &ctx,
@@ -480,7 +464,7 @@ mod background_tests {
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(Sink::default());
         let ctx = ctx(dir.path());
-        WithBackground::new(sink.clone())
+        Bash::new(sink.clone())
             .execute(
                 json!({"cwd": ".", "command": "echo listening on 8080; echo warn >&2; sleep 30", "background": true}),
                 &ctx,
@@ -502,7 +486,7 @@ mod background_tests {
     #[tokio::test]
     async fn without_background_it_is_the_plain_shell() {
         let dir = tempfile::tempdir().unwrap();
-        let out = WithBackground::new(Arc::new(Sink::default()))
+        let out = Bash::new(Arc::new(Sink::default()))
             .execute(
                 json!({"cwd": ".", "command": "echo hi", "background": false}),
                 &ctx(dir.path()),
@@ -514,36 +498,49 @@ mod background_tests {
 
     #[tokio::test]
     async fn a_soft_timeout_preserves_the_process_and_both_output_streams() {
-        let dir = tempfile::tempdir().unwrap();
-        let sink = Arc::new(Sink::default());
-        let ctx = ctx(dir.path());
-        let ended = sink.ended.notified();
-        let out = WithBackground::scoped(sink.clone())
-            .execute(
-                json!({"command": "echo start >> starts; echo before; while [ ! -f release ]; do sleep 0.01; done; echo after; echo warning >&2; exit 3", "timeout_ms": 50}),
-                &ctx,
-            )
-            .await
-            .unwrap();
-        assert!(!out.warned);
-        assert!(out.flatten().contains("job #7"), "{}", out.flatten());
-        assert_eq!(
-            sink.said.lock().unwrap().len(),
-            1,
-            "only registered, not ended"
-        );
-        std::fs::write(dir.path().join("release"), "").unwrap();
-        tokio::time::timeout(Duration::from_secs(5), ended)
-            .await
-            .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("starts")).unwrap(),
-            "start\n"
-        );
-        let said = sink.said.lock().unwrap();
-        assert_eq!(said.len(), 3, "one result and one end: {said:?}");
-        for expected in ["exited 3", "before", "after", "warning"] {
-            assert!(said[1].contains(expected), "{said:?}");
+        let mut cases = tokio::task::JoinSet::new();
+        for background in [false, true] {
+            cases.spawn(async move {
+                let dir = tempfile::tempdir().unwrap();
+                let sink = Arc::new(Sink::default());
+                let ctx = ctx(dir.path());
+                let shell = if background {
+                    Bash::new(sink.clone())
+                } else {
+                    Bash::scoped(sink.clone())
+                };
+                let ended = sink.ended.notified();
+                let out = tokio::time::timeout(
+                    FOREGROUND_WAIT + Duration::from_secs(5),
+                    shell.execute(
+                        json!({"command": "echo start >> starts; echo before; while [ ! -f release ]; do sleep 0.01; done; echo after; echo warning >&2; exit 3"}),
+                        &ctx,
+                    ),
+                )
+                .await;
+                let registered = sink.said.lock().unwrap().len();
+                // Let the process finish even when the foreground bound regresses.
+                std::fs::write(dir.path().join("release"), "").unwrap();
+                let out = out.expect("a long requested wait still returns a job").unwrap();
+                assert!(!out.warned);
+                assert!(out.flatten().contains("job #7"), "{}", out.flatten());
+                assert_eq!(registered, 1, "only registered, not ended");
+                tokio::time::timeout(Duration::from_secs(5), ended)
+                    .await
+                    .expect("the original command finishes in the job");
+                assert_eq!(
+                    std::fs::read_to_string(dir.path().join("starts")).unwrap(),
+                    "start\n"
+                );
+                let said = sink.said.lock().unwrap();
+                assert_eq!(said.len(), 3, "one result and one end: {said:?}");
+                for expected in ["exited 3", "before", "after", "warning"] {
+                    assert!(said[1].contains(expected), "{said:?}");
+                }
+            });
+        }
+        while let Some(case) = cases.join_next().await {
+            case.unwrap();
         }
     }
 
@@ -552,7 +549,7 @@ mod background_tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ctx(dir.path()).with_spill_root(dir.path().join("spill"));
         std::fs::write(dir.path().join("spill"), "in the way").unwrap();
-        let err = WithBackground::scoped(Arc::new(Sink::default()))
+        let err = Bash::scoped(Arc::new(Sink::default()))
             .execute(json!({"command": "seq 1 200000"}), &ctx)
             .await
             .unwrap_err();
@@ -564,7 +561,7 @@ mod background_tests {
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(Sink::default());
         let ctx = ctx(dir.path());
-        WithBackground::new(sink.clone())
+        Bash::new(sink.clone())
             .execute(
                 json!({"cwd": ".", "command": "echo $$ > pid; sleep 30", "background": true}),
                 &ctx,

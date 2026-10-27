@@ -633,6 +633,7 @@ impl Tui {
             self.refresh_tabs();
             self.bar.poke(self.core.lane());
             let jobs = self.drivers.jobs();
+            jobs.relay_progress();
             for root in jobs.take_interrupts() {
                 self.interrupt_at(&root);
             }

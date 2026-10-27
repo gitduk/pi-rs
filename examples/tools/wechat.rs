@@ -48,12 +48,13 @@ async fn main() -> ExitCode {
 mod bridge {
     //! wechat as a pi job: what the person types on the phone goes up fd 3 as
     //! `input` (or `interrupt` for `/stop`). Once connected it follows, so every
-    //! turn on the checkout comes back as `started`, then one `reply`, cut into
+    //! turn on the checkout comes back as `started`, progress, then `reply`, cut into
     //! messages and sent on to the phone — not only the ones the phone opened.
     //! Each question put there goes too, its options numbered; a reply of
     //! numbers only goes up as the `answer` to the latest one shown, one
     //! number or several.
 
+    use std::collections::VecDeque;
     use std::os::fd::FromRawFd;
     use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -62,7 +63,7 @@ mod bridge {
     use serde_json::{Value, json};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::unix::OwnedReadHalf;
-    use tokio::sync::mpsc;
+    use tokio::sync::{Notify, mpsc};
 
     use crate::markdown::format_markdown;
     use crate::split::split;
@@ -86,6 +87,7 @@ mod bridge {
     }
 
     // Who a reply goes to, read once under the lock.
+    #[derive(Clone)]
     struct Target {
         token: String,
         peer: String,
@@ -296,9 +298,10 @@ mod bridge {
         pi.say(json!({ "status": "connected" }));
         pi.say(json!({ "follow": true }));
         let asking = Asking::default();
+        let retry = Notify::new();
         tokio::select! {
-            r = poll(&client, &kept, &asking, &pi) => r,
-            () = answer(&client, &kept, &asking, &pi, read) => Ok(()),
+            r = poll(&client, &kept, &asking, &pi, &retry) => r,
+            () = answer(&client, &kept, &asking, &pi, read, &retry) => Ok(()),
         }
     }
 
@@ -342,7 +345,13 @@ mod bridge {
 
     // Client-side timeouts are the normal empty result; real errors back off
     // (the reference's 2s/30s rhythm); a stale token ends the job.
-    async fn poll(client: &Client, kept: &Kept, asking: &Asking, pi: &Pi) -> Result<(), String> {
+    async fn poll(
+        client: &Client,
+        kept: &Kept,
+        asking: &Asking,
+        pi: &Pi,
+        retry: &Notify,
+    ) -> Result<(), String> {
         let mut failures = 0u32;
         let mut timeout = crate::client::LONG_POLL_TIMEOUT;
         loop {
@@ -368,7 +377,14 @@ mod bridge {
                         timeout = Duration::from_millis(t);
                     }
                     let had = kept.target().is_some();
+                    let received = update
+                        .msgs
+                        .iter()
+                        .any(|m| m.message_type == 1 && !crate::text_of(m).is_empty());
                     heard(kept, asking, pi, update);
+                    if received {
+                        retry.notify_one();
+                    }
                     // Someone to send to at last: what was asked before shows
                     // now, since the turn it waits on may never end to bring it.
                     if let Some(to) = kept.target().filter(|_| !had) {
@@ -439,11 +455,41 @@ mod bridge {
     // Typing while a turn the phone opened runs, then its answer, then the
     // questions it left up, in order. Ends when pi does: there is nobody
     // left to bridge to.
-    async fn answer(client: &Client, kept: &Kept, asking: &Asking, pi: &Pi, read: OwnedReadHalf) {
+    async fn answer(
+        client: &Client,
+        kept: &Kept,
+        asking: &Asking,
+        pi: &Pi,
+        read: OwnedReadHalf,
+        retry: &Notify,
+    ) {
         let mut lines = BufReader::new(read).lines();
         let mut tickets = Tickets::default();
+        let mut outbox = Outbox::default();
         let mut running = false;
-        while let Ok(Some(line)) = lines.next_line().await {
+        let mut tick = tokio::time::interval(Duration::from_secs(4));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            let line = tokio::select! {
+                line = lines.next_line() => {
+                    let Ok(Some(line)) = line else { return };
+                    line
+                }
+                _ = retry.notified() => {
+                    outbox.flush(client, kept, pi).await;
+                    if !running && outbox.pending.is_empty()
+                        && let Some(to) = kept.target() {
+                        show_held(client, &to, asking, pi).await;
+                    }
+                    continue;
+                }
+                _ = tick.tick(), if running => {
+                    if let Some(to) = kept.target() {
+                        tickets.typing(client, &to, true).await;
+                    }
+                    continue;
+                }
+            };
             let Ok(told) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -471,7 +517,7 @@ mod bridge {
                 continue;
             };
             if let Some(why) = refused {
-                send(client, &to, pi, &format!("not taken: {why}")).await;
+                outbox.push(&to, &format!("not taken: {why}"));
             }
             if told.get("started").and_then(Value::as_bool) == Some(true) {
                 running = true;
@@ -479,13 +525,94 @@ mod bridge {
             } else if let Some(reply) = told.get("reply").and_then(Value::as_str) {
                 running = false;
                 tickets.typing(client, &to, false).await;
-                send(client, &to, pi, reply).await;
+                outbox.push(&to, reply);
                 shows = true;
+            } else if let Some(progress) = told.get("progress").and_then(Value::as_str) {
+                outbox.push(&to, progress);
             }
-            if shows {
+            if !outbox.blocked {
+                outbox.flush(client, kept, pi).await;
+            }
+            if shows && outbox.pending.is_empty() {
                 show_held(client, &to, asking, pi).await;
             }
         }
+    }
+
+    struct Pending {
+        to: Target,
+        pieces: VecDeque<(String, String)>,
+    }
+
+    #[derive(Default)]
+    struct Outbox {
+        pending: VecDeque<Pending>,
+        blocked: bool,
+    }
+
+    impl Outbox {
+        fn push(&mut self, to: &Target, text: &str) {
+            let text = format_markdown(text);
+            let pieces: VecDeque<_> = split(&text, MESSAGE_LIMIT)
+                .into_iter()
+                .filter(|p| !p.trim().is_empty())
+                .map(|p| (p.to_string(), crate::client::client_id()))
+                .collect();
+            if !pieces.is_empty() {
+                self.pending.push_back(Pending {
+                    to: to.clone(),
+                    pieces,
+                });
+            }
+        }
+
+        async fn flush(&mut self, client: &Client, kept: &Kept, pi: &Pi) -> bool {
+            self.blocked = false;
+            while let Some(pending) = self.pending.front_mut() {
+                // A new conversation token can repair a failed send, only for its peer.
+                if let Some(to) = kept.target().filter(|to| to.peer == pending.to.peer) {
+                    pending.to = to;
+                }
+                while let Some((text, id)) = pending.pieces.front() {
+                    if let Err(e) = deliver(client, &pending.to, text, id).await {
+                        self.blocked = true;
+                        pi.status(&format!("wechat send failed: {e:#}; unsent messages kept until the next incoming message"));
+                        return false;
+                    }
+                    pending.pieces.pop_front();
+                    tokio::time::sleep(PACE).await;
+                }
+                self.pending.pop_front();
+            }
+            true
+        }
+    }
+
+    async fn deliver(
+        client: &Client,
+        to: &Target,
+        text: &str,
+        id: &str,
+    ) -> crate::client::Result<()> {
+        for attempt in 0..3 {
+            match client
+                .send_text(
+                    &to.token,
+                    &to.peer,
+                    to.context_token.as_deref().unwrap_or_default(),
+                    text,
+                    id,
+                )
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) => match e.retry_after().filter(|_| attempt < 2) {
+                    Some(wait) => tokio::time::sleep(wait).await,
+                    None => return Err(e),
+                },
+            }
+        }
+        unreachable!("the last failed attempt returns its error")
     }
 
     // Whether it all went: a failure is told to pi, here.
@@ -494,16 +621,13 @@ mod bridge {
         if text.trim().is_empty() {
             return true;
         }
-        let context_token = to.context_token.as_deref().unwrap_or_default();
         let pieces = split(&text, MESSAGE_LIMIT);
         let total = pieces.len();
         for (i, piece) in pieces.iter().enumerate() {
             if i > 0 {
                 tokio::time::sleep(PACE).await;
             }
-            let sent = client
-                .send_text(&to.token, &to.peer, context_token, piece)
-                .await;
+            let sent = deliver(client, to, piece, &crate::client::client_id()).await;
             // A later piece without the ones before it reads as garbage, so a
             // failed send ends the message rather than skipping a hole.
             if let Err(e) = sent {
@@ -570,6 +694,120 @@ mod bridge {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[tokio::test]
+        async fn failed_pieces_are_kept_and_resume_with_the_same_id_and_fresh_context() {
+            let ok = (200, json!({"ret": 0}));
+            let failed = (200, json!({"ret": -2, "errmsg": "prepare failed"}));
+            let (base, requests) = server(vec![
+                ok.clone(),
+                failed.clone(),
+                failed.clone(),
+                failed,
+                ok.clone(),
+                ok,
+            ])
+            .await;
+            let client = Client::new(base);
+            let (_dir, kept) = kept();
+            {
+                let mut state = kept.lock();
+                state.token = Some("bot".into());
+                state.peer = Some("peer".into());
+                state.context_token = Some("old".into());
+            }
+            let (tx, mut status) = mpsc::unbounded_channel();
+            let pi = Pi(tx);
+            let to = kept.target().unwrap();
+            let mut outbox = Outbox::default();
+            outbox.push(
+                &to,
+                &format!("{}\n\n{}", "a".repeat(MESSAGE_LIMIT), "b".repeat(20)),
+            );
+            assert!(!outbox.flush(&client, &kept, &pi).await);
+            assert!(outbox.blocked);
+            assert_eq!(outbox.pending.front().unwrap().pieces.len(), 1);
+            assert!(
+                status.try_recv().unwrap()["status"]
+                    .as_str()
+                    .unwrap()
+                    .contains("kept")
+            );
+            outbox.push(&to, "later answer");
+            kept.lock().context_token = Some("fresh".into());
+            assert!(outbox.flush(&client, &kept, &pi).await);
+            assert!(outbox.pending.is_empty());
+            let requests = tokio::time::timeout(Duration::from_secs(5), requests)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                requests.len(),
+                6,
+                "three bounded attempts at the failed piece"
+            );
+            for at in 2..5 {
+                assert_eq!(
+                    requests[at]["msg"]["client_id"],
+                    requests[1]["msg"]["client_id"]
+                );
+                assert_eq!(
+                    requests[at]["msg"]["item_list"],
+                    requests[1]["msg"]["item_list"]
+                );
+            }
+            assert_eq!(requests[4]["msg"]["context_token"], "fresh");
+            assert_eq!(
+                requests[5]["msg"]["item_list"][0]["text_item"]["text"],
+                "later answer"
+            );
+        }
+
+        async fn server(
+            replies: Vec<(u16, Value)>,
+        ) -> (String, tokio::task::JoinHandle<Vec<Value>>) {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move {
+                let mut requests = Vec::new();
+                for (status, reply) in replies {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut raw = Vec::new();
+                    let mut buf = [0; 4096];
+                    let head = loop {
+                        let n = socket.read(&mut buf).await.unwrap();
+                        assert!(n > 0);
+                        raw.extend_from_slice(&buf[..n]);
+                        if let Some(at) = raw.windows(4).position(|s| s == b"\r\n\r\n") {
+                            break at + 4;
+                        }
+                    };
+                    let len = String::from_utf8_lossy(&raw[..head])
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|n| n.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    while raw.len() < head + len {
+                        let n = socket.read(&mut buf).await.unwrap();
+                        assert!(n > 0);
+                        raw.extend_from_slice(&buf[..n]);
+                    }
+                    requests.push(serde_json::from_slice(&raw[head..head + len]).unwrap());
+                    let body = reply.to_string();
+                    let response = format!(
+                        "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                }
+                requests
+            });
+            (base, task)
+        }
 
         #[test]
         fn backoff_rests_after_three_failures() {
@@ -734,6 +972,21 @@ mod client {
         BadToken,
     }
 
+    impl Error {
+        pub fn retry_after(&self) -> Option<Duration> {
+            match self {
+                Self::Api { ret: -2, .. } => Some(Duration::from_secs(2)),
+                Self::Http { status, .. } if *status == 429 || *status >= 500 => {
+                    Some(Duration::from_secs(2))
+                }
+                Self::Reqwest(e) if e.is_connect() || e.is_timeout() => {
+                    Some(Duration::from_secs(2))
+                }
+                _ => None,
+            }
+        }
+    }
+
     pub type Result<T> = std::result::Result<T, Error>;
 
     /// The one request channel. Cloneable — the long-poll task and the bridge
@@ -816,12 +1069,13 @@ mod client {
             to: &str,
             context_token: &str,
             text: &str,
+            id: &str,
         ) -> Result<()> {
             let body = json!({
                 "msg": {
                     "from_user_id": "",
                     "to_user_id": to,
-                    "client_id": client_id(),
+                    "client_id": id,
                     "message_type": 2,
                     "message_state": 2,
                     "item_list": [ { "type": 1, "text_item": { "text": text } } ],
@@ -1018,7 +1272,7 @@ mod client {
 
     // A client id the server accepts for tracing; shape mirrors the reference
     // (`prefix:timestamp-hex`).
-    fn client_id() -> String {
+    pub fn client_id() -> String {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())

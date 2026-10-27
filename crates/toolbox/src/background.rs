@@ -102,8 +102,10 @@ pub trait JobHandle: Send + Sync {
 pub enum Told {
     /// A turn one of its inputs opened has begun.
     Started,
-    /// That turn has ended: its whole answer, how it ended if not cleanly,
-    /// and empty when it said nothing.
+    /// A completed part of the answer, or progress while work continues.
+    Progress(String),
+    /// That turn has ended: its remaining answer, how it ended if not cleanly,
+    /// excluding parts already sent as progress; empty when nothing remains.
     Reply(String),
     /// A question it asked without `back` is up: the pick goes out as typed.
     Asked,

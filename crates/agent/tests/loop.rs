@@ -104,7 +104,7 @@ fn wired(turns: Vec<Vec<StreamEvent>>) -> (tempfile::TempDir, Agent, Ctx, Arc<Sc
     (dir, agent, Ctx::new(ws), wire)
 }
 
-// A run with the tools a real one carries: `Agent::new` starts with none.
+// Host-independent built-ins: `Agent::new` starts with none.
 fn tooled(transport: Arc<dyn Transport>, spec: ModelSpec) -> Agent {
     let mut a = Agent::new(transport, spec);
     brief(&mut a).registry = toolbox::builtin();
@@ -322,7 +322,7 @@ async fn every_call_gets_a_result_even_when_nothing_runs() {
 #[tokio::test]
 async fn a_denied_tier_comes_back_as_a_result_not_an_abort() {
     let (_d, mut a, ctx) = harness(vec![
-        call_turn(&[("t1", "bash", r#"{"command":"echo hi"}"#)]),
+        call_turn(&[("t1", "write", r#"{"path":"out","content":"hi"}"#)]),
         text_turn("understood"),
     ]);
     brief(&mut a).approver = Arc::new(Ceiling(Tier::Read));
@@ -340,7 +340,7 @@ async fn a_denied_tier_comes_back_as_a_result_not_an_abort() {
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, Event::ToolDenied { name, .. } if name == "bash"))
+            .any(|e| matches!(e, Event::ToolDenied { name, .. } if name == "write"))
     );
 }
 

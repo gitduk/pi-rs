@@ -9,17 +9,9 @@ use crate::driver::jobs::{Jobs, Table};
 /// Give a run a shell and job controls of its own. Its cancellation releases
 /// unfinished commands; another run cannot list or stop them.
 pub fn scoped(ctx: &Ctx, mut registry: Registry) -> Registry {
-    if registry.get(toolbox::bash::Bash::NAME).is_none()
-        || registry.sourced_holds(toolbox::bash::Bash::NAME)
-    {
-        return registry;
-    }
     let table = Arc::new(Table::default());
     let jobs = Arc::new(Jobs::new(table.clone()));
-    registry = registry.without(toolbox::bash::Bash::NAME);
-    registry.offer(Arc::new(toolbox::bash::WithBackground::scoped(
-        jobs.clone(),
-    )));
+    registry.fallback(Arc::new(toolbox::bash::Bash::scoped(jobs.clone())));
     registry.fallback(jobs);
 
     let stop = ctx.cancel.clone();
@@ -39,6 +31,47 @@ mod tests {
     use llm::message::{Message, UserContent};
     use llm::stream::{BlockKind, StopReason, StreamEvent};
     use serde_json::{Value, json};
+
+    #[tokio::test]
+    async fn scoped_shell_registration_respects_tool_cuts_and_live_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let _stop = ctx.cancel.clone().drop_guard();
+        let read_only = scoped(&ctx, toolbox::builtin().within(tool::Tier::Read));
+        assert!(read_only.get(toolbox::bash::Bash::NAME).is_none());
+        assert!(read_only.get(Jobs::NAME).is_none());
+        let hidden = scoped(&ctx, toolbox::builtin().without(toolbox::bash::Bash::NAME));
+        assert!(hidden.get(toolbox::bash::Bash::NAME).is_none());
+
+        let script = dir.path().join("bash");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n# ---\n# description = \"custom shell\"\n# ---\nprintf custom\n",
+        )
+        .unwrap();
+        let mut registry = toolbox::builtin();
+        registry.read(Arc::new(toolbox::scripts::Dir::new(dir.path())));
+        let registry = scoped(&ctx, registry);
+        let custom = registry.get(toolbox::bash::Bash::NAME).unwrap();
+        assert!(
+            custom
+                .execute(json!({}), &ctx)
+                .await
+                .unwrap()
+                .flatten()
+                .contains("custom")
+        );
+        std::fs::remove_file(script).unwrap();
+        let builtin = registry.get(toolbox::bash::Bash::NAME).unwrap();
+        assert!(
+            builtin
+                .execute(json!({"command": "echo builtin"}), &ctx)
+                .await
+                .unwrap()
+                .flatten()
+                .contains("builtin")
+        );
+    }
 
     struct ShellModel {
         step: AtomicUsize,
@@ -75,8 +108,7 @@ mod tests {
                 0 => (
                     toolbox::bash::Bash::NAME,
                     json!({
-                        "command": "echo start >> starts; echo ready; while [ ! -f release ]; do sleep 0.01; done; echo finished; exit 3",
-                        "timeout_ms": 20
+                        "command": "echo start >> starts; echo ready; while [ ! -f release ]; do sleep 0.01; done; echo finished; exit 3"
                     }),
                 ),
                 1 => {

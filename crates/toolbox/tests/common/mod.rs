@@ -7,6 +7,36 @@
 use tool::{Ctx, Tool, Workspace};
 use toolbox::read::Read;
 
+/// A shell for short command tests; a detached process would be a test leak.
+pub fn bash() -> toolbox::bash::Bash {
+    toolbox::bash::Bash::scoped(std::sync::Arc::new(NoJobs))
+}
+
+struct NoJobs;
+
+impl toolbox::background::Ask for NoJobs {
+    fn ask(
+        &self,
+        _root: std::path::PathBuf,
+        _asker: &str,
+        _asked: toolbox::background::Asked,
+    ) -> Result<Option<toolbox::background::Answer>, String> {
+        Err("no questions in a short command test".into())
+    }
+}
+
+impl toolbox::background::JobSink for NoJobs {
+    fn start(
+        &self,
+        _root: std::path::PathBuf,
+        _description: String,
+        _stop: tokio_util::sync::CancellationToken,
+        _told: Option<tokio::sync::mpsc::UnboundedSender<toolbox::background::Told>>,
+    ) -> std::sync::Arc<dyn toolbox::background::JobHandle> {
+        panic!("a short command test left a job running")
+    }
+}
+
 /// A file as a model would read it, which is also what lets a later edit run.
 /// A caller that wants only that second half drops the result.
 pub async fn view(c: &Ctx, path: &str) -> String {

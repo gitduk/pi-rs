@@ -35,6 +35,7 @@ const LET_GO: std::time::Duration = std::time::Duration::from_secs(10);
 // What a job may have waiting at once; past it they are counted, not kept,
 // so a job that outruns its lane cannot grow without bound.
 const MAX_WAITING: usize = 100;
+pub(super) const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Every job of this process.
 #[derive(Default)]
@@ -47,6 +48,7 @@ pub struct Table {
 
 #[derive(Default)]
 struct Inner {
+    progress_at: Option<Instant>,
     next_id: u64,
     items: Vec<Item>,
     next_question: u64,
@@ -195,6 +197,7 @@ struct Item {
     interrupt: bool,
     // Reads the latest of what it printed; None for one that keeps none.
     output: Option<Peek>,
+    last_output: String,
     // How it runs again, and the same as data for a restart to carry. One
     // that has it is kept once it ends, to be started over; one without leaves.
     rerun: Option<(Rerun, Option<Again>)>,
@@ -251,6 +254,7 @@ impl Item {
             listens: Listens::Never,
             interrupt: false,
             output: None,
+            last_output: String::new(),
             rerun: None,
             run: 0,
             gone: CancellationToken::new(),
@@ -278,6 +282,7 @@ impl Item {
 
     // Nothing of the last run is left to show or deliver.
     fn clear_run(&mut self) {
+        self.last_output.clear();
         self.progress.clear();
         self.waiting.clear();
         self.dropped = 0;
@@ -628,6 +633,9 @@ impl Table {
     pub fn tell(&self, id: u64, told: Told) {
         match &told {
             Told::Started => tracing::info!(target: "pi::job", job = id, "told started"),
+            Told::Progress(text) => tracing::info!(
+                target: "pi::job", job = id, chars = text.chars().count(), "told progress"
+            ),
             Told::Reply(text) => tracing::info!(
                 target: "pi::job", job = id, chars = text.chars().count(), reply = %text, "told reply"
             ),
@@ -646,6 +654,63 @@ impl Table {
             .and_then(|i| i.listens.to())
         {
             let _ = to.send(told);
+        }
+    }
+
+    /// Relay changed output from running jobs to their checkout's followers.
+    pub fn relay_progress(&self) {
+        let watched: Vec<_> = {
+            let mut inner = self.lock();
+            let now = Instant::now();
+            if inner
+                .progress_at
+                .is_some_and(|at| now.duration_since(at) < PROGRESS_EVERY)
+            {
+                return;
+            }
+            inner.progress_at = Some(now);
+            inner
+                .items
+                .iter()
+                .filter(|i| i.running() && i.listens.to().is_none())
+                .filter(|i| {
+                    inner
+                        .items
+                        .iter()
+                        .any(|f| f.root == i.root && f.listens.follows())
+                })
+                .filter_map(|i| {
+                    i.output
+                        .clone()
+                        .map(|peek| (i.id, i.run, i.root.clone(), peek))
+                })
+                .collect()
+        };
+        for (id, run, root, peek) in watched {
+            let latest = pi_store::text::last_line(&peek());
+            if latest.trim().is_empty() {
+                continue;
+            }
+            let followers = {
+                let mut inner = self.lock();
+                let Some(at) = inner.mine(id, run) else {
+                    continue;
+                };
+                if inner.items[at].last_output == latest {
+                    continue;
+                }
+                inner.items[at].last_output = latest.clone();
+                inner
+                    .items
+                    .iter()
+                    .filter(|i| i.root == root && i.listens.follows())
+                    .map(|i| i.id)
+                    .collect::<Vec<_>>()
+            };
+            let text = format!("#{id}: {latest}");
+            for follower in followers {
+                self.tell(follower, Told::Progress(text.clone()));
+            }
         }
     }
 
@@ -1421,6 +1486,54 @@ impl Tool for Jobs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn changed_job_output_is_paced_and_only_goes_to_its_checkout() {
+        let table = Arc::new(Table::default());
+        let root = Path::new("/checkout");
+        let sink = Jobs::new(table.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let follower = sink.start(root.into(), "bridge".into(), Default::default(), Some(tx));
+        follower.follow();
+        let (elsewhere, mut quiet) = tokio::sync::mpsc::unbounded_channel();
+        let other = sink.start(
+            "/other".into(),
+            "bridge".into(),
+            Default::default(),
+            Some(elsewhere),
+        );
+        other.follow();
+        let job = start(&table, root, "scan");
+        let output = Arc::new(Mutex::new("1/3\n".to_string()));
+        let seen = output.clone();
+        job.watch(Arc::new(move || seen.lock().unwrap().clone()));
+        table.relay_progress();
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Told::Progress(format!("#{}: 1/3", job.id())))
+        );
+        *output.lock().unwrap() = "1/3\n2/3\n".into();
+        table.relay_progress();
+        assert!(rx.try_recv().is_err(), "rapid changes wait");
+        table.lock().progress_at = Some(Instant::now() - PROGRESS_EVERY);
+        table.relay_progress();
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Told::Progress(format!("#{}: 2/3", job.id())))
+        );
+        table.lock().progress_at = Some(Instant::now() - PROGRESS_EVERY);
+        table.relay_progress();
+        assert!(rx.try_recv().is_err(), "unchanged output is silent");
+        job.end();
+        *output.lock().unwrap() = "3/3\n".into();
+        table.lock().progress_at = Some(Instant::now() - PROGRESS_EVERY);
+        table.relay_progress();
+        assert!(
+            rx.try_recv().is_err(),
+            "ended jobs report through their result"
+        );
+        assert!(quiet.try_recv().is_err(), "another checkout hears nothing");
+    }
 
     fn start(table: &Arc<Table>, root: &Path, name: &str) -> Arc<dyn JobHandle> {
         JobSink::start(

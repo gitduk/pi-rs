@@ -49,7 +49,7 @@ async fn read_leaves_the_workspace_but_write_bash_and_edit_do_not() {
     assert!(matches!(b, Err(ToolError::Escape(_))), "{b:?}");
     assert!(!o.join("y.rs").exists());
 
-    let d = toolbox::bash::Bash
+    let d = common::bash()
         .execute(json!({ "command": "pwd", "cwd": o.to_str().unwrap() }), &c)
         .await;
     assert!(matches!(d, Err(ToolError::Escape(_))), "{d:?}");
@@ -78,37 +78,25 @@ async fn read_huge_limit_stays_inside_the_file() {
 }
 
 #[tokio::test]
-async fn bash_times_out_without_hanging_the_turn() {
+async fn a_bounded_command_times_out_without_hanging_the_caller() {
     let (_d, c) = ctx();
-    let err = toolbox::bash::Bash
-        .execute(
-            json!({ "cwd": ".", "command": "sleep 5", "timeout_ms": 150 }),
-            &c,
-        )
-        .await
-        .unwrap_err();
+    let err = toolbox::bash::run(
+        "sleep 5",
+        c.workspace.root(),
+        std::time::Duration::from_millis(150),
+        &c,
+    )
+    .await
+    .err()
+    .expect("the command times out");
     assert!(matches!(err, ToolError::Timeout { ms: 150 }), "{err}");
     assert_eq!(err.code(), Some("TOOL_TIMEOUT"));
 }
 
 #[tokio::test]
-async fn a_zero_timeout_is_not_an_instant_kill() {
-    let (_d, c) = ctx();
-    // A command that takes real time: with zero read literally, this dies
-    // before it starts.
-    let out = run(
-        &toolbox::bash::Bash,
-        json!({ "cwd": ".", "command": "sleep 0.3; echo hi", "timeout_ms": 0 }),
-        &c,
-    )
-    .await;
-    assert!(out.contains("hi"), "{out}");
-}
-
-#[tokio::test]
 async fn bash_without_cwd_runs_in_the_workspace_root() {
     let (d, c) = ctx();
-    let out = toolbox::bash::Bash
+    let out = common::bash()
         .execute(json!({ "command": "pwd" }), &c)
         .await
         .unwrap()
@@ -120,7 +108,7 @@ async fn bash_without_cwd_runs_in_the_workspace_root() {
 // The gate the loop checks before a call is made.
 #[test]
 fn registry_tiers_name_what_each_tool_may_reach() {
-    let r = toolbox::builtin();
+    let r = toolbox::builtin().with(common::bash());
     assert_eq!(r.get("edit").unwrap().tier(), Tier::Write);
     assert_eq!(r.get("bash").unwrap().tier(), Tier::Exec);
     assert_eq!(r.get("read").unwrap().tier(), Tier::Read);
@@ -148,7 +136,7 @@ async fn multibyte_output_respects_the_byte_budget_and_stays_valid_utf8() {
     let (_d, c) = ctx();
     // 60k CJK chars = 180k bytes.
     let out = run(
-        &toolbox::bash::Bash,
+        &common::bash(),
         json!({ "cwd": ".", "command": "printf '中%.0s' $(seq 1 60000)" }),
         &c,
     )
@@ -433,7 +421,7 @@ async fn a_whole_block_anchor_may_name_the_annotation() {
 async fn an_over_long_output_is_kept_somewhere_the_model_can_reach() {
     let (dir, c) = common::spilling();
     let out = run(
-        &toolbox::bash::Bash,
+        &common::bash(),
         json!({ "cwd": ".", "command": "printf 'z%.0s' $(seq 1 40000); echo; echo MIDDLE_MARKER; printf 'z%.0s' $(seq 1 40000)" }),
         &c,
     )
@@ -459,7 +447,7 @@ async fn an_over_long_output_is_kept_somewhere_the_model_can_reach() {
     assert_eq!(logs(&dir.path().join("spill")), 0, "the spill was removed");
 
     let out = run(
-        &toolbox::bash::Bash,
+        &common::bash(),
         json!({ "cwd": ".", "command": "echo hi" }),
         &c,
     )
@@ -503,7 +491,7 @@ async fn a_spill_that_cannot_be_written_fails_loudly() {
     let (dir, c) = common::spilling();
     // A file where the session directory would go: create_dir_all cannot.
     std::fs::write(dir.path().join("spill"), "in the way").unwrap();
-    let err = toolbox::bash::Bash
+    let err = common::bash()
         .execute(
             json!({ "cwd": ".", "command": "printf 'z%.0s' $(seq 1 40000)" }),
             &c,
@@ -519,11 +507,8 @@ async fn a_spill_that_cannot_be_written_fails_loudly() {
 async fn a_failed_spill_still_drains_the_child() {
     let (dir, c) = common::spilling();
     std::fs::write(dir.path().join("spill"), "in the way").unwrap();
-    let err = toolbox::bash::Bash
-        .execute(
-            json!({ "cwd": ".", "command": "seq 1 200000", "timeout_ms": 5000 }),
-            &c,
-        )
+    let err = common::bash()
+        .execute(json!({ "cwd": ".", "command": "seq 1 200000" }), &c)
         .await
         .unwrap_err();
     assert_eq!(err.code(), Some("SPILL_FAILED"));

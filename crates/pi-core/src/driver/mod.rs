@@ -1,6 +1,6 @@
 //! What drives a lane from outside the keyboard: a job, a `/loop`.
 //!
-//! A driver hears only the end of turns its own lines began; `Drivers`
+//! A driver hears the progress and end of turns its own lines began; `Drivers`
 //! keeps that ledger so the surface need not know which driver cares.
 
 pub mod jobs;
@@ -76,6 +76,8 @@ struct Owed {
     said: String,
     // Where the current turn's text began: a retried request starts over.
     turn_from: usize,
+    sent: usize,
+    progress: Option<(String, tokio::time::Instant)>,
 }
 
 impl Drivers {
@@ -178,6 +180,22 @@ impl Drivers {
                 Event::TextDelta(text) => owed.said.push_str(text),
                 Event::TurnStart { .. } => owed.turn_from = owed.said.len(),
                 Event::Retrying { .. } => owed.said.truncate(owed.turn_from),
+                Event::ToolQueued { .. } => {
+                    let text = &owed.said[owed.sent..];
+                    if !text.trim().is_empty() {
+                        self.jobs.tell(owed.job, Told::Progress(text.to_string()));
+                        owed.sent = owed.said.len();
+                    }
+                }
+                Event::ToolProgress { text, .. } if !text.trim().is_empty() => {
+                    let now = tokio::time::Instant::now();
+                    if owed.progress.as_ref().is_none_or(|(last, at)| {
+                        last != text && now.duration_since(*at) >= jobs::PROGRESS_EVERY
+                    }) {
+                        self.jobs.tell(owed.job, Told::Progress(text.clone()));
+                        owed.progress = Some((text.clone(), now));
+                    }
+                }
                 _ => {}
             }
         }
@@ -193,8 +211,10 @@ impl Drivers {
         cap: Option<usize>,
     ) -> Option<String> {
         for owed in self.owed.extract_if(.., |o| o.lane == lane) {
-            self.jobs
-                .tell(owed.job, Told::Reply(reply(owed.said, ended)));
+            self.jobs.tell(
+                owed.job,
+                Told::Reply(reply(owed.said[owed.sent..].into(), ended)),
+            );
         }
         self.loops
             .turn_ended(lane, ended, ctx, cap)
@@ -210,8 +230,10 @@ impl Drivers {
     pub fn retain(&mut self, live: impl Fn(u64) -> bool) -> Vec<String> {
         // A job left waiting on a reply would wait for good.
         for owed in self.owed.extract_if(.., |o| !live(o.lane)) {
-            self.jobs
-                .tell(owed.job, Told::Reply(reply(owed.said, &Ended::Stopped)));
+            self.jobs.tell(
+                owed.job,
+                Told::Reply(reply(owed.said[owed.sent..].into(), &Ended::Stopped)),
+            );
         }
         self.loops.retain(live)
     }
@@ -228,6 +250,8 @@ impl Drivers {
             lane,
             said: String::new(),
             turn_from: 0,
+            sent: 0,
+            progress: None,
         });
         self.jobs.tell(job, Told::Started);
     }
@@ -321,6 +345,74 @@ impl Drivers {
 mod tests {
     use super::*;
     use toolbox::background::JobSink as _;
+
+    #[tokio::test]
+    async fn progress_reaches_the_job_before_tools_without_repeating_in_the_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let ctx = Ctx::new(tool::Workspace::new(&root).unwrap());
+        let mut drivers = Drivers::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let job = jobs::Jobs::new(drivers.jobs()).start(
+            root.clone(),
+            "bridge".into(),
+            Default::default(),
+            Some(tx),
+        );
+        drivers.dispatched(Origin::Input(job.id()), 1, true, true);
+        assert_eq!(rx.try_recv(), Ok(Told::Started));
+        drivers.observe(1, &root, &Event::TurnStart { turn: 1 });
+        drivers.observe(1, &root, &Event::TextDelta("checking now".into()));
+        for _ in 0..2 {
+            drivers.observe(
+                1,
+                &root,
+                &Event::ToolQueued {
+                    id: "call".into(),
+                    name: "bash".into(),
+                    args: serde_json::json!({}),
+                },
+            );
+        }
+        assert_eq!(rx.try_recv(), Ok(Told::Progress("checking now".into())));
+        assert!(
+            rx.try_recv().is_err(),
+            "one progress message per completed text"
+        );
+        drivers.observe(
+            1,
+            &root,
+            &Event::ToolProgress {
+                id: "call".into(),
+                text: "1/3".into(),
+            },
+        );
+        assert_eq!(rx.try_recv(), Ok(Told::Progress("1/3".into())));
+        drivers.observe(
+            1,
+            &root,
+            &Event::ToolProgress {
+                id: "call".into(),
+                text: "2/3".into(),
+            },
+        );
+        assert!(rx.try_recv().is_err(), "tool progress is paced");
+        drivers.observe(1, &root, &Event::TurnStart { turn: 2 });
+        drivers.observe(1, &root, &Event::TextDelta("discard this".into()));
+        drivers.observe(
+            1,
+            &root,
+            &Event::Retrying {
+                attempt: 1,
+                delay_ms: 0,
+                reason: "cut".into(),
+            },
+        );
+        drivers.observe(1, &root, &Event::TextDelta("done".into()));
+        drivers.turn_ended(1, &Ended::Done, &ctx, None);
+        assert_eq!(rx.try_recv(), Ok(Told::Reply("done".into())));
+        assert!(rx.try_recv().is_err());
+    }
 
     // The line a person sent through a job opens a turn as if typed; the
     // job hears it begin, then gets the whole answer, cut short or not.

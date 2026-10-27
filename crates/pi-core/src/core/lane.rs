@@ -235,14 +235,11 @@ pub fn arm(
     {
         let patch = Arc::make_mut(&mut brief);
         offer_fallback(patch, jobs.clone(), &mut said);
-        // The lane's jobs outlive its turn; each child gets a table of its own.
-        if patch.registry.get(toolbox::bash::Bash::NAME).is_some() {
-            let registry = std::mem::take(&mut patch.registry).without(toolbox::bash::Bash::NAME);
-            patch.registry = registry;
-            patch
-                .registry
-                .offer(Arc::new(toolbox::bash::WithBackground::new(jobs.clone())));
-        }
+        offer_fallback(
+            patch,
+            Arc::new(toolbox::bash::Bash::new(jobs.clone())),
+            &mut said,
+        );
         // Scripts likewise: the lane's may detach, the child's may not.
         for dir in &resolved.scripts {
             let held: Arc<dyn tool::Source> = dir.clone();

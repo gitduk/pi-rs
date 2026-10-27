@@ -20,8 +20,8 @@ mod testing;
 pub mod walk;
 pub mod write;
 
-/// The tools an agent cannot work without. `subagent` and `skill` are not
-/// among them: both are hung on afterwards, by whoever can build them.
+/// Tools independent of their host. Shells, job controls and other stateful
+/// tools are added by the owner of their lifetime.
 pub fn builtin() -> Registry {
     Registry::new()
         .with(read::Read)
@@ -29,6 +29,5 @@ pub fn builtin() -> Registry {
         .with(edit::Edit)
         .with(grep::Grep)
         .with(glob::Glob)
-        .with(bash::Bash)
         .with(fetch::Fetch::default())
 }

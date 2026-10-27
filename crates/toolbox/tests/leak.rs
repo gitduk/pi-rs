@@ -2,8 +2,7 @@
 // kill itself is portable, the proof here is not.
 #![cfg(target_os = "linux")]
 
-use serde_json::json;
-use tool::{Ctx, Tool, Workspace};
+use tool::{Ctx, Workspace};
 
 // A shell that backgrounds a long sleeper and then waits. Killing only the
 // shell leaves the sleeper running.
@@ -13,19 +12,16 @@ async fn a_timeout_takes_the_whole_process_group() {
     let c = Ctx::new(Workspace::new(dir.path()).unwrap());
     let pidfile = dir.path().join("gpid");
 
-    let err = match toolbox::bash::Bash
-        .execute(
-            json!({
-                "cwd": ".",
-                "command": format!("sleep 30 & echo $! > {}; sleep 30", pidfile.display()),
-                "timeout_ms": 400,
-            }),
-            &c,
-        )
-        .await
+    let err = match toolbox::bash::run(
+        &format!("sleep 30 & echo $! > {}; sleep 30", pidfile.display()),
+        c.workspace.root(),
+        std::time::Duration::from_millis(400),
+        &c,
+    )
+    .await
     {
         Err(e) => e,
-        Ok(out) => panic!("expected a timeout error, got: {}", out.flatten()),
+        Ok(out) => panic!("expected a timeout error, got: {}", out.body),
     };
     assert!(
         err.to_string()
@@ -52,16 +48,13 @@ async fn a_timeout_takes_the_whole_process_group() {
 async fn a_command_runs_in_a_session_of_its_own() {
     let dir = tempfile::tempdir().unwrap();
     let c = Ctx::new(Workspace::new(dir.path()).unwrap());
-    let out = toolbox::bash::Bash
-        .execute(
-            json!({
-                "cwd": ".",
-                "command": "read -r _ _ _ _ _ sid _ < /proc/$$/stat; [ \"$sid\" = \"$$\" ] && echo leader",
-            }),
-            &c,
-        )
-        .await
-        .unwrap()
-        .flatten();
+    let out = toolbox::bash::foreground(
+        "read -r _ _ _ _ _ sid _ < /proc/$$/stat; [ \"$sid\" = \"$$\" ] && echo leader",
+        ".",
+        &c,
+    )
+    .await
+    .unwrap()
+    .flatten();
     assert!(out.contains("leader"), "{out}");
 }

@@ -41,14 +41,14 @@ async fn main() -> ExitCode {
 mod bridge {
     //! telegram as a pi job: what the paired account sends goes up fd 3 as
     //! `input` (or `interrupt` for `/stop`). It follows, so every turn on the
-    //! checkout comes back as `started`, then one `reply`, sent to the chat;
+    //! checkout comes back as `started`, progress, then `reply`, sent to the chat;
     //! each question put there comes too, its options as buttons: a press
     //! answers with that one, a reply of numbers only with several.
     //!
     //! Anyone can message a bot, and a turn here can run commands, so only
     //! the account that sent the pairing code shown in the job is heard.
 
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, VecDeque};
     use std::os::fd::FromRawFd;
     use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -57,7 +57,7 @@ mod bridge {
     use serde_json::{Value, json};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::unix::OwnedReadHalf;
-    use tokio::sync::mpsc;
+    use tokio::sync::{Notify, mpsc};
 
     use crate::api::{Button, Click, Client, Entity, Update};
     use crate::render::{pieces, render};
@@ -363,9 +363,10 @@ mod bridge {
             state: Mutex::new(state),
         };
         let asking = Asking::default();
+        let retry = Notify::new();
         tokio::select! {
-            r = poll(&client, &kept, &asking, &pi, code) => r,
-            () = answer(&client, &kept, &asking, &pi, read) => Ok(()),
+            r = poll(&client, &kept, &asking, &pi, code, &retry) => r,
+            () = answer(&client, &kept, &asking, &pi, read, &retry) => Ok(()),
         }
     }
 
@@ -401,6 +402,7 @@ mod bridge {
         asking: &Asking,
         pi: &Pi,
         mut code: Option<String>,
+        retry: &Notify,
     ) -> Result<(), String> {
         let mut failures = 0u32;
         loop {
@@ -408,7 +410,17 @@ mod bridge {
             let failed = match client.get_updates(offset).await {
                 Ok(updates) => {
                     failures = 0;
+                    let received = {
+                        let state = kept.lock();
+                        updates.iter().filter_map(|u| u.message.as_ref()).any(|m| {
+                            m.from.as_ref().map(|u| u.id) == state.user
+                                && Some(m.chat.id) == state.chat
+                        })
+                    };
                     let (paired, clicks) = heard(kept, asking, pi, &mut code, updates);
+                    if received || !clicks.is_empty() {
+                        retry.notify_one();
+                    }
                     if let Some(chat) = paired {
                         let hello = "connected to pi: what you send here arrives as turns, and /stop stops one";
                         let _ = client.send_message(chat, hello, &[]).await;
@@ -530,8 +542,16 @@ mod bridge {
 
     // Typing while a turn runs, then its answer, then the questions it left
     // up. Ends when pi does.
-    async fn answer(client: &Client, kept: &Kept, asking: &Asking, pi: &Pi, read: OwnedReadHalf) {
+    async fn answer(
+        client: &Client,
+        kept: &Kept,
+        asking: &Asking,
+        pi: &Pi,
+        read: OwnedReadHalf,
+        retry: &Notify,
+    ) {
         let mut lines = BufReader::new(read).lines();
+        let mut outbox = Outbox::default();
         let mut typing: Option<i64> = None;
         let mut tick = tokio::time::interval(TYPING_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -568,20 +588,23 @@ mod bridge {
                         continue;
                     };
                     if let Some(why) = refused {
-                        send(client, chat, pi, &format!("not taken: {why}")).await;
+                        outbox.push(chat, &format!("not taken: {why}"));
                     }
                     if told.get("started").and_then(Value::as_bool) == Some(true) {
                         typing = Some(chat);
                         tick.reset_immediately();
                     } else if let Some(reply) = told.get("reply").and_then(Value::as_str) {
                         typing = None;
-                        send(client, chat, pi, reply).await;
+                        outbox.push(chat, reply);
                         shows = true;
+                    } else if let Some(progress) = told.get("progress").and_then(Value::as_str) {
+                        outbox.push(chat, progress);
                     }
+                    if !outbox.blocked { outbox.flush(client, pi).await; }
                     if let Some(message) = gone {
                         let _ = client.set_buttons(chat, message, &[]).await;
                     }
-                    if shows {
+                    if shows && outbox.pending.is_empty() {
                         show_held(client, chat, asking, pi).await;
                     }
                 }
@@ -590,29 +613,55 @@ mod bridge {
                         let _ = client.send_typing(chat).await;
                     }
                 }
+                _ = retry.notified() => {
+                    outbox.flush(client, pi).await;
+                    if typing.is_none() && outbox.pending.is_empty()
+                        && let Some(chat) = kept.chat() {
+                        show_held(client, chat, asking, pi).await;
+                    }
+                }
             }
         }
     }
 
-    async fn send(client: &Client, chat: i64, pi: &Pi, reply: &str) {
-        let (text, spans) = render(reply);
-        let pieces = pieces(&text, &spans, MESSAGE_LIMIT);
-        let total = pieces.len();
-        for (i, (piece, entities)) in pieces.iter().enumerate() {
-            if i > 0 {
-                tokio::time::sleep(PACE).await;
+    struct Pending {
+        chat: i64,
+        pieces: VecDeque<(String, Vec<Entity>)>,
+    }
+
+    #[derive(Default)]
+    struct Outbox {
+        pending: VecDeque<Pending>,
+        blocked: bool,
+    }
+
+    impl Outbox {
+        fn push(&mut self, chat: i64, reply: &str) {
+            let (text, spans) = render(reply);
+            let pieces: VecDeque<_> = pieces(&text, &spans, MESSAGE_LIMIT)
+                .into_iter()
+                .filter(|(text, _)| !text.trim().is_empty())
+                .collect();
+            if !pieces.is_empty() {
+                self.pending.push_back(Pending { chat, pieces });
             }
-            // A later piece without the ones before it reads as garbage, so a
-            // failed send ends the message rather than skipping a hole.
-            if let Err(e) = deliver(client, chat, piece, entities).await {
-                let part = if total > 1 {
-                    format!(" (piece {}/{total})", i + 1)
-                } else {
-                    String::new()
-                };
-                pi.status(&format!("telegram send failed{part}: {e}"));
-                return;
+        }
+
+        async fn flush(&mut self, client: &Client, pi: &Pi) -> bool {
+            self.blocked = false;
+            while let Some(pending) = self.pending.front_mut() {
+                while let Some((text, entities)) = pending.pieces.front() {
+                    if let Err(e) = deliver(client, pending.chat, text, entities).await {
+                        self.blocked = true;
+                        pi.status(&format!("telegram send failed: {e}; unsent messages kept until the next incoming message"));
+                        return false;
+                    }
+                    pending.pieces.pop_front();
+                    tokio::time::sleep(PACE).await;
+                }
+                self.pending.pop_front();
             }
+            true
         }
     }
 
@@ -623,19 +672,23 @@ mod bridge {
         entities: &[Entity],
     ) -> Result<(), crate::api::Error> {
         let mut waited = 0;
+        let mut plain = entities.is_empty();
         loop {
-            let e = match client.send_message(chat, text, entities).await {
+            let e = match client
+                .send_message(chat, text, if plain { &[] } else { entities })
+                .await
+            {
                 Ok(()) => return Ok(()),
                 Err(e) => e,
             };
-            if let Some(wait) = e.retry_after().filter(|_| waited < 3) {
+            if e.code() == Some(400) && !plain {
+                plain = true;
+                continue;
+            }
+            if let Some(wait) = e.retry_after().filter(|_| waited < 2) {
                 waited += 1;
                 tokio::time::sleep(wait).await;
                 continue;
-            }
-            // Formatting the server will not take must not lose the words.
-            if e.code() == Some(400) && !entities.is_empty() {
-                return client.send_message(chat, text, &[]).await;
             }
             return Err(e);
         }
@@ -644,6 +697,119 @@ mod bridge {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[tokio::test]
+        async fn failed_pieces_resume_in_order_without_resending_successful_ones() {
+            let ok = (200, json!({"ok": true, "result": {}}));
+            let failed = (
+                400,
+                json!({"ok": false, "error_code": 400, "description": "rejected"}),
+            );
+            let (base, requests) = server(vec![ok.clone(), failed, ok.clone(), ok]).await;
+            let client = Client::at(base);
+            let (tx, mut status) = mpsc::unbounded_channel();
+            let pi = Pi(tx);
+            let mut outbox = Outbox::default();
+            outbox.push(
+                7,
+                &format!("{}\n\n{}", "a".repeat(MESSAGE_LIMIT), "b".repeat(20)),
+            );
+            assert!(!outbox.flush(&client, &pi).await);
+            assert!(outbox.blocked);
+            assert_eq!(outbox.pending.front().unwrap().pieces.len(), 1);
+            assert!(
+                status.try_recv().unwrap()["status"]
+                    .as_str()
+                    .unwrap()
+                    .contains("kept")
+            );
+            outbox.push(7, "later answer");
+            assert!(outbox.flush(&client, &pi).await);
+            assert!(outbox.pending.is_empty());
+            let requests = tokio::time::timeout(Duration::from_secs(5), requests)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(requests[1]["text"], requests[2]["text"]);
+            assert_ne!(requests[0]["text"], requests[2]["text"]);
+            assert_eq!(requests[3]["text"], "later answer");
+            assert!(requests.iter().all(|r| r["chat_id"] == 7));
+        }
+
+        #[tokio::test]
+        async fn rate_limit_retries_and_formatting_fallback_keep_the_text() {
+            let (base, requests) = server(vec![
+                (400, json!({"ok": false, "error_code": 400})),
+                (
+                    429,
+                    json!({"ok": false, "error_code": 429, "parameters": {"retry_after": 0}}),
+                ),
+                (200, json!({"ok": true, "result": {}})),
+            ])
+            .await;
+            let client = Client::at(base);
+            let entities = vec![Entity {
+                kind: "bold",
+                offset: 0,
+                length: 4,
+                url: None,
+                language: None,
+            }];
+            deliver(&client, 7, "text", &entities).await.unwrap();
+            let requests = tokio::time::timeout(Duration::from_secs(5), requests)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!requests[0]["entities"].as_array().unwrap().is_empty());
+            assert!(requests[1]["entities"].as_array().unwrap().is_empty());
+            assert!(requests.iter().all(|r| r["text"] == "text"));
+        }
+
+        async fn server(
+            replies: Vec<(u16, Value)>,
+        ) -> (String, tokio::task::JoinHandle<Vec<Value>>) {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move {
+                let mut requests = Vec::new();
+                for (status, reply) in replies {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut raw = Vec::new();
+                    let mut buf = [0; 4096];
+                    let head = loop {
+                        let n = socket.read(&mut buf).await.unwrap();
+                        assert!(n > 0);
+                        raw.extend_from_slice(&buf[..n]);
+                        if let Some(at) = raw.windows(4).position(|s| s == b"\r\n\r\n") {
+                            break at + 4;
+                        }
+                    };
+                    let len = String::from_utf8_lossy(&raw[..head])
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|n| n.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    while raw.len() < head + len {
+                        let n = socket.read(&mut buf).await.unwrap();
+                        assert!(n > 0);
+                        raw.extend_from_slice(&buf[..n]);
+                    }
+                    requests.push(serde_json::from_slice(&raw[head..head + len]).unwrap());
+                    let body = reply.to_string();
+                    let response = format!(
+                        "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                }
+                requests
+            });
+            (base, task)
+        }
 
         fn kept() -> (tempfile::TempDir, Kept) {
             let dir = tempfile::tempdir().unwrap();
@@ -855,6 +1021,12 @@ mod api {
                     retry_after: Some(s),
                     ..
                 } => Some(Duration::from_secs(*s)),
+                Error::Api { code, .. } if *code == 429 || *code >= 500 => {
+                    Some(Duration::from_secs(2))
+                }
+                Error::Http { source, .. } if source.is_connect() || source.is_timeout() => {
+                    Some(Duration::from_secs(2))
+                }
                 _ => None,
             }
         }
@@ -951,6 +1123,14 @@ mod api {
     }
 
     impl Client {
+        #[cfg(test)]
+        pub fn at(base: String) -> Self {
+            Self {
+                http: reqwest::Client::new(),
+                base,
+            }
+        }
+
         pub fn new(token: &str) -> Self {
             Self {
                 http: reqwest::Client::new(),
@@ -1044,19 +1224,28 @@ mod api {
                 method,
                 source: e.without_url(),
             };
-            let raw = self
+            let response = self
                 .http
                 .post(format!("{}/{method}", self.base))
                 .json(&body)
                 .timeout(timeout)
                 .send()
                 .await
-                .map_err(http)?
-                .bytes()
-                .await
                 .map_err(http)?;
-            let reply: Reply<T> =
-                serde_json::from_slice(&raw).map_err(|source| Error::Json { method, source })?;
+            let status = response.status();
+            let raw = response.bytes().await.map_err(http)?;
+            let reply: Reply<T> = serde_json::from_slice(&raw).map_err(|source| {
+                if !status.is_success() {
+                    Error::Api {
+                        method,
+                        code: status.as_u16().into(),
+                        description: status.canonical_reason().unwrap_or("HTTP error").into(),
+                        retry_after: None,
+                    }
+                } else {
+                    Error::Json { method, source }
+                }
+            })?;
             match reply.result {
                 Some(result) if reply.ok => Ok(result),
                 _ => Err(Error::Api {

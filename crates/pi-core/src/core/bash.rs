@@ -1,11 +1,10 @@
 //! What a `!` command ran, and what came back.
 //!
-//! The runner is the model's own `bash` tool: same workspace, same timeout,
-//! same rewrite. What is here is the two derivations that must not drift
-//! between the live row and the rebuilt one.
+//! Direct commands wait for completion with the shell's workspace checks and
+//! rewrite. Their recorded output and rendered rows share one derivation.
 
 use agent::session::Session;
-use tool::{Tool, ToolError};
+use tool::ToolError;
 
 /// What a `!` command left behind, kept apart because the two are easy to
 /// confuse: one is written to the transcript, the other drawn on the screen.
@@ -17,8 +16,7 @@ pub struct Bashed {
     pub why_not: Option<String>,
 }
 
-/// Run what `!` named. Same runner, workspace and timeout as the model's own
-/// `bash` tool; `ctx` carries the token that lets a stop end it.
+/// Run what `!` named to completion; `ctx` carries its cancellation token.
 ///
 /// Free of `Core` so the surface can spawn it: holding `&mut Core` across the
 /// await pinned the whole loop.
@@ -27,10 +25,7 @@ pub async fn run_bash(ctx: &tool::Ctx, command: &str) -> Bashed {
         text: String::new(),
         why_not: Some(why),
     };
-    let out = match toolbox::bash::Bash
-        .execute(serde_json::json!({ "command": command, "cwd": "." }), ctx)
-        .await
-    {
+    let out = match toolbox::bash::foreground(command, ".", ctx).await {
         Ok(out) => out,
         Err(ToolError::Cancelled) => return refused("cancelled".into()),
         Err(e) => return refused(format!("failed to run `{command}`: {e}")),

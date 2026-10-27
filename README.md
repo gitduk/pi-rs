@@ -220,10 +220,9 @@ refused, and resuming one from another directory moves it here.
   not start is listed as `<name>__unavailable`, with the reason; `/mcp`
   shows each server and its tools, and `/mcp restart` reconnects them. A call
   with no answer in 10 minutes is given up.
-- `bash` uses a soft timeout: after 2 minutes by default (`timeout_ms` adjusts
-  the wait, up to 10 minutes), it returns a job id and the latest output while
+- `bash` waits at most 10 seconds, then returns a job id and the latest output while
   the original command keeps running. The model decides whether to wait longer
-  or stop it with `job`; reaching the timeout never kills the command. This
+  or stop it with `job`; returning a job id never kills the command. This
   also applies to subagents and noninteractive runs, whose jobs are isolated
   and stopped when their owning run ends.
 - `job`: what runs in the background, the latest a
@@ -257,7 +256,10 @@ refused, and resuming one from another directory moves it here.
   `options` to ask a question as the `choose` tool does (stopping the job
   takes it back), `interrupt` to stop the checkout's turn, and `follow` to
   hear every turn there. A turn an input opened, or any once it follows, is
-  told back on fd 3: `started`, then its whole `reply`. One that follows is
+  told back on fd 3: `started`, optional `{"progress": "..."}` messages,
+  then `reply` with the remaining answer (excluding text already sent as
+  progress). Progress includes completed model text before tool calls and
+  changed tool or job output, paced while work continues. One that follows is
   also told each question up on the checkout, as
   `{"question": {"id", "text", "options", "back"}}`, then
   `{"closed": <id>}` once it is answered anywhere or withdrawn; it answers
@@ -295,7 +297,11 @@ refused, and resuming one from another directory moves it here.
   `TELEGRAM_BOT_TOKEN`, open the link or QR it shows the first time, and
   only the account that opened it is heard (delete `~/.pi/telegram.json` to
   pair another). Both are cargo scripts, `wechat.rs` and `telegram.rs`, so
-  they need nightly cargo and build on first use.
+  they need nightly cargo and build on first use. Both forward progress
+  before the run ends and retry temporary send failures. Unsent pieces stay
+  in memory, in order, until another incoming message triggers a retry;
+  stopping the channel discards that queue. Updating them requires copying
+  the scripts again and restarting their jobs along with the updated pi.
 
 A server's prompts are commands too: `/<name>:<prompt> [args]` asks the server
 for the prompt's text and sends it, one typed word per argument, the last

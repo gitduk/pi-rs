@@ -327,6 +327,7 @@ async fn tell(mut to: OwnedWriteHalf, mut hear: UnboundedReceiver<Told>) {
     while let Some(told) = hear.recv().await {
         let line = match told {
             Told::Started => serde_json::json!({ "started": true }),
+            Told::Progress(text) => serde_json::json!({ "progress": text }),
             Told::Reply(text) => serde_json::json!({ "reply": text }),
             Told::Asked => serde_json::json!({ "asked": true }),
             Told::Answer(Ok(picked)) => serde_json::json!({ "answer": picked }),
@@ -788,8 +789,8 @@ echo '{"choose":"the task changed","options":["/compact","go on"]}' >&3
 echo '{"answer":3,"picks":[1]}' >&3
 echo '{"interrupt":true}' >&3
 echo '{"follow":true}' >&3
-read -r a <&3; read -r b <&3; read -r c <&3; read -r d <&3; read -r e <&3
-printf '%s\n%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" "$e" > heard"#,
+read -r a <&3; read -r b <&3; read -r c <&3; read -r d <&3; read -r e <&3; read -r f <&3
+printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" "$e" "$f" > heard"#,
         );
         let ended = sink.ended.notified();
         run("bridge", cmd, Vec::new(), 5 * SECOND, &ctx, Some(&*sink))
@@ -797,6 +798,7 @@ printf '%s\n%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" "$e" > heard"#,
             .unwrap();
         let told = sink.told.lock().unwrap().clone().expect("it listens");
         told.send(Told::Started).unwrap();
+        told.send(Told::Progress("checking".into())).unwrap();
         told.send(Told::Reply("parse.rs:40".into())).unwrap();
         let asked = Asked {
             question: "go on?".into(),
@@ -831,6 +833,7 @@ printf '%s\n%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" "$e" > heard"#,
             heard,
             [
                 serde_json::json!({ "started": true }),
+                serde_json::json!({ "progress": "checking" }),
                 serde_json::json!({ "reply": "parse.rs:40" }),
                 serde_json::json!({ "question": {
                     "id": 3, "text": "go on?", "options": ["yes"], "back": false,

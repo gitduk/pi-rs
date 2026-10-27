@@ -168,9 +168,15 @@ async fn scoped_shell_jobs_are_isolated_and_stopped_with_their_owner_or_explicit
     let mut runs = Vec::new();
     for ctx in [&first, &second] {
         let registry = core::shells::scoped(ctx, toolbox::builtin());
-        registry.get(toolbox::bash::Bash::NAME).unwrap().execute(
-            serde_json::json!({"command": "trap '' TERM; sleep 30 & echo \"$$ $!\"; wait", "timeout_ms": 20}), ctx
-        ).await.unwrap();
+        registry
+            .get(toolbox::bash::Bash::NAME)
+            .unwrap()
+            .execute(
+                serde_json::json!({"command": "trap '' TERM; sleep 30 & echo \"$$ $!\"; wait"}),
+                ctx,
+            )
+            .await
+            .unwrap();
         let control = registry.get(Jobs::NAME).unwrap();
         let processes = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -215,7 +221,11 @@ async fn cancelling_a_shell_before_its_soft_timeout_stops_the_process_group() {
     let call = {
         let ctx = ctx.clone();
         tokio::spawn(async move {
-            bash.execute(serde_json::json!({"command": "sleep 30 & echo \"$$ $!\" > pids; wait", "timeout_ms": 5000}), &ctx).await
+            bash.execute(
+                serde_json::json!({"command": "sleep 30 & echo \"$$ $!\" > pids; wait"}),
+                &ctx,
+            )
+            .await
         })
     };
     let processes = tokio::time::timeout(Duration::from_secs(5), async {
