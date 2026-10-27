@@ -23,3 +23,7 @@ clap.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+toolbox.workspace = true
+tempfile = "3"

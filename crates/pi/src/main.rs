@@ -115,17 +115,31 @@ fn paint(
 // The environment, not a flag: an older pi would refuse a flag it lacks.
 const UPDATED_FROM: &str = "PI_UPDATED_FROM";
 
+enum Ended {
+    Exit(ExitCode),
+    Restart(core::Restart),
+}
+
 fn main() -> Result<ExitCode> {
     let updated_from = std::env::var(UPDATED_FROM).ok();
     // SAFETY: no other thread exists yet to read the environment.
     unsafe { std::env::remove_var(UPDATED_FROM) };
+    match drive(run(updated_from))? {
+        Ended::Exit(code) => Ok(code),
+        Ended::Restart(next) => restart(next),
+    }
+}
+
+// Drop the runtime before acting on a restart: exec does not drop tasks,
+// so their process-group guards would otherwise leave background jobs alive.
+fn drive(run: impl std::future::Future<Output = Result<Ended>>) -> Result<Ended> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run(updated_from))
+        .block_on(run)
 }
 
-async fn run(updated_from: Option<String>) -> Result<ExitCode> {
+async fn run(updated_from: Option<String>) -> Result<Ended> {
     let args = std::sync::Arc::new(Args::parse());
     let prompt = read_prompt(&args)?;
     let within = || format!("cannot use {} as a workspace", args.cwd);
@@ -315,8 +329,8 @@ async fn run(updated_from: Option<String>) -> Result<ExitCode> {
             eprintln!("journal stopped recording: {why}");
         }
         return match out? {
-            tui::Ended::Quit => Ok(ExitCode::SUCCESS),
-            tui::Ended::Restart(next) => restart(next),
+            tui::Ended::Quit => Ok(Ended::Exit(ExitCode::SUCCESS)),
+            tui::Ended::Restart(next) => Ok(Ended::Restart(next)),
         };
     };
 
@@ -397,7 +411,7 @@ async fn run(updated_from: Option<String>) -> Result<ExitCode> {
     // A run the user stopped is not a failure of the run; scripts should be
     // able to tell the two apart.
     if matches!(outcome, Err(agent::AgentError::Cancelled)) {
-        return Ok(ExitCode::from(INTERRUPTED));
+        return Ok(Ended::Exit(ExitCode::from(INTERRUPTED)));
     }
 
     // Said only when there is something to diagnose. A successful run that
@@ -411,7 +425,7 @@ async fn run(updated_from: Option<String>) -> Result<ExitCode> {
         );
     }
     outcome?;
-    Ok(ExitCode::SUCCESS)
+    Ok(Ended::Exit(ExitCode::SUCCESS))
 }
 
 // What leaving waits on: subagent transcripts still being saved, and the
@@ -420,3 +434,6 @@ async fn settle() {
     archive::flush().await;
     core::hooks::flush().await;
 }
+
+#[cfg(test)]
+mod tests;

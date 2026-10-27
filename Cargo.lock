@@ -1892,9 +1892,11 @@ dependencies = [
  "llm",
  "pi-core",
  "pi-store",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tool",
+ "toolbox",
  "tracing",
  "ui",
 ]
