@@ -679,11 +679,7 @@ fn local(secs: u64) -> Option<libc::tm> {
 }
 
 pub fn fmt_delay(ms: u64) -> String {
-    if ms >= 1000 {
-        format!("{:.2}s", ms as f64 / 1000.0)
-    } else {
-        format!("{ms}ms")
-    }
+    llm::figures::elapsed(std::time::Duration::from_millis(ms))
 }
 
 /// A run's line for one event, plus detail rows for a tool that offers them —

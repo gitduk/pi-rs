@@ -149,7 +149,7 @@ impl Ui {
                 // clears the clock only once the loop returns.
                 let snap = snapshot(lane, view);
                 // A run whose segments all had nothing to say leaves no row.
-                let parts = status::parts(&self.status, &snap);
+                let parts = status::parts(&self.status, &snap, false);
                 if !parts.is_empty() {
                     // Kept, not just said: nothing else holds these numbers,
                     // so a rebuild could not draw an aside.

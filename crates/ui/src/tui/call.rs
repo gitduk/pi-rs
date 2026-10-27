@@ -164,7 +164,8 @@ fn job_text(job: &Job) -> (String, String) {
         ),
     };
     let state = match job.state {
-        State::Running => crate::render::lasted(job.started.elapsed()),
+        State::Running => crate::status::running_time(job.started.elapsed())
+            .map_or_else(String::new, |time| format!("{}{time}", icons::PART_SEP)),
         State::Back => format!("{}done, back when idle", icons::PART_SEP),
         State::Stopped => format!("{}stopped", icons::PART_SEP),
         State::Exited => format!("{}exited", icons::PART_SEP),

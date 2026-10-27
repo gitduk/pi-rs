@@ -318,7 +318,7 @@ impl Ui {
             },
             Part::Spent if facts.spent <= 0.0 => return None,
             Part::Spent => llm::figures::dollars(facts.spent),
-            Part::Status(segment) => return crate::status::render(segment, snap),
+            Part::Status(segment) => return crate::status::render(segment, snap, facts.running),
         })
     }
 

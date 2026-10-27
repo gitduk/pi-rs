@@ -761,7 +761,7 @@ impl Tui {
         // Only `Done` keeps a turn's status line; a turn ending otherwise
         // keeps it here, read before the clock stops.
         let parts = match was_turn {
-            true => crate::status::parts(&self.ui.status, &super::view::snapshot(on, view)),
+            true => crate::status::parts(&self.ui.status, &super::view::snapshot(on, view), false),
             false => Vec::new(),
         };
         view.state.work = None;

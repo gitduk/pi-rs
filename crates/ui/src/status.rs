@@ -17,8 +17,9 @@ use crate::render::Paint;
 pub const SPIN: Duration = Duration::from_millis(90);
 
 /// What this part reads as, or None when the run has nothing to say for it.
-pub fn render(segment: Segment, s: &Snapshot) -> Option<String> {
+pub fn render(segment: Segment, s: &Snapshot, running: bool) -> Option<String> {
     Some(match segment {
+        Segment::Elapsed if running => return running_time(s.elapsed?),
         Segment::Elapsed => llm::figures::elapsed(s.elapsed?),
         // Each half appears once the provider states it: most state both only
         // as the stream ends, and a waiting line of dashes reads as broken.
@@ -56,13 +57,21 @@ pub fn render(segment: Segment, s: &Snapshot) -> Option<String> {
 }
 
 /// The parts that have something to say, in the order asked for.
-pub fn parts(segments: &[Segment], s: &Snapshot) -> Vec<String> {
-    segments.iter().filter_map(|&seg| render(seg, s)).collect()
+pub fn parts(segments: &[Segment], s: &Snapshot, running: bool) -> Vec<String> {
+    segments
+        .iter()
+        .filter_map(|&seg| render(seg, s, running))
+        .collect()
 }
 
 /// Those parts as one line.
 pub fn line(segments: &[Segment], s: &Snapshot) -> String {
-    settled(&parts(segments, s))
+    settled(&parts(segments, s, false))
+}
+
+/// A running clock starts at one second and advances in whole seconds.
+pub fn running_time(d: Duration) -> Option<String> {
+    (d.as_secs() > 0).then(|| llm::figures::elapsed(d))
 }
 
 /// The static mark replaces the live spinner without shifting the figures.

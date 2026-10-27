@@ -517,7 +517,7 @@ impl Ui {
         rows.extend(content);
 
         if lane.is_running() {
-            let mut parts = status::parts(&self.status, &snapshot(lane, view));
+            let mut parts = status::parts(&self.status, &snapshot(lane, view), true);
             if let Some(work) = &view.state.work {
                 if matches!(work.doing, Doing::Compact) {
                     parts.insert(0, format!("compacting{}", icons::ELLIPSIS));
@@ -530,7 +530,9 @@ impl Ui {
                     parts.push(format!(
                         "retry {} in {}",
                         retry.attempt,
-                        crate::render::fmt_delay((retry.until - now).as_millis() as u64)
+                        llm::figures::elapsed(std::time::Duration::from_secs(
+                            (retry.until - now).as_millis().div_ceil(1000).max(1) as u64,
+                        ))
                     ));
                 }
                 if work.stopping {
@@ -538,7 +540,10 @@ impl Ui {
                 }
             }
             // `status = []` asks for no line, and a blank row is not none.
-            if !parts.is_empty() {
+            if !parts.is_empty()
+                || (view.state.work.is_some()
+                    && self.status.contains(&pi_store::status::Segment::Elapsed))
+            {
                 let line = parts.join(icons::PART_SEP);
                 let mut painted = status::painted(&line, &self.paint);
                 let frame = StepMark::Out(self.spinner).glyph();

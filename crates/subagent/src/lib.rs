@@ -679,7 +679,8 @@ fn check_line(check: &Checked) -> String {
             line
         }
         Outcome::CutOff { ms } => {
-            format!("[verify `{command}`: no verdict — killed after {ms}ms, having run that long]")
+            let took = llm::figures::elapsed(Duration::from_millis(*ms));
+            format!("[verify `{command}`: no verdict — killed after {took}, having run that long]")
         }
         Outcome::NoVerdict(why) => format!("[verify `{command}`: no verdict — {why}]"),
     }
