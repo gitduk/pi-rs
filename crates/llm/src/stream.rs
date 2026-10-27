@@ -36,12 +36,12 @@ impl Usage {
     }
 
     /// Take in what `ev` says of one call's counts: a start states them
-    /// whole; a terminal frame only the ones it carries, since one that omits
-    /// a counter reports 0 and must not clobber a count already delivered.
+    /// whole; later frames only the ones they carry, since one that omits a
+    /// counter reports 0 and must not clobber a count already delivered.
     pub fn observe(&mut self, ev: &StreamEvent) {
         match ev {
             StreamEvent::MessageStart { usage } => *self = *usage,
-            StreamEvent::Done { usage, .. } => {
+            StreamEvent::Usage { usage } | StreamEvent::Done { usage, .. } => {
                 if usage.input > 0 {
                     self.input = usage.input;
                 }
@@ -81,6 +81,11 @@ pub enum BlockKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
     MessageStart {
+        usage: Usage,
+    },
+    // Provider-reported cumulative counts for this call, not an increment.
+    // A counter omitted by the provider is zero and leaves its last value intact.
+    Usage {
         usage: Usage,
     },
     BlockStart {
@@ -175,7 +180,7 @@ impl Accumulator {
     pub fn push(&mut self, ev: StreamEvent) {
         self.usage.observe(&ev);
         match ev {
-            StreamEvent::MessageStart { .. } => {}
+            StreamEvent::MessageStart { .. } | StreamEvent::Usage { .. } => {}
             StreamEvent::BlockStart { index, kind } => {
                 self.blocks.entry(index).or_default().kind = Some(kind);
             }
@@ -205,6 +210,10 @@ impl Accumulator {
             }
             StreamEvent::Done { stop, .. } => self.stop = stop,
         }
+    }
+
+    pub fn usage(&self) -> Usage {
+        self.usage
     }
 
     // Provider's own id, or a local stand-in if none. Duplicate ids within a
@@ -483,6 +492,16 @@ mod tests {
                 ..Default::default()
             },
         });
+        a.push(StreamEvent::Usage {
+            usage: Usage {
+                output: 5,
+                ..Default::default()
+            },
+        });
+        assert_eq!(
+            (a.usage().input, a.usage().output, a.usage().cache_read),
+            (120, 5, 40)
+        );
         a.push(StreamEvent::Done {
             stop: StopReason::EndTurn,
             usage: Usage {

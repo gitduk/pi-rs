@@ -118,9 +118,20 @@ impl Agent {
                 Ok(ev) => ev,
                 Err(e) => return Err((AgentError::from(e), None)),
             };
-            if started.is_none() && !matches!(ev, StreamEvent::MessageStart { .. }) {
+            if started.is_none()
+                && !matches!(
+                    ev,
+                    StreamEvent::MessageStart { .. } | StreamEvent::Usage { .. }
+                )
+            {
                 started = Some(std::time::Instant::now());
             }
+            let reports_usage = matches!(
+                ev,
+                StreamEvent::MessageStart { .. }
+                    | StreamEvent::Usage { .. }
+                    | StreamEvent::Done { .. }
+            );
             match &ev {
                 StreamEvent::TextDelta { delta, .. } => {
                     voice.say(Event::TextDelta(delta.clone()));
@@ -128,13 +139,12 @@ impl Agent {
                 StreamEvent::ReasoningDelta { delta, .. } => {
                     voice.say(Event::ReasoningDelta(delta.clone()));
                 }
-                // The one measured number that arrives before the answer does.
-                StreamEvent::MessageStart { usage, .. } => {
-                    voice.say(Event::Usage(*usage));
-                }
                 _ => {}
             }
             acc.push(ev);
+            if reports_usage {
+                voice.say(Event::Usage(acc.usage()));
+            }
         }
         *generating = started.map(|at| at.elapsed());
 

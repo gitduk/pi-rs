@@ -1109,6 +1109,86 @@ async fn a_stream_that_stops_sending_does_not_hold_the_turn_open() {
     );
 }
 
+// Both intermediate and terminal counts must be visible while the stream is open.
+#[tokio::test]
+async fn reported_usage_reaches_the_consumer_before_the_stream_closes() {
+    struct ReportedThenWedged(Vec<StreamEvent>);
+
+    #[async_trait]
+    impl Transport for ReportedThenWedged {
+        async fn stream(
+            &self,
+            _: &ModelSpec,
+            _: &Request,
+        ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
+            Ok(futures::stream::iter(self.0.clone().into_iter().map(Ok))
+                .chain(futures::stream::pending())
+                .boxed())
+        }
+    }
+
+    let reported = Usage {
+        output: 89,
+        ..Default::default()
+    };
+    for report in [
+        StreamEvent::Usage { usage: reported },
+        StreamEvent::Done {
+            stop: StopReason::EndTurn,
+            usage: reported,
+        },
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+        let a = tooled(
+            Arc::new(ReportedThenWedged(vec![
+                StreamEvent::MessageStart {
+                    usage: Usage {
+                        input: 500,
+                        cache_read: 200,
+                        output: 1,
+                        ..Default::default()
+                    },
+                },
+                StreamEvent::ReasoningDelta {
+                    index: 0,
+                    delta: "thinking".into(),
+                },
+                report,
+            ])),
+            spec(),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut session = Session::with_prompt("go");
+        let retry = Retry::default();
+        let run = a.run(&mut session, &ctx, &tx, &retry);
+        tokio::pin!(run);
+        let observed = async {
+            loop {
+                match rx.recv().await.expect("event channel") {
+                    Event::Usage(usage) if usage.output == 89 => break usage,
+                    Event::TurnEnd { .. } => panic!("usage must arrive before TurnEnd"),
+                    _ => {}
+                }
+            }
+        };
+        let usage = tokio::select! {
+            out = &mut run => panic!("stream must remain open: {out:?}"),
+            usage = tokio::time::timeout(std::time::Duration::from_secs(2), observed) => {
+                usage.expect("usage must not wait for the stream to close")
+            }
+        };
+        assert_eq!(
+            (usage.input, usage.output, usage.cache_read),
+            (500, 89, 200)
+        );
+        ctx.cancel.cancel();
+        assert!(matches!(run.await, Err(AgentError::Cancelled)));
+        // A cancelled call is charged once for its latest cumulative report.
+        assert_eq!(a.meter.read().usage, usage);
+    }
+}
+
 // States its prompt, then never sends anything more.
 struct StatedThenWedged;
 

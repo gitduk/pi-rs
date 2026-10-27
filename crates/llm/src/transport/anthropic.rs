@@ -346,7 +346,9 @@ fn decode_frame(
                 usage.output = o;
             }
             repair_usage(usage, &data["usage"]);
-            None
+            data["usage"]
+                .is_object()
+                .then_some(StreamEvent::Usage { usage: *usage })
         }
         "message_stop" => Some(StreamEvent::Done {
             stop: *stop,
@@ -438,6 +440,59 @@ mod tests {
             let _ = decode_frame(frame, &mut stop, &mut usage, &mut gaps);
         }
         usage
+    }
+
+    #[test]
+    fn usage_deltas_are_reported_before_the_message_stops() {
+        let mut stop = StopReason::default();
+        let mut usage = Usage::default();
+        let mut gaps = Gaps::new("anthropic");
+        let mut acc = crate::stream::Accumulator::new("test-model".into());
+        for (frame, expected) in [
+            (
+                json!({ "type": "message_start", "message": { "usage": {
+                    "input_tokens": 25, "cache_read_input_tokens": 600,
+                    "output_tokens": 1
+                } } }),
+                Usage {
+                    input: 25,
+                    cache_read: 600,
+                    output: 1,
+                    cache_write: 0,
+                },
+            ),
+            (
+                json!({ "type": "message_delta", "usage": { "output_tokens": 32 } }),
+                Usage {
+                    input: 25,
+                    cache_read: 600,
+                    output: 32,
+                    cache_write: 0,
+                },
+            ),
+            (
+                json!({ "type": "message_delta", "usage": {
+                    "input_tokens": 30, "cache_creation_input_tokens": 40,
+                    "output_tokens": 89
+                } }),
+                Usage {
+                    input: 30,
+                    cache_read: 600,
+                    output: 89,
+                    cache_write: 40,
+                },
+            ),
+        ] {
+            let event = decode_frame(&frame, &mut stop, &mut usage, &mut gaps)
+                .expect("usage must arrive without waiting for message_stop");
+            assert!(matches!(
+                event,
+                StreamEvent::MessageStart { .. } | StreamEvent::Usage { .. }
+            ));
+            acc.push(event);
+            assert_eq!(acc.usage(), expected);
+        }
+        assert_eq!(acc.finish().usage, usage);
     }
 
     #[test]

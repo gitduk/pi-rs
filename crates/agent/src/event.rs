@@ -61,8 +61,8 @@ pub enum Event {
     // The request did not fit and is being resent smaller: a warning, but one
     // about the context from here on, like `Compacted`, not about the reply.
     Refit(String),
-    // Cumulative for the turn, not a delta. Not every wire sends one (Anthropic
-    // reports early, OpenAI only at stream end); absence means unknown, not zero.
+    // Cumulative for the turn, not a delta. Sent whenever the provider reports
+    // counts; before its first report the usage is unknown, not zero.
     Usage(Usage),
 
     TurnEnd {

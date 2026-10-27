@@ -279,12 +279,15 @@ impl Decoder {
 
     fn frame(&mut self, data: &Value) -> Vec<StreamEvent> {
         let choice = data["choices"].as_array().and_then(|c| c.first());
-        // A usage-only chunk after the finish: the turn is done already, so
-        // it restates that ending with the counts it lacked.
+        // A usage-only chunk can arrive during generation or after the finish;
+        // after it, restate the ending with the counts it lacked.
         let Some(choice) = choice else {
             return match self.stop {
                 Some(stop) if data["usage"].is_object() => vec![StreamEvent::Done {
                     stop,
+                    usage: usage_of(&data["usage"]),
+                }],
+                None if data["usage"].is_object() => vec![StreamEvent::Usage {
                     usage: usage_of(&data["usage"]),
                 }],
                 _ => Vec::new(),
@@ -372,6 +375,10 @@ impl Decoder {
             self.stop = Some(stop);
             events.push(StreamEvent::Done {
                 stop,
+                usage: usage_of(&data["usage"]),
+            });
+        } else if data["usage"].is_object() {
+            events.push(StreamEvent::Usage {
                 usage: usage_of(&data["usage"]),
             });
         }
@@ -473,6 +480,34 @@ mod tests {
         assert_eq!(u.input, 1_000);
         assert_eq!(u.cache_read, 0);
         assert_eq!(u.output, 42);
+    }
+
+    #[test]
+    fn usage_before_the_finish_is_reported_with_or_without_choices() {
+        for choices in [json!([]), json!([{ "delta": {}, "finish_reason": null }])] {
+            let mut dec = Decoder::new(Shared::new("chat"));
+            let mut acc = Accumulator::new("test-model".into());
+            for output in [5, 20] {
+                let events = dec.frame(&json!({
+                    "choices": choices,
+                    "usage": { "prompt_tokens": 100, "completion_tokens": output },
+                }));
+                assert!(matches!(events.as_slice(), [StreamEvent::Usage { .. }]));
+                for event in events {
+                    acc.push(event);
+                }
+                assert_eq!(acc.usage().input, 100);
+                assert_eq!(acc.usage().output, output);
+            }
+            for event in dec.frame(&json!({
+                "choices": [{ "delta": {}, "finish_reason": "stop" }],
+                "usage": null,
+            })) {
+                acc.push(event);
+            }
+            let done = acc.finish();
+            assert_eq!((done.usage.input, done.usage.output), (100, 20));
+        }
     }
 
     #[test]

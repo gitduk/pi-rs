@@ -141,8 +141,13 @@ pub(crate) fn terminated(
         .scan((false, false), move |(done, counted), item| {
             let out = match item {
                 Some(Ok(ev)) => {
-                    if let StreamEvent::Done { usage, .. } = &ev {
+                    if matches!(ev, StreamEvent::Done { .. }) {
                         *done = true;
+                    }
+                    if let StreamEvent::MessageStart { usage }
+                    | StreamEvent::Usage { usage }
+                    | StreamEvent::Done { usage, .. } = &ev
+                    {
                         *counted |= *usage != crate::stream::Usage::default();
                     }
                     Some(Ok(ev))
@@ -352,6 +357,27 @@ mod tests {
         ]);
         assert_eq!(whole.len(), 2);
         assert!(whole.iter().all(Result::is_ok));
+    }
+
+    #[test]
+    fn usage_reported_before_the_terminal_frame_counts_as_reported() {
+        let gaps = Shared::new("chat");
+        let events = futures::stream::iter([
+            Ok(StreamEvent::Usage {
+                usage: crate::stream::Usage {
+                    input: 100,
+                    output: 20,
+                    ..Default::default()
+                },
+            }),
+            Ok(StreamEvent::Done {
+                stop: Default::default(),
+                usage: Default::default(),
+            }),
+        ])
+        .boxed();
+        futures::executor::block_on(terminated("chat", gaps.clone(), events).collect::<Vec<_>>());
+        assert!(gaps.drain().is_empty());
     }
 
     // A host that never counts would show a session as free; said once, not
