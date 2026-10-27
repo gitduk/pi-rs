@@ -286,8 +286,9 @@ async fn a_stopped_turn_keeps_its_status_line_and_a_stopped_bang_does_not() {
 
     let turn = last_row(crate::tui::run::Kind::Turn).await;
     let bang = last_row(crate::tui::run::Kind::Bash { lines: Vec::new() }).await;
+    let figures = turn.strip_prefix("π ").expect("a settled status mark");
     assert!(
-        turn.starts_with(bang.trim()) && turn.len() > bang.trim().len(),
+        figures.starts_with(bang.trim()) && figures.len() > bang.trim().len(),
         "the turn says more than the bang: {turn:?} / {bang:?}"
     );
 }

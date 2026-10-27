@@ -11,7 +11,7 @@ use super::bar::Facts;
 use super::call::{self, drawn, pending_line};
 use super::menu::MenuEntry;
 use super::mouse::{Regions, Target, row_in};
-use super::row::{PendingTool, Row, count};
+use super::row::{PendingTool, Row, StepMark, count};
 use super::screen::{self, Rows};
 use super::scrollback::{Piece, ScrollbackRows, body};
 use super::search::{self, Anchor, Laid, Spot};
@@ -167,7 +167,7 @@ impl Ui {
         // The pending-call rows lead the live block; a click on one opens or
         // closes the batch.
         let live_stream = live.iter().enumerate().map(move |(i, s)| {
-            let target = if i < pending_rows {
+            let target = if i < pending_rows && !s.spans.is_empty() {
                 Target::PendingTools(i)
             } else {
                 Target::Live(i)
@@ -222,6 +222,14 @@ impl Ui {
         self.row_targets.clear();
         self.row_of.clear();
         for (row, target, at) in tagged_rows {
+            let target = match target {
+                Target::Scrollback(idx, line)
+                    if at >= view.surface.scrollback[idx].line_height(line, &self.paint, width) =>
+                {
+                    Target::Separator(idx, line)
+                }
+                target => target,
+            };
             rows.push(row);
             self.row_targets.push(target);
             self.row_of.push(at);
@@ -271,11 +279,7 @@ impl Ui {
                 .pointer
                 .is_some_and(|(_, row)| row_in(regions.gap, row).is_some());
             let more = format!("{scroll} more below");
-            Line::from(
-                self.paint
-                    .span_hovered(shine, &self.paint.theme.muted, more),
-            )
-            .centered()
+            Line::from(self.paint.action_hint(shine, more)).centered()
         });
         self.below = scroll;
 
@@ -373,7 +377,7 @@ impl Ui {
         }
         Line::from(vec![
             self.paint.span(color, icons::OVER_RULE.repeat(room / 2)),
-            self.paint.span_hovered(true, color, says),
+            self.paint.action_hint(true, says),
             self.paint
                 .span(color, icons::OVER_RULE.repeat(room - room / 2)),
         ])
@@ -478,6 +482,15 @@ impl Ui {
                 .push(self.paint.span(&self.paint.theme.muted, extra));
             pending.push(line);
         }
+        let previous = view
+            .surface
+            .scrollback
+            .iter()
+            .rev()
+            .find(|row| row.len() > 0);
+        if !pending.is_empty() && previous.is_some_and(Row::is_prose) {
+            rows.push(Line::default());
+        }
         rows.extend(
             pending
                 .into_iter()
@@ -487,14 +500,21 @@ impl Ui {
         // count the rows the block takes, not the lines before they did.
         let pending_rows = rows.len();
 
-        rows.extend(body(
+        let content = body(
             &view.surface.folds,
             &view.surface.scrollback,
             thinking,
             &view.surface.stream.text,
             width,
             &self.paint,
-        ));
+        );
+        if !thinking
+            && content.first().is_some_and(|line| !line.spans.is_empty())
+            && (pending_rows > 0 || previous.is_some_and(Row::is_tool_area))
+        {
+            rows.push(Line::default());
+        }
+        rows.extend(content);
 
         if lane.is_running() {
             let mut parts = status::parts(&self.status, &snapshot(lane, view));
@@ -512,8 +532,14 @@ impl Ui {
             // `status = []` asks for no line, and a blank row is not none.
             if !parts.is_empty() {
                 let line = parts.join(icons::PART_SEP);
-                let muted = Line::from(self.paint.span(&self.paint.theme.muted, line));
-                rows.extend(screen::fit(&muted, width));
+                let mut painted = status::painted(&line, &self.paint);
+                let frame = StepMark::Out(self.spinner).glyph();
+                painted.spans.insert(
+                    0,
+                    self.paint
+                        .span(&self.paint.theme.muted, format!("{frame} ")),
+                );
+                rows.extend(screen::fit(&painted, width));
             }
         }
         // Typed lines waiting their turn, muted under the said rule: off the

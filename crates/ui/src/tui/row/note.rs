@@ -38,10 +38,7 @@ impl Note {
         width: usize,
     ) -> (Line<'static>, Option<Line<'static>>) {
         if !self.open {
-            return (
-                Line::from(self.head(paint, width)),
-                Some(self.lead(0, paint)),
-            );
+            return (self.head(paint, width), Some(self.lead(0, paint)));
         }
         let (page, lead) = self.opened_line(i, self.hovered && i == 0, paint);
         (page.line, lead)
@@ -69,9 +66,12 @@ impl Note {
     }
 
     // Closed, its first line cut to one row, and how much opening shows.
-    fn head(&self, paint: &Paint, width: usize) -> Span<'static> {
+    fn head(&self, paint: &Paint, width: usize) -> Line<'static> {
         let (text, tail) = self.head_text(width);
-        paint.span_hovered(self.hovered, &paint.theme.muted, format!("{text}{tail}"))
+        Line::from(vec![
+            paint.span_hovered(self.hovered, &paint.theme.muted, text),
+            paint.action_hint(self.hovered, tail),
+        ])
     }
 
     // The head's text, cut to fit beside its tail, and the tail.

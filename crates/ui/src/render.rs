@@ -8,12 +8,13 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::io::{IsTerminal, Write};
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use agent::Event;
 use llm::model::Pricing;
 use ratatui::text::{Line, Span};
 
+use crate::markdown::FENCE;
 use crate::sgr::{band_to_ratatui, style_to_ratatui};
 use pi_store::icons;
 use pi_store::text::{RESET, clip};
@@ -25,19 +26,53 @@ use pi_store::theme::{Attr, Color, Style, Theme, push_sep};
 pub struct Paint {
     pub color: bool,
     pub theme: Arc<Theme>,
+    // Parsing an embedded theme is startup work, never per streaming delta.
+    markdown: OnceLock<crate::markdown::Format>,
 }
 
 impl Paint {
     #[cfg(test)]
     pub fn new(color: bool) -> Self {
-        Self {
-            color,
-            theme: Arc::new(Theme::default()),
-        }
+        Self::with_theme(color, Arc::new(Theme::default()))
     }
 
     pub fn with_theme(color: bool, theme: Arc<Theme>) -> Self {
-        Self { color, theme }
+        Self {
+            color,
+            theme,
+            markdown: OnceLock::new(),
+        }
+    }
+
+    /// Dim the terminal's own foreground once. Explicitly reset the colour so
+    /// Markdown syntax colours do not carry into transcript reasoning.
+    pub fn reasoning_style(&self) -> Style {
+        Style::dimmed()
+    }
+
+    /// A tool's existing display text, coloured without changing its wording.
+    pub fn tool_call(&self, name: &str, text: &str, hovered: bool) -> Vec<Span<'static>> {
+        if !self.color {
+            return vec![Span::raw(text.to_string())];
+        }
+        let Some(args) = text.strip_prefix(name) else {
+            // A narrow row can cut even the name itself.
+            return vec![self.span_hovered(hovered, &self.theme.prompt.color, text)];
+        };
+        let mut spans = vec![self.span_hovered(hovered, &self.theme.prompt.color, name)];
+        let args = if name == "bash" {
+            let mut args = crate::markdown::shell(args, self.theme.syntax);
+            if hovered {
+                for span in &mut args {
+                    span.style = Self::lit(span.style);
+                }
+            }
+            args
+        } else {
+            vec![self.span_hovered(hovered, &self.theme.code, args)]
+        };
+        spans.extend(args);
+        spans
     }
 
     pub fn on(&self, style: &Style, body: &str) -> String {
@@ -83,6 +118,17 @@ impl Paint {
             return self.span(style, body);
         }
         self.span(&style.lit(), body)
+    }
+
+    /// A clickable hint in the link colour, with the same hover as its row.
+    pub fn action_hint(&self, hovered: bool, body: impl Into<String>) -> Span<'static> {
+        let mut span = self.span_hovered(hovered, &self.theme.link, body);
+        if self.color {
+            span.style = span
+                .style
+                .remove_modifier(ratatui::style::Modifier::UNDERLINED);
+        }
+        span
     }
 
     /// A drawn span's style under the pointer, as `Style::lit` has it.
@@ -187,10 +233,6 @@ fn append_style_params(out: &mut String, style: ratatui::style::Style) {
     }
 }
 
-// Stands in for a code block's fence lines, so `fenced` can find them after
-// rendering: a private-use char no model writes.
-const FENCE: &str = "\u{E000}";
-
 /// A code block's head: its language on the prompt's band, and `note` muted
 /// after it.
 pub fn badge(lang: &str, note: &str, paint: &Paint) -> Line<'static> {
@@ -216,13 +258,13 @@ fn badge_with(
 // A code block's opening fence becomes its badge, carrying the block's text;
 // the rest of its info string is the note, and the closing fence goes.
 fn fenced(
-    lines: Vec<(Line<'static>, crate::unit::Units)>,
+    lines: Vec<(Line<'static>, crate::unit::Units, Option<Prefix>)>,
     badge: ratatui::style::Style,
     muted: ratatui::style::Style,
 ) -> Vec<Rendered> {
     let mut open: Option<(usize, Vec<String>)> = None;
     let mut out: Vec<Rendered> = Vec::with_capacity(lines.len());
-    for (line, units) in lines {
+    for (line, units, prefix) in lines {
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         let Some(lang) = text.strip_prefix(FENCE) else {
             let coded = match &mut open {
@@ -232,7 +274,12 @@ fn fenced(
                 }
                 None => Coded::Text,
             };
-            out.push(Rendered { line, coded, units });
+            out.push(Rendered {
+                line,
+                coded,
+                units,
+                prefix,
+            });
             continue;
         };
         match open.take() {
@@ -244,6 +291,7 @@ fn fenced(
                     line: badge_with(lang, note.trim(), badge, muted),
                     coded: Coded::Badge(String::new()),
                     units: Vec::new(),
+                    prefix,
                 });
             }
         }
@@ -265,51 +313,6 @@ fn trim_partial_fences(text: &str) -> &str {
     text
 }
 
-#[derive(Debug, Clone)]
-struct PiStyleSheet {
-    heading: ratatui::style::Style,
-    code: ratatui::style::Style,
-    muted: ratatui::style::Style,
-}
-
-impl tui_markdown::StyleSheet for PiStyleSheet {
-    fn heading(&self, _level: u8) -> ratatui::style::Style {
-        self.heading
-    }
-
-    fn code(&self) -> ratatui::style::Style {
-        self.code
-    }
-
-    fn code_block_fence(&self) -> &str {
-        FENCE
-    }
-
-    fn link(&self) -> ratatui::style::Style {
-        self.code
-    }
-
-    fn blockquote(&self) -> ratatui::style::Style {
-        self.muted
-    }
-
-    fn heading_meta(&self) -> ratatui::style::Style {
-        self.muted
-    }
-
-    fn table_header(&self) -> ratatui::style::Style {
-        self.heading
-    }
-
-    fn table_border(&self) -> ratatui::style::Style {
-        self.muted
-    }
-
-    fn image_alt(&self) -> ratatui::style::Style {
-        self.muted
-    }
-}
-
 /// What a rendered line is to the code blocks around it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Coded {
@@ -325,17 +328,63 @@ pub enum Coded {
 /// read as one.
 #[derive(Debug, Clone)]
 pub struct Rendered {
+    /// The body, without its block prefix; `full_line` includes that prefix.
     pub line: Line<'static>,
     pub coded: Coded,
     pub units: crate::unit::Units,
+    pub prefix: Option<Prefix>,
 }
 
-/// Parse and render markdown into styled lines using `tui-markdown` and theme.
+/// Equal-width first and continuation prefixes keep list markers on the first
+/// screen row and quote rules on every screen row.
+#[derive(Debug, Clone)]
+pub struct Prefix {
+    pub first: Line<'static>,
+    pub rest: Line<'static>,
+    /// A thematic break stretches to the available body width when drawn.
+    pub rule: bool,
+}
+
+impl Prefix {
+    pub fn fit_body(&self, mut line: Line<'static>, width: usize) -> Line<'static> {
+        if self.rule {
+            let room = width
+                .checked_sub(self.first.width())
+                .filter(|n| *n > 0)
+                .unwrap_or(width);
+            if let Some(span) = line.spans.first_mut() {
+                span.content = "─".repeat(room).into();
+            }
+        }
+        line
+    }
+}
+
+impl Rendered {
+    pub fn full_line(&self) -> Line<'static> {
+        let mut spans = self
+            .prefix
+            .as_ref()
+            .map_or_else(Vec::new, |p| p.first.spans.clone());
+        spans.extend(self.line.spans.clone());
+        Line::from(spans).style(self.line.style)
+    }
+
+    pub fn full_units(&self) -> crate::unit::Units {
+        let lead = self.prefix.as_ref().map_or(0, |p| p.first.width());
+        self.units
+            .iter()
+            .map(|r| r.start + lead..r.end + lead)
+            .collect()
+    }
+}
+
+/// Parse and render Markdown into styled lines, including block prefixes.
 /// Styles ride on the spans; nothing here speaks SGR.
 pub fn render_markdown(text: &str, paint: &Paint) -> Vec<ratatui::text::Line<'static>> {
     render_coded(text, paint)
         .into_iter()
-        .map(|r| r.line)
+        .map(|r| r.full_line())
         .collect()
 }
 
@@ -353,6 +402,7 @@ pub fn render_coded(text: &str, paint: &Paint) -> Vec<Rendered> {
                 line: Line::from(l.to_string()),
                 coded: Coded::Text,
                 units: Vec::new(),
+                prefix: None,
             })
             .collect();
     }
@@ -363,28 +413,27 @@ pub fn render_coded(text: &str, paint: &Paint) -> Vec<Rendered> {
         .map(|(w, _)| usize::from(w));
     let drawn = crate::block::drawn(trimmed, width);
     let marked = crate::unit::mark(&drawn);
-    let sheet = PiStyleSheet {
-        heading: style_to_ratatui(&paint.theme.heading),
-        code: style_to_ratatui(&paint.theme.code),
-        muted: style_to_ratatui(&paint.theme.muted),
-    };
-    let badge = sheet
-        .code
-        .patch(band_to_ratatui(&paint.theme.prompt.panel.said));
-    let muted = sheet.muted;
-    let options = tui_markdown::Options::new(sheet);
-    let parsed = tui_markdown::from_str_with_options(&marked, &options);
-    // The parsed text borrows the input; flatten text/line styles onto the
-    // spans and own the content, so the lines outlive this call.
+    let badge =
+        style_to_ratatui(&paint.theme.code).patch(band_to_ratatui(&paint.theme.prompt.panel.said));
+    let muted = style_to_ratatui(&paint.theme.muted);
+    let options = paint
+        .markdown
+        .get_or_init(|| crate::markdown::options(paint.theme.clone()));
+    let parsed = options.render(&marked, width);
+    let prefixes: Vec<_> = parsed.iter().map(|row| row.prefix.clone()).collect();
+    // Flatten block and inline styles onto the owned spans before measuring.
     let lines = parsed
-        .lines
         .into_iter()
-        .map(|line| {
-            let line_style = parsed.style.patch(line.style);
+        .map(|row| {
+            let line = row.line;
+            let line_style = line.style;
             let spans: Vec<Span<'static>> = line
                 .spans
                 .into_iter()
-                .map(|span| Span::styled(span.content.to_string(), line_style.patch(span.style)))
+                .map(|span| {
+                    let style = crate::markdown::inline(line_style.patch(span.style), &paint.theme);
+                    Span::styled(span.content.to_string(), style)
+                })
                 .collect();
             Line::from(spans)
         })
@@ -393,6 +442,11 @@ pub fn render_coded(text: &str, paint: &Paint) -> Vec<Rendered> {
         Cow::Owned(_) => crate::unit::strip(lines),
         Cow::Borrowed(_) => lines.into_iter().map(|l| (l, Vec::new())).collect(),
     };
+    let lines = lines
+        .into_iter()
+        .zip(prefixes)
+        .map(|((line, units), prefix)| (line, units, prefix))
+        .collect();
     fenced(lines, badge, muted)
 }
 
@@ -470,15 +524,18 @@ pub fn result_rows(
     let placed = placed(call.place) + &ran_for(call.took);
     let width_of = pi_store::text::width;
     let fits = room.saturating_sub(width_of(call.name) + 2 + width_of(placed.as_str()));
-    let mut out = vec![Line::from(vec![
-        p.span(mark_style, mark),
-        Span::raw(format!(" {} ", call.name)),
-        p.span_hovered(hovered, &p.theme.muted, clip(head, fits) + &placed),
-    ])];
+    let mut spans = vec![p.span(mark_style, mark), Span::raw(" ")];
+    spans.extend(p.tool_call(
+        call.name,
+        &format!("{} {}", call.name, clip(head, fits)),
+        hovered,
+    ));
+    spans.push(p.span_hovered(hovered, &p.theme.muted, placed));
+    let mut out = vec![Line::from(spans)];
     let diff_lines: Vec<&str> = rest.lines().collect();
     let (rows, footer) = sketched(&diff_lines, shown);
     out.extend(sketch_rows(rows, p, room));
-    out.extend(footer.map(|text| Line::from(p.span_hovered(hovered, &p.theme.muted, text))));
+    out.extend(footer.map(|text| Line::from(p.action_hint(hovered, text))));
     out
 }
 
@@ -635,10 +692,11 @@ pub fn describe(
     let line = match event {
         // Same naming every line that shows a call uses — not a place to
         // spell a tool differently.
-        Event::ToolQueued { name, args, .. } => Line::from(vec![
-            p.span(&p.theme.muted, icons::PENDING_MARK),
-            Span::raw(format!(" {}", named(name, &summarize(args)))),
-        ]),
+        Event::ToolQueued { name, args, .. } => {
+            let mut spans = vec![p.span(&p.theme.muted, icons::PENDING_MARK), Span::raw(" ")];
+            spans.extend(p.tool_call(name, &named(name, &summarize(args)), false));
+            Line::from(spans)
+        }
         Event::ToolEnd {
             name,
             outcome,
@@ -657,7 +715,7 @@ pub fn describe(
         }
         Event::ToolDenied { name, reason, .. } => Line::from(vec![
             p.span(&p.theme.status.err, icons::FAIL_MARK),
-            Span::raw(format!(" {name} ")),
+            p.span(&p.theme.prompt.color, format!(" {name} ")),
             p.span(&p.theme.muted, clip(reason, room)),
         ]),
         Event::Compacted(r) => {
@@ -742,10 +800,13 @@ impl Renderer {
             Event::ReasoningDelta(d) if !self.quiet => {
                 if !self.thinking {
                     self.settle_out();
-                    eprint!("{}", self.paint.on(&self.paint.theme.muted, "thinking "));
+                    eprint!(
+                        "{}",
+                        self.paint.on(&self.paint.reasoning_style(), "thinking ")
+                    );
                     self.thinking = true;
                 }
-                eprint!("{}", self.paint.on(&self.paint.theme.muted, d));
+                eprint!("{}", self.paint.on(&self.paint.reasoning_style(), d));
                 self.err_dirty = true;
                 let _ = std::io::stderr().flush();
             }
@@ -764,7 +825,8 @@ impl Renderer {
                     .snapshot(&self.model, self.worktree.as_deref(), None, 0);
                 let line = crate::status::line(&self.status, &snap);
                 if !line.is_empty() {
-                    eprintln!("{}", self.paint.on(&self.paint.theme.muted, &line));
+                    let painted = crate::status::painted(&line, &self.paint);
+                    eprintln!("{}", lines_to_ansi(&[painted]));
                 }
             }
             // Worth seeing even under --quiet: the run did less than it was asked.
@@ -877,6 +939,54 @@ pub fn summarize(args: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::Paint;
+
+    #[test]
+    fn a_tool_call_keeps_the_command_verbatim() {
+        let text = "bash cd /home/wukaige/ai-agent && git diff --stat | cat; echo \"=== 改动\"; git diff src/server/app.py | head -40";
+        for color in [true, false] {
+            let paint = Paint::new(color);
+            for command in [
+                text,
+                "bash printf 'unfinished",
+                "bash echo 你好\n\tgit diff",
+            ] {
+                let spans = paint.tool_call("bash", command, false);
+                let plain: String = spans.iter().map(|s| s.content.as_ref()).collect();
+                assert_eq!(plain, command);
+                assert!(spans.iter().all(|s| !s.content.contains('\x1b')));
+            }
+        }
+    }
+
+    #[test]
+    fn a_tool_call_keeps_result_text_and_width() {
+        let call = super::Finished {
+            outcome: super::Outcome::Done,
+            name: "bash",
+            preview: "cd /home/wukaige/ai-agent && echo \"=== 改动\"; git diff src/server/app.py | head -40",
+            place: Some("crates/ui"),
+            took: Some(std::time::Duration::from_secs(3)),
+        };
+        for width in [24, 80, 180] {
+            let plain = super::result_rows(
+                &call,
+                super::Shown::Sketch,
+                false,
+                &Paint::new(false),
+                width,
+            );
+            let painted =
+                super::result_rows(&call, super::Shown::Sketch, false, &Paint::new(true), width);
+            assert_eq!(plain.len(), painted.len());
+            for (plain, painted) in plain.iter().zip(&painted) {
+                assert_eq!(plain.to_string(), painted.to_string());
+                assert_eq!(plain.width(), painted.width());
+            }
+            assert!(painted[0].to_string().ends_with(" · in crates/ui · 3s"));
+        }
+    }
+
     #[test]
     fn consecutive_text_deltas_stay_on_one_line() {
         let mut r = super::Renderer::new(

@@ -259,6 +259,9 @@ pub(super) struct ScrollbackRows<'a> {
     // Each row's logical line count, the steps the two walks take. Wrapped
     // heights are the rows' own caches.
     lens: Vec<usize>,
+    // A separator belongs to the preceding row's last line, so it shares
+    // that line's ordered anchor and never interrupts the history walk.
+    separators: Vec<bool>,
 }
 
 /// One line of the view: a scrollback row's line (asked for once the
@@ -269,6 +272,7 @@ pub(super) enum Piece<'a> {
         line: usize,
         paint: &'a Paint,
         width: usize,
+        separator: bool,
     },
     Live(screen::Ready<'a>),
 }
@@ -281,7 +285,8 @@ impl screen::Piece for Piece<'_> {
                 line,
                 paint,
                 width,
-            } => row.line_height(*line, paint, *width),
+                separator,
+            } => row.line_height(*line, paint, *width) + usize::from(*separator),
             Piece::Live(line) => screen::Piece::height(line),
         }
     }
@@ -293,9 +298,12 @@ impl screen::Piece for Piece<'_> {
                 line,
                 paint,
                 width,
+                separator,
             } => {
                 let (line, border) = row.line(line, paint, width);
-                let mut pieces = screen::wrap(border.as_ref(), &line, width);
+                let continuation = row.continuation();
+                let mut pieces =
+                    screen::wrap_continued(border.as_ref(), continuation.as_ref(), &line, width);
                 if let Some(border) = border.as_ref().filter(|b| row.hangs() && width > b.width()) {
                     let (lead, blank) = (border.spans.len(), " ".repeat(border.width()));
                     for piece in pieces.iter_mut().skip(1) {
@@ -304,13 +312,17 @@ impl screen::Piece for Piece<'_> {
                 }
                 // After the wrap, so every screen row a said line spans gets
                 // the band whole and the padding never wraps a row of its own.
-                match row.band() {
+                let mut pieces = match row.band() {
                     Some(band) => pieces
                         .into_iter()
                         .map(|piece| screen::banded(piece, band, width))
                         .collect(),
                     None => pieces,
+                };
+                if separator {
+                    pieces.push(Line::default());
                 }
+                pieces
             }
             Piece::Live(line) => screen::Piece::pieces(line),
         }
@@ -338,6 +350,14 @@ impl<'a> ScrollbackRows<'a> {
     pub(super) fn new(rows: &'a [Row], paint: &'a Paint, width: usize) -> Self {
         let back = rows.len().saturating_sub(1);
         let lens: Vec<usize> = rows.iter().map(Row::len).collect();
+        let mut separators = vec![false; rows.len()];
+        let mut previous: Option<usize> = None;
+        for (idx, row) in rows.iter().enumerate().filter(|(idx, _)| lens[*idx] > 0) {
+            if let Some(prev) = previous {
+                separators[prev] = rows[prev].separates(row);
+            }
+            previous = Some(idx);
+        }
         let back_row = lens.get(back).copied().unwrap_or(0);
         Self {
             rows,
@@ -346,6 +366,7 @@ impl<'a> ScrollbackRows<'a> {
             front: (0, 0),
             back: (back, back_row),
             lens,
+            separators,
         }
     }
 
@@ -361,6 +382,7 @@ impl<'a> ScrollbackRows<'a> {
             line,
             paint: self.paint,
             width: self.width,
+            separator: self.separators[idx] && line + 1 == self.lens[idx],
         }
     }
 
@@ -448,7 +470,7 @@ pub(super) fn body(
     if reasoning {
         // Indented like the lines it will join.
         let indent = folds.stream_indent(scrollback).unwrap_or_default();
-        let muted = Line::from(paint.span(&paint.theme.muted, partial));
+        let muted = Row::reasoning_line(partial, paint);
         let border = (!indent.is_empty()).then(|| Line::from(indent));
         screen::wrap(border.as_ref(), &muted, width)
     } else {
@@ -457,8 +479,25 @@ pub(super) fn body(
         render::render_coded(partial, paint)
             .into_iter()
             .flat_map(|r| {
-                let border = (r.coded == render::Coded::Code).then_some(&indent);
-                screen::wrap(border, &r.line, width)
+                let mut border = r.prefix.as_ref().map(|p| p.first.clone());
+                if r.coded == render::Coded::Code {
+                    border
+                        .get_or_insert_with(Line::default)
+                        .spans
+                        .extend(indent.spans.clone());
+                }
+                let line = r
+                    .prefix
+                    .as_ref()
+                    .map_or_else(|| r.line.clone(), |p| p.fit_body(r.line.clone(), width));
+                let rest = r.prefix.map(|prefix| {
+                    let mut rest = prefix.rest;
+                    if r.coded == render::Coded::Code {
+                        rest.spans.extend(indent.spans.clone());
+                    }
+                    rest
+                });
+                screen::wrap_continued(border.as_ref(), rest.as_ref(), &line, width)
             })
             .collect()
     }

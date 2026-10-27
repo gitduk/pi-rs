@@ -17,7 +17,6 @@ use super::view::{Doing, Work, front_view, tail_of, view_at};
 use super::{NO_TRANSCRIPT, Tui};
 use pi_core::core;
 use pi_core::driver::{Ended, Origin};
-use pi_store::icons;
 
 // A tool `/tool` started, back from its call.
 pub(super) struct Started {
@@ -776,7 +775,9 @@ impl Tui {
                 self.ui.say(view, stopped);
             }
             Err(AgentError::Cancelled) => {
-                let line = format!("stopped{}{}", icons::PART_SEP, parts.join(icons::PART_SEP));
+                let mut parts = parts;
+                parts.insert(0, "stopped".to_string());
+                let line = crate::status::settled(&parts);
                 self.ui.say_kept(on, view, &line);
             }
             Err(e) => {
@@ -784,7 +785,7 @@ impl Tui {
                 let rest = Span::from(format!(" {e}"));
                 self.ui.say(view, Line::from(vec![mark, rest]));
                 if !parts.is_empty() {
-                    self.ui.say_kept(on, view, &parts.join(icons::PART_SEP));
+                    self.ui.say_kept(on, view, &crate::status::settled(&parts));
                 }
             }
         }

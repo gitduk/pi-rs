@@ -487,6 +487,8 @@ impl Ui {
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Target {
     Scrollback(usize, usize),
+    // Trailing whitespace has an ordered history position but no click action.
+    Separator(usize, usize),
     // Row `i` of the live block: a pending call, a click on it opening or
     // closing the batch, or the rest.
     PendingTools(usize),

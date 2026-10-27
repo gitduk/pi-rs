@@ -272,6 +272,10 @@ impl Ui {
             return Some(vec![self.paint.span(&self.paint.theme.status.err, alerts)]);
         }
         let (text, look) = match item {
+            Item::Part(part @ Part::Status(_)) => {
+                let text = self.part(*part, facts, snap)?;
+                return Some(crate::status::painted(&text, &self.paint).spans);
+            }
             Item::Part(part) => (self.part(*part, facts, snap)?, &MUTED),
             Item::Styled(s) => (self.part(s.part, facts, snap)?, &s.style),
             Item::Text(t) => return self.text(t),

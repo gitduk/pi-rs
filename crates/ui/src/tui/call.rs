@@ -80,7 +80,7 @@ impl RunTool {
 // matching the row this call lands as once folded.
 pub(super) fn pending_line(now: Instant, tick: usize, t: &RunTool, paint: &Paint) -> Line<'static> {
     let stage = t.stage();
-    let named = named(&t.name, &t.summary) + &crate::render::placed(t.place.as_deref());
+    let named = named(&t.name, &t.summary);
     let (mark, out) = match &t.run {
         // A modifying call never folds, so it stays drawn here, still
         // turning, after it ends: a time beside it would read as finished.
@@ -90,8 +90,13 @@ pub(super) fn pending_line(now: Instant, tick: usize, t: &RunTool, paint: &Paint
             row::out_for(stage.progress(), t.out_secs(now)),
         ),
     };
-    let text = format!("{} {named}{out}", mark.glyph());
-    Line::from(paint.span(&paint.theme.muted, text))
+    let mut spans = vec![paint.span(&paint.theme.muted, format!("{} ", mark.glyph()))];
+    spans.extend(paint.tool_call(&t.name, &named, false));
+    spans.push(paint.span(
+        &paint.theme.muted,
+        crate::render::placed(t.place.as_deref()) + &out,
+    ));
+    Line::from(spans)
 }
 
 // Foldable calls, shown from when they are queued so the row doesn't jump
@@ -249,11 +254,9 @@ pub(super) fn job_lines(
             if from > 0 {
                 let more = format!("  {from} more");
                 let shine = hovered == Some(JobRow::Earlier(job.id));
-                rows.push(Line::from(paint.span_hovered(
-                    shine,
-                    &paint.theme.muted,
-                    pi_store::text::clip(&more, room),
-                )));
+                rows.push(Line::from(
+                    paint.action_hint(shine, pi_store::text::clip(&more, room)),
+                ));
                 ids.push(JobRow::Earlier(job.id));
             }
             let own = rows.len();
@@ -284,11 +287,7 @@ pub(super) fn job_lines(
             false => format!("{} more", jobs.len() - JOBS_SHOWN),
         };
         let shine = hovered == Some(JobRow::Fold);
-        lines.push(Line::from(paint.span_hovered(
-            shine,
-            &paint.theme.muted,
-            fold,
-        )));
+        lines.push(Line::from(paint.action_hint(shine, fold)));
         ids.push(JobRow::Fold);
     }
     (lines, ids)

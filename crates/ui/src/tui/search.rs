@@ -29,7 +29,9 @@ pub(super) enum Spot {
 impl Spot {
     pub(super) fn of(target: Target) -> Option<Self> {
         match target {
-            Target::Scrollback(idx, line) => Some(Spot::Row(idx, line)),
+            Target::Scrollback(idx, line) | Target::Separator(idx, line) => {
+                Some(Spot::Row(idx, line))
+            }
             Target::Text(n) => Some(Spot::Text(n)),
             Target::PendingTools(i) | Target::Live(i) => Some(Spot::Live(i)),
             Target::Rule | Target::Gap => None,

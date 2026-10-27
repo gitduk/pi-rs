@@ -153,7 +153,7 @@ impl Ui {
                 if !parts.is_empty() {
                     // Kept, not just said: nothing else holds these numbers,
                     // so a rebuild could not draw an aside.
-                    let line = parts.join(icons::PART_SEP);
+                    let line = status::settled(&parts);
                     self.say_kept(lane, view, &line);
                 }
             }

@@ -28,7 +28,7 @@ use result::ToolOut;
 use steps::Group;
 pub use steps::{FoldedTool, PendingTool, Stage, Step, StepMark, out_for};
 
-pub struct Row(Kind, Height);
+pub struct Row(Kind, Height, Option<Box<render::Prefix>>);
 
 // The rows this row takes on screen at one width, wraps included —
 // counted per logical line and cached until width or content changes.
@@ -191,7 +191,7 @@ trait Fold {
 impl Row {
     // A row whose height is not measured yet; every constructor starts here.
     fn new(kind: Kind) -> Self {
-        Self(kind, Height::default())
+        Self(kind, Height::default(), None)
     }
 
     // The row as something that opens and closes, if it is one.
@@ -263,7 +263,8 @@ impl Row {
     /// Plain text as notice rows, one per line — shared by the live
     /// stream (which also files it) and a rebuild (from the archived text).
     pub fn notice_lines(text: &str, paint: &Paint) -> Vec<Self> {
-        (paint.muted(text).lines.into_iter())
+        text.lines()
+            .map(|line| crate::status::painted(line, paint))
             .map(Self::notice)
             .collect()
     }
@@ -302,16 +303,16 @@ impl Row {
     /// One reasoning line. A reasoning line lives inside its group, not
     /// beside it.
     pub fn reasoning_line(line: &str, paint: &Paint) -> Line<'static> {
-        Line::from(paint.span(&paint.theme.muted, line))
+        Line::from(paint.span(&paint.reasoning_style(), line))
     }
 
     /// A whole assistant text block, for a caller that has one. Its mermaid
     /// blocks are rows of their own, drawn at whatever width they get.
     pub fn answer(text: &str, paint: &Paint) -> Vec<Self> {
         let markdown = |text: &str| {
-            render::render_coded(text, paint)
-                .into_iter()
-                .map(|r| match r.coded {
+            render::render_coded(text, paint).into_iter().map(|r| {
+                let prefix = r.prefix;
+                let mut row = match r.coded {
                     render::Coded::Badge(code) => Self::new(Kind::Code(Code {
                         badge: r.line,
                         code,
@@ -319,14 +320,16 @@ impl Row {
                     })),
                     render::Coded::Code => Self::new(Kind::CodeLine(r.line)),
                     render::Coded::Text => Self::new(Kind::Answer(r.line, r.units)),
-                })
+                };
+                row.2 = prefix.map(Box::new);
+                row
+            })
         };
         if !paint.color {
             return markdown(text).collect();
         }
         let blank = Self::gap;
-        let is_blank =
-            |row: &Self| matches!(row, Self(Kind::Answer(l, _), _) if l.spans.is_empty());
+        let is_blank = |row: &Self| matches!(row, Self(Kind::Answer(l, _), _, _) if l.spans.is_empty() && row.2.is_none());
         let mut rows: Vec<Self> = Vec::new();
         for piece in block::pieces(text) {
             match piece {
@@ -566,9 +569,9 @@ impl Row {
 
     /// The line a call that was never answered keeps: stopped before it landed.
     pub fn tool_start(name: &str, summary: &str, paint: &Paint) -> Self {
-        Self::notice(Line::from(
-            paint.span(&paint.theme.muted, tool_start_line(name, summary)),
-        ))
+        let mut spans = vec![paint.span(&paint.theme.muted, format!("{} ", icons::STOPPED_MARK))];
+        spans.extend(paint.tool_call(name, &named(name, summary), false));
+        Self::notice(Line::from(spans))
     }
 
     // One logical line of a prompt the user said: the rule it wears, the text
@@ -659,7 +662,7 @@ impl Row {
         paint: &Paint,
         width: usize,
     ) -> (Line<'static>, Option<Line<'static>>) {
-        match &self.0 {
+        let (line, border) = match &self.0 {
             Kind::Said { border, body, .. } => (body.clone(), Some(border.clone())),
             Kind::Answer(text, _) => (text.clone(), None),
             Kind::Lines(lines) => (lines[i].clone(), None),
@@ -681,7 +684,28 @@ impl Row {
             Kind::Result(r) => (r.line(i, paint, width), None),
             Kind::Relayed(r) => r.line(i, paint, width),
             Kind::Steps(g) => g.line(i, paint, width),
+        };
+        match &self.2 {
+            None => (line, border),
+            Some(prefix) => {
+                let line = prefix.fit_body(line, width);
+                let mut first = prefix.first.clone();
+                if let Some(border) = border {
+                    first.spans.extend(border.spans);
+                }
+                (line, Some(first))
+            }
         }
+    }
+
+    pub fn continuation(&self) -> Option<Line<'static>> {
+        self.2.as_ref().map(|prefix| {
+            let mut rest = prefix.rest.clone();
+            if matches!(self.0, Kind::CodeLine(_)) {
+                rest.spans.push(Span::raw(CODE_INDENT));
+            }
+            rest
+        })
     }
 
     /// Whether a wrap of this row shows its border on the first piece only,
@@ -695,7 +719,7 @@ impl Row {
     pub fn units(&self, i: usize, paint: &Paint, width: usize) -> crate::unit::Units {
         match &self.0 {
             Kind::Answer(_, units) => units.clone(),
-            Kind::Relayed(r) => r.units(i).to_vec(),
+            Kind::Relayed(r) => r.units(i),
             Kind::Steps(g) => g.units(i, paint),
             Kind::Block(b) => b.units(paint, width),
             _ => Vec::new(),
@@ -709,6 +733,27 @@ impl Row {
             Kind::Said { band, .. } => *band,
             _ => None,
         }
+    }
+
+    pub fn is_tool_area(&self) -> bool {
+        match &self.0 {
+            Kind::Result(_) => true,
+            Kind::Steps(group) => group.has_tools(),
+            _ => false,
+        }
+    }
+
+    pub fn is_prose(&self) -> bool {
+        match &self.0 {
+            Kind::Answer(line, _) => !line.spans.is_empty() || self.2.is_some(),
+            Kind::CodeLine(_) | Kind::Code(_) | Kind::Block(_) => true,
+            _ => false,
+        }
+    }
+
+    /// One blank row at a boundary, without changing either group's contents.
+    pub fn separates(&self, next: &Row) -> bool {
+        self.is_tool_area() && next.is_prose() || self.is_prose() && next.is_tool_area()
     }
 
     /// Whether this row is the group holding reasoning block `id`.
@@ -809,11 +854,6 @@ impl Row {
 /// border, so a wrapped line keeps it on every row.
 pub const CODE_INDENT: &str = " ";
 
-/// What a result says in text, its other parts left out.
-fn tool_start_line(name: &str, summary: &str) -> String {
-    format!("{} {}", icons::STOPPED_MARK, named(name, summary))
-}
-
 pub(super) use llm::figures::count;
 
 // `text` cut to one row beside a `lead` wide mark and the `tail` after it.
@@ -837,21 +877,23 @@ fn tilde(path: &std::path::Path) -> String {
 impl From<crate::render::Rendered> for PageLine {
     fn from(r: crate::render::Rendered) -> Self {
         use crate::render::Coded;
+        let line = r.full_line();
+        let units = r.full_units();
         match r.coded {
             Coded::Badge(code) => Self {
-                line: r.line,
+                line,
                 copies: Some(code),
                 units: Vec::new(),
             },
             Coded::Code => {
                 let mut spans = vec![Span::raw(CODE_INDENT)];
-                spans.extend(r.line.spans);
+                spans.extend(line.spans);
                 Line::from(spans).into()
             }
             Coded::Text => Self {
-                line: r.line,
+                line,
                 copies: None,
-                units: r.units,
+                units,
             },
         }
     }

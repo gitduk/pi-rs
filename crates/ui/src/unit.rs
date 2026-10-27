@@ -9,7 +9,7 @@ use std::borrow::Cow;
 use std::ops::Range;
 
 use pi_store::text::cols_at;
-use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd, TextMergeWithOffset};
 use ratatui::text::{Line, Span};
 
 /// The cell ranges of a line that read as one.
@@ -22,17 +22,24 @@ const CLOSE: char = '\u{E002}';
 /// `text` with every stretch that reads as one between `OPEN` and `CLOSE`;
 /// none in a table, whose columns the renderer sizes marks and all.
 pub fn mark(text: &str) -> Cow<'_, str> {
-    // Neither a code span nor an inline link without these: no parse. A
-    // text holding the marks already (an icon font's glyph) is left as is.
-    if !text.contains('`') && !text.contains("](") || text.contains([OPEN, CLOSE]) {
+    // Skip parsing when there is no code or link to mark. Text holding the
+    // marks already (an icon font's glyph) is left as is.
+    if !text.contains('`') && !text.contains("](") && !text.contains("://") && !text.contains('@')
+        || text.contains([OPEN, CLOSE])
+    {
         return Cow::Borrowed(text);
     }
     let mut at: Vec<(usize, char)> = Vec::new();
     let mut table = false;
+    let mut code = false;
+    let mut image = false;
+    let mut metadata = false;
     // The link open, if one is (links never nest): whether it is inline,
     // and the bytes its text spans.
     let mut link: Option<(bool, Option<Range<usize>>)> = None;
-    for (event, range) in Parser::new_ext(text, options()).into_offset_iter() {
+    for (event, range) in
+        TextMergeWithOffset::new(Parser::new_ext(text, options()).into_offset_iter())
+    {
         let edge = matches!(
             event,
             Event::Start(Tag::Link { .. }) | Event::End(TagEnd::Link)
@@ -48,7 +55,21 @@ pub fn mark(text: &str) -> Cow<'_, str> {
         match event {
             Event::Start(Tag::Table(_)) => table = true,
             Event::End(TagEnd::Table) => table = false,
+            Event::Start(Tag::CodeBlock(_)) => code = true,
+            Event::End(TagEnd::CodeBlock) => code = false,
+            Event::Start(Tag::Image { .. }) => image = true,
+            Event::End(TagEnd::Image) => image = false,
+            Event::Start(Tag::MetadataBlock(_)) => metadata = true,
+            Event::End(TagEnd::MetadataBlock(_)) => metadata = false,
             _ if table => {}
+            Event::Text(_) if !code && !image && !metadata && link.is_none() => {
+                for found in crate::markdown::link_finder().links(&text[range.clone()]) {
+                    at.extend([
+                        (range.start + found.start(), OPEN),
+                        (range.start + found.end(), CLOSE),
+                    ]);
+                }
+            }
             Event::Code(_) => at.extend([(range.start, OPEN), (range.end, CLOSE)]),
             // Only an inline link's text is its own: another's names its
             // reference too, and a mark there would break the lookup.
@@ -92,7 +113,7 @@ pub fn mark(text: &str) -> Cow<'_, str> {
 }
 
 // The renderer's own, so what is code here is code there.
-fn options() -> Options {
+pub(crate) fn options() -> Options {
     Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
         | Options::ENABLE_HEADING_ATTRIBUTES
@@ -239,5 +260,19 @@ mod tests {
     fn backticks_inside_a_code_block_are_left_alone() {
         let got = units("```sh\necho `date`\n```\n");
         assert!(got.iter().all(|(_, u)| u.is_empty()), "{got:?}");
+    }
+
+    #[test]
+    fn bare_urls_and_emails_are_whole_selection_units() {
+        let got = units("See https://example.com/a_(b), or mail user@example.com.");
+        let [(text, ranges)] = &got[..] else {
+            panic!("{got:?}")
+        };
+        assert_eq!(
+            taken(text, ranges),
+            ["https://example.com/a_(b)", "user@example.com"]
+        );
+        let code = units("```text\nhttps://example.com\n```");
+        assert!(code.iter().all(|(_, units)| units.is_empty()));
     }
 }

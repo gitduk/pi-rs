@@ -74,20 +74,20 @@ impl Relayed {
         // Not `PageLine::from`: a code line's indent rides in the border here,
         // so a wrap keeps it.
         let page = PageLine {
-            line: r.line.clone(),
+            line: r.full_line(),
             copies: match &r.coded {
                 render::Coded::Badge(code) => Some(code.clone()),
                 _ => None,
             },
-            units: r.units.clone(),
+            units: r.full_units(),
         };
         (page, Some(Line::from(indent)))
     }
 
     // What in line `i` reads as one; its own line holds nothing such.
-    pub(super) fn units(&self, i: usize) -> &[std::ops::Range<usize>] {
+    pub(super) fn units(&self, i: usize) -> crate::unit::Units {
         let body = i.checked_sub(1).and_then(|i| self.body.get(i));
-        body.map_or(&[], |r| &r.units)
+        body.map_or_else(Vec::new, render::Rendered::full_units)
     }
 
     pub(super) fn hover(&mut self, hovered: bool) {
@@ -101,11 +101,14 @@ impl Relayed {
             n => format!("{}{}", icons::PART_SEP, count(n, "line")),
         };
         let now = agent::session::now();
-        let tail = format!("{lines}{}{}", icons::PART_SEP, render::clock(self.at, now));
+        let time = format!("{}{}", icons::PART_SEP, render::clock(self.at, now));
+        let tail = format!("{lines}{time}");
         let text = clip_beside(&self.label, 2, &tail, width);
         Line::from(vec![
             paint.span_hovered(hovered, &paint.theme.prompt.color, icons::RELAYED_MARK),
-            paint.span_hovered(hovered, &paint.theme.muted, format!(" {text}{tail}")),
+            paint.span_hovered(hovered, &paint.theme.muted, format!(" {text}")),
+            paint.action_hint(hovered, lines),
+            paint.span_hovered(hovered, &paint.theme.muted, time),
         ])
     }
 }

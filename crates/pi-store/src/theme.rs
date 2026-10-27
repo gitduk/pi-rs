@@ -178,12 +178,18 @@ impl PartialEq for Style {
 impl Eq for Style {}
 
 impl Style {
-    fn color(c: Color) -> Self {
+    /// A foreground colour with no additional text attributes.
+    pub fn color(c: Color) -> Self {
         Self {
             color: Some(c),
             sgr: Vec::new(),
             rendered: OnceLock::new(),
         }
+    }
+
+    /// The terminal's default foreground, dimmed once without a palette colour.
+    pub fn dimmed() -> Self {
+        Self::color(Color::Basic(39)).adding(Attr::Dim)
     }
 
     fn attrs(a: &[Attr]) -> Self {
@@ -311,8 +317,16 @@ pub struct Theme {
     pub heading: Style,
     #[serde(default = "default_emphasis")]
     pub emphasis: Style,
+    #[serde(default = "default_strong")]
+    pub strong: Style,
     #[serde(default = "default_code")]
     pub code: Style,
+    #[serde(default = "default_link")]
+    pub link: Style,
+    #[serde(default = "default_quote")]
+    pub quote: Style,
+    #[serde(default)]
+    pub syntax: Syntax,
     #[serde(default)]
     pub diff: Diff,
     #[serde(default)]
@@ -335,9 +349,22 @@ pub struct Theme {
     pub table: Vec<Style>,
 }
 
-const GREEN: Color = Color::Rgb(137, 210, 129);
-const RED: Color = Color::Rgb(252, 58, 75);
-const YELLOW: Color = Color::Rgb(229, 192, 123);
+// Catppuccin Mocha's semantic colours; the light counterparts live together
+// in `for_background`, so explicitly configured styles stay untouched.
+const GREEN: Color = Color::Rgb(166, 227, 161);
+const RED: Color = Color::Rgb(243, 139, 168);
+const YELLOW: Color = Color::Rgb(249, 226, 175);
+const BLUE: Color = Color::Rgb(137, 180, 250);
+const ACCENT_BLUE: Color = Color::Rgb(99, 168, 248);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Syntax {
+    #[default]
+    Auto,
+    CatppuccinMocha,
+    CatppuccinLatte,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -407,8 +434,7 @@ pub struct Prompt {
     /// caret.
     #[serde(default = "default_normal_icon")]
     pub normal: String,
-    /// The bands the prompt paints: the input line, and the lines it lands
-    /// as. Two shades, the live one the brighter.
+    /// The bands for editable and submitted text, the editable one brighter.
     #[serde(default)]
     pub panel: Bands,
 }
@@ -447,7 +473,7 @@ impl Default for Prompt {
 }
 
 fn default_muted() -> Style {
-    Style::attrs(&[Attr::Dim])
+    Style::dimmed()
 }
 fn default_heading() -> Style {
     Style::attrs(&[Attr::Bold])
@@ -455,17 +481,24 @@ fn default_heading() -> Style {
 fn default_emphasis() -> Style {
     Style::attrs(&[Attr::Italic])
 }
-fn default_code() -> Style {
-    Style::color(Color::Rgb(88, 166, 255))
+fn default_strong() -> Style {
+    Style::color(RED).adding(Attr::Bold)
 }
-// Clear of `code`'s colour and of the diff's green and red, which say
-// something of their own.
+fn default_code() -> Style {
+    Style::color(BLUE)
+}
+fn default_link() -> Style {
+    Style::color(BLUE).adding(Attr::Underline)
+}
+fn default_quote() -> Style {
+    default_muted()
+}
 fn default_table() -> Vec<Style> {
     [
-        (229, 192, 123),
-        (86, 182, 194),
-        (198, 120, 221),
-        (209, 154, 102),
+        (249, 226, 175),
+        (148, 226, 213),
+        (203, 166, 247),
+        (250, 179, 135),
     ]
     .into_iter()
     .map(|(r, g, b)| Style::color(Color::Rgb(r, g, b)))
@@ -493,16 +526,13 @@ fn default_match_current() -> Style {
     Style::color(YELLOW).adding(Attr::Reverse)
 }
 fn default_selected() -> Style {
-    Style::attrs(&[Attr::Bold])
+    default_prompt_color().adding(Attr::Bold)
 }
 fn default_prompt_color() -> Style {
-    // opencode's build agent colour, which is what its input line and its
-    // user messages both wear.
-    Style::color(Color::Rgb(92, 156, 245))
+    Style::color(ACCENT_BLUE)
 }
 
-// The bands for a terminal that will not say what its background is:
-// opencode's `backgroundPanel` and `backgroundElement`, the live one brighter.
+// Neutral dark bands when the background is unknown.
 fn default_panel_input() -> Color {
     Color::Rgb(30, 30, 30)
 }
@@ -526,7 +556,11 @@ impl Default for Theme {
             muted: default_muted(),
             heading: default_heading(),
             emphasis: default_emphasis(),
+            strong: default_strong(),
             code: default_code(),
+            link: default_link(),
+            quote: default_quote(),
+            syntax: Syntax::default(),
             diff: Diff::default(),
             status: Status::default(),
             menu: Menu::default(),
@@ -537,6 +571,69 @@ impl Default for Theme {
             table: default_table(),
         }
     }
+}
+
+impl Theme {
+    /// Resolve automatic colours against a background. Only defaults follow
+    /// it: a style supplied by the config keeps its colour and attributes.
+    pub fn for_background(&self, bg: (u8, u8, u8)) -> Self {
+        let mut theme = self.clone();
+        let defaults = Self::default();
+        let light = is_light(bg);
+        if theme.syntax == Syntax::Auto {
+            theme.syntax = if light {
+                Syntax::CatppuccinLatte
+            } else {
+                Syntax::CatppuccinMocha
+            };
+        }
+        if light {
+            for (style, default, color) in [
+                (&mut theme.strong, &defaults.strong, (210, 15, 57)),
+                (&mut theme.diff.add, &defaults.diff.add, (64, 160, 43)),
+                (&mut theme.diff.del, &defaults.diff.del, (210, 15, 57)),
+                (&mut theme.status.ok, &defaults.status.ok, (64, 160, 43)),
+                (&mut theme.status.err, &defaults.status.err, (210, 15, 57)),
+                (&mut theme.status.warn, &defaults.status.warn, (143, 103, 0)),
+                (
+                    &mut theme.match_current,
+                    &defaults.match_current,
+                    (143, 103, 0),
+                ),
+            ] {
+                if style == default {
+                    *style = Style {
+                        color: Some(Color::Rgb(color.0, color.1, color.2)),
+                        sgr: style.sgr.clone(),
+                        rendered: OnceLock::new(),
+                    };
+                }
+            }
+            if theme.table == defaults.table {
+                theme.table = [
+                    (143, 103, 0),
+                    (23, 146, 153),
+                    (136, 57, 239),
+                    (254, 100, 11),
+                ]
+                .into_iter()
+                .map(|(r, g, b)| Style::color(Color::Rgb(r, g, b)))
+                .collect();
+            }
+        }
+        let bands = bands_for(bg);
+        if theme.prompt.panel.input == defaults.prompt.panel.input {
+            theme.prompt.panel.input = bands.input;
+        }
+        if theme.prompt.panel.said == defaults.prompt.panel.said {
+            theme.prompt.panel.said = bands.said;
+        }
+        theme
+    }
+}
+
+fn is_light((r, g, b): (u8, u8, u8)) -> bool {
+    0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b) > 127.5
 }
 
 fn byte(v: &str) -> Result<u8> {
@@ -586,7 +683,7 @@ pub fn bands_for(bg: (u8, u8, u8)) -> Bands {
 
 #[cfg(test)]
 mod tests {
-    use super::Color;
+    use super::{Color, Syntax, Theme};
 
     #[test]
     fn a_hex_colour_parses_in_both_lengths() {
@@ -597,5 +694,15 @@ mod tests {
         assert_eq!(Color::parse("#fa0").unwrap(), Color::Rgb(0xff, 0xaa, 0x00));
         assert!(Color::parse("#12345g").is_err());
         assert!(Color::parse("#1234").is_err());
+    }
+
+    #[test]
+    fn an_explicit_syntax_palette_survives_background_detection_and_roundtrips() {
+        let theme: Theme = toml::from_str("syntax = 'catppuccin-mocha'").unwrap();
+        let light = theme.for_background((255, 255, 255));
+        assert_eq!(light.syntax, Syntax::CatppuccinMocha);
+        let saved = toml::to_string(&theme).unwrap();
+        assert_eq!(toml::from_str::<Theme>(&saved).unwrap(), theme);
+        assert!(toml::from_str::<Theme>("syntax = 'missing'").is_err());
     }
 }

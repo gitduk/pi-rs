@@ -3,7 +3,7 @@
 
 use ratatui::text::{Line, Span};
 
-use super::{Fold, Opened, count};
+use super::{Fold, Opened, Opening, count, page_of};
 use crate::render::{self, Outcome, Paint};
 use crate::tui::browse::PageLine;
 use crate::tui::{THINKING, screen};
@@ -252,11 +252,11 @@ impl StepMark {
 
     // The mark and the space after it.
     fn spans(self, hovered: bool, paint: &Paint) -> Vec<Span<'static>> {
+        let reasoning = paint.reasoning_style();
         let style = match self {
             StepMark::Ended(outcome) => render::outcome_style(outcome, &paint.theme),
-            StepMark::Out(_) | StepMark::Thinking(_) | StepMark::Queued | StepMark::Thought => {
-                &paint.theme.muted
-            }
+            StepMark::Thinking(_) | StepMark::Thought => &reasoning,
+            StepMark::Out(_) | StepMark::Queued => &paint.theme.muted,
         };
         vec![
             paint.span_hovered(hovered, style, self.glyph()),
@@ -272,8 +272,12 @@ const MARK_WIDTH: usize = 2;
 struct Head {
     mark: StepMark,
     text: String,
+    // Present only when this text names a tool, for its colours.
+    tool: Option<String>,
     // What follows the text, a count or a time, kept whole when the text is cut.
     tail: String,
+    // Where the clickable hint's colour starts, past any plain metadata.
+    hint_from: Option<usize>,
     // Whether more of the text is there than this line, whatever the width.
     more: bool,
 }
@@ -296,13 +300,30 @@ impl Head {
         let text = if open {
             self.text.clone()
         } else {
-            let text = pi_store::text::clip_more(&self.text, self.room(width), self.more);
-            format!("{text}{}", self.tail)
+            pi_store::text::clip_more(&self.text, self.room(width), self.more)
         };
         // The mark and the text are spans of their own, so hover bolds
         // instead of recolouring.
         let mut spans = self.mark.spans(hovered, paint);
-        spans.push(paint.span_hovered(hovered, &paint.theme.muted, text));
+        let reasoning = paint.reasoning_style();
+        let style = match self.mark {
+            StepMark::Thinking(_) | StepMark::Thought => &reasoning,
+            StepMark::Ended(_) | StepMark::Out(_) | StepMark::Queued => &paint.theme.muted,
+        };
+        if let Some(name) = &self.tool {
+            spans.extend(paint.tool_call(name, &text, hovered));
+        } else {
+            spans.push(paint.span_hovered(hovered, style, text));
+        }
+        if !open {
+            let (metadata, hint) = self
+                .tail
+                .split_at(self.hint_from.unwrap_or(self.tail.len()));
+            spans.push(paint.span_hovered(hovered, style, metadata));
+            if !hint.is_empty() {
+                spans.push(paint.action_hint(hovered, hint));
+            }
+        }
         Line::from(spans)
     }
 }
@@ -321,6 +342,8 @@ fn pending_head(p: &PendingTool, tick: usize, timed: bool) -> Head {
     Head {
         mark: p.stage.mark(tick),
         text: p.desc(),
+        tool: Some(p.name.clone()),
+        hint_from: None,
         tail: match timed {
             true => place + &out_for(p.stage.progress(), p.secs),
             false => place,
@@ -334,9 +357,11 @@ fn pending_head(p: &PendingTool, tick: usize, timed: bool) -> Head {
 fn shown_of(lines: &[Line<'static>], paint: &Paint) -> Vec<render::Rendered> {
     let text: Vec<String> = lines.iter().map(screen::plain).collect();
     let mut shown = render::render_coded(&text.join("\n"), paint);
-    let muted = crate::sgr::style_to_ratatui(&paint.theme.muted).fg;
-    for span in shown.iter_mut().flat_map(|r| r.line.spans.iter_mut()) {
-        span.style.fg = muted.or(span.style.fg);
+    if paint.color {
+        let reasoning = crate::sgr::style_to_ratatui(&paint.reasoning_style());
+        for span in shown.iter_mut().flat_map(|r| r.line.spans.iter_mut()) {
+            span.style = span.style.patch(reasoning);
+        }
     }
     shown
 }
@@ -431,10 +456,14 @@ impl Step {
             Step::Tool(t) => Head {
                 mark: StepMark::Ended(t.outcome),
                 text: t.desc(),
+                tool: Some(t.name.clone()),
+                hint_from: None,
                 tail: t.placed() + &render::ran_for(t.took),
                 more: t.asked > 0,
             },
             Step::Thinking { lines, live, .. } => Head {
+                tool: None,
+                hint_from: Some(0),
                 mark: match live {
                     true => StepMark::Thinking(tick),
                     false => StepMark::Thought,
@@ -527,7 +556,9 @@ fn steps_header(
         let head = Head {
             mark,
             text: kinds(steps, pending),
+            tool: None,
             tail: String::new(),
+            hint_from: None,
             more: false,
         };
         return head.line(false, hovered, paint, width);
@@ -543,13 +574,16 @@ fn steps_header(
         (None, None) => return Line::default(),
     };
     let mut tail = newest.tail;
+    let mut hint_from = newest.hint_from;
     let others = steps.len() + pending.len() - 1;
     if others > 0 {
+        hint_from.get_or_insert(tail.len());
         tail.push_str(&format!("{}{others} more", icons::PART_SEP));
     }
     let head = Head {
         mark,
         tail,
+        hint_from,
         ..newest
     };
     head.line(open, hovered, paint, width)
@@ -669,6 +703,22 @@ impl Group {
 
     pub(super) fn join(&mut self, step: Step) {
         self.steps.push(step);
+    }
+
+    pub(super) fn has_tools(&self) -> bool {
+        !self.pending.is_empty() || self.steps.iter().any(|step| matches!(step, Step::Tool(_)))
+    }
+
+    // The closed step that a click can open, and whether it is the group alone.
+    fn closed_step(&self, i: usize) -> Option<(&Step, bool)> {
+        match self.lone() {
+            Some(step) if i == 0 && self.folded => Some((step, true)),
+            None if i > 0 => {
+                let step = &self.steps[self.listed_step(i)?];
+                (!step.is_open()).then_some((step, false))
+            }
+            _ => None,
+        }
     }
 
     fn lone(&self) -> Option<&Step> {
@@ -846,18 +896,7 @@ impl Fold for Group {
     // A step closed on line `i`: a lone one from the folded line, a
     // listed one from its own.
     fn opened(&self, i: usize, paint: &Paint) -> Option<Opened> {
-        let (step, lone) = match self.lone() {
-            // The group is the step: opening the group opens it.
-            Some(step) if i == 0 && self.folded => (step, true),
-            None if i > 0 => {
-                let step = &self.steps[self.listed_step(i)?];
-                if step.is_open() {
-                    return None;
-                }
-                (step, false)
-            }
-            _ => return None,
-        };
+        let (step, lone) = self.closed_step(i)?;
         let lines = (0..step.opened_len()).map(|j| {
             (
                 step.opened_content(j, false, 0, paint),
@@ -865,6 +904,27 @@ impl Fold for Group {
             )
         });
         Some(lines.collect())
+    }
+
+    fn opening(&self, i: usize, paint: &Paint) -> Option<Opening> {
+        let (step, lone) = self.closed_step(i)?;
+        let Step::Thinking { lines, .. } = step else {
+            return self.opened(i, paint).map(page_of);
+        };
+        // Reading a reasoning block uses ordinary Markdown contrast. Repaint
+        // from the source so the transcript's dim style does not override
+        // headings, links and code colours on the page.
+        let text = lines
+            .iter()
+            .map(screen::plain)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let opened = render::render_coded(&text, paint)
+            .into_iter()
+            .enumerate()
+            .map(|(j, row)| (step.marked(j, row.into(), 0, paint), opened_border(j, lone)))
+            .collect();
+        Some(page_of(opened))
     }
 }
 

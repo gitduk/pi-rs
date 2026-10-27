@@ -3,9 +3,193 @@ use crate::tui::row::{FoldedTool, Row, Step};
 use crate::tui::scrollback::{Folds, Scrollback, ScrollbackRows};
 use crate::tui::{View, following_terminal};
 use pi_store::theme::{Color, Theme};
+
+#[test]
+fn markdown_continuations_align_in_live_and_settled_rows() {
+    use crate::tui::screen::{Piece, plain};
+    use crate::tui::scrollback::{Folds, Scrollback, ScrollbackRows, body};
+
+    let source =
+        "- abcdefghijklmnop\n  - nested words continue\n\n  > quoted words continue\n\n---";
+    let paint = Paint::new(true);
+    let history: Scrollback = Row::answer(source, &paint).into();
+    for width in [5, 12, 28] {
+        let settled: Vec<String> = ScrollbackRows::new(&history, &paint, width)
+            .flat_map(Piece::pieces)
+            .map(|line| plain(&line))
+            .collect();
+        let live: Vec<String> = body(
+            &Folds::default(),
+            &Scrollback::default(),
+            false,
+            source,
+            width,
+            &paint,
+        )
+        .iter()
+        .map(plain)
+        .collect();
+        assert_eq!(settled, live, "width {width}");
+        assert_eq!(settled.last().unwrap(), &"─".repeat(width));
+    }
+    let narrow: Vec<String> = ScrollbackRows::new(&history, &paint, 12)
+        .flat_map(Piece::pieces)
+        .map(|line| plain(&line))
+        .collect();
+    assert_eq!(narrow[0], "• abcdefghij");
+    assert_eq!(narrow[1], "  klmnop");
+    assert!(narrow.iter().any(|line| line.starts_with("  ◦ ")));
+    assert!(
+        narrow
+            .iter()
+            .filter(
+                |line| line.contains("quoted") || line.contains("continue") && line.contains('│')
+            )
+            .all(|line| line.starts_with("  │ "))
+    );
+}
 use ratatui::text::Line;
 
 use super::harness::*;
+
+#[test]
+fn mouse_scroll_reaches_both_ends_across_tool_and_prose_rows() {
+    use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
+
+    let mut ui = test_ui(60, 12);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    for i in 0..30 {
+        view.surface
+            .scrollback
+            .extend(Row::answer(&format!("explanation {i}"), &ui.paint));
+        view.surface.scrollback.push(Row::steps(
+            Step::Tool(FoldedTool::new("read", &format!("file{i}"), "", "")),
+            true,
+        ));
+    }
+    ui.flush(&lane, &mut view);
+    let bottom = ui.drawn.clone();
+    for kind in [MouseEventKind::ScrollUp, MouseEventKind::ScrollDown] {
+        for _ in 0..view.surface.scrollback.len() * 2 {
+            let event = Event::Mouse(MouseEvent {
+                kind,
+                column: 2,
+                row: ui.regions.history.y,
+                modifiers: KeyModifiers::NONE,
+            });
+            ui.key(&lane, &mut view, event, false);
+            ui.flush(&lane, &mut view);
+        }
+        match kind {
+            MouseEventKind::ScrollUp => assert_eq!(ui.drawn[0], "explanation 0"),
+            MouseEventKind::ScrollDown => assert_eq!(ui.drawn, bottom),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn tool_spacing_preserves_row_indices_and_keeps_consecutive_calls_together() {
+    use crate::tui::screen::{Piece, plain};
+
+    let paint = Paint::new(false);
+    let mut rows = Row::answer("before", &paint);
+    for name in ["a.rs", "b.rs"] {
+        rows.push(Row::steps(
+            Step::Tool(FoldedTool::new("read", name, "", "")),
+            true,
+        ));
+    }
+    rows.extend(Row::answer("after", &paint));
+    let forward: Vec<_> = ScrollbackRows::new(&rows, &paint, 80)
+        .flat_map(Piece::pieces)
+        .map(|line| plain(&line))
+        .collect();
+    assert_eq!(
+        forward,
+        [
+            "before".to_string(),
+            String::new(),
+            format!("{} read a.rs", pi_store::icons::DONE_MARK),
+            format!("{} read b.rs", pi_store::icons::DONE_MARK),
+            String::new(),
+            "after".into()
+        ]
+    );
+    let backward: Vec<_> = ScrollbackRows::new(&rows, &paint, 80)
+        .rev()
+        .flat_map(|piece| piece.pieces().into_iter().rev())
+        .map(|line| plain(&line))
+        .collect();
+    assert_eq!(backward, forward.iter().rev().cloned().collect::<Vec<_>>());
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[1].folded(), Some(true));
+}
+
+#[test]
+fn a_tool_separator_does_not_toggle_the_preceding_group() {
+    use crate::tui::mouse::Target;
+    use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    let mut ui = test_ui(60, 14);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    view.surface.scrollback.push(Row::steps(
+        Step::Tool(FoldedTool::new("read", "a.rs", "", "contents")),
+        true,
+    ));
+    view.surface
+        .scrollback
+        .extend(Row::answer("explanation", &ui.paint));
+    ui.flush(&lane, &mut view);
+    let i = ui
+        .row_targets
+        .iter()
+        .position(|t| matches!(t, Target::Separator(0, 0)))
+        .expect("a separator after the group");
+    assert!(ui.drawn[i].is_empty());
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        ui.key(
+            &lane,
+            &mut view,
+            Event::Mouse(MouseEvent {
+                kind,
+                column: 1,
+                row: ui.regions.history.y + i as u16,
+                modifiers: KeyModifiers::NONE,
+            }),
+            false,
+        );
+    }
+    assert_eq!(view.surface.scrollback[0].folded(), Some(true));
+}
+
+#[test]
+fn a_stream_after_tools_keeps_its_scrolled_position_when_it_lands() {
+    let mut ui = test_ui(40, 12);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    view.surface.scrollback.push(Row::steps(
+        Step::Tool(FoldedTool::new("read", "a.rs", "", "contents")),
+        true,
+    ));
+    view.surface.stream.text = (1..=20).map(|i| format!("paragraph {i}\n\n")).collect();
+    ui.flush(&lane, &mut view);
+    ui.scroll_view(&mut view, true, 6);
+    ui.flush(&lane, &mut view);
+    let top = ui.drawn[0].clone();
+    assert!(top.contains("paragraph"));
+    view.surface.stream.text.push_str("paragraph 21\n\n");
+    ui.flush(&lane, &mut view);
+    assert_eq!(ui.drawn[0], top, "while the stream grows");
+    ui.close(&mut view);
+    ui.flush(&lane, &mut view);
+    assert_eq!(ui.drawn[0], top, "when the separated paragraph lands");
+}
 
 // Rows are painted once per width; a stale cache would leak the narrow
 // frame's clipping into the wide one, visible only below the head row.

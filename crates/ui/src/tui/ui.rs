@@ -24,7 +24,7 @@ use pi_store::icons;
 use pi_store::keys::Keys;
 use pi_store::status::{Segment, default_parts};
 use pi_store::theme::Style as ThemeStyle;
-use pi_store::theme::{Theme, bands_for};
+use pi_store::theme::Theme;
 
 pub(super) struct Ui {
     pub(super) screen: Screen,
@@ -334,7 +334,7 @@ impl Ui {
         resolved: &Resolved,
         theme: Arc<pi_store::theme::Theme>,
     ) {
-        self.paint.theme = theme;
+        self.paint = Paint::with_theme(self.paint.color, theme);
         self.bang_prompt = Self::paint_prompt(&self.paint, icons::BANG_SIGIL);
         self.tab_sep = Self::paint_sep(&self.paint);
         self.band = self.paint.band(&self.paint.theme.prompt.panel.input);
@@ -372,22 +372,9 @@ impl Ui {
     }
 }
 
-// The config's theme with the prompt's bands following the terminal, unless the
-// config named a band itself — a file that wanted a fixed colour wrote one.
+// Resolve automatic colours once, including after a config reload.
 pub(super) fn following_terminal(theme: &Theme, bg: Option<(u8, u8, u8)>) -> Theme {
-    let mut theme = theme.clone();
-    let Some(bg) = bg else {
-        return theme;
-    };
-    let bands = bands_for(bg);
-    let default = pi_store::theme::Bands::default();
-    if theme.prompt.panel.input == default.input {
-        theme.prompt.panel.input = bands.input;
-    }
-    if theme.prompt.panel.said == default.said {
-        theme.prompt.panel.said = bands.said;
-    }
-    theme
+    bg.map_or_else(|| theme.clone(), |bg| theme.for_background(bg))
 }
 
 /// A left press in the transcript, kept to tell a click from a drag and a

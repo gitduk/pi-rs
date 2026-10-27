@@ -6,6 +6,7 @@
 
 pub mod block;
 pub mod listing;
+mod markdown;
 pub mod render;
 pub mod sgr;
 pub mod status;

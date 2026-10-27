@@ -333,6 +333,24 @@ pub fn wrap(border: Option<&Line<'_>>, line: &Line<'_>, width: usize) -> Vec<Lin
         .collect()
 }
 
+/// A list's marker leads only its first screen row; a quote's rule continues.
+pub fn wrap_continued(
+    first: Option<&Line<'_>>,
+    rest: Option<&Line<'_>>,
+    line: &Line<'_>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut rows = wrap(first, line, width);
+    if let (Some(first), Some(rest)) = (first, rest)
+        && width > first.width()
+    {
+        for row in rows.iter_mut().skip(1) {
+            row.spans.splice(..first.spans.len(), spans_of(rest));
+        }
+    }
+    rows
+}
+
 /// Lays one row in a band: color goes under every span (text keeps its
 /// own foreground) and fills columns past the text into one rectangle.
 pub fn banded(line: Line<'static>, band: RStyle, width: usize) -> Line<'static> {
