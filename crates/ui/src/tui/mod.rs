@@ -7,6 +7,7 @@ mod call;
 mod clipboard;
 mod editor;
 mod frame;
+mod jobs;
 mod keys;
 pub use keys::WORDS;
 mod menu;
@@ -100,6 +101,9 @@ pub(crate) enum Deed {
     Unsend,
     // A job's row clicked: what it said that is not back yet, on a page.
     Job(u64),
+    // An empty list stops every running job in the current checkout.
+    StopJobs(Vec<u64>),
+    RestartJobs(Vec<u64>),
     // Drop the asides: the rows only drawn, never filed.
     Tidy,
     // The person's answer to a question its asker waits on, or none.
@@ -117,7 +121,15 @@ impl Deed {
             Deed::Rewind => {
                 Fate::Refused("rewinding needs the transcript this run is writing — esc first")
             }
-            _ => Fate::Now,
+            Deed::Nothing
+            | Deed::External
+            | Deed::Interrupt
+            | Deed::Unsend
+            | Deed::Job(_)
+            | Deed::StopJobs(_)
+            | Deed::RestartJobs(_)
+            | Deed::Tidy
+            | Deed::Answer { .. } => Fate::Now,
         }
     }
 
@@ -127,7 +139,13 @@ impl Deed {
         match self {
             // An answer is journaled where it was picked, with what was picked.
             Deed::Nothing | Deed::Tidy | Deed::Answer { .. } => false,
-            Deed::External | Deed::Rewind | Deed::Interrupt | Deed::Unsend | Deed::Job(_) => true,
+            Deed::External
+            | Deed::Rewind
+            | Deed::Interrupt
+            | Deed::Unsend
+            | Deed::Job(_)
+            | Deed::StopJobs(_)
+            | Deed::RestartJobs(_) => true,
         }
     }
 }
@@ -504,8 +522,32 @@ impl Tui {
                     }),
                 };
             }
+            Deed::StopJobs(ids) => {
+                let said = self.drivers.stop_jobs(self.core.lane().root(), &ids);
+                self.land_driven(said);
+            }
+            Deed::RestartJobs(ids) => {
+                let said = self.drivers.restart_jobs(self.core.lane().root(), &ids);
+                self.land_driven(said);
+            }
             Deed::Tidy => self.ui.tidy(front_view(&mut self.views, self.core.lane())),
             Deed::Answer { question, picked } => self.drivers.jobs().answer(question, picked),
+        }
+    }
+
+    fn land_driven(&mut self, said: Said) {
+        match said {
+            Said::Nothing => {}
+            Said::Notice(line) => self.notice(line),
+            Said::Noted(line, note) => {
+                self.notice(line);
+                let lane = self.core.lane_mut();
+                let view = front_view(&mut self.views, lane);
+                self.ui.say_note(lane, view, &note);
+            }
+            Said::Transcript(line) => self
+                .ui
+                .say(front_view(&mut self.views, self.core.lane()), by_pi(&line)),
         }
     }
 
@@ -644,11 +686,7 @@ impl Tui {
             self.ui
                 .sync_questions(jobs.questions(self.core.lane().root()));
             let root = self.core.lane().root();
-            self.ui.every_job = jobs.jobs(root);
-            self.ui.jobs = (self.ui.every_job.iter())
-                .filter(|j| j.state == pi_core::driver::jobs::State::Running)
-                .cloned()
-                .collect();
+            self.ui.sync_jobs(jobs.jobs(root));
             self.ui.tools = Some(self.core.lane().agent().brief.clone());
             // Walked once per line completing it, not on every pass: the
             // transcript holds still while `/rewind` is on the line.
@@ -835,27 +873,19 @@ impl Tui {
                 }
                 Step::Handled(lines) => self.land_lines(lines),
                 Step::Surface { word, .. } if word == keys::KEYS => {
-                    self.land_lines(self.ui.keys.listing())
+                    let mut listing = self.ui.keys.listing();
+                    listing.rows.push(pi_store::listing::Row::new([
+                        "Normal, with no menu: ctrl+k focuses the last job. In jobs: ctrl+k/j move; k stops; r restarts; K stops all; enter opens output; esc returns to input."
+                    ]));
+                    self.land_lines(listing)
                 }
                 Step::Surface { word, .. } => self.notice(format!("unknown command {word}")),
                 Step::Compact(focus) => self.start_compact(focus, &done_tx),
                 Step::Tool { name, args } => self.start_tool(name, args, &started_tx),
                 Step::Drive(drive) => {
                     let lane = self.core.lane();
-                    match self.drivers.command(drive, lane.token(), lane.ctx()) {
-                        Said::Nothing => {}
-                        Said::Command(lines) => self.ui.open_answer(Listing::say(lines)),
-                        Said::Notice(line) => self.notice(line),
-                        Said::Noted(line, note) => {
-                            self.notice(line);
-                            let lane = self.core.lane_mut();
-                            let view = front_view(&mut self.views, lane);
-                            self.ui.say_note(lane, view, &note);
-                        }
-                        Said::Transcript(line) => self
-                            .ui
-                            .say(front_view(&mut self.views, self.core.lane()), by_pi(&line)),
-                    }
+                    let said = self.drivers.command(drive, lane.token(), lane.ctx());
+                    self.land_driven(said);
                 }
                 // Queued-during-run entries are taken one at a time at the
                 // loop's top; draining here would merge them into one prompt.

@@ -38,6 +38,19 @@ pub trait JobSink: Ask {
     ) -> Arc<dyn JobHandle>;
 }
 
+/// Host-owned controls exposed through a shell. These add argument fields
+/// and handle control requests; the shell remains the registered tool.
+#[async_trait::async_trait]
+pub trait JobControls: Send + Sync {
+    fn description(&self) -> &str;
+    fn parameters(&self) -> serde_json::Map<String, serde_json::Value>;
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &tool::Ctx,
+    ) -> Result<tool::ToolOutput, tool::ToolError>;
+}
+
 /// Where a call still in its turn puts a question to the person.
 pub trait Ask: Send + Sync {
     /// Put `asked` from `asker` at `root`. With `back` the pick comes back on

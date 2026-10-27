@@ -4,13 +4,14 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::process::Command;
 
-use crate::background::{Again, JobHandle, JobSink, Rerun};
+use crate::background::{Again, JobControls, JobHandle, JobSink, Rerun};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput, output};
 
 const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const FOREGROUND_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Args {
     command: String,
     #[serde(default = "workspace_root")]
@@ -70,6 +71,7 @@ async fn prepare(
 /// command's id; `background` can return it immediately.
 pub struct Bash {
     jobs: Arc<dyn JobSink>,
+    controls: Option<Arc<dyn JobControls>>,
     background: bool,
     description: String,
 }
@@ -81,6 +83,7 @@ impl Bash {
     pub fn new(jobs: Arc<dyn JobSink>) -> Self {
         Self {
             jobs,
+            controls: None,
             background: true,
             description: format!(
                 "{} After at most {} seconds, return a running job id and its latest output; \
@@ -100,6 +103,78 @@ impl Bash {
             ..Self::new(jobs)
         }
     }
+
+    /// Add the host's controls for the jobs kept by this shell. The host
+    /// owns their parameters and behavior; the shell exposes them in one tool.
+    pub fn with_controls(mut self, controls: Arc<dyn JobControls>) -> Self {
+        self.description.push(' ');
+        self.description.push_str(controls.description());
+        self.controls = Some(controls);
+        self
+    }
+}
+
+/// Queue a command independently of the calling turn, starting it after
+/// `after`. The job is registered now, so it can be stopped before launch.
+async fn schedule(
+    command: &str,
+    cwd: &str,
+    after: std::time::Duration,
+    ctx: &Ctx,
+    jobs: &dyn JobSink,
+) -> Result<ToolOutput, ToolError> {
+    let preview = first_line(command).to_string();
+    let (command, cwd) = prepare(
+        Args {
+            command: command.into(),
+            cwd: cwd.into(),
+        },
+        Tier::Exec,
+        ctx,
+    )
+    .await?;
+    let at = tokio::time::Instant::now()
+        .checked_add(after)
+        .ok_or_else(|| ToolError::Invalid("the start delay is too large".into()))?;
+    let stop = tokio_util::sync::CancellationToken::new();
+    let job = jobs.start(
+        ctx.workspace.root().to_path_buf(),
+        preview.clone(),
+        stop.clone(),
+        None,
+    );
+    let id = job.id();
+    job.watch(Arc::new(String::new));
+    let again = Again { command, cwd };
+    let launch = rerun(again.clone(), ctx);
+    job.rerun(launch.clone(), Some(again));
+    if !after.is_zero() {
+        job.status(format!(
+            "waiting {} before starting",
+            llm::figures::elapsed(after)
+        ));
+    }
+    tokio::spawn(async move {
+        tokio::select! {
+            biased;
+            () = stop.cancelled() => return,
+            () = tokio::time::sleep_until(at) => {}
+        }
+        job.status("starting".into());
+        if let Err(why) = launch(job.clone(), stop) {
+            job.result(format!("could not start: {why}"));
+            job.end();
+        }
+    });
+    let when = if after.is_zero() {
+        "now".to_string()
+    } else {
+        format!("in {}", llm::figures::elapsed(after))
+    };
+    Ok(ToolOutput::text(format!(
+        "scheduled as background job #{id}, starting {when}. Its exit status and output \
+         come back automatically later. Continue independent work, or report progress and end this turn."
+    )).with_preview(format!("{preview} [background #{id}]")))
 }
 
 #[async_trait]
@@ -122,6 +197,13 @@ impl Tool for Bash {
             "required": ["command"],
             "additionalProperties": false,
         });
+        if let Some(controls) = &self.controls {
+            schema.as_object_mut().expect("object").remove("required");
+            schema["properties"]
+                .as_object_mut()
+                .expect("properties")
+                .extend(controls.parameters());
+        }
         if !self.background {
             return schema;
         }
@@ -133,6 +215,12 @@ impl Tool for Bash {
                 this process. What it prints stays readable while it runs, so leave it \
                 unredirected; use this, not nohup or `&`, for anything meant to keep running.",
         });
+        schema["properties"]["wait"] = json!({
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "description": "Seconds to delay before starting command. Requires command and background=true. The call returns a job id immediately; the delay happens in the background. Omit or use 0 to start immediately. Completion reports automatically.",
+        });
         schema
     }
 
@@ -141,6 +229,31 @@ impl Tool for Bash {
     }
 
     async fn execute(&self, mut args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
+        let present = |key: &str| args.get(key).is_some_and(|v| !v.is_null());
+        if !present("command") {
+            if ["cwd", "background", "wait"].iter().any(|key| present(key)) {
+                return Err(ToolError::Invalid(
+                    "command is required for cwd, background, or a start delay".into(),
+                ));
+            }
+            if let Some(controls) = &self.controls {
+                return controls.execute(args, ctx).await;
+            }
+        } else if let Some(controls) = &self.controls
+            && controls.parameters().keys().any(|key| present(key))
+        {
+            return Err(ToolError::Invalid(
+                "run a command or control existing jobs in one call, not both".into(),
+            ));
+        }
+        let after = match args.get("wait").filter(|v| !v.is_null()) {
+            Some(v) => Some(v.as_u64().ok_or_else(|| {
+                ToolError::Invalid(
+                    "wait must be a nonnegative number of seconds before starting command".into(),
+                )
+            })?),
+            None => None,
+        };
         let background = args
             .as_object_mut()
             .and_then(|a| a.remove("background"))
@@ -151,7 +264,31 @@ impl Tool for Bash {
                 "this run only keeps commands while it is active".into(),
             ));
         }
+        if after.is_some() && !background {
+            return Err(ToolError::Invalid(
+                "a start delay requires background=true".into(),
+            ));
+        }
+        if let Some(object) = args.as_object_mut() {
+            object.remove("wait");
+            object.retain(|_, value| !value.is_null());
+        }
         let args: Args = tool::parse_args_hinted(args, ARGS_HINT)?;
+        if args.command.trim().is_empty() {
+            return Err(ToolError::Invalid(
+                "command must be a nonempty string".into(),
+            ));
+        }
+        if let Some(seconds) = after {
+            return schedule(
+                &args.command,
+                &args.cwd,
+                std::time::Duration::from_secs(seconds),
+                ctx,
+                self.jobs.as_ref(),
+            )
+            .await;
+        }
         let timeout = FOREGROUND_WAIT;
         let preview = first_line(&args.command).to_string();
         let (command, cwd) = prepare(args, self.tier(), ctx).await?;
@@ -189,7 +326,8 @@ impl Tool for Bash {
         supervise(running, job);
         let said = if background {
             format!(
-                "running in the background as job #{id}; its exit status and output come back on their own later."
+                "running in the background as job #{id}; its exit status and output come back on their own later. \
+                 Continue independent work, or report progress and end this turn. Do not poll or wait for it."
             )
         } else {
             let elapsed = llm::figures::elapsed(timeout);
@@ -200,14 +338,14 @@ impl Tool for Bash {
                 &output
             };
             let lifetime = if self.background {
-                "Report the current progress; its exit status and output come back on their own later."
+                "Continue independent work, or report progress and end this turn. Its exit status and \
+                 output come back on their own later. Do not poll or wait for it."
             } else {
                 "This run owns the job; wait for it or stop it before finishing your task."
             };
             format!(
                 "still running after {elapsed} as job #{id}; the soft timeout did not stop \
-                the command. Decide whether to wait for the job or stop it; do not rerun the \
-                command. {lifetime} Latest output:\n{output}"
+                the command. Do not rerun the command. {lifetime} Latest output:\n{output}"
             )
         };
         Ok(ToolOutput::text(said).with_preview(format!("{preview} [background #{id}]")))

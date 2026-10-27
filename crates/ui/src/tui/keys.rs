@@ -86,6 +86,9 @@ impl Ui {
                 return Asked::Own(Deed::Nothing);
             }
             TermEvent::Paste(text) => {
+                if self.job_focus.is_some() {
+                    return Asked::Own(Deed::Nothing);
+                }
                 self.last_press = None;
                 // Only the line or a query being typed takes text: anywhere
                 // else the paste would land where nobody can see it.
@@ -96,7 +99,12 @@ impl Ui {
                 }
                 return Asked::Own(Deed::Nothing);
             }
-            TermEvent::Mouse(mouse) => return self.mouse(view, mouse),
+            TermEvent::Mouse(mouse) => {
+                if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                    self.leave_jobs();
+                }
+                return self.mouse(view, mouse);
+            }
             // Windows reports both press and release; acting on both would
             // double every keystroke.
             TermEvent::Key(k) if k.kind != KeyEventKind::Release => {
@@ -137,6 +145,9 @@ impl Ui {
             Some(Action::AppCancel) => return self.cancel(view, running),
             Some(Action::AppQuit) => return Asked::Core(Intent::Builtin(Builtin::Quit)),
             _ => {}
+        }
+        if let Some(asked) = self.job_key(key) {
+            return asked;
         }
         if self.search_key(view, action) {
             self.disarm();
@@ -195,7 +206,9 @@ impl Ui {
     // The stop: whatever is over the editor closes, and a run stops. With
     // neither, it says the next one leaves.
     fn cancel(&mut self, view: &mut View, running: bool) -> Asked {
-        let closed = self.close_overlay(view);
+        let focused = self.job_focus.is_some();
+        self.leave_jobs();
+        let closed = self.close_overlay(view) || focused;
         if running {
             return Asked::Own(Deed::Interrupt);
         }

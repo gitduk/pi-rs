@@ -195,8 +195,7 @@ refused, and resuming one from another directory moves it here.
 | `/mv <dir>`                        | move this session to another directory; its jobs follow |
 | `/compact [focus]`                 | summarize everything but the working tail     |
 | `/loop <line>`                     | resubmit a line until a round edits no file   |
-| `/job [text]`, `stop <id>`         | background jobs; have the model start one; stop one |
-| `/tool [name] [key=value…]`        | list the tools, or run one yourself beside any turn, as a job `/job stop` ends; the model is told what it said |
+| `/tool [name] [key=value…]`        | list the tools, or run one yourself beside any turn, as a background job; the model is told what it said |
 | `/mcp`, `/mcp restart [name]`      | MCP servers and their tools; reconnect        |
 | `/settings`                        | edit the project's config                     |
 | `/edit [file]`                     | edit a prompt, an `AGENTS.md`, or memory      |
@@ -210,6 +209,14 @@ refused, and resuming one from another directory moves it here.
 | drag, double or triple click       | copy the text, a word, or a line              |
 | `ctrl+v`                           | paste a clipboard image as `[Image #n]`       |
 
+In Vim Normal mode, `ctrl+k` focuses the last background job above the input.
+`ctrl+k`/`ctrl+j` move between jobs; `ctrl+j` below the last job or `esc` returns
+to the draft at its original cursor position. The selected job is highlighted:
+`k` stops it, `r` restarts it, `K` stops every running job in this workspace,
+and `enter` expands or folds its output. Stopped rows stay available while
+focused so they can be restarted. Completion lists and reading pages keep
+their own keys; Insert mode keeps its editing keys. `/keys` includes this help.
+
 ## Tools
 
 `read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `subagent` `memory`, plus:
@@ -220,20 +227,26 @@ refused, and resuming one from another directory moves it here.
   not start is listed as `<name>__unavailable`, with the reason; `/mcp`
   shows each server and its tools, and `/mcp restart` reconnects them. A call
   with no answer in 10 minutes is given up.
-- `bash` waits at most 10 seconds, then returns a job id and the latest output while
-  the original command keeps running. The model decides whether to wait longer
-  or stop it with `job`; returning a job id never kills the command. This
-  also applies to subagents and noninteractive runs, whose jobs are isolated
-  and stopped when their owning run ends.
-- `job`: what runs in the background, the latest a
-  command printed with `output`, or `stop` one. A
-  `bash` or `subagent` call with `background`, or a script that detaches,
-  leaves the turn free in the terminal; each result comes back as a turn of its own once the
-  checkout is in front and idle. Those still out are listed above the input line,
-  a click on one shows what it printed, and `/job stop` stops one — the
-  model is told before it next speaks. `/job <text>` asks the model to start
-  something in the background; `/tool bash command=… background=true` starts
-  one without it. Jobs last while pi runs; past that, use cron.
+- `bash` runs commands and manages background work. A regular command waits at
+  most 10 seconds, then returns a job id and the latest output while the original
+  command keeps running. `background: true` returns immediately. Add `wait` to
+  delay the start **in seconds**, for example:
+  `{"command":"python3 report.py","background":true,"wait":30}`. The delay
+  happens in the background; omit `wait` or use 0 to start immediately.
+  With no command, `{}` lists jobs, `{"output":3}` shows a job's latest output,
+  `{"stop":[3]}` stops it, `{"stop_all":true}` stops all, and `{"restart":[3]}`
+  runs a command again under its id. Stopping during a delay prevents execution.
+  Background results automatically open later turns once the checkout is idle;
+  the model can continue independent work or report progress and end its turn.
+  The separate job tool and its former completion-wait interface are removed.
+  Subagents and noninteractive runs keep their commands isolated and stop them
+  when their owning run ends; their shell offers `join` to collect results
+  before ending. These runs do not offer delayed background starts.
+  A `subagent` call with `background`, or a script that detaches, uses the same
+  job table and shell controls. Jobs appear above the input line; clicking one
+  shows its output. The task-list keys and bash controls stop or restart jobs;
+  user actions are reported to the model before it next speaks. Jobs last while
+  pi runs; past that, use cron.
 - One tool per script in `~/.pi/tools/`: any file whose first line is a `#!`,
   its `description` and `[args]` written as TOML in a `# ---` comment block
   under that line; or a cargo script `*.rs`, described by its

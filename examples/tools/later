@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ---
-# description = "Leave yourself a prompt that comes back to this checkout as a turn of its own, after a delay or on a period. It arrives once nothing else is running, so end this turn rather than wait for it. Give `prompt` and one of `after` or `every`. It lasts while pi runs; `jobs` lists it and stops it. To come back when a command ends, run it with bash's `background` instead."
+# description = "Leave yourself a prompt that comes back to this checkout as a turn of its own, after a delay or on a period. It arrives once nothing else is running, so end this turn rather than wait for it. Give `prompt` and one of `after` or `every`. It lasts while pi runs and can be stopped as a background task. To come back when a command ends, run it with bash's `background` instead."
 # [args]
 # prompt = "What to do when it comes due, written as a request: it arrives with nothing of this turn but what you put in it."
 # after = "optional: a delay, 30s / 10m / 2h / 1d"

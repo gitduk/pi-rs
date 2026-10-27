@@ -10,9 +10,10 @@ use crate::driver::jobs::{Jobs, Table};
 /// unfinished commands; another run cannot list or stop them.
 pub fn scoped(ctx: &Ctx, mut registry: Registry) -> Registry {
     let table = Arc::new(Table::default());
-    let jobs = Arc::new(Jobs::new(table.clone()));
-    registry.fallback(Arc::new(toolbox::bash::Bash::scoped(jobs.clone())));
-    registry.fallback(jobs);
+    let jobs = Arc::new(Jobs::scoped(table.clone()));
+    registry.fallback(Arc::new(
+        toolbox::bash::Bash::scoped(jobs.clone()).with_controls(jobs),
+    ));
 
     let stop = ctx.cancel.clone();
     let root = ctx.workspace.root().to_path_buf();
@@ -37,9 +38,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
         let _stop = ctx.cancel.clone().drop_guard();
+        let full = scoped(&ctx, toolbox::builtin());
+        assert!(full.get("job").is_none());
+        let shell = full.get(toolbox::bash::Bash::NAME).unwrap();
+        assert!(shell.schema()["properties"].get("join").is_some());
+        assert!(shell.schema()["properties"].get("wait").is_none());
         let read_only = scoped(&ctx, toolbox::builtin().within(tool::Tier::Read));
         assert!(read_only.get(toolbox::bash::Bash::NAME).is_none());
-        assert!(read_only.get(Jobs::NAME).is_none());
         let hidden = scoped(&ctx, toolbox::builtin().without(toolbox::bash::Bash::NAME));
         assert!(hidden.get(toolbox::bash::Bash::NAME).is_none());
 
@@ -113,12 +118,18 @@ mod tests {
                 ),
                 1 => {
                     assert!(result().contains("job #1"));
-                    (Jobs::NAME, json!({"wait": 1, "timeout_ms": 20}))
+                    (
+                        toolbox::bash::Bash::NAME,
+                        json!({"join": 1, "timeout_ms": 20}),
+                    )
                 }
                 2 => {
                     assert!(result().contains("still running"));
                     std::fs::write(self.root.join("release"), "").unwrap();
-                    (Jobs::NAME, json!({"wait": 1, "timeout_ms": 5000}))
+                    (
+                        toolbox::bash::Bash::NAME,
+                        json!({"join": 1, "timeout_ms": 5000}),
+                    )
                 }
                 3 => {
                     let result = result();

@@ -28,6 +28,9 @@ const MENU_PADDING: usize = 2;
 
 impl Ui {
     pub(super) fn flush(&mut self, lane: &Lane, view: &mut View) {
+        if self.job_focus.is_some() && (self.reading() || !self.menu().is_empty()) {
+            self.leave_jobs();
+        }
         let width = self.screen.width();
         let paged = self.read.is_some();
         let text = self.page_lines();
@@ -88,16 +91,29 @@ impl Ui {
                 .or(self.fold_at(row).then_some(call::JobRow::Fold))
         });
         let open = self.job_open.as_ref();
-        let (mut jobs, job_rows) = call::job_lines(
+        let (mut jobs, mut job_rows) = call::job_lines(
             &self.jobs,
             hovered_job,
             open,
-            self.jobs_all,
+            self.jobs_all || self.job_focus.is_some(),
             &self.paint,
             width,
         );
-        self.job_rows = job_rows;
+        for (line, row) in jobs.iter_mut().zip(&job_rows) {
+            if matches!(row, call::JobRow::Job(id) if Some(*id) == self.job_focus) {
+                line.style = line.style.add_modifier(ratatui::style::Modifier::REVERSED);
+            }
+        }
         let mut bar = self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width);
+        if self.job_focus.is_some() {
+            bar.insert(
+                0,
+                Line::from(self.paint.span(
+                    &self.paint.theme.muted,
+                    pi_store::text::clip(super::jobs::HINT, width),
+                )),
+            );
+        }
         // A query being typed is the line's text, drawn as the search's row:
         // `/`, the query, which hit of how many.
         let (input, caret) = match self.search_line().filter(|_| self.search_typing()) {
@@ -126,7 +142,38 @@ impl Ui {
             input.len(),
         );
         asked.truncate(regions.asked.height as usize);
+        // A hidden selection must never receive destructive keys.
+        let focus_row = self.job_focus.and_then(|id| {
+            job_rows
+                .iter()
+                .position(|row| *row == call::JobRow::Job(id))
+        });
+        let job_top = focus_row.map_or(0, |at| {
+            let id = self.job_focus.expect("a focused row");
+            let end = job_rows
+                .iter()
+                .enumerate()
+                .skip(at + 1)
+                .find(|(_, row)| {
+                    matches!(row, call::JobRow::Job(other) if *other != id)
+                        || **row == call::JobRow::Fold
+                })
+                .map_or(job_rows.len(), |(at, _)| at);
+            end.saturating_sub(regions.jobs.height as usize).min(at)
+        });
+        jobs.drain(..job_top.min(jobs.len()));
+        job_rows.drain(..job_top.min(job_rows.len()));
         jobs.truncate(regions.jobs.height as usize);
+        job_rows.truncate(regions.jobs.height as usize);
+        let job_caret = focus_row.and_then(|at| {
+            let row = at.saturating_sub(job_top);
+            (row < regions.jobs.height as usize)
+                .then_some((regions.jobs.x, regions.jobs.y + row as u16))
+        });
+        self.job_rows = job_rows;
+        if self.job_focus.is_some() && job_caret.is_none() {
+            self.leave_jobs();
+        }
         bar.truncate(regions.bar.height as usize);
         // A paste taller than the terminal keeps the caret's row in view.
         let editor_h = regions.editor.height as usize;
@@ -354,7 +401,7 @@ impl Ui {
             }
             frame.render_widget(Rows(&input_view), regions.editor);
             let caret_row = regions.editor.y + caret_in_view as u16;
-            frame.set_cursor_position((caret.1, caret_row));
+            frame.set_cursor_position(job_caret.unwrap_or((caret.1, caret_row)));
         });
         // Bold doesn't move a row, so a second frame settles it.
         let over = self

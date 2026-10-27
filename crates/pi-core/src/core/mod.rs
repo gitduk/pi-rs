@@ -212,8 +212,8 @@ impl Core {
         Some(std::sync::Arc::new(jobs))
     }
 
-    /// Offer `job` on every lane, writing into `table`, which the surface
-    /// serves: lanes armed before this are armed again.
+    /// Offer background controls through each lane's shell, writing into
+    /// `table`, which the surface serves; re-arm lanes already open.
     pub fn enable_jobs(&mut self, table: std::sync::Arc<crate::driver::jobs::Table>) {
         self.jobs = Some(table);
         let retry = retry(&self.config);
@@ -353,7 +353,6 @@ impl Core {
             Intent::Bash(command) => Step::Bash(command),
             Intent::Prompt(send) => Step::Prompt { send, typed: None },
             Intent::Surface { word, args } => Step::Surface { word, args },
-            Intent::Builtin(Builtin::Job(arg)) => Step::Drive(Drive::Job(arg)),
             Intent::Builtin(Builtin::Tool(line)) if line.trim().is_empty() => Step::Handled(
                 crate::input::commands::tool_listing(&self.lane().agent().brief.registry),
             ),
@@ -363,13 +362,6 @@ impl Core {
                     Err(why) => Step::Notice(why),
                 }
             }
-            Intent::Builtin(Builtin::Background(what)) => Step::Prompt {
-                send: format!(
-                    "Start this in the background, apart from this turn, then end the \
-                     turn without waiting on it:\n\n{what}"
-                ),
-                typed: Some(format!("/job {what}")),
-            },
             Intent::Builtin(Builtin::Loop(goal)) => match goal.trim() {
                 "" => Step::Drive(Drive::Loop(None)),
                 goal if self.starts_turn(goal) => Step::Drive(Drive::Loop(Some(goal.to_string()))),

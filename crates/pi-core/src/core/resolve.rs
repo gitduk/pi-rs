@@ -322,7 +322,7 @@ pub fn resolve(
         );
         let whose = if *project { "project" } else { "user" };
         // Offered tools win a name; between directories, the one read earlier.
-        // A tool hung on after this (`bash`, `subagent`, `memory`, `job`) asks the
+        // A tool hung on after this (`bash`, `subagent`, `memory`) asks the
         // same question later and stands down instead of taking the name.
         for script in tool::Source::tools(&**scripts) {
             let name = script.name();
@@ -747,7 +747,6 @@ mod tests {
                 toolbox::bash::Bash::NAME,
                 skills::Load::NAME,
                 subagent::Subagent::NAME,
-                crate::driver::jobs::Jobs::NAME,
             ]
             .map(String::from),
         );

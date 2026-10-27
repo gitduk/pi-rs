@@ -38,8 +38,6 @@ pub enum Ended {
 /// What a driver's command answers, and where it goes.
 pub enum Said {
     Nothing,
-    // The answer to the command, for whoever typed it.
-    Command(Vec<String>),
     // A refusal or what did not happen: a notice, not an answer.
     Notice(String),
     // A notice (empty when there is none) and a note the model reads before
@@ -81,7 +79,7 @@ struct Owed {
 }
 
 impl Drivers {
-    /// What `job` and every call that outlives its turn write into: the
+    /// What the shell controls and calls that outlive their turn write into: the
     /// lanes' tools and this driver share it.
     pub fn jobs(&self) -> Arc<jobs::Table> {
         self.jobs.clone()
@@ -136,7 +134,6 @@ impl Drivers {
                 Ok(()) => Said::Nothing,
                 Err(why) => Said::Notice(why),
             },
-            Drive::Job(arg) => self.job_command(&arg, ctx),
             Drive::Loop(None) => match self.loops.stop(lane) {
                 // A loop really ended: that belongs in the transcript.
                 Some(said) => Said::Transcript(said),
@@ -272,16 +269,8 @@ fn reply(mut said: String, ended: &Ended) -> String {
     said
 }
 
-// The ids after a `/job` verb, `#` or not; the first that is none, said.
-fn job_ids(ids: &[&str]) -> Result<Vec<u64>, Said> {
-    (ids.iter())
-        .map(|id| jobs::parse_id(id).ok_or_else(|| Said::Notice(format!("`{id}` is not a job id"))))
-        .collect()
-}
-
-// What a `/job` verb did to jobs the model may have started: only what
-// failed is a notice, and the model is told the rest, since nothing
-// comes back from them to say so. `note` gets `#id (what)`s and whether one.
+// What the user's controls changed: failures are notices; successful
+// changes are also told to the model, since the jobs will not report them.
 fn job_note(
     (failed, done): (Vec<String>, Vec<String>),
     note: impl Fn(&str, bool) -> String,
@@ -294,57 +283,83 @@ fn job_note(
 }
 
 impl Drivers {
-    // `/job`: what runs in the background here, `stop [id…]` to end them,
-    // every one when none is named, `restart id…` to start them over.
-    fn job_command(&self, arg: &str, ctx: &Ctx) -> Said {
-        let root = ctx.workspace.root();
-        let lines = match arg.split_whitespace().collect::<Vec<_>>().as_slice() {
-            [] => {
-                let jobs = self.jobs.listing(root);
-                if jobs.is_empty() {
-                    vec!["nothing in the background here".into()]
-                } else {
-                    jobs
-                }
-            }
-            ["stop", ids @ ..] => {
-                return match job_ids(ids) {
-                    Ok(ids) => job_note(self.jobs.stop_each(root, &ids), |ids, one| {
-                        let (job, it) = if one { ("job", "it") } else { ("jobs", "them") };
-                        format!(
-                            "The user stopped background {job} {ids}; nothing more will come \
-                             back from {it}."
-                        )
-                    }),
-                    Err(said) => said,
-                };
-            }
-            ["restart", ids @ ..] if !ids.is_empty() => {
-                return match job_ids(ids) {
-                    Ok(ids) => job_note(self.jobs.restart_each(root, &ids), |ids, one| {
-                        let job = if one { "job" } else { "jobs" };
-                        format!(
-                            "The user restarted background {job} {ids}: each runs again under \
-                             the same id, and what the earlier run had not yet reported is dropped."
-                        )
-                    }),
-                    Err(said) => said,
-                };
-            }
-            _ => vec![
-                "/job lists what runs in the background; /job stop [id…] ends them, or all; \
-                 /job restart id… starts them over; /job <text> has the model start it there"
-                    .into(),
-            ],
-        };
-        Said::Command(lines)
+    /// Stop the named jobs, or all running jobs when none are named, and
+    /// tell the model what the user changed.
+    pub fn stop_jobs(&self, root: &std::path::Path, ids: &[u64]) -> Said {
+        job_note(self.jobs.stop_each(root, ids), |ids, one| {
+            let (job, it) = if one { ("job", "it") } else { ("jobs", "them") };
+            format!(
+                "The user stopped background {job} {ids}; nothing more will come back from {it}."
+            )
+        })
+    }
+
+    /// Restart the named jobs and tell the model that their earlier,
+    /// unreported results no longer apply.
+    pub fn restart_jobs(&self, root: &std::path::Path, ids: &[u64]) -> Said {
+        job_note(self.jobs.restart_each(root, ids), |ids, one| {
+            let job = if one { "job" } else { "jobs" };
+            format!(
+                "The user restarted background {job} {ids}: each runs again under the same id, and what the earlier run had not yet reported is dropped."
+            )
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tool::Tool as _;
     use toolbox::background::JobSink as _;
+
+    // The start delay belongs to the job. Ending the scheduling turn does
+    // not cancel it; completion opens a later turn through the same driver.
+    #[tokio::test]
+    async fn a_delayed_job_returns_before_starting_and_reports_in_a_later_turn() {
+        use serde_json::json;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let root = ctx.workspace.root();
+        let mut drivers = Drivers::default();
+        let table = drivers.jobs();
+        let control = Arc::new(jobs::Jobs::new(table.clone()));
+        let jobs = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        let marker = root.join("started");
+        let out = tokio::time::timeout(
+            Duration::from_millis(500),
+            jobs.execute(
+                json!({"command": "echo started > started; echo finished", "background": true, "wait": 1}),
+                &ctx,
+            ),
+        )
+        .await
+        .expect("scheduling must not wait for the start delay")
+        .unwrap();
+        assert!(out.flatten().contains("job #1"));
+        assert!(!marker.exists(), "the command has not started");
+        assert!(table.jobs(root)[0].progress.contains("before starting"));
+        assert!(drivers.next(1, root).is_none());
+        ctx.cancel.cancel();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!marker.exists(), "the delay is still in the background");
+        let next = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let changed = table.changed().notified();
+                if let Some(next) = drivers.next(1, root) {
+                    break next;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .expect("completion is delivered without another user input");
+        assert_eq!(next.origin, Origin::Job);
+        assert!(next.line.contains("finished"));
+        assert!(marker.exists());
+        assert!(drivers.next(1, root).is_none(), "reported once");
+    }
 
     #[tokio::test]
     async fn progress_reaches_the_job_before_tools_without_repeating_in_the_reply() {
@@ -455,16 +470,14 @@ mod tests {
     async fn a_job_the_user_stops_is_noted_for_the_model() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
-        let ctx = Ctx::new(tool::Workspace::new(&root).unwrap());
-        let mut drivers = Drivers::default();
+        let drivers = Drivers::default();
         let job = jobs::Jobs::new(drivers.jobs()).start(
             root.clone(),
             "http.server 8080".into(),
             Default::default(),
             None,
         );
-        let stop = format!("stop {}", job.id());
-        let Said::Noted(_, note) = drivers.command(Drive::Job(stop.clone()), 1, &ctx) else {
+        let Said::Noted(_, note) = drivers.stop_jobs(&root, &[job.id()]) else {
             panic!("a stop is noted")
         };
         assert!(
@@ -472,7 +485,7 @@ mod tests {
             "{note}"
         );
         assert!(matches!(
-            drivers.command(Drive::Job(stop), 1, &ctx),
+            drivers.stop_jobs(&root, &[job.id()]),
             Said::Notice(_)
         ));
     }

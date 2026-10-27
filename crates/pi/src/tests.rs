@@ -177,7 +177,7 @@ async fn scoped_shell_jobs_are_isolated_and_stopped_with_their_owner_or_explicit
             )
             .await
             .unwrap();
-        let control = registry.get(Jobs::NAME).unwrap();
+        let control = registry.get(toolbox::bash::Bash::NAME).unwrap();
         let processes = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let out = control
@@ -193,7 +193,7 @@ async fn scoped_shell_jobs_are_isolated_and_stopped_with_their_owner_or_explicit
         .await
         .unwrap();
         let waited = control
-            .execute(serde_json::json!({"wait": 1, "timeout_ms": 20}), ctx)
+            .execute(serde_json::json!({"join": 1, "timeout_ms": 20}), ctx)
             .await
             .unwrap();
         assert!(waited.flatten().contains("still running"));

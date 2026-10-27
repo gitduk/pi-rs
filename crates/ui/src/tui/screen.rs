@@ -520,6 +520,14 @@ impl Screen {
         }
     }
 
+    #[cfg(test)]
+    pub fn test_cursor(&mut self) -> ratatui::layout::Position {
+        match &mut self.term {
+            Term::Test(t) => t.get_cursor_position().expect("an in-memory cursor"),
+            Term::Live(_) => unreachable!("a test screen is the in-memory one"),
+        }
+    }
+
     /// Columns a row is laid out in: the whole width.
     pub fn width(&self) -> usize {
         self.width.max(1) as usize

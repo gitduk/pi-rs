@@ -128,9 +128,11 @@ pub(super) struct Ui {
     // Whether the live block lists every call in flight or just the newest
     // with a count; a click flips it. Outlives the calls themselves.
     pub(super) live_tools_shown: bool,
-    // The front checkout's running jobs, drawn over the input line.
+    // Keep stopped rows available for restart while this list has focus.
     pub(super) jobs: Vec<pi_core::driver::jobs::Job>,
-    // Every job of the front checkout, kept ones too, for `/job` to complete.
+    // List changes must not redirect a stop to a different job.
+    pub(super) job_focus: Option<u64>,
+    // Queued results need rows even without a live process.
     pub(super) every_job: Vec<pi_core::driver::jobs::Job>,
     // The front lane's tools, for `/tool` to complete; read only when it does,
     // since reading one re-stats the tools directory.
@@ -199,6 +201,7 @@ impl Ui {
     // view, and the state that was that lane's. A search found its hits
     // there, and gives the line back first.
     pub(super) fn leave_lane(&mut self, view: &mut View) {
+        self.leave_jobs();
         self.search_close(view);
         view.draft = self.editor.take_composing();
         self.flash = None;
@@ -253,6 +256,7 @@ impl Ui {
             flash_hit: None,
             copied: None,
             jobs: Vec::new(),
+            job_focus: None,
             every_job: Vec::new(),
             tools: None,
             job_open: None,

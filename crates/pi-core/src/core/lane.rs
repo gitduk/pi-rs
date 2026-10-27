@@ -234,10 +234,9 @@ pub fn arm(
         && tool::Tier::Exec.under(resolved.ceiling)
     {
         let patch = Arc::make_mut(&mut brief);
-        offer_fallback(patch, jobs.clone(), &mut said);
         offer_fallback(
             patch,
-            Arc::new(toolbox::bash::Bash::new(jobs.clone())),
+            Arc::new(toolbox::bash::Bash::new(jobs.clone()).with_controls(jobs.clone())),
             &mut said,
         );
         // Scripts likewise: the lane's may detach, the child's may not.
@@ -1154,6 +1153,32 @@ mod tests {
         assert!(child.unwrap_err().to_string().contains("cannot keep"));
     }
 
+    #[test]
+    fn a_lanes_shell_exposes_background_controls_without_a_separate_job_tool() {
+        use std::sync::Arc;
+
+        let mut agent = agent::Agent::new(
+            Arc::new(Recording::default()),
+            crate::core::tests::test_spec("m"),
+        );
+        super::arm(
+            &mut agent,
+            super::a_resolved(""),
+            crate::core::archive::nowhere(),
+            agent::Retry::default(),
+            Some(Arc::default()),
+        );
+        assert!(agent.brief.registry.get("job").is_none());
+        let shell = agent.brief.registry.get(toolbox::bash::Bash::NAME).unwrap();
+        let schema = shell.schema();
+        for control in ["stop", "stop_all", "restart", "output", "wait"] {
+            assert!(schema["properties"].get(control).is_some(), "{control}");
+        }
+        assert_eq!(schema["properties"]["wait"]["type"], "integer");
+        assert!(schema["properties"].get("join").is_none());
+        assert!(schema.get("required").is_none(), "an empty call lists jobs");
+    }
+
     // A script already holding a name the lane hands a tool keeps it: the
     // built-in stands down and says so, rather than taking the name over
     // and leaving the script silently gone.
@@ -1164,7 +1189,6 @@ mod tests {
         for name in [
             subagent::Subagent::NAME,
             crate::core::memory::Remember::NAME,
-            crate::driver::jobs::Jobs::NAME,
         ] {
             let dir = tempfile::tempdir().unwrap();
             let tools = dir.path().join("tools");

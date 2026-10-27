@@ -56,10 +56,6 @@ pub enum Builtin {
     Edit(String),
     // What to run over and over, or empty to stop the loop in force.
     Loop(String),
-    // Bare, what runs in the background here; `stop <id>` ends one.
-    Job(String),
-    // Something the model is asked to start in the background.
-    Background(String),
     // A tool to run by name with no model in between, as typed after `/tool`:
     // only the lane knows its tools, so the line is read there. Empty lists them.
     Tool(String),
@@ -104,8 +100,7 @@ impl Intent {
                 | Builtin::Content
                 | Builtin::Name(_)
                 | Builtin::Model(_)
-                | Builtin::Effort(_)
-                | Builtin::Job(_),
+                | Builtin::Effort(_),
             ) => Fate::Now,
             // A restart drops only the servers' connections, never the run's.
             Intent::Builtin(Builtin::Mcp(_)) => Fate::Now,
@@ -139,7 +134,6 @@ impl Intent {
             Intent::Surface { .. } => Fate::Now,
             // Its first round is due at once, and a round wants the lane free.
             Intent::Builtin(Builtin::Loop(_)) => Fate::Queued,
-            Intent::Builtin(Builtin::Background(_)) => Fate::Queued,
             // Beside the run: it touches neither the transcript nor the turn.
             Intent::Builtin(Builtin::Tool(_)) => Fate::Now,
             // A `!` files its result in the transcript, which the run has.
@@ -407,8 +401,6 @@ impl Step {
 pub enum Drive {
     /// `/loop` over a goal already known to start a turn; `None` stops it.
     Loop(Option<String>),
-    /// `/job`, with what followed the word.
-    Job(String),
 }
 
 /// Lines of a notice folded into one.

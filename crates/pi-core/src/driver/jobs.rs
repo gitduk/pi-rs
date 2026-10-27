@@ -25,8 +25,10 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tool::limit::MAX_CALL;
-use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
-use toolbox::background::{Again, Answer, Ask, Asked, JobHandle, JobSink, Peek, Rerun, Told};
+use tool::{Ctx, ToolError, ToolOutput};
+use toolbox::background::{
+    Again, Answer, Ask, Asked, JobControls, JobHandle, JobSink, Peek, Rerun, Told,
+};
 
 use crate::core::question::{Asker, Question};
 
@@ -555,7 +557,7 @@ impl Table {
             }
             Back::Input { .. } => true,
         });
-        tracing::info!(target: "pi::job", job = id, results = said.len(), "delivered to a wait");
+        tracing::info!(target: "pi::job", job = id, results = said.len(), "results collected");
         settle(&mut inner.items, at);
         drop(inner);
         self.wake();
@@ -1086,16 +1088,27 @@ pub fn parse_id(word: &str) -> Option<u64> {
     word.trim_start_matches('#').parse().ok()
 }
 
-/// The `job` tool, and where a call that outlives its turn is kept.
+/// The shell controls, and where a call that outlives its turn is kept.
 pub struct Jobs {
     table: Arc<Table>,
+    // Single-run jobs must finish before their owner releases them.
+    scoped: bool,
 }
 
 impl Jobs {
-    pub const NAME: &'static str = "job";
-
     pub fn new(table: Arc<Table>) -> Self {
-        Self { table }
+        Self {
+            table,
+            scoped: false,
+        }
+    }
+
+    /// Job controls for a run whose unfinished commands end with it.
+    pub fn scoped(table: Arc<Table>) -> Self {
+        Self {
+            table,
+            scoped: true,
+        }
     }
 }
 
@@ -1318,65 +1331,82 @@ impl JobHandle for Handle {
 }
 
 #[async_trait]
-impl Tool for Jobs {
-    fn name(&self) -> &str {
-        Self::NAME
-    }
-
+impl JobControls for Jobs {
     fn description(&self) -> &str {
-        "List what runs in the background for this checkout — subagents sent \
-         off with `background`, tools that went on after their call returned — \
-         show the latest a command printed with `output`, `stop` some by id, \
-         or `stop_all`. A stopped job's results never come back. `restart` \
-         runs a background command again under its id, stopped first if it \
-         still runs; a stopped or exited one stays listed for that. When you \
-         need jobs' results before going on, `wait` takes one id or an array \
-         of ids and waits for all of them under one timeout — never sleep in \
-         a shell. It returns their results in the requested order, and those \
-         results do not come back again as turns. A shell call past \
-         its soft timeout is still running under the returned id: inspect its \
-         output, wait longer, or stop it; do not start the command again."
+        if self.scoped {
+            "List this run's commands, show their latest `output`, or `stop` them by id \
+             (`stop_all` stops all). `restart` runs a command again under its id. \
+             `join` takes one id or an array and waits for all under one timeout, \
+             returning results in request order. Wait for unfinished commands or stop \
+             them before finishing this run; they end with it. Never sleep in a shell \
+             or rerun a command just because its shell call returned a running job id."
+        } else {
+            "With no command, list background jobs. Show their latest `output`, \
+             `stop` them by id, or `stop_all`. `restart` runs a command again under \
+             its id, stopping its earlier run first. Results arrive automatically \
+             in later turns; continue independent work, or report progress and end \
+             this turn. Do not poll or wait for background work."
+        }
     }
 
-    fn tier(&self) -> Tier {
-        Tier::Exec
-    }
-
-    fn schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "stop": {
+    fn parameters(&self) -> serde_json::Map<String, Value> {
+        let mut parameters = serde_json::Map::from_iter([
+            (
+                "stop".into(),
+                json!({
                     "type": "array",
                     "items": { "type": "integer" },
                     "description": "The ids of those to stop.",
-                },
-                "stop_all": { "type": "boolean", "description": "Stop every one still running." },
-                "restart": {
+                }),
+            ),
+            (
+                "stop_all".into(),
+                json!({ "type": "boolean", "description": "Stop every one still running." }),
+            ),
+            (
+                "restart".into(),
+                json!({
                     "type": "array",
                     "items": { "type": "integer" },
                     "description": "The ids of those to start over.",
-                },
-                "output": {
+                }),
+            ),
+            (
+                "output".into(),
+                json!({
                     "type": "integer",
                     "description": "The id of one whose latest output to show, as it runs.",
-                },
-                "wait": {
-                    "type": ["integer", "array"],
-                    "items": { "type": "integer" },
-                    "minItems": 1,
-                    "description": "One job id or an array of ids to wait for together until all end. Duplicates are ignored. One shared timeout_ms; on timeout, completed jobs return their results and running jobs show their latest output. Results stay in the requested order; an invalid id does not discard other jobs' results.",
-                },
-                "timeout_ms": {
-                    "type": "integer",
-                    "description": "How long `wait` waits. Default and max 600000.",
-                },
-            },
-        })
+                }),
+            ),
+        ]);
+        if self.scoped {
+            parameters.insert("join".into(), json!({
+                "type": ["integer", "array"],
+                "items": { "type": "integer" },
+                "minItems": 1,
+                "description": "One job id or an array of ids to join until all end. Duplicates are ignored. One shared timeout_ms; on timeout, completed jobs return their results and running jobs show their latest output. Results stay in request order, including errors for invalid ids.",
+            }));
+            parameters.insert("timeout_ms".into(), json!({
+                "type": "integer",
+                "description": format!("How long `join` waits. Default and max {}.", MAX_CALL.as_millis()),
+            }));
+        }
+        parameters
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let root = ctx.workspace.root();
+        let present = |key: &str| args.get(key).is_some_and(|v| !v.is_null());
+        let parameters = self.parameters();
+        if let Some(fields) = args.as_object() {
+            for (key, value) in fields {
+                if !value.is_null() && !parameters.contains_key(key) {
+                    return Err(ToolError::Invalid(format!(
+                        "unknown background control `{key}`"
+                    )));
+                }
+            }
+        }
         // A lone id still names one; so does `"#3"`.
         let id = |v: &Value| {
             v.as_u64()
@@ -1428,13 +1458,13 @@ impl Tool for Jobs {
                 self.table.stop_each(root, if all { &[] } else { &ids }),
             );
         }
-        if args.get("wait").is_some_and(|v| !v.is_null()) {
-            let mut ids = ids_of("wait")?;
+        if present("join") {
+            let mut ids = ids_of("join")?;
             let mut seen = HashSet::new();
             ids.retain(|id| seen.insert(*id));
             if ids.is_empty() {
                 return Err(ToolError::Invalid(
-                    "`wait` needs at least one job id".into(),
+                    "`join` needs at least one job id".into(),
                 ));
             }
             let asked = args.get("timeout_ms").and_then(Value::as_u64);
@@ -1462,7 +1492,7 @@ impl Tool for Jobs {
             if failed == ids.len() {
                 return Err(ToolError::Invalid(out));
             }
-            let out = ToolOutput::text(out).with_preview(named("wait", &ids));
+            let out = ToolOutput::text(out).with_preview(named("join", &ids));
             return Ok(match failed {
                 0 => out,
                 _ => out.warned(),
@@ -1486,6 +1516,129 @@ impl Tool for Jobs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tool::Tool;
+
+    #[tokio::test]
+    async fn stopping_a_delayed_job_prevents_the_command_from_starting() {
+        let (dir, ctx) = context();
+        let table = Arc::new(Table::default());
+        let control = Arc::new(Jobs::new(table.clone()));
+        let jobs = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        jobs.execute(
+            json!({"background": true, "command": "echo started >> starts", "wait": 1}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let listed = jobs.execute(json!({}), &ctx).await.unwrap().flatten();
+        assert!(
+            listed.contains("waiting") && listed.contains("#1"),
+            "{listed}"
+        );
+        let output = jobs
+            .execute(json!({"output": 1}), &ctx)
+            .await
+            .unwrap()
+            .flatten();
+        assert_eq!(output, "nothing printed yet");
+        jobs.execute(json!({"stop": [1]}), &ctx).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert!(!dir.path().join("starts").exists());
+        assert_eq!(table.jobs(ctx.workspace.root())[0].state, State::Stopped);
+        assert!(table.take_back(ctx.workspace.root()).is_none());
+
+        jobs.execute(json!({"restart": [1]}), &ctx).await.unwrap();
+        let result = table
+            .wait(ctx.workspace.root(), 1, std::time::Duration::from_secs(5))
+            .await
+            .unwrap()
+            .expect("the command can still be restarted");
+        assert!(result[0].contains("exited 0"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("starts")).unwrap(),
+            "started\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_job_without_a_start_delay_runs_immediately_in_its_cwd() {
+        for wait in [None, Some(0)] {
+            let (dir, ctx) = context();
+            let table = Arc::new(Table::default());
+            let control = Arc::new(Jobs::new(table.clone()));
+            let jobs = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+            std::fs::create_dir(dir.path().join("subdir")).unwrap();
+            let mut args = json!({"background": true, "command": "echo made > result; echo failed >&2; exit 3", "cwd": "subdir"});
+            if let Some(wait) = wait {
+                args["wait"] = json!(wait);
+            }
+            jobs.execute(args, &ctx).await.unwrap();
+            let result = table
+                .wait(ctx.workspace.root(), 1, std::time::Duration::from_secs(5))
+                .await
+                .unwrap()
+                .expect("a zero delay starts immediately");
+            assert!(
+                result[0].contains("exited 3") && result[0].contains("failed"),
+                "{result:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("subdir/result")).unwrap(),
+                "made\n"
+            );
+            assert!(
+                table.take_back(ctx.workspace.root()).is_none(),
+                "delivered once"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_start_requests_do_not_create_jobs() {
+        let (dir, ctx) = context();
+        let table = Arc::new(Table::default());
+        let control = Arc::new(Jobs::new(table.clone()));
+        let jobs = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        let marker = dir.path().join("starts");
+        for args in [
+            json!({"wait": [10], "timeout_ms": 420000}),
+            json!({"wait": 30}),
+            json!({"command": "echo started > starts", "wait": 30}),
+            json!({"command": "echo started > starts", "timeout_ms": 420000}),
+            json!({"background": true, "command": "echo started > starts", "wait": -1}),
+            json!({"background": true, "command": "echo started > starts", "wait": 0.5}),
+            json!({"background": true, "command": "echo started > starts", "wait": [10]}),
+            json!({"background": true, "command": "echo started > starts", "wait": u64::MAX}),
+            json!({"background": true, "command": "echo started > starts", "stop_all": true}),
+            json!({"background": true, "command": " "}),
+            json!({"join": 10}),
+        ] {
+            assert!(jobs.execute(args.clone(), &ctx).await.is_err(), "{args}");
+            assert!(table.jobs(ctx.workspace.root()).is_empty(), "{args}");
+            assert!(!marker.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_scheduled_command_that_cannot_launch_reports_the_failure() {
+        let (_dir, ctx) = context();
+        let table = Arc::new(Table::default());
+        let control = Arc::new(Jobs::new(table.clone()));
+        let jobs = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        jobs.execute(
+            json!({"background": true, "command": "echo started", "cwd": "missing", "wait": 0}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let result = table
+            .wait(ctx.workspace.root(), 1, std::time::Duration::from_secs(5))
+            .await
+            .unwrap()
+            .expect("a failed launch must end the job");
+        assert!(result[0].contains("could not start:"), "{result:?}");
+        assert_eq!(table.jobs(ctx.workspace.root())[0].state, State::Exited);
+    }
 
     #[tokio::test]
     async fn changed_job_output_is_paced_and_only_goes_to_its_checkout() {
@@ -1600,15 +1753,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_batch_wait_keeps_request_order_and_takes_each_result_once() {
+    async fn a_batch_join_keeps_request_order_and_takes_each_result_once() {
         let (_dir, ctx) = context();
         let root = ctx.workspace.root();
         let table = Arc::new(Table::default());
-        let jobs = Jobs::new(table.clone());
+        let jobs = Jobs::scoped(table.clone());
         let first = start(&table, root, "first");
         let second = start(&table, root, "second");
         let mut waiting =
-            Box::pin(jobs.execute(json!({"wait": [first.id(), second.id(), first.id()]}), &ctx));
+            Box::pin(jobs.execute(json!({"join": [first.id(), second.id(), first.id()]}), &ctx));
         assert!(futures::poll!(waiting.as_mut()).is_pending());
         second.input("a person's line".into());
         second.result("second result".into());
@@ -1621,7 +1774,7 @@ mod tests {
         first.result("first result".into());
         first.end();
         let out = waiting.await.unwrap();
-        assert_eq!(out.preview(), "wait #1, #2");
+        assert_eq!(out.preview(), "join #1, #2");
         assert_eq!(
             out.flatten(),
             "#1 ended:\nfirst result\n\n#2 ended:\nsecond result"
@@ -1638,18 +1791,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_batch_wait_uses_one_deadline_and_keeps_completed_results() {
+    async fn a_batch_join_uses_one_deadline_and_keeps_completed_results() {
         let (_dir, ctx) = context();
         let root = ctx.workspace.root();
         let table = Arc::new(Table::default());
-        let jobs = Jobs::new(table.clone());
+        let jobs = Jobs::scoped(table.clone());
         let first = start(&table, root, "first");
         let second = start(&table, root, "second");
         let done = start(&table, root, "done");
         done.result("ready".into());
         done.end();
         let mut waiting = Box::pin(jobs.execute(
-            json!({"wait": [first.id(), second.id(), done.id()], "timeout_ms": 20}),
+            json!({"join": [first.id(), second.id(), done.id()], "timeout_ms": 20}),
             &ctx,
         ));
         assert!(futures::poll!(waiting.as_mut()).is_pending());
@@ -1668,11 +1821,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_batch_wait_reports_bad_ids_without_discarding_valid_results() {
+    async fn a_batch_join_reports_bad_ids_without_discarding_valid_results() {
         let (_dir, ctx) = context();
         let root = ctx.workspace.root();
         let table = Arc::new(Table::default());
-        let jobs = Jobs::new(table.clone());
+        let jobs = Jobs::scoped(table.clone());
         let job = start(&table, root, "build");
         let elsewhere = start(&table, Path::new("/elsewhere"), "other checkout");
         job.result("built".into());
@@ -1680,7 +1833,7 @@ mod tests {
         elsewhere.result("private".into());
         elsewhere.end();
         let out = jobs
-            .execute(json!({"wait": [99, job.id(), elsewhere.id()]}), &ctx)
+            .execute(json!({"join": [99, job.id(), elsewhere.id()]}), &ctx)
             .await
             .unwrap();
         assert_eq!(
@@ -1695,20 +1848,20 @@ mod tests {
             ["private"]
         );
         assert!(matches!(
-            jobs.execute(json!({"wait": [98, 99]}), &ctx).await,
+            jobs.execute(json!({"join": [98, 99]}), &ctx).await,
             Err(ToolError::Invalid(_))
         ));
     }
 
     #[tokio::test]
-    async fn cancelling_a_batch_wait_leaves_completed_results_queued() {
+    async fn cancelling_a_batch_join_leaves_completed_results_queued() {
         let (_dir, ctx) = context();
         let root = ctx.workspace.root();
         let table = Arc::new(Table::default());
-        let jobs = Jobs::new(table.clone());
+        let jobs = Jobs::scoped(table.clone());
         let done = start(&table, root, "done");
         let running = start(&table, root, "running");
-        let mut waiting = Box::pin(jobs.execute(json!({"wait": [done.id(), running.id()]}), &ctx));
+        let mut waiting = Box::pin(jobs.execute(json!({"join": [done.id(), running.id()]}), &ctx));
         assert!(futures::poll!(waiting.as_mut()).is_pending());
         done.result("keep this".into());
         done.end();
@@ -1720,17 +1873,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_still_accepts_single_ids_and_rejects_bad_arrays_before_taking_results() {
+    async fn join_accepts_single_ids_and_rejects_bad_arrays_before_taking_results() {
         let (_dir, ctx) = context();
         let table = Arc::new(Table::default());
-        let jobs = Jobs::new(table.clone());
+        let jobs = Jobs::scoped(table.clone());
         for string_id in [false, true] {
             let job = start(&table, ctx.workspace.root(), "build");
             job.result("built".into());
             job.end();
             for ids in [json!([]), json!([job.id(), false])] {
                 assert!(matches!(
-                    jobs.execute(json!({"wait": ids}), &ctx).await,
+                    jobs.execute(json!({"join": ids}), &ctx).await,
                     Err(ToolError::Invalid(_))
                 ));
             }
@@ -1739,9 +1892,9 @@ mod tests {
             } else {
                 json!(job.id())
             };
-            let out = jobs.execute(json!({"wait": id}), &ctx).await.unwrap();
+            let out = jobs.execute(json!({"join": id}), &ctx).await.unwrap();
             assert_eq!(out.flatten(), format!("#{} ended:\nbuilt", job.id()));
-            assert_eq!(out.preview(), format!("wait #{}", job.id()));
+            assert_eq!(out.preview(), format!("join #{}", job.id()));
             assert!(!out.warned);
         }
     }

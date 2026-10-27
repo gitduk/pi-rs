@@ -80,7 +80,6 @@ impl Ui {
             &self.commands,
             &self.choices,
             pi_core::input::commands::Front {
-                jobs: &self.every_job,
                 tools: self.tools.as_ref().map(|brief| &brief.registry),
                 said: &self.said,
             },
