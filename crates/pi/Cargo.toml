@@ -26,4 +26,5 @@ tokio.workspace = true
 
 [dev-dependencies]
 toolbox.workspace = true
+serde_json.workspace = true
 tempfile = "3"

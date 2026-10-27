@@ -1883,6 +1883,7 @@ dependencies = [
  "llm",
  "pi-core",
  "pi-store",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-util",

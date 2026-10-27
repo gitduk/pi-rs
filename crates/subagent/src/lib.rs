@@ -76,10 +76,14 @@ pub struct Subagent {
     // Where a call sent to the background is kept; without it `background`
     // is not offered and every call blocks its turn.
     background: Option<Arc<dyn JobSink>>,
+    tools: Option<ToolFactory>,
 }
 
 // How long a child may run silent unless `with_deadline` says otherwise.
 const DEADLINE: Duration = Duration::from_secs(1800);
+
+/// Build tools owned by one child run, released when its context is cancelled.
+pub type ToolFactory = Arc<dyn Fn(&Ctx, tool::Registry) -> tool::Registry + Send + Sync>;
 
 impl Subagent {
     pub const NAME: &'static str = "subagent";
@@ -126,6 +130,7 @@ impl Subagent {
             deadline: DEADLINE,
             retry,
             background: None,
+            tools: None,
         }
     }
 
@@ -138,6 +143,12 @@ impl Subagent {
 
     pub fn with_deadline(mut self, deadline: Duration) -> Self {
         self.deadline = deadline;
+        self
+    }
+
+    /// Arm each child with its own tools under that child's cancellation token.
+    pub fn with_tools(mut self, tools: ToolFactory) -> Self {
+        self.tools = Some(tools);
         self
     }
 }
@@ -362,12 +373,19 @@ impl Subagent {
         // Tree, locks and renumbering are shared with the parent (same files);
         // transcript, spill name and token are the child's own.
         let stop = ctx.cancel.child_token();
+        let _stop = stop.clone().drop_guard();
         let root = ctx.spill_root().to_path_buf();
         let child = ctx
             .clone()
             .with_cancel(stop.clone())
             .with_session(&id, root)
             .with_own_writes();
+
+        let mut agent = self.agent.as_ref().clone();
+        if let Some(tools) = &self.tools {
+            let patch = Arc::make_mut(&mut agent.brief);
+            patch.registry = tools(&child, std::mem::take(&mut patch.registry));
+        }
 
         let (tx, mut rx) = unbounded_channel();
         // Every event resets the silence clock, whatever kind it is: an
@@ -455,7 +473,7 @@ impl Subagent {
         // stop; one ignoring it is dropped after STOP_GRACE.
         let ran = {
             let mut run = std::pin::pin!(
-                self.agent
+                agent
                     .run(&mut session, &child, &tx, &self.retry)
                     .instrument(child_span)
             );
@@ -473,6 +491,7 @@ impl Subagent {
             }
         };
         watchdog.abort();
+        stop.cancel();
         // The collector ends when the last sender goes, and `run` held one.
         drop(tx);
         let mut lost = false;

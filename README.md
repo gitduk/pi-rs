@@ -220,10 +220,16 @@ refused, and resuming one from another directory moves it here.
   not start is listed as `<name>__unavailable`, with the reason; `/mcp`
   shows each server and its tools, and `/mcp restart` reconnects them. A call
   with no answer in 10 minutes is given up.
-- `job`, in the terminal: what runs in the background, the latest a
+- `bash` uses a soft timeout: after 2 minutes by default (`timeout_ms` adjusts
+  the wait, up to 10 minutes), it returns a job id and the latest output while
+  the original command keeps running. The model decides whether to wait longer
+  or stop it with `job`; reaching the timeout never kills the command. This
+  also applies to subagents and noninteractive runs, whose jobs are isolated
+  and stopped when their owning run ends.
+- `job`: what runs in the background, the latest a
   command printed with `output`, or `stop` one. A
   `bash` or `subagent` call with `background`, or a script that detaches,
-  leaves the turn free; each result comes back as a turn of its own once the
+  leaves the turn free in the terminal; each result comes back as a turn of its own once the
   checkout is in front and idle. Those still out are listed above the input line,
   a click on one shows what it printed, and `/job stop` stops one — the
   model is told before it next speaks. `/job <text>` asks the model to start

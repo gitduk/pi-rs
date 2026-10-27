@@ -19,6 +19,7 @@ pub mod prompt;
 pub mod question;
 pub mod resolve;
 pub mod settings;
+pub mod shells;
 pub mod status;
 pub mod tools;
 pub mod update;

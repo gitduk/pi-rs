@@ -1247,7 +1247,9 @@ impl Tool for Jobs {
          still runs; a stopped or exited one stays listed for that. When you \
          need a job's result before going on, `wait` for it — never sleep in \
          a shell: wait returns the moment it ends, with what it said, and \
-         that result does not come back again as a turn."
+         that result does not come back again as a turn. A shell call past \
+         its soft timeout is still running under the returned id: inspect its \
+         output, wait longer, or stop it; do not start the command again."
     }
 
     fn tier(&self) -> Tier {
@@ -1351,8 +1353,8 @@ impl Tool for Jobs {
                 Some(said) => format!("#{id} ended:\n{}", said.join("\n\n")),
                 None => {
                     let latest = self.table.output(root, id).unwrap_or_else(|why| why);
-                    let secs = within.as_secs();
-                    format!("#{id} still running after {secs}s; latest output:\n{latest}")
+                    let elapsed = llm::figures::elapsed(within);
+                    format!("#{id} still running after {elapsed}; latest output:\n{latest}")
                 }
             };
             return Ok(ToolOutput::text(out).with_preview(named("wait", &[id])));

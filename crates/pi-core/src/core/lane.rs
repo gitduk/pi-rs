@@ -203,7 +203,8 @@ pub fn arm(
         resolved.prompt_files.prompt("subagent"),
         &resolved.standing,
         retry,
-    );
+    )
+    .with_tools(Arc::new(super::shells::scoped));
     if let Some(deadline) = resolved.subagent_deadline {
         subagent = subagent.with_deadline(deadline);
     }
@@ -234,8 +235,7 @@ pub fn arm(
     {
         let patch = Arc::make_mut(&mut brief);
         offer_fallback(patch, jobs.clone(), &mut said);
-        // The same shell, now able to leave its turn; the child keeps the
-        // plain one, having nowhere to keep a job.
+        // The lane's jobs outlive its turn; each child gets a table of its own.
         if patch.registry.get(toolbox::bash::Bash::NAME).is_some() {
             let registry = std::mem::take(&mut patch.registry).without(toolbox::bash::Bash::NAME);
             patch.registry = registry;

@@ -376,12 +376,18 @@ async fn run(updated_from: Option<String>) -> Result<Ended> {
     if keeps {
         ctx = ctx.with_session(&id, pi_store::spill_root());
     }
+    let stop = ctx.cancel.child_token();
+    let _stop = stop.clone().drop_guard();
+    ctx = ctx.with_cancel(stop.clone());
+    let patch = Arc::make_mut(&mut ag.brief);
+    patch.registry = core::shells::scoped(&ctx, std::mem::take(&mut patch.registry));
 
     // Always through the log: a loaded session whose view happens to be empty
     // still has history worth keeping, and `resume` handles an empty session.
     let mut session = carried;
     session.send_prompt(prompt, None);
     let outcome = ag.run(&mut session, &ctx, &tx, &retry).await;
+    stop.cancel();
 
     session.note_outcome(&outcome);
 

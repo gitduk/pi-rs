@@ -15,6 +15,15 @@ use super::*;
 struct Processes(Vec<u32>);
 
 impl Processes {
+    fn printed(output: &str) -> Option<Self> {
+        let pids = output
+            .split_whitespace()
+            .map(str::parse)
+            .collect::<Result<Vec<u32>, _>>()
+            .ok()?;
+        (pids.len() == 2).then(|| Self(pids))
+    }
+
     fn running(pid: u32) -> bool {
         let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
             return false;
@@ -33,6 +42,16 @@ impl Processes {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    async fn wait_gone(&self) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while self.0.iter().any(|&pid| Self::running(pid)) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the shell and its descendant were stopped");
     }
 }
 
@@ -54,14 +73,9 @@ async fn processes(table: &Table, root: &Path, id: u64) -> Processes {
             // A restarted run attaches its output after the previous one
             // has let go, so there may not be a stream to read yet.
             let output = table.output(root, id).unwrap_or_default();
-            if let Ok(pids) = output
-                .split_whitespace()
-                .map(str::parse)
-                .collect::<Result<Vec<u32>, _>>()
-                && pids.len() == 2
-            {
-                assert!(pids.iter().all(|&pid| Processes::running(pid)));
-                return Processes(pids);
+            if let Some(processes) = Processes::printed(&output) {
+                assert!(processes.0.iter().all(|&pid| Processes::running(pid)));
+                return processes;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -142,4 +156,84 @@ fn a_restart_takes_down_background_processes_before_the_next_run() {
 #[test]
 fn a_restart_also_takes_down_a_stopped_job_still_cleaning_up() {
     carry_job(true);
+}
+
+#[tokio::test]
+async fn scoped_shell_jobs_are_isolated_and_stopped_with_their_owner_or_explicitly() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let second = Ctx::new(first.workspace.clone());
+    let _first = first.cancel.clone().drop_guard();
+    let _second = second.cancel.clone().drop_guard();
+    let mut runs = Vec::new();
+    for ctx in [&first, &second] {
+        let registry = core::shells::scoped(ctx, toolbox::builtin());
+        registry.get(toolbox::bash::Bash::NAME).unwrap().execute(
+            serde_json::json!({"command": "trap '' TERM; sleep 30 & echo \"$$ $!\"; wait", "timeout_ms": 20}), ctx
+        ).await.unwrap();
+        let control = registry.get(Jobs::NAME).unwrap();
+        let processes = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let out = control
+                    .execute(serde_json::json!({"output": 1}), ctx)
+                    .await
+                    .unwrap();
+                if let Some(processes) = Processes::printed(&out.flatten()) {
+                    break processes;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let waited = control
+            .execute(serde_json::json!({"wait": 1, "timeout_ms": 20}), ctx)
+            .await
+            .unwrap();
+        assert!(waited.flatten().contains("still running"));
+        assert!(processes.0.iter().all(|&pid| Processes::running(pid)));
+        runs.push((control, processes));
+    }
+    first.cancel.cancel();
+    runs[0].1.wait_gone().await;
+    assert!(runs[1].1.0.iter().all(|&pid| Processes::running(pid)));
+    runs[1]
+        .0
+        .execute(serde_json::json!({"stop": [1]}), &second)
+        .await
+        .unwrap();
+    runs[1].1.wait_gone().await;
+}
+
+#[tokio::test]
+async fn cancelling_a_shell_before_its_soft_timeout_stops_the_process_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let _stop = ctx.cancel.clone().drop_guard();
+    let registry = core::shells::scoped(&ctx, toolbox::builtin());
+    let bash = registry.get(toolbox::bash::Bash::NAME).unwrap();
+    let call = {
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            bash.execute(serde_json::json!({"command": "sleep 30 & echo \"$$ $!\" > pids; wait", "timeout_ms": 5000}), &ctx).await
+        })
+    };
+    let processes = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(output) = std::fs::read_to_string(dir.path().join("pids"))
+                && let Some(processes) = Processes::printed(&output)
+            {
+                break processes;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    ctx.cancel.cancel();
+    assert!(matches!(
+        call.await.unwrap(),
+        Err(tool::ToolError::Cancelled)
+    ));
+    processes.wait_gone().await;
 }

@@ -14,7 +14,7 @@ use tool::{Ctx, ToolError};
 
 use crate::background::Peek;
 
-/// The longest any child may run, whatever its caller asked for.
+/// The longest a bounded process call may run, whatever its caller asked for.
 pub(crate) const MAX_RUN: Duration = tool::limit::MAX_CALL;
 
 pub struct Exited {
@@ -219,14 +219,20 @@ impl<R: AsyncRead + Unpin> AsyncRead for Tee<R> {
 }
 
 /// Pull `pipe` into a bounded capture on a task of its own.
-fn drain<R>(mut pipe: R, ctx: &Ctx) -> tokio::task::JoinHandle<Captured>
+fn drain<R>(
+    mut pipe: R,
+    ctx: &Ctx,
+    failure: Arc<Mutex<Option<ToolError>>>,
+) -> tokio::task::JoinHandle<Captured>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     let ctx = ctx.clone();
     tokio::spawn(async move {
         let mut capture = Capture::new();
-        let _ = capture.drain(&mut pipe, &ctx).await;
+        if let Err(why) = capture.drain(&mut pipe, &ctx).await {
+            *failure.lock().unwrap_or_else(PoisonError::into_inner) = Some(why);
+        }
         capture.finish()
     })
 }
@@ -241,18 +247,29 @@ pub(crate) struct Streams {
     tail: Tail,
     stdout: tokio::task::JoinHandle<Captured>,
     stderr: tokio::task::JoinHandle<Captured>,
+    failure: Arc<Mutex<Option<ToolError>>>,
 }
 
 impl Streams {
     /// Take over `child`'s piped stdout and stderr.
     pub(crate) fn of(child: &mut tokio::process::Child, ctx: &Ctx) -> Self {
         let tail = Tail::default();
-        let stdout = drain(tail.tee(child.stdout.take().expect("stdout is piped")), ctx);
-        let stderr = drain(tail.tee(child.stderr.take().expect("stderr is piped")), ctx);
+        let failure = Arc::default();
+        let stdout = drain(
+            tail.tee(child.stdout.take().expect("stdout is piped")),
+            ctx,
+            Arc::clone(&failure),
+        );
+        let stderr = drain(
+            tail.tee(child.stderr.take().expect("stderr is piped")),
+            ctx,
+            Arc::clone(&failure),
+        );
         Self {
             tail,
             stdout,
             stderr,
+            failure,
         }
     }
 
@@ -268,6 +285,20 @@ impl Streams {
             captured(&mut self.stdout).await,
             captured(&mut self.stderr).await,
         )
+    }
+
+    /// Both captures, or why their complete output could not be kept.
+    pub(crate) async fn checked(&mut self) -> Result<(Captured, Captured), ToolError> {
+        let both = self.captured().await;
+        match self
+            .failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            Some(why) => Err(why),
+            None => Ok(both),
+        }
     }
 
     /// Its output once its process has exited, taking down what it left
