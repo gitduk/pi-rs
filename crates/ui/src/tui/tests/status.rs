@@ -53,15 +53,48 @@ fn a_retry_waits_on_the_status_line_and_leaves_its_reason_in_a_row() {
             reason: "502 Bad Gateway: upstream connect error".into(),
         },
     );
-    let (live, _) = ui.live(&lane, &view, false, std::time::Instant::now());
-    let status = plain(live.last().expect("a status line"));
-    assert!(status.contains("retry"), "{status:?}");
+    let until = view
+        .state
+        .work
+        .as_ref()
+        .unwrap()
+        .retry
+        .as_ref()
+        .unwrap()
+        .until;
+    for (remaining_ms, expected) in [
+        (3000, Some("retry 2 in 3.00s")),
+        (1750, Some("retry 2 in 1.75s")),
+        (500, Some("retry 2 in 500ms")),
+        (0, None),
+    ] {
+        let now = until - std::time::Duration::from_millis(remaining_ms);
+        let (live, _) = ui.live(&lane, &view, false, now);
+        let status = plain(live.last().expect("a status line"));
+        match expected {
+            Some(text) => assert!(status.contains(text), "{status:?}"),
+            None => assert!(!status.contains("retry"), "{status:?}"),
+        }
+    }
+    let (live, _) = ui.live(
+        &lane,
+        &view,
+        false,
+        until + std::time::Duration::from_secs(1),
+    );
+    assert!(!plain(live.last().unwrap()).contains("retry"));
     let rows = drawn_rows(&view);
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert!(rows[0].ends_with("502 Bad Gateway: upstream connect error"));
 
     ui.on_event(&mut lane, &mut view, agent::Event::TextDelta("ok".into()));
-    let (live, _) = ui.live(&lane, &view, false, std::time::Instant::now());
+    assert!(view.state.work.as_ref().unwrap().retry.is_none());
+    let (live, _) = ui.live(
+        &lane,
+        &view,
+        false,
+        until - std::time::Duration::from_secs(1),
+    );
     let status = plain(live.last().expect("a status line"));
     assert!(!status.contains("retry"), "{status:?}");
 }

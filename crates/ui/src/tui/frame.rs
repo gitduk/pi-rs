@@ -524,7 +524,15 @@ impl Ui {
                 }
                 // A stopping run says so; an ordinary one needs no word — its
                 // ticking clock already says the turn is on.
-                parts.extend(work.retry.clone());
+                if let Some(retry) = &work.retry
+                    && now < retry.until
+                {
+                    parts.push(format!(
+                        "retry {} in {}",
+                        retry.attempt,
+                        crate::render::fmt_delay((retry.until - now).as_millis() as u64)
+                    ));
+                }
                 if work.stopping {
                     parts.push(format!("stopping{}", icons::ELLIPSIS));
                 }

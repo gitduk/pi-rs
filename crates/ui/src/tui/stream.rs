@@ -5,7 +5,7 @@ use super::call::{Run, RunTool, push_tool_row};
 use super::row::Row;
 use super::scrollback::f_entry;
 use super::search::Spot;
-use super::view::{Doing, StreamKind, Surface, View, snapshot};
+use super::view::{Doing, RetryWait, StreamKind, Surface, View, snapshot};
 use crate::render;
 use crate::status;
 use agent::Event;
@@ -13,7 +13,7 @@ use agent::session::Entry as LogEntry;
 use pi_core::core::lane::Lane;
 use pi_store::icons;
 use ratatui::text::{Line, Text};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 // `text` as pi's own word: the mark before its first line, that width blank
 // before the rest. In the text, so a kept line redraws with it.
@@ -232,10 +232,10 @@ impl Ui {
             } => {
                 self.close(view);
                 if let Some(work) = &mut view.state.work {
-                    work.retry = Some(format!(
-                        "retry {attempt} in {}",
-                        render::fmt_delay(*delay_ms)
-                    ));
+                    work.retry = Some(RetryWait {
+                        attempt: *attempt,
+                        until: Instant::now() + Duration::from_millis(*delay_ms),
+                    });
                 }
                 self.say(view, self.paint.muted(&by_pi(reason)));
             }

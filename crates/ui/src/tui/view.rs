@@ -84,9 +84,13 @@ pub(super) struct Work {
     pub(super) doing: Doing,
     // It has been asked to stop and is still winding down.
     pub(super) stopping: bool,
-    // The retry it is waiting out, worded for the status line; any other
-    // event means the wait is over.
-    pub(super) retry: Option<String>,
+    // The retry it is waiting out; any other event means the wait is over.
+    pub(super) retry: Option<RetryWait>,
+}
+
+pub(super) struct RetryWait {
+    pub(super) attempt: usize,
+    pub(super) until: Instant,
 }
 
 impl Work {
