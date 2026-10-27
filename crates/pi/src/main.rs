@@ -208,16 +208,9 @@ async fn run(updated_from: Option<String>) -> Result<ExitCode> {
         // screen and surface only at exit, after the session they were for.
         let said = dialled.warning.iter().chain(&dialled.assumed).cloned();
         resolved.notes.splice(0..0, said);
-    } else {
+    } else if let Some(warning) = &dialled.warning {
         // Ahead of the quiet check on purpose: see `Dialled::warning`.
-        if let Some(warning) = &dialled.warning {
-            eprintln!("\x1b[{}m{warning}\x1b[0m", config.theme.muted.codes());
-        }
-        if !args.quiet {
-            for note in dialled.assumed.iter().chain(&resolved.notes) {
-                eprintln!("\x1b[{}m{note}\x1b[0m", config.theme.muted.codes());
-            }
-        }
+        eprintln!("\x1b[{}m{warning}\x1b[0m", config.theme.muted.codes());
     }
     // Captured before the spec and workspace move into the agent and context.
     let root = workspace.root().to_path_buf();
@@ -261,6 +254,11 @@ async fn run(updated_from: Option<String>) -> Result<ExitCode> {
     // Armed here rather than field by field: the brief the lane keeps and the
     // one the agent runs on are the same value, subagent tool and all.
     let resolved = lane::arm(&mut ag, Arc::new(resolved), archive, retry, None);
+    if prompt.is_some() && !args.quiet {
+        for note in dialled.assumed.iter().chain(&resolved.notes) {
+            eprintln!("\x1b[{}m{note}\x1b[0m", config.theme.muted.codes());
+        }
+    }
 
     // An explicit --name renames a resumed session; otherwise it keeps its own.
     let name = args

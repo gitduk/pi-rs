@@ -169,10 +169,14 @@ pub struct Found {
 // category, so a bound also keeps a stray symlink from a full filesystem walk.
 const MAX_DEPTH: usize = 3;
 
-/// The skills directory as a `tool::Source`: the `skill` tool as the
-/// directory now stands, rebuilt only when a `SKILL.md` under it changed.
+/// The skills directories as a `tool::Source`: the `skill` tool as they now
+/// stand, rebuilt only when a `SKILL.md` under one changed.
+///
+/// Directories are read in order and the first to claim a name keeps it, so
+/// whoever passes them decides which of two skills with one name is the one
+/// offered.
 pub struct Shelf {
-    dir: PathBuf,
+    dirs: Vec<PathBuf>,
     builtins: Vec<Skill>,
     seen: Stamped<Seen>,
     builds: AtomicU64,
@@ -185,9 +189,9 @@ struct Seen {
 }
 
 impl Shelf {
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
+    pub fn new(dirs: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
         Self {
-            dir: dir.into(),
+            dirs: dirs.into_iter().map(Into::into).collect(),
             builtins: Vec::new(),
             seen: Stamped::default(),
             builds: AtomicU64::new(0),
@@ -207,12 +211,14 @@ impl Shelf {
 
     fn fresh<T>(&self, read: impl FnOnce(&Seen) -> T) -> T {
         let mut stamps = Vec::new();
-        stamp(&self.dir, MAX_DEPTH, &mut stamps);
+        for dir in &self.dirs {
+            stamp(dir, MAX_DEPTH, &mut stamps);
+        }
         self.seen.read(stamps, || self.build(), read)
     }
 
     fn build(&self) -> Seen {
-        let mut found = discover(&self.dir);
+        let mut found = discover(&self.dirs);
         for builtin in &self.builtins {
             if !found.skills.iter().any(|s| s.name == builtin.name) {
                 found.skills.push(builtin.clone());
@@ -258,10 +264,13 @@ fn stamp(dir: &Path, depth: usize, out: &mut Vec<Stamp>) {
     }
 }
 
-/// Every skill under `dir`, sorted by name.
-pub fn discover(dir: &Path) -> Found {
+/// Every skill under `dirs`, read in order and sorted by name. A name an
+/// earlier directory claimed keeps its skill; the later one is reported.
+pub fn discover(dirs: &[PathBuf]) -> Found {
     let mut found = Found::default();
-    walk(dir, MAX_DEPTH, &mut found);
+    for dir in dirs {
+        walk(dir, MAX_DEPTH, &mut found);
+    }
     found.skills.sort_by(|a, b| a.name.cmp(&b.name));
     found
 }

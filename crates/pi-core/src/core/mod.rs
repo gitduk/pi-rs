@@ -637,7 +637,7 @@ mod tests {
         let mut core = a_repl(dir.path(), transport, "model-a");
         let shelf = dir.path().join("skills");
         let mut resolved = (**core.lane().resolved()).clone();
-        resolved.shelf = Some(std::sync::Arc::new(skills::Shelf::new(&shelf)));
+        resolved.shelf = Some(std::sync::Arc::new(skills::Shelf::new([&shelf])));
         core.lane_mut().keep(std::sync::Arc::new(resolved));
         core.refresh_skills();
         assert!(

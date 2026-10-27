@@ -27,7 +27,7 @@ async fn a_file_argument_cannot_leave_the_skill_directory() {
     let neighbour = dir.path().join("skills/commit");
     std::fs::create_dir_all(&neighbour).unwrap();
     std::fs::write(neighbour.join("SKILL.md"), "# Commit\n").unwrap();
-    let found = discover(&dir.path().join("skills"));
+    let found = discover(&[dir.path().join("skills")]);
 
     let (_w, c) = ctx();
     let r = Load::new(found.skills)
@@ -45,7 +45,7 @@ async fn a_file_argument_cannot_leave_the_skill_directory() {
 fn a_skill_written_later_is_on_the_shelf_at_the_next_look() {
     use tool::Source as _;
     let dir = tempfile::tempdir().unwrap();
-    let shelf = skills::Shelf::new(dir.path());
+    let shelf = skills::Shelf::new([dir.path()]);
     assert!(shelf.tools().is_empty());
     let (_, before) = shelf.now();
     assert_eq!(shelf.now().1, before, "nothing changed, nothing moves");
@@ -64,5 +64,31 @@ fn a_skill_written_later_is_on_the_shelf_at_the_next_look() {
         shelf.tools()[0]
             .description()
             .contains("haiku: write haiku")
+    );
+}
+
+// Two directories, read in order: the first to claim a name keeps it, and
+// which one is offered is the caller's order to set.
+#[test]
+fn the_first_directory_to_claim_a_name_keeps_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+    for (base, description) in [(&first, "first"), (&second, "second's")] {
+        let skill = base.join("commit");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            format!("---\ndescription: {description}\n---\nbody\n"),
+        )
+        .unwrap();
+    }
+    let found = discover(&[first.clone(), second.clone()]);
+    assert_eq!(found.skills.len(), 1, "{:?}", found.skills);
+    assert_eq!(found.skills[0].dir, first.join("commit"));
+    assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
+    assert!(
+        found.problems[0].contains("already defined by"),
+        "{:?}",
+        found.problems
     );
 }

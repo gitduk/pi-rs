@@ -183,6 +183,11 @@ pub fn arm(
     retry: agent::Retry,
     jobs: Option<Arc<crate::driver::jobs::Table>>,
 ) -> Arc<Resolved> {
+    let mut resolved = resolved;
+    // The tools hung on below were not there when `resolve` read the script
+    // directories, so a name one of them holds is a script's: it keeps it and
+    // the built-in waits behind it, returning when the script releases it.
+    let mut said = Vec::new();
     let jobs = jobs.map(|table| Arc::new(crate::driver::jobs::Jobs::new(table)));
     // Hooks ask where jobs are kept, a child's gates as the lane's do.
     let ask: Arc<dyn toolbox::background::Ask> = match &jobs {
@@ -209,16 +214,18 @@ pub fn arm(
     // Changed from here on a fresh `Arc`, since the child holds this one: it
     // runs on the registry it came from, and only the lane's copy carries the tool.
     if subagent.tier().under(resolved.ceiling) {
-        Arc::make_mut(&mut brief).registry.offer(Arc::new(subagent));
+        offer_fallback(Arc::make_mut(&mut brief), Arc::new(subagent), &mut said);
     }
     // The lane's copy only: a child never hears the user, whose words are
     // the only ones memory keeps.
     if resolved.remembers && tool::Tier::Write.under(resolved.ceiling) {
-        Arc::make_mut(&mut brief)
-            .registry
-            .offer(Arc::new(crate::core::memory::Remember::new(
+        offer_fallback(
+            Arc::make_mut(&mut brief),
+            Arc::new(crate::core::memory::Remember::new(
                 pi_store::memory::Memory::default(),
-            )));
+            )),
+            &mut said,
+        );
     }
     // The lane's copy only, as with the subagent: a child cannot reach the
     // lane its prompt would come back to.
@@ -226,7 +233,7 @@ pub fn arm(
         && tool::Tier::Exec.under(resolved.ceiling)
     {
         let patch = Arc::make_mut(&mut brief);
-        patch.registry.offer(jobs.clone());
+        offer_fallback(patch, jobs.clone(), &mut said);
         // The same shell, now able to leave its turn; the child keeps the
         // plain one, having nowhere to keep a job.
         if patch.registry.get(toolbox::bash::Bash::NAME).is_some() {
@@ -245,7 +252,27 @@ pub fn arm(
         }
     }
     agent.apply(brief);
+    // Re-armed as often as the config or the job table moves; the same tool
+    // stands down every time, so the note is kept once.
+    let kept = Arc::make_mut(&mut resolved);
+    for line in said {
+        if !kept.notes.contains(&line) {
+            kept.notes.push(line);
+        }
+    }
     resolved
+}
+
+// Keep the built-in after the live sources, so renaming a script frees its
+// name without re-arming. Say when it is already standing down at startup.
+fn offer_fallback(brief: &mut agent::Briefing, tool: Arc<dyn tool::Tool>, said: &mut Vec<String>) {
+    let name = tool.name().to_string();
+    if brief.registry.sourced_holds(&name) {
+        said.push(format!(
+            "tool skipped — {name}: a script already offers that name; rename one of them"
+        ));
+    }
+    brief.registry.fallback(tool);
 }
 
 /// The half of a lane the config decides, for tests that build one directly —
@@ -1128,6 +1155,123 @@ mod tests {
         assert!(lane.unwrap().flatten().contains("job #1"));
         let child = off(&resolved.brief.registry).execute(args, &ctx).await;
         assert!(child.unwrap_err().to_string().contains("cannot keep"));
+    }
+
+    // A script already holding a name the lane hands a tool keeps it: the
+    // built-in stands down and says so, rather than taking the name over
+    // and leaving the script silently gone.
+    #[test]
+    fn a_script_keeps_its_name_and_the_built_in_returns_after_a_rename() {
+        use std::sync::Arc;
+
+        for name in [
+            subagent::Subagent::NAME,
+            crate::core::memory::Remember::NAME,
+            crate::driver::jobs::Jobs::NAME,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let tools = dir.path().join("tools");
+            std::fs::create_dir(&tools).unwrap();
+            std::fs::write(
+                tools.join(name),
+                "#!/bin/sh\n# ---\n# description = \"my own tool\"\n# ---\necho hi\n",
+            )
+            .unwrap();
+            let scripts = Arc::new(toolbox::scripts::Dir::new(&tools));
+            let mut resolved = Arc::try_unwrap(super::a_resolved("standing")).ok().unwrap();
+            resolved.remembers = true;
+            Arc::make_mut(&mut resolved.brief)
+                .registry
+                .read(scripts.clone());
+            resolved.scripts = vec![scripts];
+            let mut agent = agent::Agent::new(
+                Arc::new(Recording::default()),
+                crate::core::tests::test_spec("m"),
+            );
+            let resolved = super::arm(
+                &mut agent,
+                Arc::new(resolved),
+                crate::core::archive::nowhere(),
+                agent::Retry::default(),
+                Some(Arc::default()),
+            );
+
+            let kept = agent.brief.registry.get(name).unwrap();
+            assert_eq!(
+                kept.description(),
+                "my own tool",
+                "the script was taken over"
+            );
+            assert!(
+                resolved.notes.iter().any(|n| n.contains(name)),
+                "the built-in stood down without saying so: {:?}",
+                resolved.notes
+            );
+
+            std::fs::rename(tools.join(name), tools.join("custom")).unwrap();
+            let built_in = agent
+                .brief
+                .registry
+                .get(name)
+                .expect("the built-in returns");
+            assert_ne!(built_in.description(), "my own tool");
+            assert_eq!(
+                agent.brief.registry.get("custom").unwrap().description(),
+                "my own tool"
+            );
+            assert!(
+                resolved.brief.registry.get(name).is_none(),
+                "the child gained a lane's tool"
+            );
+
+            std::fs::rename(tools.join("custom"), tools.join(name)).unwrap();
+            assert_eq!(
+                agent.brief.registry.get(name).unwrap().description(),
+                "my own tool"
+            );
+        }
+    }
+
+    #[test]
+    fn a_script_above_the_ceiling_does_not_hide_memory() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let name = crate::core::memory::Remember::NAME;
+        std::fs::write(
+            dir.path().join(name),
+            "#!/bin/sh\n# ---\n# description = \"custom memory\"\n# ---\necho hi\n",
+        )
+        .unwrap();
+        let scripts = Arc::new(toolbox::scripts::Dir::new(dir.path()));
+        let mut resolved = Arc::try_unwrap(super::a_resolved("standing")).ok().unwrap();
+        resolved.remembers = true;
+        resolved.ceiling = tool::Tier::Write;
+        let brief = Arc::make_mut(&mut resolved.brief);
+        brief.registry.read(scripts.clone());
+        brief.registry = std::mem::take(&mut brief.registry).within(tool::Tier::Write);
+        resolved.scripts = vec![scripts];
+        let mut agent = agent::Agent::new(
+            Arc::new(Recording::default()),
+            crate::core::tests::test_spec("m"),
+        );
+        let resolved = super::arm(
+            &mut agent,
+            Arc::new(resolved),
+            crate::core::archive::nowhere(),
+            agent::Retry::default(),
+            None,
+        );
+        let memory = agent
+            .brief
+            .registry
+            .get(name)
+            .expect("memory is still available");
+        assert_eq!(memory.tier(), tool::Tier::Write);
+        assert!(
+            resolved.notes.is_empty(),
+            "a filtered script was reported as a conflict"
+        );
     }
 
     // Screen rows filed while a run holds the transcript wait rather than

@@ -196,7 +196,10 @@ refused, and resuming one from another directory moves it here.
   script starts with, such as its service's key; `bash` never sees them.
   A checkout's own scripts go in the nearest `.pi/tools/` up to the
   repository root (outside a repository, the workspace's own), with its own
-  `.env`; yours keeps a name both use.
+  `.env`; of a name both use, the checkout's is the one offered, and the
+  other is reported as skipped. A built-in tool's name is not free either:
+  a script that takes one keeps it, and the built-in stands down with a note
+  saying to rename one of them.
   A script may also write JSON lines to fd 3 (`PI_EVENTS_FD`): `status` for
   its progress, `detach` to end the call and run on as a job, then `result`
   for each turn it sends back (its stdout at exit is the last), `input` for a
@@ -269,11 +272,15 @@ and wait on you, as long as you take: `examples/hooks/ask-first` holds a
 
 Scripts and skills are read live: one written while pi runs is offered to the
 model from its next turn, and a skill's `/name` answers the next time you type.
+A skill is a directory with a `SKILL.md` in `~/.pi/skills/`, or in the nearest
+`.pi/skills/` up to the repository root (outside a repository, the workspace's
+own) — the same two places a script is read from. Where both hold one name,
+for a script as for a skill, the project's is the one offered.
 
 The built-in `pi-extend` skill teaches the model to write both and to connect
 an MCP server, so a capability it lacks is one it can add; the built-in
 `pi-help` skill is this README, for questions about pi itself. A skill of
-either name in `~/.pi/skills/` replaces it.
+either name on disk replaces it.
 
 An image pasted with `ctrl+v` goes with the message itself; its path rides
 along in the text. `read` also opens PNG, JPEG, GIF and WebP files as images.
@@ -314,6 +321,7 @@ never writes memory, nor does a run under `--tier read` or `net`, or with
 | `~/.pi/prompts/subagent.md`              | replaces a subagent's own prompt           |
 | `~/.pi/AGENTS.md`, `AGENTS.md`           | instructions: yours, a project's           |
 | `~/.pi/skills/`                          | skills: a directory with a `SKILL.md`      |
+| `.pi/skills/`                            | a project's skills                         |
 | `~/.pi/memory/*.md`                      | memory: global, and one file per project   |
 | `~/.pi/tools/`                           | script tools                               |
 | `~/.pi/tools/.env`                       | values every script starts with; `0600`    |

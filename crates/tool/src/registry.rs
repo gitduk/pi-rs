@@ -12,6 +12,14 @@ pub trait Source: Send + Sync {
     fn tools(&self) -> Vec<Arc<dyn Tool>>;
 }
 
+struct Fixed(Arc<dyn Tool>);
+
+impl Source for Fixed {
+    fn tools(&self) -> Vec<Arc<dyn Tool>> {
+        vec![self.0.clone()]
+    }
+}
+
 /// The active tool set. Ordering is stable so the tool block stays
 /// prompt-cacheable across turns.
 #[derive(Default, Clone)]
@@ -61,6 +69,19 @@ impl Registry {
     /// offered one, so none of them can take an offered tool's name.
     pub fn read(&mut self, source: Arc<dyn Source>) {
         self.sources.push(source);
+    }
+
+    /// Offer a fixed tool after the sources already read. It yields to them
+    /// as they change, returning when its name is free, under the same cuts.
+    pub fn fallback(&mut self, tool: Arc<dyn Tool>) {
+        self.read(Arc::new(Fixed(tool)));
+    }
+
+    /// Whether a source offers `name` now. Offering a tool of that name would
+    /// leave the source's unused without a word, so a caller about to offer
+    /// one asks first and says so.
+    pub fn sourced_holds(&self, name: &str) -> bool {
+        self.sourced().contains_key(name)
     }
 
     /// Read `new` in the place `old` was read, and say whether it was: for a
@@ -205,6 +226,55 @@ mod tests {
         fn tools(&self) -> Vec<Arc<dyn Tool>> {
             self.0.lock().unwrap().clone()
         }
+    }
+
+    #[test]
+    fn a_fallback_returns_when_a_live_source_releases_its_name() {
+        let shelf = Arc::new(Shelf(Default::default()));
+        let mut r = Registry::new().with(Named("read", "built in", Tier::Read));
+        r.read(shelf.clone());
+        r.fallback(Arc::new(Named("memory", "built in", Tier::Write)));
+        r.fallback(Arc::new(Named("read", "fallback", Tier::Read)));
+        assert_eq!(r.get("memory").unwrap().description(), "built in");
+        assert_eq!(r.get("read").unwrap().description(), "built in");
+
+        shelf
+            .0
+            .lock()
+            .unwrap()
+            .push(Arc::new(Named("memory", "script", Tier::Exec)));
+        assert_eq!(r.get("memory").unwrap().description(), "script");
+        assert_eq!(
+            r.defs()
+                .iter()
+                .find(|t| t.name == "memory")
+                .unwrap()
+                .description,
+            "script"
+        );
+        assert_eq!(
+            r.clone()
+                .within(Tier::Write)
+                .get("memory")
+                .unwrap()
+                .description(),
+            "built in"
+        );
+        assert!(r.clone().within(Tier::Read).get("memory").is_none());
+        let hidden = r.clone().without("memory");
+        assert!(!hidden.sourced_holds("memory"));
+        assert!(hidden.get("memory").is_none());
+
+        shelf.0.lock().unwrap().clear();
+        assert_eq!(r.get("memory").unwrap().description(), "built in");
+        assert_eq!(
+            r.defs()
+                .iter()
+                .find(|t| t.name == "memory")
+                .unwrap()
+                .description,
+            "built in"
+        );
     }
 
     // A tool that shows up mid-run is offered from then on, but never over a

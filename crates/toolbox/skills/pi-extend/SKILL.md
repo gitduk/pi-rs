@@ -26,7 +26,8 @@ Any other file in `tools/` is skipped without a word.
 
 A tool only this checkout needs goes in its own `.pi/tools/` instead, at the
 repository root (outside a repository, in the workspace), read live the same
-way and with its own `.env`. A name already offered keeps its tool.
+way and with its own `.env`. Of a name both use, the checkout's is the tool
+offered; yours in `tools/` is skipped, with a note.
 
 ```sh
 #!/usr/bin/env bash
@@ -88,7 +89,9 @@ fn main() {
 
 Steps:
 
-1. Check the name is free: a tool already offered keeps it.
+1. Check the name is free. A name a built-in already holds keeps the
+   built-in; a name another script holds keeps that script. Either way the
+   later one stands down and says so, so pick another.
 2. Write the file.
 3. Run it once by hand the way pi will, then a failing case, and check the
    error reads well: `echo '{"file":"Cargo.toml"}' | file=Cargo.toml bash
@@ -211,3 +214,6 @@ The instructions, followed when the skill is loaded.
 - Other files in the directory are reached with
   `skill(name: "<name>", file: "<path>")`; mention them in the instructions.
 - A skill in `skills/` with the name of a built-in one replaces it.
+- A skill only this checkout needs goes in its own `.pi/skills/` instead, at
+  the repository root (outside a repository, in the workspace), read live the
+  same way. Of a name both use, the checkout's is the one offered.

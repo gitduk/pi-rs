@@ -240,10 +240,25 @@ pub fn resolve(
 
     // Sources offer their tools in order, built-ins first.
     let mut registry = toolbox::builtin();
+    // Whether two directories are the one directory, seen from different
+    // routes: a home that is the checkout's own `.pi` would otherwise be read
+    // twice and every skill and script in it reported as colliding with itself.
+    let same = |a: &Path, b: &Path| {
+        a.canonicalize()
+            .ok()
+            .is_some_and(|a| b.canonicalize().ok() == Some(a))
+    };
     // Read live, like the scripts: a skill written while pi runs can be loaded
     // on the next turn, and typed once `Core::refresh_skills` has seen it.
-    let shelf = pi_store::dir().filter(|_| !pinned.no_skills).map(|pi| {
-        let shelf = skills::Shelf::new(pi.join("skills"));
+    let home_skills = pi_store::dir().map(|pi| pi.join("skills"));
+    let project_skills = config::project_dir(root, "skills")
+        .filter(|dir| !home_skills.as_deref().is_some_and(|home| same(dir, home)));
+    let skill_dirs: Vec<PathBuf> = project_first(project_skills.as_ref(), home_skills)
+        .into_iter()
+        .map(|(dir, _)| dir)
+        .collect();
+    let shelf = (!pinned.no_skills).then(|| {
+        let shelf = skills::Shelf::new(skill_dirs);
         let builtins = [toolbox::scripts::SKILL, PI_SKILL];
         Arc::new(
             builtins
@@ -261,6 +276,18 @@ pub fn resolve(
             .iter()
             .map(|p| format!("skill skipped — {p}")),
     );
+    // Named on the banner the way a project's own scripts are.
+    let mut project_skill_names = Vec::new();
+    if let Some(dir) = &project_skills {
+        project_skill_names.extend(
+            found
+                .skills
+                .iter()
+                .filter(|s| s.dir.starts_with(dir))
+                .map(|s| s.name.clone()),
+        );
+    }
+    project_skill_names.sort();
     // A skill is two things at once, a command the user can type and a body
     // the model can load, and both read the same list.
     let commands = commands(&found.skills, words, &mut notes);
@@ -273,24 +300,17 @@ pub fn resolve(
 
     // Read live: a script written while pi runs is a tool from the next turn,
     // the checkout's directory too, though it is not there yet.
-    // Yours come first: a checkout's script may add a tool, never stand in
-    // for one you trust and so take what you meant for it.
     let home_tools = pi_store::dir().map(|root| root.join("tools"));
-    let same = |a: &Path, b: &Path| {
-        a.canonicalize()
-            .ok()
-            .is_some_and(|a| b.canonicalize().ok() == Some(a))
-    };
     let project_tools = config::project_dir(root, "tools")
         .filter(|dir| !home_tools.as_deref().is_some_and(|home| same(dir, home)));
-    let script_dirs: Vec<(Arc<toolbox::scripts::Dir>, bool)> = (home_tools.iter())
-        .map(|dir| (dir, false))
-        .chain(project_tools.iter().map(|dir| (dir, true)))
-        .map(|(dir, project)| {
-            notes.extend(toolbox::scripts::env::loose(dir));
-            (Arc::new(toolbox::scripts::Dir::new(dir)), project)
-        })
-        .collect();
+    let script_dirs: Vec<(Arc<toolbox::scripts::Dir>, bool)> =
+        project_first(project_tools.as_ref(), home_tools)
+            .into_iter()
+            .map(|(dir, project)| {
+                notes.extend(toolbox::scripts::env::loose(&dir));
+                (Arc::new(toolbox::scripts::Dir::new(dir)), project)
+            })
+            .collect();
     let mut project_scripts = Vec::new();
     let mut named = std::collections::BTreeSet::new();
     for (scripts, project) in &script_dirs {
@@ -301,12 +321,13 @@ pub fn resolve(
                 .map(|p| format!("tool skipped — {p}")),
         );
         let whose = if *project { "project" } else { "user" };
-        // Offered tools win a name, the subagent among them though it is
-        // offered later, per lane; then a directory read earlier.
+        // Offered tools win a name; between directories, the one read earlier.
+        // A tool hung on after this (`subagent`, `memory`, `job`) asks the
+        // same question later and stands down instead of taking the name.
         for script in tool::Source::tools(&**scripts) {
             let name = script.name();
             let earlier = !named.insert(name.to_string());
-            if registry.get(name).is_some() || name == subagent::Subagent::NAME || earlier {
+            if registry.get(name).is_some() || earlier {
                 notes.push(format!(
                     "tool skipped — {whose} script {name}: the name is taken"
                 ));
@@ -314,11 +335,6 @@ pub fn resolve(
                 project_scripts.push(name.to_string());
             }
         }
-    }
-    // Offered per lane after all of the above, so a holder of its name is
-    // known here: say so once, not on every re-arm.
-    if registry.get(subagent::Subagent::NAME).is_some() {
-        notes.push("tool skipped — subagent: the name is taken".to_string());
     }
     let scripts: Vec<_> = script_dirs.into_iter().map(|(dir, _)| dir).collect();
     for dir in &scripts {
@@ -423,6 +439,10 @@ pub fn resolve(
             .chain(
                 (!project_scripts.is_empty()).then(|| ("tools".into(), project_scripts.join(", "))),
             )
+            .chain(
+                (!project_skill_names.is_empty())
+                    .then(|| ("skills".into(), project_skill_names.join(", "))),
+            )
             .collect(),
     })
 }
@@ -445,6 +465,18 @@ const PI_SKILL: &str = concat!(
      what a pi command, setting or feature does; /help only lists the commands.\n---\n\n",
     include_str!("../../../../README.md"),
 );
+
+/// The checkout's directories before the home's, so a name both use is the
+/// project's — skill and script alike. The reason to keep something in a
+/// checkout is that it belongs to that tree, and what is general must not
+/// shadow it.
+fn project_first(project: Option<&PathBuf>, home: Option<PathBuf>) -> Vec<(PathBuf, bool)> {
+    let project = project.map(|dir| (dir.clone(), true));
+    project
+        .into_iter()
+        .chain(home.map(|dir| (dir, false)))
+        .collect()
+}
 
 /// The config files a resolve in `root` reads, as they stand now. Missing
 /// ones are left out, so one appearing is a change too.
@@ -623,6 +655,29 @@ fn endpoint(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    // A checkout's skill or script of a name an already-known one holds must
+    // be the one offered: the reason to put one in the project is that it
+    // belongs to that tree.
+    #[test]
+    fn a_project_directory_is_read_before_the_home_one() {
+        let project = PathBuf::from("/repo/.pi/skills");
+        let home = Some(PathBuf::from("/home/u/.pi/skills"));
+        assert_eq!(
+            super::project_first(Some(&project), home.clone()),
+            [
+                (PathBuf::from("/repo/.pi/skills"), true),
+                (PathBuf::from("/home/u/.pi/skills"), false)
+            ]
+        );
+        assert_eq!(
+            super::project_first(None, home),
+            [(PathBuf::from("/home/u/.pi/skills"), false)],
+            "no project directory, the home alone"
+        );
+    }
+
     // A name the table and a lookup spell apart would run that part of pi
     // on an empty prompt, and nothing on screen would say so.
     #[test]
