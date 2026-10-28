@@ -163,6 +163,7 @@ impl Conversation {
 // What is running on the lane, and the channel its events arrive on.
 struct Runner {
     run: Run,
+    input: Option<Arc<crate::driver::input::Input>>,
     // Where this lane's runs post what they are doing. One channel per lane,
     // so an event needs no label to say which screen it belongs on.
     events: UnboundedSender<Event>,
@@ -352,6 +353,7 @@ impl Lane {
             talk: Conversation::new(parts.id, parts.created, None, parts.name, parts.claim),
             runner: Runner {
                 run: Run::Idle,
+                input: None,
                 events,
                 inbox,
             },
@@ -400,6 +402,35 @@ impl Lane {
             cancel,
             unsend: false,
         };
+    }
+
+    /// Supply messages to this run between requests. Only model runs listen.
+    pub fn listen(
+        &mut self,
+        jobs: Arc<crate::driver::jobs::Table>,
+    ) -> Arc<crate::driver::input::Input> {
+        let input = Arc::new(crate::driver::input::Input::new(
+            self.root().to_path_buf(),
+            jobs,
+        ));
+        self.runner.input = Some(input.clone());
+        input
+    }
+
+    pub fn input(&self) -> Option<&Arc<crate::driver::input::Input>> {
+        match &self.runner.run {
+            Run::Running { cancel, .. } if !cancel.is_cancelled() => self.runner.input.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Detach the settled run's input and return its unconsumed messages.
+    pub fn take_pending_input(&mut self) -> Vec<agent::session::Prompt> {
+        self.runner
+            .input
+            .take()
+            .map(|input| input.pending())
+            .unwrap_or_default()
     }
 
     /// Ask the run under way to stop, and say whether there was one. `unsend`

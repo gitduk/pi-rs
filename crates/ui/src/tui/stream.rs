@@ -252,18 +252,17 @@ impl Ui {
 
     // The submitted line onto the screen: the row its answer lands under.
     pub(super) fn submit(&mut self, view: &mut View, line: &str) {
-        let rows = Row::prompt(line, &self.paint);
-        super::scrollback::open_turn(&mut view.surface.scrollback);
-        view.surface.scrollback.extend(rows);
-        view.surface
-            .folds
-            .fold_previous(&mut view.surface.scrollback);
+        self.submit_rows(view, Row::prompt(line, &self.paint));
     }
 
     pub(super) fn submit_relayed(&mut self, view: &mut View, label: &str, line: &str) {
         let row = Row::relayed(label, line, agent::session::now(), &self.paint);
+        self.submit_rows(view, [row]);
+    }
+
+    fn submit_rows(&self, view: &mut View, rows: impl IntoIterator<Item = Row>) {
         super::scrollback::open_turn(&mut view.surface.scrollback);
-        view.surface.scrollback.push(row);
+        view.surface.scrollback.extend(rows);
         view.surface
             .folds
             .fold_previous(&mut view.surface.scrollback);
@@ -328,6 +327,8 @@ impl Ui {
                             result,
                         );
                     }
+                } else if matches!(entry, LogEntry::Ask { .. }) {
+                    self.submit_rows(view, rows);
                 } else {
                     view.surface.scrollback.extend(rows);
                 }

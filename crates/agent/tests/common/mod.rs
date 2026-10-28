@@ -15,6 +15,7 @@ use std::sync::Arc;
 ///
 /// `Agent::new` starts on the identity compactor, which never shrinks
 /// anything, so a test about compaction must say which one it means.
+#[allow(dead_code)] // not every test binary exercises compaction
 pub fn compacting(agent: &mut agent::Agent, writer: Option<(Arc<dyn Transport>, ModelSpec)>) {
     agent.compactor = Arc::new(agent::Summarizing::new(
         writer,

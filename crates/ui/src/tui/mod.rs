@@ -48,7 +48,7 @@ use menu::Lists;
 use run::Done;
 use term::{HISTORY_KEEP, Hold, drop_shared_history, history_of, reader};
 use ui::{Mark, Tab, Ui, following_terminal, lane_name};
-use view::{Queued, View, Views, front_view, prune_views, view_at};
+use view::{Pending, Queued, View, Views, front_view, prune_views, view_at};
 
 // What a folded run shows instead of what it is thinking.
 const THINKING: &str = "thinking…";
@@ -167,7 +167,7 @@ enum Wake {
     // line it was read from: echoed if the answer lands under it.
     Do(Asked, Option<String>),
     // A line pi relays for the model: always a turn, never a command.
-    Relay(String, run::Relay),
+    Relay(agent::session::Prompt),
     // A turn ended and has to be settled, whichever lane it belongs to.
     Turn(Done),
     // Something only the screen cares about.
@@ -571,7 +571,9 @@ impl Tui {
     // The one gate every input passes, so two ways of asking the same
     // thing can't get different answers. `fate` decides only mid-run.
     fn admit(&mut self, asked: Asked, origin: Origin, line: Option<String>) -> Wake {
-        if !self.core.lane().is_running() {
+        if !self.core.lane().is_running()
+            || matches!(&asked, Asked::Core(Intent::Prompt(_))) && origin == Origin::Typed
+        {
             return Wake::Do(asked, line);
         }
         let intent = match asked {
@@ -595,7 +597,7 @@ impl Tui {
                 front_view(&mut self.views, self.core.lane())
                     .queued
                     .push(Queued {
-                        intent,
+                        input: Pending::Intent(intent),
                         origin,
                         line,
                     });
@@ -734,6 +736,7 @@ impl Tui {
             let waiting = !view.queued.is_empty();
             // Who sent what is carried out this pass.
             let mut origin = Origin::Typed;
+            let mut prepared = None;
             // A driver's line goes only when the lane is free and nothing typed
             // is waiting: what the user says comes first.
             let free = !running && !waiting;
@@ -817,10 +820,12 @@ impl Tui {
                     .queued
                     .remove(0);
                 origin = queued.origin;
-                Wake::Do(Asked::Core(queued.intent), queued.line)
+                let (intent, ask) = queued.input.into_intent();
+                prepared = ask;
+                Wake::Do(Asked::Core(intent), queued.line)
             };
             // Out here, where all of `self` is free again.
-            let (asked, line) = match woke {
+            let (asked, mut line) = match woke {
                 Wake::Turn(done) => {
                     self.settle(done).await;
                     continue;
@@ -828,8 +833,8 @@ impl Tui {
                 Wake::Nothing => continue,
                 Wake::Leave(why) => break why,
                 // Its driver hears nothing of the turn, so nothing follows.
-                Wake::Relay(line, relay) => {
-                    self.start_relayed(line, relay, &done_tx);
+                Wake::Relay(ask) => {
+                    self.start_turn(ask, &done_tx);
                     continue;
                 }
                 Wake::Do(asked, line) => (asked, line),
@@ -852,8 +857,10 @@ impl Tui {
             );
             let step = self.core.dispatch(intent);
             self.reconcile(was);
-            self.echo_under(&step, line);
             let prompt = matches!(step, Step::Prompt { .. });
+            if !prompt {
+                self.echo_under(&step, line.take());
+            }
             // Its turn starts when the server answers; drivers hear then.
             let deferred = matches!(step, Step::McpPrompt { .. });
             match step {
@@ -906,7 +913,13 @@ impl Tui {
                 }
                 // Queued-during-run entries are taken one at a time at the
                 // loop's top; draining here would merge them into one prompt.
-                Step::Prompt { send, typed } => self.start_turn(send, typed, &done_tx),
+                Step::Prompt { send, typed } => {
+                    let ask =
+                        prepared.unwrap_or_else(|| clipboard::prompt(send, typed, &self.ui.images));
+                    if !self.deliver_prompt(ask, origin, line, &done_tx) {
+                        continue;
+                    }
+                }
             }
             // The driver that sent this line hears the end of the turn it began.
             // By token: the step may have moved the surface to another lane.
@@ -943,11 +956,12 @@ impl Tui {
                     target: "pi::session", origin = ?next.origin, lane = self.core.lane().token(), label = %label, "relay"
                 );
                 self.ui.submit_relayed(view, &label, &next.line);
-                let relay = run::Relay {
-                    label,
-                    note: next.note,
-                };
-                Wake::Relay(next.line, relay)
+                Wake::Relay(agent::session::Prompt {
+                    text: next.line,
+                    shown: Some(label),
+                    relayed: Some(next.note),
+                    images: Vec::new(),
+                })
             }
             None => {
                 let intent = match next.as_typed {

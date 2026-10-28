@@ -13,6 +13,23 @@ const TYPES: [(&str, &str); 4] = [
     ("image/webp", "webp"),
 ];
 
+pub(super) fn prompt(
+    text: String,
+    shown: Option<String>,
+    images: &[PathBuf],
+) -> agent::session::Prompt {
+    let (text, shown, images) = match with_paths(&text, images) {
+        Some((sent, named)) => (sent, shown.or(Some(text)), attached(&named)),
+        None => (text, shown, Vec::new()),
+    };
+    agent::session::Prompt {
+        text,
+        shown,
+        images,
+        relayed: None,
+    }
+}
+
 /// The saved file, and what the line calls it: `1280x720 245.3 KB`.
 pub(super) fn paste_image() -> Result<(PathBuf, String), String> {
     let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();

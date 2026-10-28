@@ -789,13 +789,14 @@ impl Session {
         });
     }
 
-    fn send(&mut self, ask: Prompt) {
+    /// Continue with a complete ask, including its origin and attachments.
+    pub fn send(&mut self, ask: Prompt) -> EntryId {
         // A run that died tells the model so; a user stop leaves direction to
         // the next prompt.
         if let Some(note) = self.interrupted.take().and_then(|c| c.note()) {
             self.push_note(note);
         }
-        self.push_ask(ask);
+        self.push_ask(ask)
     }
 
     /// Everywhere the conversation can be rewound to, in session order:

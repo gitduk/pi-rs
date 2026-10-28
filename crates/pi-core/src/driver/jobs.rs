@@ -3,8 +3,8 @@
 //! it to its checkout: queued results together in one turn, each input a line
 //! read as if typed, whose turn's answer goes back to the job.
 //!
-//! What comes back goes only when the lane is free and nothing typed is
-//! waiting. Nothing here outlives this process but a job no longer running
+//! Results can reach a run between model requests; inputs open their own
+//! turns. Nothing here outlives this process but a job no longer running
 //! that a restarted pi can start over; past that, use cron.
 //!
 //! The questions such calls put to the person stand here too, jobs' and
@@ -145,15 +145,25 @@ impl Inner {
         (self.items.iter()).position(|i| i.id == id && i.run == run)
     }
 
-    // One queued message, with the same bookkeeping for results and inputs.
-    fn take_back(&mut self, root: &Path) -> Option<(u64, Back)> {
-        let at = self
-            .items
+    fn back_at(&self, root: &Path, results_only: bool) -> Option<(usize, usize)> {
+        self.items
             .iter()
-            .position(|i| i.root == root && !i.waiting.is_empty())?;
+            .enumerate()
+            .filter(|(_, item)| item.root == root)
+            .find_map(|(at, item)| {
+                item.waiting
+                    .iter()
+                    .position(|back| !results_only || matches!(back, Back::Result(_)))
+                    .map(|back| (at, back))
+            })
+    }
+
+    // One queued message, with the same bookkeeping for results and inputs.
+    fn take_back(&mut self, root: &Path, results_only: bool) -> Option<(u64, Back)> {
+        let (at, back) = self.back_at(root, results_only)?;
         let item = &mut self.items[at];
         let id = item.id;
-        let mut back = item.waiting.pop_front()?;
+        let mut back = item.waiting.remove(back)?;
         if item.waiting.is_empty() && item.dropped > 0 {
             let dropped = format!(
                 "({} later lines were dropped: more than {MAX_WAITING} waited at once.)",
@@ -436,7 +446,7 @@ pub struct Job {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     Running,
-    /// Done, its results waiting for the lane to be free.
+    /// Done, its results waiting to be delivered.
     Back,
     /// Stopped by the user, kept to be started over.
     Stopped,
@@ -567,9 +577,7 @@ impl Table {
             State::Back => {}
             State::Stopped => return Err(format!("#{id} was stopped; it has nothing to say")),
             State::Exited => {
-                return Err(format!(
-                    "#{id} already ended; what it said came back as a turn of its own"
-                ));
+                return Err(format!("#{id} already ended; its results were delivered"));
             }
         }
         let mut said = Vec::new();
@@ -600,8 +608,21 @@ impl Table {
     /// into one turn. A person's input stays separate, in its original place.
     /// The id names the first result's job, or the input's sender.
     pub fn take_back(&self, root: &Path) -> Option<(u64, Back)> {
+        self.take_next(root, false)
+    }
+
+    /// Results for an active run. Person-originated inputs keep their own
+    /// turns; they do not hold back results the active run may depend on.
+    pub fn take_ready_results(&self, root: &Path) -> Option<Due> {
+        match self.take_next(root, true)? {
+            (_, Back::Result(due)) => Some(due),
+            (_, Back::Input { .. }) => unreachable!("only results were requested"),
+        }
+    }
+
+    fn take_next(&self, root: &Path, results_only: bool) -> Option<(u64, Back)> {
         let mut inner = self.lock();
-        let (id, back) = inner.take_back(root)?;
+        let (id, back) = inner.take_back(root, results_only)?;
         let mut due = match back {
             Back::Result(due) => due,
             input @ Back::Input { .. } => {
@@ -610,18 +631,13 @@ impl Table {
             }
         };
         let mut jobs = vec![id];
-        // Hold the lock through the snapshot: new results wait for the next
-        // batch, and an input must not be consumed just to look past it.
-        while let Some(item) = inner
-            .items
-            .iter()
-            .find(|i| i.root == root && !i.waiting.is_empty())
-        {
-            match item.waiting.front() {
+        // Hold the lock through the snapshot; later arrivals form another batch.
+        while let Some((at, back)) = inner.back_at(root, results_only) {
+            match inner.items[at].waiting.get(back) {
                 Some(Back::Result(_)) => {}
                 Some(Back::Input { .. }) | None => break,
             }
-            let Some((job, Back::Result(next))) = inner.take_back(root) else {
+            let Some((job, Back::Result(next))) = inner.take_back(root, results_only) else {
                 unreachable!("the next queued message was a result")
             };
             due.line.push_str("\n\n");
@@ -1384,7 +1400,8 @@ impl JobControls for Jobs {
             "With no command, list background jobs. Show their latest `output`, \
              `stop` them by id, or `stop_all`. `restart` runs a command again under \
              its id, stopping its earlier run first. Results arrive automatically \
-             in later turns; continue independent work, or report progress and end \
+             before the next model request, or open a new turn if the run has ended; \
+             continue independent work, or report progress and end \
              this turn. Do not poll or wait for background work."
         }
     }

@@ -207,7 +207,10 @@ async fn a_panicked_bang_does_not_lay_its_transcript_down_again() {
     })
     .await;
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    tui.start_turn("the next question".into(), None, &tx);
+    tui.start_turn(
+        crate::tui::clipboard::prompt("the next question".into(), None, &[]),
+        &tx,
+    );
 
     let rows = lane_rows(&mut tui, token);
     assert_eq!(
@@ -1001,10 +1004,12 @@ async fn a_queued_line_remembers_the_job_it_came_from() {
         Origin::Input(1),
         None,
     );
-    tui.admit(
-        Asked::Core(Intent::Prompt("typed here".into())),
+    let (done, _) = tokio::sync::mpsc::unbounded_channel();
+    tui.deliver_prompt(
+        crate::tui::clipboard::prompt("typed here".into(), None, &[]),
         Origin::Typed,
         None,
+        &done,
     );
 
     let from: Vec<_> = view_at(&mut tui.views, token)
@@ -1013,6 +1018,101 @@ async fn a_queued_line_remembers_the_job_it_came_from() {
         .map(|q| q.origin)
         .collect();
     assert_eq!(from, [Origin::Input(1), Origin::Typed]);
+}
+
+#[tokio::test]
+async fn a_typed_followup_reaches_the_running_agent_and_survives_cancellation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tui = surface(dir.path());
+    let token = tui.core.lane().token();
+    let input = tui.core.lane_mut().listen(tui.drivers.jobs());
+    let wake = tui.admit(
+        Asked::Core(Intent::Prompt("new direction".into())),
+        Origin::Typed,
+        Some("new direction".into()),
+    );
+    assert!(matches!(
+        wake,
+        crate::tui::Wake::Do(Asked::Core(Intent::Prompt(_)), _)
+    ));
+    let (done, mut ended) = tokio::sync::mpsc::unbounded_channel();
+    let ask = agent::session::Prompt {
+        text: "model text".into(),
+        shown: Some("new direction".into()),
+        images: vec![llm::message::Image::Url {
+            url: "https://example.test/image.png".into(),
+        }],
+        relayed: Some("original provenance".into()),
+    };
+    assert!(!tui.deliver_prompt(
+        ask.clone(),
+        Origin::Typed,
+        Some("new direction".into()),
+        &done
+    ));
+    assert!(tui.core.lane().is_running());
+    assert!(ended.try_recv().is_err(), "no second run was started");
+    assert!(view_at(&mut tui.views, token).queued.is_empty());
+    assert!(tui.core.lane_mut().stop(false));
+    assert!(
+        tui.core.lane().input().is_none(),
+        "stopped runs no longer accept input"
+    );
+    tui.settle(crate::tui::run::Done {
+        token,
+        kind: crate::tui::run::Kind::Turn,
+        ran: Some((
+            agent::session::Session::with_prompt("original"),
+            Err(agent::AgentError::Cancelled),
+        )),
+    })
+    .await;
+    assert!(input.pending().is_empty());
+    let queue = &view_at(&mut tui.views, token).queued;
+    assert_eq!(queue.len(), 1);
+    assert!(matches!(&queue[0].input, crate::tui::view::Pending::Prompt(p) if p == &ask));
+    assert_eq!(queue[0].line.as_deref(), Some("new direction"));
+    assert!(tui.core.lane().input().is_none());
+
+    let queued = view_at(&mut tui.views, token).queued.remove(0);
+    let (_, prepared) = queued.input.into_intent();
+    assert!(tui.deliver_prompt(prepared.unwrap(), queued.origin, queued.line, &done));
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(2), ended.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    tui.settle(completed).await;
+    assert_eq!(tui.core.lane().session().unwrap().last_prompt(), Some(&ask));
+}
+
+#[test]
+fn a_followup_does_not_pass_an_earlier_queued_command_or_enter_another_lane() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tui = surface(dir.path());
+    let input = tui.core.lane_mut().listen(tui.drivers.jobs());
+    let (done, _) = tokio::sync::mpsc::unbounded_channel();
+    tui.admit(
+        Asked::Core(Intent::Bash("echo first".into())),
+        Origin::Typed,
+        Some("! echo first".into()),
+    );
+    tui.deliver_prompt(
+        crate::tui::clipboard::prompt("after bash".into(), None, &[]),
+        Origin::Typed,
+        Some("after bash".into()),
+        &done,
+    );
+    assert_eq!(front_view(&mut tui.views, tui.core.lane()).queued.len(), 2);
+    assert!(input.pending().is_empty());
+    switch_to(&mut tui, running_lane(dir.path()));
+    tui.deliver_prompt(
+        crate::tui::clipboard::prompt("another lane".into(), None, &[]),
+        Origin::Typed,
+        Some("another lane".into()),
+        &done,
+    );
+    assert_eq!(front_view(&mut tui.views, tui.core.lane()).queued.len(), 1);
+    assert!(input.pending().is_empty());
 }
 
 // Queued results open one turn under their batch label, even output that
@@ -1032,12 +1132,12 @@ async fn queued_job_results_open_one_turn_under_their_label() {
     job.result("/compact".into());
     job.end();
 
-    let Some((Origin::Job, crate::tui::Wake::Relay(line, relay))) = tui.driver_line() else {
+    let Some((Origin::Job, crate::tui::Wake::Relay(ask))) = tui.driver_line() else {
         panic!("the results are relayed together");
     };
-    assert!(line.contains("check the build"), "{line}");
-    assert!(line.ends_with("/compact"), "{line}");
-    assert_eq!(relay.label, "2 background job results");
+    assert!(ask.text.contains("check the build"), "{}", ask.text);
+    assert!(ask.text.ends_with("/compact"), "{}", ask.text);
+    assert_eq!(ask.shown.as_deref(), Some("2 background job results"));
     assert!(tui.driver_line().is_none(), "one turn takes both results");
     let token = tui.core.lane().token();
     assert!(

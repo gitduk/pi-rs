@@ -3,6 +3,7 @@
 //! A driver hears the progress and end of turns its own lines began; `Drivers`
 //! keeps that ledger so the surface need not know which driver cares.
 
+pub mod input;
 pub mod jobs;
 pub mod looping;
 

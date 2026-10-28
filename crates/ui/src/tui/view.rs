@@ -139,11 +139,25 @@ pub enum StreamKind {
 // One line waiting for the lane in front to come free: what the door made of
 // it, and who sent it.
 pub(super) struct Queued {
-    pub(super) intent: Intent,
+    pub(super) input: Pending,
     pub(super) origin: Origin,
     // A typed line, kept off the transcript while it waits: up hands it back
     // to the editor, or its answer echoes it if it lands under the line.
     pub(super) line: Option<String>,
+}
+
+pub(super) enum Pending {
+    Intent(Intent),
+    Prompt(agent::session::Prompt),
+}
+
+impl Pending {
+    pub(super) fn into_intent(self) -> (Intent, Option<agent::session::Prompt>) {
+        match self {
+            Self::Intent(intent) => (intent, None),
+            Self::Prompt(ask) => (Intent::Prompt(ask.text.clone()), Some(ask)),
+        }
+    }
 }
 
 pub(super) type Views = std::collections::BTreeMap<u64, View>;

@@ -171,6 +171,19 @@ impl Agent {
         tx: &UnboundedSender<Event>,
         retry: &Retry,
     ) -> Result<Usage, AgentError> {
+        self.run_with_input(session, ctx, tx, retry, &|| None).await
+    }
+
+    /// Run with messages supplied between complete model replies and tool
+    /// batches. Input never interrupts generation or an executing call.
+    pub async fn run_with_input(
+        &self,
+        session: &mut Session,
+        ctx: &Ctx,
+        tx: &UnboundedSender<Event>,
+        retry: &Retry,
+        input: &dyn seams::Input,
+    ) -> Result<Usage, AgentError> {
         let voice = Voice::new(tx.clone(), self.brief.hooks.clone());
         // Tool sources are live: what they list now, not when the brief was applied.
         tracing::info!(
@@ -185,7 +198,7 @@ impl Agent {
         if let Some(note) = self.brief.hooks.ahead(&prompt, ctx).await {
             say_note(session, &voice, note);
         }
-        let out = self.turns(session, ctx, &voice, retry).await;
+        let out = self.turns(session, ctx, &voice, retry, input).await;
         match &out {
             Ok(_) => {}
             Err(AgentError::Cancelled) => session.close_open(session::STOPPED_CALL),
@@ -205,6 +218,7 @@ impl Agent {
         ctx: &Ctx,
         voice: &Voice,
         retry: &Retry,
+        input: &dyn seams::Input,
     ) -> Result<Usage, AgentError> {
         let mut totals = Usage::default();
 
@@ -222,6 +236,7 @@ impl Agent {
         let mut holds = 0usize;
 
         for turn in 1.. {
+            receive(session, ctx, voice, input);
             voice.say(Event::TurnStart { turn });
             // Entered around each await, not held across it — a guard spanning
             // an await labels whatever else the runtime polls meanwhile.
@@ -259,11 +274,14 @@ impl Agent {
                     .instrument(span.clone())
                     .await;
                 totals.add(&fitted.spent);
-                sent = as_sent(fitted.context, &self.model.spec);
                 if fitted.changed {
                     compactions += 1;
                     held = None;
                 }
+                if receive(session, ctx, voice, input) {
+                    continue;
+                }
+                sent = as_sent(fitted.context, &self.model.spec);
                 bound = self.overhead() + llm::estimate::tokens(&sent, &self.model.spec);
                 tracing::debug!(
                     target: "pi::loop",
@@ -405,6 +423,9 @@ impl Agent {
             session.push_assistant(content);
 
             if let Some(reply) = reply {
+                if receive(session, ctx, voice, input) {
+                    continue;
+                }
                 if holds == MAX_HOLDS {
                     voice.say(Event::Warning(format!(
                         "hooks kept the run going {MAX_HOLDS} times; it stops here"
@@ -533,6 +554,18 @@ pub(crate) fn as_sent(mut context: Vec<Message>, spec: &ModelSpec) -> Vec<Messag
 fn say_note(session: &mut Session, voice: &Voice, note: String) {
     let id = session.push_note(note);
     say_committed(session, voice, &[id]);
+}
+
+fn receive(session: &mut Session, ctx: &Ctx, voice: &Voice, input: &dyn seams::Input) -> bool {
+    let mut ids = Vec::new();
+    while !ctx.cancel.is_cancelled() {
+        let Some(ask) = input.take() else { break };
+        ids.push(session.send(ask));
+    }
+    if !ids.is_empty() {
+        say_committed(session, voice, &ids);
+    }
+    !ids.is_empty()
 }
 
 // A state update, not a drawing instruction: whoever draws derives the

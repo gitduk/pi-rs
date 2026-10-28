@@ -15,6 +15,21 @@ use llm::stream::Usage;
 use serde_json::Value;
 use tool::Tier;
 
+/// Messages to read between model requests. Taking one transfers ownership;
+/// callers keep unconsumed messages when a run ends.
+pub trait Input: Send + Sync {
+    fn take(&self) -> Option<crate::session::Prompt>;
+}
+
+impl<F> Input for F
+where
+    F: Fn() -> Option<crate::session::Prompt> + Send + Sync,
+{
+    fn take(&self) -> Option<crate::session::Prompt> {
+        self()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
     Allow,

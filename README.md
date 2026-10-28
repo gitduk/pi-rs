@@ -222,6 +222,11 @@ and `enter` expands or folds its output. Stopped rows stay available while
 focused so they can be restarted. Completion lists and reading pages keep
 their own keys; Insert mode keeps its editing keys. `/keys` includes this help.
 
+While a model reply is generating, completed background results and additional
+messages you type wait for that reply to finish. After its tool calls complete,
+they enter the next model request in the same run. A reply with no tool calls
+also continues when messages are waiting. Generation is never interrupted.
+
 ## Tools
 
 `read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `subagent` `memory`, plus:

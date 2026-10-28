@@ -3,7 +3,7 @@
 //! Beside them, what is asked off the loop without lending the transcript:
 //! a tool named directly, and an MCP prompt's text.
 
-use agent::session::{Entry as LogEntry, Session};
+use agent::session::{Entry as LogEntry, Prompt, Session};
 use agent::{AgentError, Event};
 use futures::FutureExt;
 use ratatui::text::{Line, Span};
@@ -73,25 +73,6 @@ where
     std::panic::AssertUnwindSafe(run).catch_unwind().await.ok()
 }
 
-/// A line pi sends on the model's behalf: what the screen names it by, and
-/// what the model is told of where it came from.
-pub(super) struct Relay {
-    pub(super) label: String,
-    pub(super) note: String,
-}
-
-// What opens a turn: a line the user gave, or one pi relays.
-enum Ask {
-    Typed {
-        prompt: String,
-        typed: Option<String>,
-    },
-    Relayed {
-        prompt: String,
-        relay: Relay,
-    },
-}
-
 impl Tui {
     // The front lane's transcript, for a run about to start on it.
     fn take_carried(&mut self) -> Option<Session> {
@@ -110,28 +91,41 @@ impl Tui {
         self.core.lane_mut().seed_meter();
     }
 
-    // Starts a turn on the lane in front and returns immediately: the run
-    // posts to that lane's channel, freeing the loop to draw and serve others.
-    pub(super) fn start_turn(
+    pub(super) fn deliver_prompt(
         &mut self,
-        prompt: String,
-        typed: Option<String>,
+        ask: Prompt,
+        origin: Origin,
+        line: Option<String>,
         done: &UnboundedSender<Done>,
-    ) {
-        self.begin(Ask::Typed { prompt, typed }, done);
+    ) -> bool {
+        if self.core.lane().is_running() {
+            if origin == Origin::Typed
+                && front_view(&mut self.views, self.core.lane())
+                    .queued
+                    .is_empty()
+                && let Some(input) = self.core.lane().input()
+            {
+                input.push(ask);
+                self.ui.flash("message queued for after this reply");
+            } else {
+                front_view(&mut self.views, self.core.lane())
+                    .queued
+                    .push(super::view::Queued {
+                        input: super::view::Pending::Prompt(ask),
+                        origin,
+                        line,
+                    });
+            }
+            return false;
+        }
+        if let Some(line) = line {
+            self.echo(&line);
+        }
+        self.start_turn(ask, done);
+        true
     }
 
-    // The same, for a line pi relays on the model's behalf.
-    pub(super) fn start_relayed(
-        &mut self,
-        prompt: String,
-        relay: Relay,
-        done: &UnboundedSender<Done>,
-    ) {
-        self.begin(Ask::Relayed { prompt, relay }, done);
-    }
-
-    fn begin(&mut self, ask: Ask, done: &UnboundedSender<Done>) {
+    pub(super) fn start_turn(&mut self, ask: Prompt, done: &UnboundedSender<Done>) {
         if let Some(said) = self.core.refresh_prompt_files() {
             self.notice(pi_core::input::notice(said));
         }
@@ -145,22 +139,7 @@ impl Tui {
         let Some(mut carried) = self.take_carried() else {
             return;
         };
-        match ask {
-            Ask::Typed { prompt, typed } => {
-                // The line keeps `[Image #n …]`; the model is told where each one is.
-                let (prompt, typed, images) =
-                    match super::clipboard::with_paths(&prompt, &self.ui.images) {
-                        Some((sent, named)) => (
-                            sent,
-                            typed.or(Some(prompt)),
-                            super::clipboard::attached(&named),
-                        ),
-                        None => (prompt, typed, Vec::new()),
-                    };
-                carried.send_prompt_with(prompt, typed, images);
-            }
-            Ask::Relayed { prompt, relay } => carried.send_relayed(prompt, relay.label, relay.note),
-        }
+        carried.send(ask);
         // The stop note the send filed is an entry now:
         // derive rows like any commit so they show without a rebuild.
         let view = front_view(&mut self.views, self.core.lane());
@@ -188,8 +167,11 @@ impl Tui {
         // Read where the run starts, not carried on the agent: a reload
         // between two turns reaches the next one this way.
         let retry = pi_core::core::retry(&self.core.config);
+        let input = self.core.lane_mut().listen(self.drivers.jobs());
         tokio::spawn(async move {
-            let out = guard(agent.run(&mut carried, &ctx, &sent, &retry)).await;
+            let out =
+                guard(agent.run_with_input(&mut carried, &ctx, &sent, &retry, input.as_ref()))
+                    .await;
             let _ = done.send(Done {
                 token,
                 kind: Kind::Turn,
@@ -330,7 +312,10 @@ impl Tui {
             }
             Ok(send) if front && !self.core.lane().is_running() => {
                 self.echo(&typed);
-                self.start_turn(send, Some(typed), done);
+                self.start_turn(
+                    super::clipboard::prompt(send, Some(typed), &self.ui.images),
+                    done,
+                );
                 true
             }
             Ok(_) if !front => {
@@ -548,6 +533,20 @@ impl Tui {
         let Some(lane) = self.core.position_of(done.token) else {
             return;
         };
+        let pending = self.core.lanes[lane]
+            .take_pending_input()
+            .into_iter()
+            .map(|ask| {
+                let line = Some(ask.shown_text().to_string());
+                super::view::Queued {
+                    input: super::view::Pending::Prompt(ask),
+                    origin: Origin::Typed,
+                    line,
+                }
+            });
+        view_at(&mut self.views, done.token)
+            .queued
+            .splice(..0, pending);
         let unsend = self.core.lanes[lane].finish();
 
         match done.kind {
