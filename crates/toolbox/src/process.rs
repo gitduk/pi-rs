@@ -287,9 +287,27 @@ impl Streams {
         )
     }
 
-    /// Both captures, or why their complete output could not be kept.
-    pub(crate) async fn checked(&mut self) -> Result<(Captured, Captured), ToolError> {
-        let both = self.captured().await;
+    async fn after_exit(&mut self, group: Option<u32>) -> (Captured, Captured) {
+        // Keep the same future across the deadline: one pipe may already
+        // have completed, and its join handle must not be awaited twice.
+        let both = self.captured();
+        tokio::pin!(both);
+        tokio::select! {
+            both = &mut both => both,
+            () = tokio::time::sleep(LINGER) => {
+                reap(group).await;
+                both.await
+            }
+        }
+    }
+
+    /// Both captures after process exit, or why their output could not be kept.
+    /// Reclaim descendants still holding the pipes past the exit grace period.
+    pub(crate) async fn checked(
+        &mut self,
+        group: Option<u32>,
+    ) -> Result<(Captured, Captured), ToolError> {
+        let both = self.after_exit(group).await;
         match self
             .failure
             .lock()
@@ -309,11 +327,7 @@ impl Streams {
         stop: &tokio_util::sync::CancellationToken,
     ) -> Option<(Captured, Captured)> {
         tokio::select! {
-            both = self.captured() => Some(both),
-            () = tokio::time::sleep(LINGER) => {
-                reap(group).await;
-                Some(self.captured().await)
-            }
+            both = self.after_exit(group) => Some(both),
             () = stop.cancelled() => None,
         }
     }

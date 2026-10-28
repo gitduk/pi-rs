@@ -3,7 +3,9 @@
 
 use std::ops::Range;
 
-use pulldown_cmark::{BlockQuoteKind, CodeBlockKind, Event, Parser, Tag, TextMergeWithOffset};
+use pulldown_cmark::{
+    Alignment, BlockQuoteKind, CodeBlockKind, Event, Parser, Tag, TextMergeWithOffset,
+};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use tui_markdown::{AlertKind, StyleSheet};
@@ -259,11 +261,30 @@ impl Document<'_> {
                 let newline = if body.ends_with('\n') { "" } else { "\n" };
                 self.delegate(&format!("{fence}{info}\n{body}{newline}{fence}"))
             }
-            Event::Start(Tag::Table(_)) => self.delegate(&format!(
-                "{}\n\n{}",
-                &self.text[node.range.clone()],
-                self.references
-            )),
+            Event::Start(Tag::Table(alignments)) => {
+                // Row ranges exclude enclosing quote and list markers;
+                // the table's continuous source range includes them.
+                let mut source = String::new();
+                for row in &node.children {
+                    source.push_str(self.text[row.range.clone()].trim_end_matches(['\r', '\n']));
+                    source.push('\n');
+                    if matches!(row.event, Event::Start(Tag::TableHead)) {
+                        source.push('|');
+                        for alignment in alignments {
+                            source.push_str(match alignment {
+                                Alignment::None => "---|",
+                                Alignment::Left => ":---|",
+                                Alignment::Center => ":---:|",
+                                Alignment::Right => "---:|",
+                            });
+                        }
+                        source.push('\n');
+                    }
+                }
+                source.push('\n');
+                source.push_str(&self.references);
+                self.delegate(&source)
+            }
             Event::Start(Tag::MetadataBlock(_)) => self.delegate(&self.text[node.range.clone()]),
             Event::Start(Tag::HtmlBlock) => plain(&node.children)
                 .lines()
@@ -526,6 +547,43 @@ mod tests {
             ]
         );
         assert!(quotes[6].chars().all(|c| c == '─'));
+    }
+
+    #[test]
+    fn tables_keep_their_layout_inside_containers() {
+        for table in [
+            "| a | b |\n|---|---|\n| x | y |",
+            "a | b\n:--- | ---:\n**x** | `y`\\|z\n\\>literal | [site][ref]",
+            "| a | b |\n|---|---|",
+        ] {
+            let references = "\n\n[ref]: https://example.com";
+            let plain = lines(&format!("{table}{references}"));
+            assert!(plain[0].starts_with('┌'), "{plain:?}");
+            for (first, rest, first_out, rest_out) in [
+                ("> ", "> ", "│ ", "│ "),
+                ("> > ", "> > ", "│ │ ", "│ │ "),
+                ("- ", "  ", "• ", "  "),
+                ("> - ", ">   ", "│ • ", "│   "),
+                ("- > ", "  > ", "• │ ", "  │ "),
+            ] {
+                let nested = table
+                    .lines()
+                    .enumerate()
+                    .map(|(i, line)| format!("{}{line}", if i == 0 { first } else { rest }))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let expected = plain
+                    .iter()
+                    .enumerate()
+                    .map(|(i, line)| format!("{}{line}", if i == 0 { first_out } else { rest_out }))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    lines(&format!("{nested}{references}")),
+                    expected,
+                    "{nested}"
+                );
+            }
+        }
     }
 
     #[test]

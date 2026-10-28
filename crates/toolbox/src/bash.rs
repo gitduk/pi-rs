@@ -446,7 +446,7 @@ async fn wait(
         }
     };
     let (out, err) = tokio::select! {
-        both = streams.checked() => both?,
+        both = streams.checked(group) => both?,
         () = stop.cancelled() => {
             crate::process::reap(group).await;
             return Err(ToolError::Cancelled);
@@ -652,6 +652,62 @@ mod background_tests {
             .await
             .unwrap();
         assert!(out.flatten().contains("hi"), "{}", out.flatten());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_exited_shell_reclaims_descendants_holding_its_output_pipes() {
+        let mut cases = tokio::task::JoinSet::new();
+        for mode in 0..3 {
+            for command in [
+                "sleep 30 & echo done; echo warning >&2; exit 3",
+                // stdout closes before stderr: do not await it twice at the deadline.
+                "sleep 30 >&- & echo done; echo warning >&2; exit 3",
+                // Descendants may finish printing within the exit grace period.
+                "(sleep 0.1; echo done; echo warning >&2) & exit 3",
+            ] {
+                cases.spawn(async move {
+                    let dir = tempfile::tempdir().unwrap();
+                    let sink = Arc::new(Sink::default());
+                    let ctx = ctx(dir.path());
+                    let shell = if mode == 1 {
+                        Bash::scoped(sink.clone()).until_exit()
+                    } else {
+                        Bash::new(sink.clone())
+                    };
+                    let ended = sink.ended.notified();
+                    let result = tokio::time::timeout(Duration::from_secs(5), async {
+                        let out = shell
+                            .execute(json!({"command": command, "background": mode == 2}), &ctx)
+                            .await
+                            .unwrap();
+                        if mode == 2 {
+                            ended.await;
+                            sink.said.lock().unwrap()[1].clone()
+                        } else {
+                            assert!(out.warned);
+                            assert!(sink.said.lock().unwrap().is_empty());
+                            out.flatten()
+                        }
+                    })
+                    .await;
+                    if let Some(stop) = sink.stop.lock().unwrap().take() {
+                        stop.cancel();
+                    }
+                    let said = result.expect("output pipes are reclaimed after shell exit");
+                    for expected in [
+                        "done",
+                        "warning",
+                        if mode == 2 { "exited 3" } else { "exit 3" },
+                    ] {
+                        assert!(said.contains(expected), "{said}");
+                    }
+                });
+            }
+        }
+        while let Some(case) = cases.join_next().await {
+            case.unwrap();
+        }
     }
 
     #[tokio::test]
