@@ -79,10 +79,9 @@ pub struct Asked {
 /// Where the answer to a question asked with `back` arrives.
 pub type Answer = oneshot::Receiver<Option<String>>;
 
-/// A running job's way to report. Each `result` comes back to its checkout
-/// as a turn of its own; an `input` is a
-/// person speaking through the job, read as if typed; `end` says it will
-/// report no more.
+/// A running job's way to report. Queued `result`s come back to its checkout
+/// together in one turn; an `input` is a person speaking through the job,
+/// read as if typed in its own turn; `end` says it will report no more.
 pub trait JobHandle: Send + Sync {
     fn id(&self) -> u64;
     fn status(&self, text: String);

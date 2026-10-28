@@ -135,7 +135,7 @@ impl Subagent {
     }
 
     /// Offer `background`: a call may leave its turn as a job kept by
-    /// `jobs`, its answer coming back as a turn of its own.
+    /// `jobs`, its answer coming back with other queued job results in a turn.
     pub fn with_background(mut self, jobs: Arc<dyn JobSink>) -> Self {
         self.background = Some(jobs);
         self
@@ -297,7 +297,7 @@ impl Tool for Subagent {
         if self.background.is_some() {
             schema["properties"]["background"] = json!({
                 "type": "boolean",
-                "description": "Run it apart from this turn: the call returns at once with an id, and the answer comes back later as a turn of its own. For a long job you need not wait on — keep working, or end the turn. It shares this checkout, so give it work that touches no file you are editing.",
+                "description": "Run it apart from this turn: the call returns at once with an id, and the answer comes back later in a turn with other queued job results. For a long job you need not wait on — keep working, or end the turn. It shares this checkout, so give it work that touches no file you are editing.",
             });
         }
         schema

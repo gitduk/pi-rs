@@ -1,6 +1,6 @@
 //! A script call that may outlive its turn. Fd 3 is a socket of JSON lines:
 //! `status` says how far it has got; `detach` ends the call and runs on as a
-//! job; after it, each `result` comes back as a turn, as does stdout at exit,
+//! job; after it, queued `result`s and stdout at exit come back together in a turn,
 //! `input` is a person's line, `interrupt` stops the checkout's turn,
 //! `choose` is a question whose `options` the person picks one or several
 //! of, and `follow` asks to hear every turn. A turn an input opened, or any
@@ -634,40 +634,6 @@ echo 'all done'"#,
             .await
             .unwrap();
         assert_eq!(*progress.lock().unwrap(), ["after"]);
-    }
-
-    // The shipped `later` is the protocol's worked example: it has to keep
-    // detaching and reporting the way this side reads it.
-    #[tokio::test]
-    async fn the_shipped_later_detaches_then_brings_its_prompt_back() {
-        let Ok(python) = which("python3") else {
-            return;
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let later =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/tools/later");
-        let mut cmd = Command::new(python);
-        cmd.arg(later).current_dir(dir.path());
-        let sink = Arc::new(Sink::default());
-        let ctx = ctx(dir.path());
-        let ended = sink.ended.notified();
-        let input = br#"{"prompt": "check the build", "after": "0s"}"#.to_vec();
-        let Ran::Detached { said, .. } = run("later", cmd, input, 5 * SECOND, &ctx, Some(&*sink))
-            .await
-            .unwrap()
-        else {
-            panic!("it detached")
-        };
-        assert!(said.contains("back in 0s"), "{said}");
-        tokio::time::timeout(5 * SECOND, ended)
-            .await
-            .expect("it ended");
-        let said = sink.said.lock().unwrap();
-        let result = said
-            .iter()
-            .find(|s| s.starts_with("result "))
-            .expect("a result");
-        assert!(result.contains("check the build"), "{said:?}");
     }
 
     // The shipped `choose` asks on fd 3 and hears it is up, or why not; a

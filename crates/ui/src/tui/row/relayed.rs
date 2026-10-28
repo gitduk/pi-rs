@@ -1,5 +1,5 @@
-//! A turn nobody typed — a `later` come due, a background subagent's
-//! answer: one line naming it, its text under the line once opened.
+//! A turn nobody typed, carrying background job results: one line naming it,
+//! its text under the line once opened.
 
 use ratatui::text::Line;
 

@@ -1015,16 +1015,16 @@ async fn a_queued_line_remembers_the_job_it_came_from() {
     assert_eq!(from, [Origin::Input(1), Origin::Typed]);
 }
 
-// A job's result opens a turn under its label, even one that reads like a
-// command: it is the job's output, never something typed.
+// Queued results open one turn under their batch label, even output that
+// reads like a command: it is the job's output, never something typed.
 #[tokio::test]
-async fn a_jobs_result_opens_a_turn_under_its_label() {
+async fn queued_job_results_open_one_turn_under_their_label() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     let job = toolbox::background::JobSink::start(
         &pi_core::driver::jobs::Jobs::new(tui.drivers.jobs()),
         dir.path().to_path_buf(),
-        "later".into(),
+        "build".into(),
         Default::default(),
         None,
     );
@@ -1032,18 +1032,18 @@ async fn a_jobs_result_opens_a_turn_under_its_label() {
     job.result("/compact".into());
     job.end();
 
-    for said in ["check the build", "/compact"] {
-        let Some((Origin::Job, crate::tui::Wake::Relay(line, relay))) = tui.driver_line() else {
-            panic!("the result is relayed");
-        };
-        assert!(line.ends_with(said), "{line}");
-        assert_eq!(relay.label, format!("later #1 {said}"));
-    }
+    let Some((Origin::Job, crate::tui::Wake::Relay(line, relay))) = tui.driver_line() else {
+        panic!("the results are relayed together");
+    };
+    assert!(line.contains("check the build"), "{line}");
+    assert!(line.ends_with("/compact"), "{line}");
+    assert_eq!(relay.label, "2 background job results");
+    assert!(tui.driver_line().is_none(), "one turn takes both results");
     let token = tui.core.lane().token();
     assert!(
         lane_rows(&mut tui, token)
             .iter()
-            .any(|r| r.contains("later #1 check the build"))
+            .any(|r| r.contains("2 background job results"))
     );
 }
 

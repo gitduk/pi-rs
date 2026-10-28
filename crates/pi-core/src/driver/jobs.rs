@@ -1,7 +1,7 @@
 //! `job`: what runs apart from the turn that started it — a subagent sent
 //! to the background, a script tool that detached — and what comes back from
-//! it to its checkout: each result a turn of its own, each input a line read
-//! as if typed, whose turn's answer goes back to the job.
+//! it to its checkout: queued results together in one turn, each input a line
+//! read as if typed, whose turn's answer goes back to the job.
 //!
 //! What comes back goes only when the lane is free and nothing typed is
 //! waiting. Nothing here outlives this process but a job no longer running
@@ -143,6 +143,29 @@ impl Inner {
     // Where run `run` of job `id` stands in the table, if it is still here.
     fn mine(&self, id: u64, run: u64) -> Option<usize> {
         (self.items.iter()).position(|i| i.id == id && i.run == run)
+    }
+
+    // One queued message, with the same bookkeeping for results and inputs.
+    fn take_back(&mut self, root: &Path) -> Option<(u64, Back)> {
+        let at = self
+            .items
+            .iter()
+            .position(|i| i.root == root && !i.waiting.is_empty())?;
+        let item = &mut self.items[at];
+        let id = item.id;
+        let mut back = item.waiting.pop_front()?;
+        if item.waiting.is_empty() && item.dropped > 0 {
+            let dropped = format!(
+                "({} later lines were dropped: more than {MAX_WAITING} waited at once.)",
+                std::mem::take(&mut item.dropped)
+            );
+            match &mut back {
+                Back::Result(due) => due.line.push_str(&format!("\n\n{dropped}")),
+                Back::Input { note, .. } => *note = dropped,
+            }
+        }
+        settle(&mut self.items, at);
+        Some((id, back))
     }
 
     // `question` numbered, so an answer or a withdrawal can name it.
@@ -573,33 +596,50 @@ impl Table {
             .then(Instant::now)
     }
 
-    /// The oldest thing waiting for `root`, taken, with the job it came from.
+    /// Take the next queued message for `root`, combining consecutive results
+    /// into one turn. A person's input stays separate, in its original place.
+    /// The id names the first result's job, or the input's sender.
     pub fn take_back(&self, root: &Path) -> Option<(u64, Back)> {
         let mut inner = self.lock();
-        let at = inner
+        let (id, back) = inner.take_back(root)?;
+        let mut due = match back {
+            Back::Result(due) => due,
+            input @ Back::Input { .. } => {
+                tracing::info!(target: "pi::job", job = id, kind = "input", "delivered");
+                return Some((id, input));
+            }
+        };
+        let mut jobs = vec![id];
+        // Hold the lock through the snapshot: new results wait for the next
+        // batch, and an input must not be consumed just to look past it.
+        while let Some(item) = inner
             .items
             .iter()
-            .position(|i| i.root == root && !i.waiting.is_empty())?;
-        let item = &mut inner.items[at];
-        let id = item.id;
-        let mut back = item.waiting.pop_front()?;
-        if item.waiting.is_empty() && item.dropped > 0 {
-            let dropped = format!(
-                "({} later lines were dropped: more than {MAX_WAITING} waited at once.)",
-                std::mem::take(&mut item.dropped)
-            );
-            match &mut back {
-                Back::Result(due) => due.line.push_str(&format!("\n\n{dropped}")),
-                Back::Input { note, .. } => *note = dropped,
+            .find(|i| i.root == root && !i.waiting.is_empty())
+        {
+            match item.waiting.front() {
+                Some(Back::Result(_)) => {}
+                Some(Back::Input { .. }) | None => break,
             }
+            let Some((job, Back::Result(next))) = inner.take_back(root) else {
+                unreachable!("the next queued message was a result")
+            };
+            due.line.push_str("\n\n");
+            due.line.push_str(&next.line);
+            due.text.push_str("\n\n");
+            due.text.push_str(&next.text);
+            jobs.push(job);
         }
-        settle(&mut inner.items, at);
-        let kind = match back {
-            Back::Result(_) => "result",
-            Back::Input { .. } => "input",
-        };
-        tracing::info!(target: "pi::job", job = id, kind, "delivered");
-        Some((id, back))
+        if jobs.len() > 1 {
+            due.label = format!("{} background job results", jobs.len());
+            due.note = format!(
+                "This turn combines {} queued results from background jobs you started; \
+                 the user did not just type them. Handle these results together in this turn.",
+                jobs.len()
+            );
+        }
+        tracing::info!(target: "pi::job", ?jobs, kind = "result", "delivered");
+        Some((id, Back::Result(due)))
     }
 
     /// Checkouts whose running turn a job asked to stop since last asked.
@@ -2197,10 +2237,10 @@ mod tests {
         assert!(table.jobs(&root).is_empty());
     }
 
-    // A crawler's batches come back one turn each, in order, and the job
-    // stays listed until the last is delivered, even after it has exited.
+    // A crawler's queued results come back together, in order, and the job
+    // stays listed until they are delivered, even after it has exited.
     #[tokio::test]
-    async fn a_detached_job_reports_many_results_in_order() {
+    async fn a_detached_job_reports_queued_results_together_in_order() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
         let job = JobSink::start(
@@ -2222,9 +2262,12 @@ mod tests {
         assert_eq!(table.jobs(&root)[0].progress, "1/2 pages");
         assert_eq!(table.jobs(&root)[0].state, State::Back);
         let first = result_of(&table, &root).unwrap();
-        assert!(first.line.ends_with("page one"), "{}", first.line);
-        assert_eq!(table.jobs(&root).len(), 1, "one result still waits");
-        assert!(result_of(&table, &root).unwrap().line.ends_with("page two"));
+        assert_eq!(
+            first.line,
+            "Background job #1 (crawl) reports:\n\npage one\n\nBackground job #1 (crawl) reports:\n\npage two"
+        );
+        assert_eq!(first.text, "page one\n\npage two");
+        assert!(result_of(&table, &root).is_none(), "reported once");
         assert!(table.jobs(&root).is_empty());
     }
 

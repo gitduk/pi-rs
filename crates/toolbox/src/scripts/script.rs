@@ -252,19 +252,22 @@ mod tests {
     #[test]
     fn an_optional_argument_is_left_out_of_required() {
         let script = Script {
-            name: "later".into(),
-            description: "Come back".into(),
+            name: "greet".into(),
+            description: "Greet someone".into(),
             args: vec![
-                ("prompt".into(), "what to do".into()),
-                ("after".into(), "optional: a delay".into()),
+                ("who".into(), "whom to greet".into()),
+                ("greeting".into(), "optional: what to say".into()),
             ],
-            path: PathBuf::from("later"),
+            path: PathBuf::from("greet"),
             runner: Runner::Cargo,
             jobs: None,
         };
         let schema = script.schema();
-        assert_eq!(schema["required"], json!(["prompt"]));
-        assert_eq!(schema["properties"]["after"]["description"], "a delay");
+        assert_eq!(schema["required"], json!(["who"]));
+        assert_eq!(
+            schema["properties"]["greeting"]["description"],
+            "what to say"
+        );
     }
 
     #[test]

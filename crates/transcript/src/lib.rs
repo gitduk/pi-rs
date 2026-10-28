@@ -103,9 +103,9 @@ pub struct Prompt {
     /// `None` when it is the same as `text`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shown: Option<String>,
-    /// Set when pi sent this ask on the model's own behalf — a `later` come
-    /// due, a background job's answer: what the model is told of where
-    /// it came from. Nobody typed it, so `shown` names it rather than echoes it.
+    /// Set for an ask sent on the model's own behalf: what the model is told
+    /// of where it came from. Nobody typed it, so `shown` names it rather than
+    /// echoes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relayed: Option<String>,
 }

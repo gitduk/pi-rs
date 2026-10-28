@@ -89,8 +89,9 @@ impl Drivers {
     /// only when the lane is free and nothing typed is waiting: what the user
     /// says comes first.
     ///
-    /// A job's result first: it was due already, and a loop's next round can
-    /// wait one turn where a loop that never settles would hold it off for good.
+    /// Queued job results together first: they were due already, and a loop's
+    /// next round can wait one turn where a loop that never settles would hold
+    /// them off for good. Inputs through jobs keep their own turns.
     pub fn next(&mut self, lane: u64, root: &std::path::Path) -> Option<Next> {
         Some(match self.jobs.take_back(root) {
             Some((_, jobs::Back::Result(due))) => Next {
@@ -359,6 +360,83 @@ mod tests {
         assert!(next.line.contains("finished"));
         assert!(marker.exists());
         assert!(drivers.next(1, root).is_none(), "reported once");
+    }
+
+    #[tokio::test]
+    async fn queued_results_open_one_turn_only_on_their_checkout() {
+        let mut drivers = Drivers::default();
+        let root = std::path::Path::new("/checkout");
+        let elsewhere = std::path::Path::new("/elsewhere");
+        let table = drivers.jobs();
+        let sink = jobs::Jobs::new(table.clone());
+        let first = sink.start(root.into(), "build".into(), Default::default(), None);
+        let other = sink.start(elsewhere.into(), "other".into(), Default::default(), None);
+        let second = sink.start(root.into(), "test".into(), Default::default(), None);
+        // Arrival order differs from registration order, as it can in a run.
+        second.result("tests passed".into());
+        second.end();
+        other.result("another checkout".into());
+        other.end();
+        first.result("built".into());
+        first.end();
+
+        let next = drivers.next(1, root).unwrap();
+        assert_eq!(next.origin, Origin::Job);
+        assert_eq!(next.label.as_deref(), Some("2 background job results"));
+        assert_eq!(
+            next.line,
+            "Background job #1 (build) reports:\n\nbuilt\n\nBackground job #3 (test) reports:\n\ntests passed"
+        );
+        assert!(next.note.contains("2 queued results"));
+        assert!(!next.as_typed);
+        assert!(
+            drivers.next(1, root).is_none(),
+            "one turn drains the backlog"
+        );
+        assert!(table.jobs(root).is_empty(), "ended jobs are settled");
+        let next = drivers.next(2, elsewhere).unwrap();
+        assert!(next.line.ends_with("another checkout"));
+        assert!(next.note.contains("background job #2 (other)"));
+        assert!(drivers.next(2, elsewhere).is_none());
+    }
+
+    #[tokio::test]
+    async fn batching_preserves_inputs_and_leaves_future_results_for_later() {
+        let mut drivers = Drivers::default();
+        let root = std::path::Path::new("/checkout");
+        let sink = jobs::Jobs::new(drivers.jobs());
+        let job = sink.start(root.into(), "watch".into(), Default::default(), None);
+        let other = sink.start(root.into(), "build".into(), Default::default(), None);
+        job.result("first".into());
+        job.result("second".into());
+        job.input("what happened?".into());
+        job.result("third".into());
+        job.input("and now?".into());
+        other.result("built".into());
+        other.end();
+
+        let batch = drivers.next(1, root).unwrap();
+        assert_eq!(batch.label.as_deref(), Some("2 background job results"));
+        assert!(batch.line.ends_with("second"));
+        assert!(!batch.line.contains("third"));
+        let input = drivers.next(1, root).unwrap();
+        assert_eq!(input.origin, Origin::Input(job.id()));
+        assert_eq!(input.line, "what happened?");
+        assert!(input.label.is_none());
+        assert!(input.note.is_empty());
+        assert!(drivers.next(1, root).unwrap().line.ends_with("third"));
+        let input = drivers.next(1, root).unwrap();
+        assert_eq!(input.origin, Origin::Input(job.id()));
+        assert_eq!(input.line, "and now?");
+        assert!(drivers.next(1, root).unwrap().line.ends_with("built"));
+        assert!(drivers.next(1, root).is_none());
+
+        job.result("later".into());
+        job.end();
+        let next = drivers.next(1, root).unwrap();
+        assert!(next.line.ends_with("later"));
+        assert!(next.note.contains("background job #1 (watch)"));
+        assert!(drivers.next(1, root).is_none());
     }
 
     #[tokio::test]

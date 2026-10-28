@@ -297,9 +297,8 @@ their own keys; Insert mode keeps its editing keys. `/keys` includes this help.
   several, `space` marks them while nothing is typed (or in Normal), and
   `enter` sends the marked ones as one prompt, a line each; a command is
   only picked alone.
-  [`examples/tools/`](examples/tools/) has six to copy: `search`; `judge`,
-  which reads its key from there; `later`, a prompt the model leaves itself
-  for after a delay or on a period; `choose`, through which the model puts
+  [`examples/tools/`](examples/tools/) has five to copy: `search`; `judge`,
+  which reads its key from there; `choose`, through which the model puts
   you a question and ends its turn; `wechat`, which bridges the session
   to a WeChat chat — ask for it, scan the QR the first time, and what you
   send from the phone arrives as turns, `/stop` included, and a question

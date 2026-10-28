@@ -211,7 +211,7 @@ impl Tool for Bash {
             "type": "boolean",
             "description": "Run it apart from this turn — a build, a deploy, a dev server, a \
                 watcher: the call returns at once with a job id, and once it exits its status \
-                and output come back as a turn of its own. No timeout applies, and it ends with \
+                and output come back in a turn with other queued job results. No timeout applies, and it ends with \
                 this process. What it prints stays readable while it runs, so leave it \
                 unredirected; use this, not nohup or `&`, for anything meant to keep running.",
         });
