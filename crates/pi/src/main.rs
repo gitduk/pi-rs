@@ -380,7 +380,7 @@ async fn run(updated_from: Option<String>) -> Result<Ended> {
     let _stop = stop.clone().drop_guard();
     ctx = ctx.with_cancel(stop.clone());
     let patch = Arc::make_mut(&mut ag.brief);
-    patch.registry = core::shells::scoped(&ctx, std::mem::take(&mut patch.registry));
+    patch.registry = core::shells::foreground(std::mem::take(&mut patch.registry));
 
     // Always through the log: a loaded session whose view happens to be empty
     // still has history worth keeping, and `resume` handles an empty session.

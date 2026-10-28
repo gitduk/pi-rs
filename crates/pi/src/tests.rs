@@ -213,37 +213,43 @@ async fn scoped_shell_jobs_are_isolated_and_stopped_with_their_owner_or_explicit
 
 #[tokio::test]
 async fn cancelling_a_shell_before_its_soft_timeout_stops_the_process_group() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-    let _stop = ctx.cancel.clone().drop_guard();
-    let registry = core::shells::scoped(&ctx, toolbox::builtin());
-    let bash = registry.get(toolbox::bash::Bash::NAME).unwrap();
-    let call = {
-        let ctx = ctx.clone();
-        tokio::spawn(async move {
-            bash.execute(
-                serde_json::json!({"command": "sleep 30 & echo \"$$ $!\" > pids; wait"}),
-                &ctx,
-            )
-            .await
-        })
-    };
-    let processes = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Ok(output) = std::fs::read_to_string(dir.path().join("pids"))
-                && let Some(processes) = Processes::printed(&output)
-            {
-                break processes;
+    for foreground in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+        let _stop = ctx.cancel.clone().drop_guard();
+        let registry = if foreground {
+            core::shells::foreground(toolbox::builtin())
+        } else {
+            core::shells::scoped(&ctx, toolbox::builtin())
+        };
+        let bash = registry.get(toolbox::bash::Bash::NAME).unwrap();
+        let call = {
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                bash.execute(
+                    serde_json::json!({"command": "sleep 30 & echo \"$$ $!\" > pids; wait"}),
+                    &ctx,
+                )
+                .await
+            })
+        };
+        let processes = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(output) = std::fs::read_to_string(dir.path().join("pids"))
+                    && let Some(processes) = Processes::printed(&output)
+                {
+                    break processes;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    ctx.cancel.cancel();
-    assert!(matches!(
-        call.await.unwrap(),
-        Err(tool::ToolError::Cancelled)
-    ));
-    processes.wait_gone().await;
+        })
+        .await
+        .unwrap();
+        ctx.cancel.cancel();
+        assert!(matches!(
+            call.await.unwrap(),
+            Err(tool::ToolError::Cancelled)
+        ));
+        processes.wait_gone().await;
+    }
 }

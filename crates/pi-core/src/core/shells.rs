@@ -6,6 +6,14 @@ use tool::{Ctx, Registry};
 
 use crate::driver::jobs::{Jobs, Table};
 
+/// Give a run a shell that waits for each command to exit. There are no
+/// detached commands to control; cancellation releases the active process.
+pub fn foreground(mut registry: Registry) -> Registry {
+    let jobs = Arc::new(Jobs::scoped(Arc::new(Table::default())));
+    registry.fallback(Arc::new(toolbox::bash::Bash::scoped(jobs).until_exit()));
+    registry
+}
+
 /// Give a run a shell and job controls of its own. Its cancellation releases
 /// unfinished commands; another run cannot list or stop them.
 pub fn scoped(ctx: &Ctx, mut registry: Registry) -> Registry {
@@ -35,47 +43,65 @@ mod tests {
 
     #[tokio::test]
     async fn scoped_shell_registration_respects_tool_cuts_and_live_sources() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
-        let _stop = ctx.cancel.clone().drop_guard();
-        let full = scoped(&ctx, toolbox::builtin());
-        assert!(full.get("job").is_none());
-        let shell = full.get(toolbox::bash::Bash::NAME).unwrap();
-        assert!(shell.schema()["properties"].get("join").is_some());
-        assert!(shell.schema()["properties"].get("wait").is_none());
-        let read_only = scoped(&ctx, toolbox::builtin().within(tool::Tier::Read));
-        assert!(read_only.get(toolbox::bash::Bash::NAME).is_none());
-        let hidden = scoped(&ctx, toolbox::builtin().without(toolbox::bash::Bash::NAME));
-        assert!(hidden.get(toolbox::bash::Bash::NAME).is_none());
+        let registrations: [fn(&Ctx, Registry) -> Registry; 2] =
+            [scoped, |_, registry| foreground(registry)];
+        for register in registrations {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+            let _stop = ctx.cancel.clone().drop_guard();
+            let full = register(&ctx, toolbox::builtin());
+            assert!(full.get("job").is_none());
+            let shell = full.get(toolbox::bash::Bash::NAME).unwrap();
+            assert!(shell.schema()["properties"].get("wait").is_none());
+            assert!(shell.schema()["properties"].get("background").is_none());
+            let read_only = register(&ctx, toolbox::builtin().within(tool::Tier::Read));
+            assert!(read_only.get(toolbox::bash::Bash::NAME).is_none());
+            let hidden = register(&ctx, toolbox::builtin().without(toolbox::bash::Bash::NAME));
+            assert!(hidden.get(toolbox::bash::Bash::NAME).is_none());
 
-        let script = dir.path().join("bash");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\n# ---\n# description = \"custom shell\"\n# ---\nprintf custom\n",
-        )
-        .unwrap();
-        let mut registry = toolbox::builtin();
-        registry.read(Arc::new(toolbox::scripts::Dir::new(dir.path())));
-        let registry = scoped(&ctx, registry);
-        let custom = registry.get(toolbox::bash::Bash::NAME).unwrap();
-        assert!(
-            custom
-                .execute(json!({}), &ctx)
-                .await
-                .unwrap()
-                .flatten()
-                .contains("custom")
-        );
-        std::fs::remove_file(script).unwrap();
-        let builtin = registry.get(toolbox::bash::Bash::NAME).unwrap();
-        assert!(
-            builtin
-                .execute(json!({"command": "echo builtin"}), &ctx)
-                .await
-                .unwrap()
-                .flatten()
-                .contains("builtin")
-        );
+            let script = dir.path().join("bash");
+            std::fs::write(
+                &script,
+                "#!/bin/sh\n# ---\n# description = \"custom shell\"\n# ---\nprintf custom\n",
+            )
+            .unwrap();
+            let mut registry = toolbox::builtin();
+            registry.read(Arc::new(toolbox::scripts::Dir::new(dir.path())));
+            let registry = register(&ctx, registry);
+            let custom = registry.get(toolbox::bash::Bash::NAME).unwrap();
+            assert!(
+                custom
+                    .execute(json!({}), &ctx)
+                    .await
+                    .unwrap()
+                    .flatten()
+                    .contains("custom")
+            );
+            std::fs::remove_file(script).unwrap();
+            let builtin = registry.get(toolbox::bash::Bash::NAME).unwrap();
+            assert!(
+                builtin
+                    .execute(json!({"command": "echo builtin"}), &ctx)
+                    .await
+                    .unwrap()
+                    .flatten()
+                    .contains("builtin")
+            );
+        }
+    }
+
+    #[test]
+    fn foreground_shell_only_accepts_commands_and_describes_the_wait() {
+        let registry = foreground(toolbox::builtin());
+        let shell = registry.get(toolbox::bash::Bash::NAME).unwrap();
+        let schema = shell.schema();
+        let properties = schema["properties"].as_object().unwrap();
+        assert_eq!(properties.len(), 2);
+        assert!(properties.contains_key("command"));
+        assert!(properties.contains_key("cwd"));
+        assert_eq!(schema["required"], json!(["command"]));
+        assert!(shell.description().contains("Wait for the command to exit"));
+        assert!(!shell.description().contains("job id"));
     }
 
     struct ShellModel {

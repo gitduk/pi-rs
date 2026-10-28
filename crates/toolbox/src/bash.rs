@@ -73,6 +73,7 @@ pub struct Bash {
     jobs: Arc<dyn JobSink>,
     controls: Option<Arc<dyn JobControls>>,
     background: bool,
+    foreground_wait: Option<std::time::Duration>,
     description: String,
 }
 
@@ -85,6 +86,7 @@ impl Bash {
             jobs,
             controls: None,
             background: true,
+            foreground_wait: Some(FOREGROUND_WAIT),
             description: format!(
                 "{} After at most {} seconds, return a running job id and its latest output; \
                  the command keeps running until it exits or you stop the job. For long-running \
@@ -102,6 +104,17 @@ impl Bash {
             background: false,
             ..Self::new(jobs)
         }
+    }
+
+    /// Keep each foreground command in its call until it exits or the run is cancelled.
+    /// Configure this before adding controls, if any.
+    pub fn until_exit(mut self) -> Self {
+        self.foreground_wait = None;
+        self.description = format!(
+            "{DESCRIPTION} Wait for the command to exit and return its exit status and output. \
+             No automatic timeout applies; stop the run to cancel an unfinished command."
+        );
+        self
     }
 
     /// Add the host's controls for the jobs kept by this shell. The host
@@ -289,7 +302,6 @@ impl Tool for Bash {
             )
             .await;
         }
-        let timeout = FOREGROUND_WAIT;
         let preview = first_line(&args.command).to_string();
         let (command, cwd) = prepare(args, self.tier(), ctx).await?;
         let before = crate::drift::before(ctx);
@@ -310,7 +322,12 @@ impl Tool for Bash {
                     let moved = crate::drift::absorb(ctx, before);
                     return Ok(crate::drift::tell(ran.output(preview), &moved));
                 }
-                () = tokio::time::sleep(timeout) => {}
+                () = async {
+                    match self.foreground_wait {
+                        Some(timeout) => tokio::time::sleep(timeout).await,
+                        None => std::future::pending().await,
+                    }
+                } => {}
             }
         }
         let job = self.jobs.start(
@@ -330,7 +347,10 @@ impl Tool for Bash {
                  Continue independent work, or report progress and end this turn. Do not poll or wait for it."
             )
         } else {
-            let elapsed = llm::figures::elapsed(timeout);
+            let elapsed = llm::figures::elapsed(
+                self.foreground_wait
+                    .expect("a soft timeout returned the call"),
+            );
             let output = peek();
             let output = if output.is_empty() {
                 "no output yet"
@@ -632,6 +652,58 @@ mod background_tests {
             .await
             .unwrap();
         assert!(out.flatten().contains("hi"), "{}", out.flatten());
+    }
+
+    #[tokio::test]
+    async fn waiting_until_exit_never_hands_a_long_command_to_a_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        let ctx = ctx(dir.path());
+        let call = {
+            let sink = sink.clone();
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                Bash::scoped(sink)
+                    .until_exit()
+                    .execute(
+                        json!({"command": "echo start >> starts; echo before; while [ ! -f release ]; do sleep 0.01; done; echo after; echo warning >&2; exit 3"}),
+                        &ctx,
+                    )
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !dir.path().join("starts").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the foreground command started");
+        tokio::time::sleep(FOREGROUND_WAIT + Duration::from_millis(200)).await;
+        let returned_early = call.is_finished();
+        let registered = sink.said.lock().unwrap().clone();
+        // Release the process even if the foreground wait regresses.
+        std::fs::write(dir.path().join("release"), "").unwrap();
+        let out = tokio::time::timeout(Duration::from_secs(5), call)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            !returned_early,
+            "the call must still be waiting after 10 seconds"
+        );
+        assert!(registered.is_empty(), "no job was started: {registered:?}");
+        assert!(sink.said.lock().unwrap().is_empty());
+        assert!(out.warned);
+        assert!(!out.preview().contains("[background"));
+        for expected in ["before", "after", "warning", "exit 3"] {
+            assert!(out.flatten().contains(expected), "{}", out.flatten());
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("starts")).unwrap(),
+            "start\n"
+        );
     }
 
     #[tokio::test]

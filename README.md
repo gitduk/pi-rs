@@ -237,8 +237,8 @@ also continues when messages are waiting. Generation is never interrupted.
   not start is listed as `<name>__unavailable`, with the reason; `/mcp`
   shows each server and its tools, and `/mcp restart` reconnects them. A call
   with no answer in 10 minutes is given up.
-- `bash` runs commands and manages background work. A regular command waits at
-  most 10 seconds, then returns a job id and the latest output while the original
+- In interactive mode, `bash` runs commands and manages background work. A regular
+  command waits at most 10 seconds, then returns a job id and the latest output while the original
   command keeps running. `background: true` returns immediately. Add `wait` to
   delay the start **in seconds**, for example:
   `{"command":"python3 report.py","background":true,"wait":30}`. The delay
@@ -249,9 +249,12 @@ also continues when messages are waiting. Generation is never interrupted.
   Background results automatically open later turns once the checkout is idle;
   the model can continue independent work or report progress and end its turn.
   The separate job tool and its former completion-wait interface are removed.
-  Subagents and noninteractive runs keep their commands isolated and stop them
-  when their owning run ends; their shell offers `join` to collect results
-  before ending. These runs do not offer delayed background starts.
+  One-shot runs such as `pi "fix the flaky test"` wait for each command to exit,
+  without automatically moving it to the background or imposing a timeout.
+  Interrupting the run stops the command and its process group.
+  Subagents keep their commands isolated and stop them when their owning run
+  ends; their shell offers `join` to collect results before ending.
+  One-shot runs and subagents do not offer delayed background starts.
   A `subagent` call with `background`, or a script that detaches, uses the same
   job table and shell controls. Jobs appear above the input line; clicking one
   shows its output. The task-list keys and bash controls stop or restart jobs;
