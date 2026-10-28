@@ -505,6 +505,20 @@ impl Ui {
                 self.on_drag(mouse.column, mouse.row);
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                if !self.reading() {
+                    let deed = match self.target_at(mouse.row) {
+                        Some(super::mouse::Target::JobResults(_)) => {
+                            Some(Deed::JobResults(!self.job_results_shown))
+                        }
+                        Some(super::mouse::Target::JobResult(_, id)) => Some(Deed::Job(id)),
+                        _ => None,
+                    };
+                    if let Some(deed) = deed {
+                        self.press = None;
+                        self.selection = None;
+                        return Asked::Own(deed);
+                    }
+                }
                 self.on_press(view, mouse.column, mouse.row);
             }
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => {

@@ -32,6 +32,9 @@ impl Ui {
         }
         self.every_job = all;
         self.jobs = jobs;
+        if !self.every_job.iter().any(|j| j.state == State::Back) {
+            self.job_results_shown = false;
+        }
     }
 
     pub(super) fn leave_jobs(&mut self) {

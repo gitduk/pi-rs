@@ -134,6 +134,8 @@ pub(super) struct Ui {
     pub(super) job_focus: Option<u64>,
     // Queued results need rows even without a live process.
     pub(super) every_job: Vec<pi_core::driver::jobs::Job>,
+    // Independent of the running-job list.
+    pub(super) job_results_shown: bool,
     // The front lane's tools, for `/tool` to complete; read only when it does,
     // since reading one re-stats the tools directory.
     pub(super) tools: Option<Arc<agent::Briefing>>,
@@ -202,6 +204,7 @@ impl Ui {
     // there, and gives the line back first.
     pub(super) fn leave_lane(&mut self, view: &mut View) {
         self.leave_jobs();
+        self.job_results_shown = false;
         self.search_close(view);
         view.draft = self.editor.take_composing();
         self.flash = None;
@@ -258,6 +261,7 @@ impl Ui {
             jobs: Vec::new(),
             job_focus: None,
             every_job: Vec::new(),
+            job_results_shown: false,
             tools: None,
             job_open: None,
             job_rows: Vec::new(),

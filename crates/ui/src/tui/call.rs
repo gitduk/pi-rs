@@ -8,6 +8,7 @@ use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 
 use super::browse::PageLine;
+use super::mouse::Target;
 use super::row::{self, PendingTool, Row, Stage, StepMark};
 use super::scrollback::{Folds, Scrollback};
 use super::ui::OpenJob;
@@ -244,6 +245,73 @@ pub(super) fn job_page(job: &Job, body: &str, paint: &Paint) -> Vec<PageLine> {
     std::iter::once(head.into()).chain(said).collect()
 }
 
+// Finished jobs can accumulate while a turn holds their delivery.
+pub(super) fn job_results(
+    jobs: &[Job],
+    open: bool,
+    hovered: Option<Target>,
+    paint: &Paint,
+    width: usize,
+    at: usize,
+) -> (Vec<Line<'static>>, Vec<Target>) {
+    let jobs: Vec<_> = jobs.iter().filter(|j| j.state == State::Back).collect();
+    if jobs.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let room = width.saturating_sub(1);
+    let text = format!(
+        "{} {} waiting{}click to {}",
+        icons::RELAYED_MARK,
+        row::count(jobs.len(), "job result"),
+        icons::PART_SEP,
+        if open { "collapse" } else { "expand" },
+    );
+    let shine = matches!(hovered, Some(Target::JobResults(_)));
+    let mut spans = vec![paint.action_hint(shine, within(&text, room))];
+    if !open && let Some(job) = jobs.iter().rev().find(|j| !j.last.is_empty()) {
+        let latest = format!("{}#{} {}", icons::PART_SEP, job.id, job.last);
+        spans.push(paint.span(
+            &paint.theme.muted,
+            within(&latest, room.saturating_sub(pi_store::text::width(&text))),
+        ));
+    }
+    let mut lines = vec![Line::from(spans)];
+    let mut targets = vec![Target::JobResults(at)];
+    if open {
+        for job in jobs {
+            let (head, _) = job_text(job);
+            let ([head, last, tail], _) = fit_job_row(head, String::new(), &job.last, width);
+            let shine = matches!(hovered, Some(Target::JobResult(_, id)) if id == job.id);
+            lines.push(closed_job_line(job, &head, last, tail, shine, paint));
+            targets.push(Target::JobResult(at + targets.len(), job.id));
+        }
+    }
+    (lines, targets)
+}
+
+fn closed_job_line(
+    job: &Job,
+    head: &str,
+    last: String,
+    tail: String,
+    shine: bool,
+    paint: &Paint,
+) -> Line<'static> {
+    let muted = |s: String| paint.span_hovered(shine, &paint.theme.muted, s);
+    // What it printed in italics, read apart from what was run.
+    let (sep, said) = match last.strip_prefix(icons::PART_SEP) {
+        Some(said) => (icons::PART_SEP.to_string(), said.to_string()),
+        None => (String::new(), last),
+    };
+    let mut said = muted(said);
+    if paint.color {
+        said = said.italic();
+    }
+    let mut spans = job_head(job, head, shine, paint);
+    spans.extend([muted(sep), said, muted(tail)]);
+    Line::from(spans)
+}
+
 // One row per job, `hovered` bold; the `open` one whole, wrapped, with the
 // tail of `body` under it. Also the job whose own row each is, for a click
 // to find; what it printed under it is no one's.
@@ -287,19 +355,7 @@ pub(super) fn job_lines(
             rows
         } else {
             let ([head, last, tail], _) = job_row(job, width);
-            let muted = |s: String| paint.span_hovered(shine, &paint.theme.muted, s);
-            // What it printed in italics, read apart from what was run.
-            let (sep, said) = match last.strip_prefix(icons::PART_SEP) {
-                Some(said) => (icons::PART_SEP.to_string(), said.to_string()),
-                None => (String::new(), last),
-            };
-            let mut said = muted(said);
-            if paint.color {
-                said = said.italic();
-            }
-            let mut spans = job_head(job, &head, shine, paint);
-            spans.extend([muted(sep), said, muted(tail)]);
-            let row = Line::from(spans);
+            let row = closed_job_line(job, &head, last, tail, shine, paint);
             ids.push(JobRow::Job(job.id));
             vec![row]
         };
@@ -321,9 +377,13 @@ pub(super) fn job_lines(
 // it printed, then its clock. A long command keeps half of what the clock
 // leaves; the line it printed takes the rest.
 fn job_row(job: &Job, width: usize) -> ([String; 3], bool) {
-    let room = width.saturating_sub(1);
     let (head, tail) = job_text(job);
-    let last = match job.last.as_str() {
+    fit_job_row(head, tail, &job.last, width)
+}
+
+fn fit_job_row(head: String, tail: String, last: &str, width: usize) -> ([String; 3], bool) {
+    let room = width.saturating_sub(1);
+    let last = match last {
         "" => String::new(),
         last => format!("{}{last}", icons::PART_SEP),
     };

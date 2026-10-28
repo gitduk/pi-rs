@@ -58,7 +58,7 @@ impl Ui {
             let hovered = self.hovered_scrollback.filter(|h| h.0 == idx).map(|h| h.1);
             row.update_live(hovered, self.spinner, flight);
         }
-        let (live, pending_rows) = self.live(lane, view, row_holds, now);
+        let (live, live_targets) = self.live(lane, view, row_holds, now);
 
         // What the keys asked is answered before anything is laid out, so the
         // list, the bar and the line are drawn as the answer left them.
@@ -211,14 +211,8 @@ impl Ui {
                 (item, Target::Scrollback(idx, line))
             });
 
-        // The pending-call rows lead the live block; a click on one opens or
-        // closes the batch.
         let live_stream = live.iter().enumerate().map(move |(i, s)| {
-            let target = if i < pending_rows && !s.spans.is_empty() {
-                Target::PendingTools(i)
-            } else {
-                Target::Live(i)
-            };
+            let target = live_targets[i];
             // In hand already, and the window takes it as it is.
             (
                 Piece::Live(screen::Ready {
@@ -494,15 +488,13 @@ impl Ui {
         })
     }
 
-    // Rows above the input: calls in flight the group isn't drawing, the
-    // open stream, the status line. Includes the count leading pending calls.
     pub(super) fn live(
         &self,
         lane: &Lane,
         view: &View,
         row_holds: bool,
         now: std::time::Instant,
-    ) -> (Vec<Line<'static>>, usize) {
+    ) -> (Vec<Line<'static>>, Vec<Target>) {
         let width = self.screen.width();
         let mut rows: Vec<Line<'static>> = Vec::new();
         let thinking = view.surface.stream.kind == StreamKind::Reasoning;
@@ -603,17 +595,6 @@ impl Ui {
             }
         }
         // Typed lines precede job results to match delivery priority.
-        let jobs = self
-            .every_job
-            .iter()
-            .filter(|job| job.state == pi_core::driver::jobs::State::Back)
-            .map(|job| {
-                let result = match job.last.as_str() {
-                    "" => String::new(),
-                    last => format!("{}{last}", icons::PART_SEP),
-                };
-                format!("#{} {}{result}", job.id, job.description)
-            });
         let waiting = |mark: &str, line: &str| {
             let first = line.lines().next().unwrap_or_default();
             let more = if line.trim_end().contains('\n') {
@@ -631,9 +612,29 @@ impl Ui {
                 .filter_map(|q| q.line.as_deref())
                 .flat_map(|line| waiting(icons::SAID_RULE, line)),
         );
-        rows.extend(jobs.flat_map(|line| waiting(icons::RELAYED_MARK, &line)));
-
-        (rows, pending_rows)
+        let mut targets: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                if i < pending_rows && !row.spans.is_empty() {
+                    Target::PendingTools(i)
+                } else {
+                    Target::Live(i)
+                }
+            })
+            .collect();
+        let hovered = self.pointer.and_then(|(_, row)| self.target_at(row));
+        let (results, result_targets) = call::job_results(
+            &self.every_job,
+            self.job_results_shown,
+            hovered,
+            &self.paint,
+            width,
+            rows.len(),
+        );
+        rows.extend(results);
+        targets.extend(result_targets);
+        (rows, targets)
     }
 
     // `judge #3 · tests failed, now what? · space mark · tab take …`: who

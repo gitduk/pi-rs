@@ -323,3 +323,134 @@ fn global_cancel_keeps_working_and_paste_does_not_change_a_focused_draft() {
     ));
     assert_eq!(ui.job_focus, None);
 }
+
+#[test]
+fn waiting_results_fold_without_wrapping_long_commands() {
+    use crate::tui::mouse::Target;
+    use crate::tui::screen::{plain, rows};
+
+    let (_dir, lane) = a_running_lane();
+    let view = View::default();
+    let mut pending = jobs(&(1..=14).collect::<Vec<_>>());
+    for job in &mut pending {
+        job.state = State::Back;
+        job.description = format!("python3 -c '{}'", "长命令 ".repeat(100));
+    }
+    pending.last_mut().unwrap().last = "KeyError: 'agentId'".into();
+    pending.extend(jobs(&[15]));
+
+    for width in [20, 40, 80] {
+        let mut ui = test_ui(width, 24);
+        ui.sync_jobs(pending.clone());
+        let (live, targets) = ui.live(&lane, &view, false, std::time::Instant::now());
+        assert_eq!(live.len(), targets.len());
+        let at = targets
+            .iter()
+            .position(|t| matches!(t, Target::JobResults(_)))
+            .unwrap();
+        assert_eq!(live.len(), at + 1, "all results share one row");
+        assert_eq!(rows(&live[at], width as usize), 1);
+        if width == 80 {
+            assert!(plain(&live[at]).contains(&pending[13].last));
+        }
+
+        ui.job_results_shown = true;
+        let (live, targets) = ui.live(&lane, &view, false, std::time::Instant::now());
+        let ids: Vec<_> = targets
+            .iter()
+            .filter_map(|t| match t {
+                Target::JobResult(_, id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, (1..=14).collect::<Vec<_>>());
+        assert!(live[at..].iter().all(|l| rows(l, width as usize) == 1));
+        assert_eq!(ui.jobs.iter().map(|j| j.id).collect::<Vec<_>>(), [15]);
+
+        ui.sync_jobs(jobs(&[15]));
+        assert!(!ui.job_results_shown, "the next batch starts folded");
+    }
+}
+
+#[tokio::test]
+async fn waiting_results_expand_and_open_the_original_output_without_delivering_it() {
+    use crate::tui::mouse::Target;
+    use crate::tui::screen::plain;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut tui = surface(dir.path());
+    let root = tui.core.lane().root().to_path_buf();
+    let table = tui.drivers.jobs();
+    let sink = pi_core::driver::jobs::Jobs::new(table.clone());
+    let command = format!("python3 -c '{}'", "long command ".repeat(30));
+    let job = toolbox::background::JobSink::start(
+        &sink,
+        root.clone(),
+        command.clone(),
+        Default::default(),
+        None,
+    );
+    let output = "exited 1:\nTraceback (most recent call last):\nKeyError: 'agentId'";
+    job.result(output.into());
+    job.end();
+    tui.ui.sync_jobs(table.jobs(&root));
+
+    let flush = |tui: &mut crate::tui::Tui| {
+        let view = crate::tui::view_at(&mut tui.views, tui.core.lane().token());
+        tui.ui.flush(tui.core.lane(), view);
+    };
+    let click = |tui: &mut crate::tui::Tui, at: usize| {
+        press(
+            tui,
+            TermEvent::Mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 5,
+                row: tui.ui.regions.history.y + at as u16,
+                modifiers: KeyModifiers::NONE,
+            }),
+        )
+    };
+
+    flush(&mut tui);
+    let at = tui
+        .ui
+        .row_targets
+        .iter()
+        .position(|t| matches!(t, Target::JobResults(_)))
+        .unwrap();
+    let asked = click(&mut tui, at);
+    assert_eq!(deed(asked), Deed::JobResults(true));
+    tui.carry(Deed::JobResults(true)).await;
+    flush(&mut tui);
+    let at = tui
+        .ui
+        .row_targets
+        .iter()
+        .position(|t| matches!(t, Target::JobResult(_, id) if *id == job.id()))
+        .unwrap();
+    let asked = click(&mut tui, at);
+    tui.carry(deed(asked)).await;
+    let page = tui
+        .ui
+        .page()
+        .unwrap()
+        .iter()
+        .map(|r| plain(&r.line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(page.contains(&command), "the command is whole");
+    assert!(page.contains(output), "the complete error is available");
+    assert_eq!(table.waiting(&root, job.id()).unwrap(), [output]);
+
+    tui.ui.close_page();
+    flush(&mut tui);
+    let at = tui
+        .ui
+        .row_targets
+        .iter()
+        .position(|t| matches!(t, Target::JobResults(_)))
+        .unwrap();
+    let asked = click(&mut tui, at);
+    tui.carry(deed(asked)).await;
+    assert!(!tui.ui.job_results_shown);
+}

@@ -101,6 +101,8 @@ pub(crate) enum Deed {
     Unsend,
     // A job's row clicked: what it said that is not back yet, on a page.
     Job(u64),
+    // Show or hide the completed jobs waiting for delivery.
+    JobResults(bool),
     // An empty list stops every running job in the current checkout.
     StopJobs(Vec<u64>),
     RestartJobs(Vec<u64>),
@@ -126,6 +128,7 @@ impl Deed {
             | Deed::Interrupt
             | Deed::Unsend
             | Deed::Job(_)
+            | Deed::JobResults(_)
             | Deed::StopJobs(_)
             | Deed::RestartJobs(_)
             | Deed::Tidy
@@ -144,6 +147,7 @@ impl Deed {
             | Deed::Interrupt
             | Deed::Unsend
             | Deed::Job(_)
+            | Deed::JobResults(_)
             | Deed::StopJobs(_)
             | Deed::RestartJobs(_) => true,
         }
@@ -513,7 +517,20 @@ impl Tui {
             Deed::Unsend => self.stop_current(true),
             Deed::Rewind => self.open_rewind(),
             Deed::External => self.edit_externally().await,
+            Deed::JobResults(shown) => self.ui.job_results_shown = shown,
             Deed::Job(id) => {
+                if let Some(job) = self
+                    .ui
+                    .every_job
+                    .iter()
+                    .find(|j| j.id == id && j.state == pi_core::driver::jobs::State::Back)
+                {
+                    if let Some(body) = self.drivers.jobs().body(self.core.lane().root(), id) {
+                        self.ui
+                            .open_page(call::job_page(job, &body, &self.ui.paint));
+                    }
+                    return;
+                }
                 self.ui.job_open = match &self.ui.job_open {
                     Some(open) if open.id == id => None,
                     _ => Some(ui::OpenJob {

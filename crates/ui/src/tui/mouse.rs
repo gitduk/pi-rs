@@ -492,6 +492,9 @@ pub(super) enum Target {
     // Row `i` of the live block: a pending call, a click on it opening or
     // closing the batch, or the rest.
     PendingTools(usize),
+    // Completed jobs waiting to be delivered in the live block.
+    JobResults(usize),
+    JobResult(usize, u64),
     Live(usize),
     // Line `n` of the text the reading page shows.
     Text(usize),
