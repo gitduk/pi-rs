@@ -254,21 +254,22 @@ pub(super) fn job_results(
     width: usize,
     at: usize,
 ) -> (Vec<Line<'static>>, Vec<Target>) {
-    let jobs: Vec<_> = jobs.iter().filter(|j| j.state == State::Back).collect();
-    if jobs.is_empty() {
+    let jobs = jobs.iter().filter(|j| j.state == State::Back);
+    let count = jobs.clone().count();
+    if count == 0 {
         return (Vec::new(), Vec::new());
     }
     let room = width.saturating_sub(1);
     let text = format!(
         "{} {} waiting{}click to {}",
         icons::RELAYED_MARK,
-        row::count(jobs.len(), "job result"),
+        row::count(count, "job result"),
         icons::PART_SEP,
         if open { "collapse" } else { "expand" },
     );
     let shine = matches!(hovered, Some(Target::JobResults(_)));
     let mut spans = vec![paint.action_hint(shine, within(&text, room))];
-    if !open && let Some(job) = jobs.iter().rev().find(|j| !j.last.is_empty()) {
+    if !open && let Some(job) = jobs.clone().rev().find(|j| !j.last.is_empty()) {
         let latest = format!("{}#{} {}", icons::PART_SEP, job.id, job.last);
         spans.push(paint.span(
             &paint.theme.muted,

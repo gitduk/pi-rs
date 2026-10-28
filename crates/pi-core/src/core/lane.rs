@@ -251,10 +251,9 @@ pub fn arm(
     agent.apply(brief);
     // Re-armed as often as the config or the job table moves; the same tool
     // stands down every time, so the note is kept once.
-    let kept = Arc::make_mut(&mut resolved);
     for line in said {
-        if !kept.notes.contains(&line) {
-            kept.notes.push(line);
+        if !resolved.notes.contains(&line) {
+            Arc::make_mut(&mut resolved).notes.push(line);
         }
     }
     resolved

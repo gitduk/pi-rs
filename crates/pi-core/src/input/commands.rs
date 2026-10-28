@@ -457,13 +457,13 @@ fn params(schema: &serde_json::Value) -> impl Iterator<Item = Param<'_>> {
 
 // After a tool's command word: the keys not given yet, while no `=` is typed.
 fn tool_args(tool: &dyn tool::Tool, head: &str, typed: &str) -> Vec<Candidate> {
+    if typed.contains(['=', '"']) {
+        return Vec::new();
+    }
     let schema = tool.schema();
     let given: Vec<&str> = (head.split_whitespace().skip(1))
         .filter_map(|w| w.split_once('=').map(|(k, _)| k))
         .collect();
-    if typed.contains(['=', '"']) {
-        return Vec::new();
-    }
     params(&schema)
         .filter(|p| p.name.starts_with(typed) && !given.contains(&p.name))
         .map(|p| Candidate {

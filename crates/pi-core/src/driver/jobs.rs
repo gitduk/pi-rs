@@ -159,8 +159,7 @@ impl Inner {
     }
 
     // One queued message, with the same bookkeeping for results and inputs.
-    fn take_back(&mut self, root: &Path, results_only: bool) -> Option<(u64, Back)> {
-        let (at, back) = self.back_at(root, results_only)?;
+    fn take_back(&mut self, at: usize, back: usize) -> Option<(u64, Back)> {
         let item = &mut self.items[at];
         let id = item.id;
         let mut back = item.waiting.remove(back)?;
@@ -622,7 +621,8 @@ impl Table {
 
     fn take_next(&self, root: &Path, results_only: bool) -> Option<(u64, Back)> {
         let mut inner = self.lock();
-        let (id, back) = inner.take_back(root, results_only)?;
+        let (at, back) = inner.back_at(root, results_only)?;
+        let (id, back) = inner.take_back(at, back)?;
         let mut due = match back {
             Back::Result(due) => due,
             input @ Back::Input { .. } => {
@@ -637,7 +637,7 @@ impl Table {
                 Some(Back::Result(_)) => {}
                 Some(Back::Input { .. }) | None => break,
             }
-            let Some((job, Back::Result(next))) = inner.take_back(root, results_only) else {
+            let Some((job, Back::Result(next))) = inner.take_back(at, back) else {
                 unreachable!("the next queued message was a result")
             };
             due.line.push_str("\n\n");
@@ -727,16 +727,17 @@ impl Table {
                 return;
             }
             inner.progress_at = Some(now);
+            let followed: HashSet<_> = inner
+                .items
+                .iter()
+                .filter(|i| i.listens.follows())
+                .map(|i| &i.root)
+                .collect();
             inner
                 .items
                 .iter()
                 .filter(|i| i.running() && i.listens.to().is_none())
-                .filter(|i| {
-                    inner
-                        .items
-                        .iter()
-                        .any(|f| f.root == i.root && f.listens.follows())
-                })
+                .filter(|i| followed.contains(&i.root))
                 .filter_map(|i| {
                     i.output
                         .clone()

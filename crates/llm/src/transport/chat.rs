@@ -282,16 +282,14 @@ impl Decoder {
         // A usage-only chunk can arrive during generation or after the finish;
         // after it, restate the ending with the counts it lacked.
         let Some(choice) = choice else {
-            return match self.stop {
-                Some(stop) if data["usage"].is_object() => vec![StreamEvent::Done {
-                    stop,
-                    usage: usage_of(&data["usage"]),
-                }],
-                None if data["usage"].is_object() => vec![StreamEvent::Usage {
-                    usage: usage_of(&data["usage"]),
-                }],
-                _ => Vec::new(),
-            };
+            if !data["usage"].is_object() {
+                return Vec::new();
+            }
+            let usage = usage_of(&data["usage"]);
+            return vec![match self.stop {
+                Some(stop) => StreamEvent::Done { stop, usage },
+                None => StreamEvent::Usage { usage },
+            }];
         };
         let delta = &choice["delta"];
         let mut events = Vec::new();

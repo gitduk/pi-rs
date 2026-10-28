@@ -486,10 +486,10 @@ pub(super) fn body(
                         .spans
                         .extend(indent.spans.clone());
                 }
-                let line = r
-                    .prefix
-                    .as_ref()
-                    .map_or_else(|| r.line.clone(), |p| p.fit_body(r.line.clone(), width));
+                let line = match &r.prefix {
+                    Some(prefix) => prefix.fit_body(r.line, width),
+                    None => r.line,
+                };
                 let rest = r.prefix.map(|prefix| {
                     let mut rest = prefix.rest;
                     if r.coded == render::Coded::Code {

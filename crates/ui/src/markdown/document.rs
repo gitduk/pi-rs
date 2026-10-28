@@ -224,7 +224,7 @@ impl Document<'_> {
                     }
                 };
                 for row in &mut rows {
-                    row.line = row.line.clone().patch_style(style);
+                    row.line.style = row.line.style.patch(style);
                 }
                 let bar = Line::from(Span::styled("│ ", style));
                 prefix(&mut rows, bar.clone(), bar);
@@ -389,17 +389,7 @@ impl Document<'_> {
                     let label = plain(&node.children);
                     let distinct = label != dest_url.as_ref()
                         && format!("mailto:{label}") != dest_url.as_ref();
-                    if distinct || !title.is_empty() {
-                        push(lines, " (", style);
-                        if distinct {
-                            push(lines, dest_url, style.patch(sheet.link()));
-                        }
-                        if !title.is_empty() {
-                            let space = if distinct { " " } else { "" };
-                            push(lines, &format!("{space}\"{title}\""), style);
-                        }
-                        push(lines, ")", style);
-                    }
+                    self.destination(lines, style, dest_url, title, distinct);
                 }
                 Event::Start(Tag::Image {
                     dest_url, title, ..
@@ -412,17 +402,7 @@ impl Document<'_> {
                     };
                     push(lines, &description, style.patch(sheet.image_alt()));
                     let distinct = !dest_url.is_empty() && alt != dest_url.as_ref();
-                    if distinct || !title.is_empty() {
-                        push(lines, " (", style);
-                        if distinct {
-                            push(lines, dest_url, style.patch(sheet.link()));
-                        }
-                        if !title.is_empty() {
-                            let space = if distinct { " " } else { "" };
-                            push(lines, &format!("{space}\"{title}\""), style);
-                        }
-                        push(lines, ")", style);
-                    }
+                    self.destination(lines, style, dest_url, title, distinct);
                 }
                 Event::Start(tag) => {
                     let nested = match tag {
@@ -439,6 +419,28 @@ impl Document<'_> {
                 Event::End(_) | Event::Rule => {}
             }
         }
+    }
+
+    fn destination(
+        &self,
+        lines: &mut Vec<Line<'static>>,
+        style: Style,
+        url: &str,
+        title: &str,
+        distinct: bool,
+    ) {
+        if !distinct && title.is_empty() {
+            return;
+        }
+        push(lines, " (", style);
+        if distinct {
+            push(lines, url, style.patch(self.format.sheet.link()));
+        }
+        if !title.is_empty() {
+            let space = if distinct { " " } else { "" };
+            push(lines, &format!("{space}\"{title}\""), style);
+        }
+        push(lines, ")", style);
     }
 }
 
@@ -458,16 +460,19 @@ fn push(lines: &mut Vec<Line<'static>>, text: &str, style: Style) {
 }
 
 fn plain(nodes: &[Node<'_>]) -> String {
-    let mut text = String::new();
-    for node in nodes {
-        match &node.event {
-            Event::Text(t) | Event::Code(t) | Event::Html(t) | Event::InlineHtml(t) => {
-                text.push_str(t)
+    fn append(nodes: &[Node<'_>], text: &mut String) {
+        for node in nodes {
+            match &node.event {
+                Event::Text(t) | Event::Code(t) | Event::Html(t) | Event::InlineHtml(t) => {
+                    text.push_str(t)
+                }
+                Event::SoftBreak | Event::HardBreak => text.push('\n'),
+                _ => append(&node.children, text),
             }
-            Event::SoftBreak | Event::HardBreak => text.push('\n'),
-            _ => text.push_str(&plain(&node.children)),
         }
     }
+    let mut text = String::new();
+    append(nodes, &mut text);
     text
 }
 

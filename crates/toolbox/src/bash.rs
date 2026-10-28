@@ -130,22 +130,13 @@ impl Bash {
 /// Queue a command independently of the calling turn, starting it after
 /// `after`. The job is registered now, so it can be stopped before launch.
 async fn schedule(
-    command: &str,
-    cwd: &str,
+    args: Args,
     after: std::time::Duration,
     ctx: &Ctx,
     jobs: &dyn JobSink,
 ) -> Result<ToolOutput, ToolError> {
-    let preview = first_line(command).to_string();
-    let (command, cwd) = prepare(
-        Args {
-            command: command.into(),
-            cwd: cwd.into(),
-        },
-        Tier::Exec,
-        ctx,
-    )
-    .await?;
+    let preview = first_line(&args.command).to_string();
+    let (command, cwd) = prepare(args, Tier::Exec, ctx).await?;
     let at = tokio::time::Instant::now()
         .checked_add(after)
         .ok_or_else(|| ToolError::Invalid("the start delay is too large".into()))?;
@@ -294,8 +285,7 @@ impl Tool for Bash {
         }
         if let Some(seconds) = after {
             return schedule(
-                &args.command,
-                &args.cwd,
+                args,
                 std::time::Duration::from_secs(seconds),
                 ctx,
                 self.jobs.as_ref(),
@@ -417,7 +407,9 @@ fn launch(command: &str, cwd: &std::path::Path, ctx: &Ctx) -> Result<Launched, T
     let group = child.id();
     let guard = group.map(crate::process::Group);
     tracing::info!(target: "pi::bash", command, cwd = %cwd.display(), ?group, "spawned");
-    let streams = crate::process::Streams::of(&mut child, ctx);
+    // Pipe readers can outlive the call as a job. Keep only what output
+    // capture needs, rather than holding the turn's locks and progress.
+    let streams = crate::process::Streams::of(&mut child, &spills_only(ctx));
     Ok(Launched {
         child,
         group,

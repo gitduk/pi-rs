@@ -1,7 +1,7 @@
 ---
 [package]
 # Bump this script's version whenever it changes.
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Bridge this session to WeChat: what the user sends from their phone arrives here as turns, and each answer goes back to the phone. Use when the user asks to connect WeChat. It runs in the background until `jobs` stops it; the first time, a QR shows in its job for the user to scan, and the login is kept for next time."
 
@@ -379,12 +379,7 @@ mod bridge {
                         timeout = Duration::from_millis(t);
                     }
                     let had = kept.target().is_some();
-                    let received = update
-                        .msgs
-                        .iter()
-                        .any(|m| m.message_type == 1 && !crate::text_of(m).is_empty());
-                    heard(kept, asking, pi, update);
-                    if received {
+                    if heard(kept, asking, pi, update) {
                         retry.notify_one();
                     }
                     // Someone to send to at last: what was asked before shows
@@ -408,10 +403,11 @@ mod bridge {
 
     // Lines go up as input, or as an answer when they only pick options;
     // `/stop` as an interrupt. The reply address moves to whoever spoke
-    // last. Saved only when something changed.
-    fn heard(kept: &Kept, asking: &Asking, pi: &Pi, update: Update) {
+    // last. Saved only when something changed. Returns whether text arrived.
+    fn heard(kept: &Kept, asking: &Asking, pi: &Pi, update: Update) -> bool {
         let mut s = kept.lock();
         let before = s.clone();
+        let mut received = false;
         if !update.get_updates_buf.is_empty() {
             s.get_updates_buf = update.get_updates_buf;
         }
@@ -423,6 +419,7 @@ mod bridge {
             if text.is_empty() {
                 continue;
             }
+            received = true;
             if matches!(text.trim(), "/stop" | "/esc") {
                 pi.say(json!({ "interrupt": true }));
                 continue;
@@ -441,6 +438,7 @@ mod bridge {
         if *s != before {
             kept.save(&s);
         }
+        received
     }
 
     // 2s between ordinary retries, 30s once three have failed in a row (the
@@ -558,7 +556,7 @@ mod bridge {
             let pieces: VecDeque<_> = split(&text, MESSAGE_LIMIT)
                 .into_iter()
                 .filter(|p| !p.trim().is_empty())
-                .map(|p| (p.to_string(), crate::client::client_id()))
+                .map(|p| (p, crate::client::client_id()))
                 .collect();
             if !pieces.is_empty() {
                 self.pending.push_back(Pending {
@@ -2008,25 +2006,25 @@ mod types {
 
     /// The text a message carries, by priority: the first text item, else a voice
     /// transcription. Media-only messages yield "".
-    pub fn text_of(msg: &WireMessage) -> String {
+    pub fn text_of(msg: &WireMessage) -> &str {
         for item in &msg.item_list {
             match item.r#type {
                 1 => {
                     if let Some(t) = &item.text_item {
-                        return t.text.clone();
+                        return &t.text;
                     }
                 }
                 3 => {
                     if let Some(v) = &item.voice_item
                         && let Some(text) = &v.text
                     {
-                        return text.clone();
+                        return text;
                     }
                 }
                 _ => {}
             }
         }
-        String::new()
+        ""
     }
 
     /// One `getupdates` response. A client-side long-poll timeout returns an empty

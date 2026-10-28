@@ -428,9 +428,8 @@ pub fn render_coded(text: &str, paint: &Paint) -> Vec<Rendered> {
         .markdown
         .get_or_init(|| crate::markdown::options(paint.theme.clone()));
     let parsed = options.render(&marked, width);
-    let prefixes: Vec<_> = parsed.iter().map(|row| row.prefix.clone()).collect();
     // Flatten block and inline styles onto the owned spans before measuring.
-    let lines = parsed
+    let (lines, prefixes): (Vec<_>, Vec<_>) = parsed
         .into_iter()
         .map(|row| {
             let line = row.line;
@@ -440,12 +439,12 @@ pub fn render_coded(text: &str, paint: &Paint) -> Vec<Rendered> {
                 .into_iter()
                 .map(|span| {
                     let style = crate::markdown::inline(line_style.patch(span.style), &paint.theme);
-                    Span::styled(span.content.to_string(), style)
+                    Span::styled(span.content.into_owned(), style)
                 })
                 .collect();
-            Line::from(spans)
+            (Line::from(spans), row.prefix)
         })
-        .collect();
+        .unzip();
     let lines = match marked {
         Cow::Owned(_) => crate::unit::strip(lines),
         Cow::Borrowed(_) => lines.into_iter().map(|l| (l, Vec::new())).collect(),
