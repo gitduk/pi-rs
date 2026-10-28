@@ -7,9 +7,9 @@ use std::path::Path;
 // Where a token ends and a new one may start. The newline keeps the scan
 // inside the line the caret is on, as the per-line parse upstream does.
 const DELIMS: [char; 6] = [' ', '\t', '"', '\'', '=', '\n'];
-// A listing stops here: a folder this full is no list to pick from anyway.
+// File suggestions are bounded; directory navigation keeps every entry.
 const WALK_CAP: usize = 2000;
-// What is offered at most.
+// What file suggestions offer at most.
 const TOP: usize = 20;
 
 /// One candidate: the path as the completed `@token` should read,
@@ -84,7 +84,7 @@ pub fn candidates(query: &str, root: &Path) -> Vec<FileEntry> {
             break;
         }
     }
-    rank(raw, name, &display_base)
+    rank(raw, name, &display_base, false)
 }
 
 /// Candidates under `home` for the text after `~/`, each spelled from `~/`.
@@ -134,9 +134,9 @@ fn listed(query: &str, base: &Path, lead: &str, dirs_only: bool) -> Vec<FileEntr
             let dir = e.path().is_dir();
             ((hidden || !rel.starts_with('.')) && (dir || !dirs_only)).then_some((rel, dir))
         })
-        .take(WALK_CAP)
+        .take(if dirs_only { usize::MAX } else { WALK_CAP })
         .collect();
-    rank(raw, name, &display_base)
+    rank(raw, name, &display_base, dirs_only)
 }
 
 // The folder `query` names under `root`, how its entries are spelled from
@@ -152,8 +152,14 @@ fn split(query: &str, root: &Path, lead: &str) -> (std::path::PathBuf, String, S
     }
 }
 
-fn rank(raw: Vec<(String, bool)>, name: String, display_base: &str) -> Vec<FileEntry> {
+fn rank(
+    raw: Vec<(String, bool)>,
+    name: String,
+    display_base: &str,
+    dirs_only: bool,
+) -> Vec<FileEntry> {
     let query_lower = name.to_lowercase();
+    let browse = dirs_only && name.is_empty();
     let mut scored: Vec<(i32, FileEntry)> = raw
         .into_iter()
         .filter_map(|(rel, dir)| {
@@ -182,10 +188,15 @@ fn rank(raw: Vec<(String, bool)>, name: String, display_base: &str) -> Vec<FileE
         .collect();
     scored.sort_by(|a, b| {
         b.0.cmp(&a.0)
-            .then_with(|| a.1.path.len().cmp(&b.1.path.len()))
+            .then_with(|| match browse {
+                true => std::cmp::Ordering::Equal,
+                false => a.1.path.len().cmp(&b.1.path.len()),
+            })
             .then_with(|| a.1.path.cmp(&b.1.path))
     });
-    scored.truncate(TOP);
+    if !dirs_only {
+        scored.truncate(TOP);
+    }
     scored.into_iter().map(|(_, e)| e).collect()
 }
 
@@ -301,6 +312,33 @@ mod tests {
             names(&mv_candidates(&abs, &root, None)),
             vec![format!("{}/src", root.display())]
         );
+    }
+
+    #[test]
+    fn directory_navigation_keeps_all_siblings_in_name_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("work");
+        let mut expected = vec![
+            "../a_long_directory".to_string(),
+            "../work".into(),
+            "../z".into(),
+        ];
+        for i in 0..30 {
+            expected.push(format!("../project{i:02}"));
+        }
+        for path in &expected {
+            fs::create_dir(dir.path().join(path.strip_prefix("../").unwrap())).unwrap();
+        }
+        fs::create_dir(dir.path().join(".hidden")).unwrap();
+        fs::write(dir.path().join("a_file"), "").unwrap();
+        expected.sort();
+        assert_eq!(names(&mv_candidates("../", &root, None)), expected);
+        assert_eq!(mv_candidates("../project", &root, None).len(), 30);
+
+        // File suggestions still have their own relevance ranking and bound.
+        let files = candidates("project", dir.path());
+        assert_eq!(files.len(), TOP);
+        assert_eq!(files[0].path, "project00");
     }
 
     #[test]

@@ -20,6 +20,65 @@ fn the_scratch_file_is_private() {
     std::fs::remove_file(&path).unwrap();
 }
 
+// Directory browsing shows each path once and can reach every choice.
+#[test]
+fn mv_browses_every_sibling_as_a_single_path_and_completes_the_selection() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use pi_store::keys::Action;
+    use ratatui::widgets::Widget;
+
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["work", "a long directory", "z"] {
+        std::fs::create_dir(dir.path().join(name)).unwrap();
+    }
+    for i in 0..25 {
+        std::fs::create_dir(dir.path().join(format!("project{i:02}"))).unwrap();
+    }
+    let root = dir.path().join("work");
+    let lane = running_lane(&root);
+    let mut ui = test_ui(80, 12);
+    let mut view = View::default();
+    ui.at_root = root;
+    ui.editor.set_line("/mv ../");
+
+    let menu = ui.menu();
+    assert_eq!(menu.len(), 28);
+    assert_eq!(menu.first().unwrap().show(), "../z/");
+    assert_eq!(menu.last().unwrap().show(), "../a long directory/");
+    assert!(menu.iter().all(|entry| entry.help().is_empty()));
+    assert!(!menu.last().unwrap().taken_by_enter(false));
+
+    let area = ratatui::layout::Rect::new(0, 0, 80, 1);
+    let mut buffer = ratatui::buffer::Buffer::empty(area);
+    ratatui::widgets::List::new(ui.menu_items(&menu[menu.len() - 1..], 0, 80))
+        .render(area, &mut buffer);
+    let row: String = (0..80).map(|x| buffer[(x, 0)].symbol()).collect();
+    assert_eq!(row.trim(), "../a long directory/");
+
+    ui.flush(&lane, &mut view);
+    assert!(ui.list.top > 0, "the first choice is near the input");
+    for _ in 1..menu.len() {
+        ui.step_menu(Action::MenuPrevious);
+    }
+    ui.flush(&lane, &mut view);
+    assert_eq!(
+        ui.list.top, 0,
+        "navigation reaches the other end of the list"
+    );
+    assert_eq!(ui.highlighted().unwrap().show(), "../z/");
+    let key = crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let intent = ui.key(&lane, &mut view, key, false);
+    assert!(matches!(intent, Asked::Own(Deed::Nothing)));
+    assert_eq!(ui.editor.text(), "/mv ../z/");
+
+    // A directory name with spaces replaces the argument as a whole.
+    ui.editor.set_line("/mv ../a long");
+    let key = crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let intent = ui.key(&lane, &mut view, key, false);
+    assert!(matches!(intent, Asked::Own(Deed::Nothing)));
+    assert_eq!(ui.editor.text(), "/mv ../a long directory/");
+}
+
 // The @ completion rides the same menu: Tab lands the path, Enter lands
 // it and stays — the prompt is not sent until the user says so.
 #[test]

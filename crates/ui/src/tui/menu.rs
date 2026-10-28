@@ -59,7 +59,12 @@ impl Ui {
                 .map(|f| MenuEntry::File {
                     start,
                     end,
-                    show: at_row_name(&f.path, f.dir),
+                    show: if kind == Path::Mv {
+                        format!("{}/", f.path)
+                    } else {
+                        at_row_name(&f.path, f.dir)
+                    },
+                    kind,
                     lead,
                     path: f.path.clone(),
                     dir: f.dir,
@@ -343,8 +348,10 @@ pub(super) enum MenuEntry {
     File {
         start: usize,
         end: usize,
-        // The row's left column: the file's own name, `/` for a directory.
+        // Directory navigation shows the whole path; other paths use a name
+        // with the full path alongside it.
         show: String,
+        kind: Path,
         lead: &'static str,
         path: String,
         dir: bool,
@@ -386,6 +393,7 @@ impl MenuEntry {
     pub(super) fn help(&self) -> &str {
         match self {
             MenuEntry::Completion(c) => &c.help,
+            MenuEntry::File { kind: Path::Mv, .. } => "",
             MenuEntry::File { path, .. } => path,
             MenuEntry::Hit { .. } | MenuEntry::Pick { .. } => "",
         }
