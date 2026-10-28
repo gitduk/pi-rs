@@ -359,7 +359,7 @@ impl Ui {
         let empty = self.editor.is_empty();
         match action {
             Some(Action::LineSubmit) => self.search_enter(view),
-            Some(Action::MenuDismiss | Action::PageClose) => {
+            Some(Action::MenuDismiss | Action::PageClose | Action::LineClear) => {
                 self.search_close(view);
             }
             // Back past the first character: no query, so no search.

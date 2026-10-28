@@ -1,5 +1,7 @@
 ---
 [package]
+# Bump this script's version whenever it changes.
+version = "0.1.0"
 edition = "2024"
 description = "Bridge this session to Telegram: what the user sends to their bot arrives here as turns, and each answer goes back to the chat. Use when the user asks to connect Telegram. It needs TELEGRAM_BOT_TOKEN, a bot token from @BotFather, in the tools' .env. It runs in the background until `jobs` stops it; the first time, a link and a QR show in its job for the user to pair their account, and the pairing is kept for next time."
 

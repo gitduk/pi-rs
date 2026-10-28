@@ -1,5 +1,7 @@
 ---
 [package]
+# Bump this script's version whenever it changes.
+version = "0.1.0"
 edition = "2024"
 description = "Bridge this session to WeChat: what the user sends from their phone arrives here as turns, and each answer goes back to the phone. Use when the user asks to connect WeChat. It runs in the background until `jobs` stops it; the first time, a QR shows in its job for the user to scan, and the login is kept for next time."
 
