@@ -367,7 +367,7 @@ impl Ui {
                 frame.render_widget(below, regions.gap);
             }
             frame.render_widget(Rows(&jobs), regions.jobs);
-            if regions.rule.height > 0 {
+            if regions.overlay().height > 0 {
                 frame.render_widget(ratatui::widgets::Clear, regions.overlay());
                 frame.render_widget(Rows(&asked), regions.asked);
                 frame.render_widget(&menu_rule, regions.rule);

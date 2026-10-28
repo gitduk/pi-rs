@@ -102,7 +102,7 @@ impl Ui {
         self.read.is_some() && !matches!(self.target_at(row), None | Some(Target::Text(_)))
     }
 
-    // Whether `row` is under the list, which lies over the history.
+    // Whether `row` belongs to the list or its heading.
     fn over_menu(&self, row: u16) -> bool {
         row_in(self.regions.overlay(), row).is_some()
     }
@@ -583,6 +583,35 @@ impl Regions {
         left -= jobs;
         let editor = editor.min(left);
         left -= editor;
+        if asked > 0 {
+            // The question needs its conversation visible for context.
+            let shown = (asked + menu + 1).min(left.div_ceil(2));
+            let option = usize::from(menu > 0).min(shown);
+            let rule = usize::from(shown > option + 1);
+            let asked = asked.min(shown - option - rule);
+            let menu = shown - asked - rule;
+            let [history, gap, asked, rule, menu, jobs, editor, bar] = Layout::vertical([
+                Constraint::Fill(1),
+                Constraint::Length(HISTORY_GAP),
+                Constraint::Length(asked as u16),
+                Constraint::Length(rule as u16),
+                Constraint::Length(menu as u16),
+                Constraint::Length(jobs as u16),
+                Constraint::Length(editor as u16),
+                Constraint::Length(bar as u16),
+            ])
+            .areas(area);
+            return Self {
+                history,
+                gap,
+                asked,
+                rule,
+                menu,
+                jobs,
+                editor,
+                bar,
+            };
+        }
         let chunks = Layout::vertical([
             Constraint::Fill(1),
             Constraint::Length(HISTORY_GAP),
@@ -616,7 +645,7 @@ impl Regions {
         }
     }
 
-    // The rows the completion list lies over: its question, rule and options.
+    // The list's question, rule and options, whether reserved or overlaid.
     pub(super) fn overlay(&self) -> Rect {
         self.asked.union(self.rule).union(self.menu)
     }
