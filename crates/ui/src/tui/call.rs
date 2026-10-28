@@ -174,21 +174,26 @@ fn job_text(job: &Job) -> (String, String) {
     (head, state)
 }
 
-// The visible head may end anywhere, even inside the id. Only the command
-// carries shell colours; progress after it keeps its own muted voice.
+// A job's description can be prose, so shell syntax colours do not apply.
+// Truncation may cut the head inside the id.
 fn job_head(job: &Job, head: &str, hovered: bool, paint: &Paint) -> Vec<Span<'static>> {
     let id = format!("#{} ", job.id);
     let Some(rest) = head.strip_prefix(&id) else {
-        return vec![paint.span_hovered(hovered, &paint.theme.prompt.color, head)];
+        return vec![paint.span_hovered(hovered, &paint.theme.muted, head)];
     };
-    let (command, progress) = match rest.strip_prefix(&job.description) {
+    let (description, progress) = match rest.strip_prefix(&job.description) {
         Some(progress) => (job.description.as_str(), progress),
         None => (rest, ""),
     };
-    let mut spans = vec![paint.span_hovered(hovered, &paint.theme.prompt.color, id)];
-    spans.extend(paint.shell(command, hovered));
-    spans.push(paint.span_hovered(hovered, &paint.theme.muted, progress));
-    spans
+    let mut description = Span::raw(description.to_string());
+    if hovered && paint.color {
+        description = description.bold();
+    }
+    vec![
+        paint.span_hovered(hovered, &paint.theme.muted, id),
+        description,
+        paint.span_hovered(hovered, &paint.theme.muted, progress),
+    ]
 }
 
 // Under an open job: the last this many rows of what it printed.
