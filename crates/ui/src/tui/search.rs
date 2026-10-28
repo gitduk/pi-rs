@@ -328,11 +328,15 @@ impl Ui {
         else {
             return;
         };
+        self.land_at(view, hit.at, regions);
+    }
+
+    pub(super) fn land_at(&mut self, view: &mut View, at: Place, regions: &Regions) {
         let covered = regions.history.intersection(regions.overlay()).height;
         let shown = regions.history.height.saturating_sub(covered);
         *self.window_mut(view).1 = Some(Anchor {
-            spot: hit.at.spot,
-            rows: hit.at.row as isize - (shown / 2) as isize,
+            spot: at.spot,
+            rows: at.row as isize - (shown / 2) as isize,
         });
     }
 

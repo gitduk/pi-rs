@@ -139,10 +139,11 @@ impl Tui {
         let Some(mut carried) = self.take_carried() else {
             return;
         };
-        carried.send(ask);
+        let id = carried.send(ask);
         // The stop note the send filed is an entry now:
         // derive rows like any commit so they show without a rebuild.
         let view = front_view(&mut self.views, self.core.lane());
+        view.surface.scrollback.bind_prompt(id);
         let tail = view.surface.tail;
         let fresh: Vec<LogEntry> = carried
             .entries()
@@ -589,10 +590,16 @@ impl Tui {
         // The view drew every row the run left, in front or not, so its cursor
         // is the end of what came home — or the next adopt draws them again.
         if ran_back {
-            let tail = self.core.lanes[lane].session().and_then(tail_of);
-            view_at(&mut self.views, self.core.lanes[lane].token())
-                .surface
-                .tail = tail;
+            let session = self.core.lanes[lane].session();
+            let surface = &mut view_at(&mut self.views, self.core.lanes[lane].token()).surface;
+            if was_bash
+                && let Some(entry) = session.and_then(|s| s.entries().last())
+                && matches!(entry, LogEntry::Bash { .. })
+                && surface.tail.is_none_or(|tail| entry.id() > tail)
+            {
+                surface.scrollback.bind_prompt(entry.id());
+            }
+            surface.tail = session.and_then(tail_of);
         }
 
         // A panic, or an unsent prompt, has nothing to tell the model; nor

@@ -3,6 +3,8 @@
 //! `keys` drives them.
 use super::Ui;
 use super::mouse::at_row_name;
+use super::search::{Place, Spot};
+use super::view::View;
 use pi_core::core;
 use pi_core::core::question::Question;
 use pi_core::input::commands::{Candidate, Choice};
@@ -269,6 +271,35 @@ impl Ui {
         // A search's list moves the view with it.
         self.search_follow();
     }
+
+    // Follow the selected prompt once per change, leaving subsequent
+    // scrolling free to read its surroundings.
+    pub(super) fn rewind_follow(&mut self, view: &View, menu: &[MenuEntry]) -> Option<Place> {
+        let picked = self.list.highlighted(menu.len().max(1));
+        let id = match menu.get(picked) {
+            Some(MenuEntry::Completion(c)) => c
+                .line
+                .strip_prefix(super::REWIND)
+                .and_then(|id| id.parse().ok())
+                .map(agent::session::EntryId),
+            _ => None,
+        };
+        if self.list.followed == id {
+            return None;
+        }
+        self.list.followed = id;
+        let idx = id.and_then(|id| {
+            view.surface
+                .scrollback
+                .iter()
+                .position(|r| r.entry() == Some(id))
+        })?;
+        self.close_page();
+        Some(Place {
+            spot: Spot::Row(idx, 0),
+            row: 0,
+        })
+    }
 }
 
 // What a path token is completed against.
@@ -283,6 +314,8 @@ pub(super) enum Path {
 // against the line it grew from, and what was done to it there.
 #[derive(Default)]
 pub(super) struct List {
+    // The prompt the view last followed while its completion was selected.
+    followed: Option<agent::session::EntryId>,
     // Which row is highlighted. `None` anchors a fresh list on its bottom
     // row, and says nobody moved to one.
     pub(super) picked: Option<usize>,
@@ -305,6 +338,7 @@ impl List {
     // A fresh list: the highlight back on the bottom row, in sight.
     pub(super) fn restart(&mut self) {
         (self.picked, self.top) = (None, 0);
+        self.followed = None;
     }
 
     // Kept against `line`: another one starts the list over.

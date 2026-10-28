@@ -24,6 +24,20 @@ impl Scrollback {
         self.0.push(row);
     }
 
+    // An echoed prompt precedes its transcript entry. Bind its rows once
+    // the send (or completed command) supplies the id.
+    pub(super) fn bind_prompt(&mut self, id: agent::session::EntryId) {
+        let Some(last) = self.0.iter().rposition(Row::opens_turn) else {
+            return;
+        };
+        for row in self.0[..=last].iter_mut().rev() {
+            if !row.opens_turn() || row.entry().is_some() {
+                break;
+            }
+            row.bind_entry(id);
+        }
+    }
+
     // Drops the asides, saying whether there were any.
     pub(super) fn tidy(&mut self) -> bool {
         let was = self.0.len();
@@ -619,7 +633,7 @@ pub(super) fn open_turn(rows: &mut Scrollback) {
 /// One entry's rows, as both the rebuild and a fresh adoption draw them.
 /// Answers don't pass through here — their rows stream directly.
 pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
-    match entry {
+    let mut rows = match entry {
         LogEntry::Ask { ask, at, .. } if ask.relayed.is_some() => {
             Some(vec![Row::relayed(ask.shown_text(), &ask.text, *at, paint)])
         }
@@ -650,5 +664,13 @@ pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
             vec![Row::stored_result(r, preview.as_deref(), outcome, *took)]
         }),
         _ => None,
+    }?;
+    if matches!(entry, LogEntry::Ask { .. } | LogEntry::Bash { .. }) {
+        for row in &mut rows {
+            if row.opens_turn() {
+                row.bind_entry(entry.id());
+            }
+        }
     }
+    Some(rows)
 }

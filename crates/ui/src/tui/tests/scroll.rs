@@ -1174,6 +1174,123 @@ fn the_search_lists_its_hits_and_enter_keeps_the_pick() {
     );
 }
 
+#[test]
+fn the_rewind_list_follows_prompts_without_changing_the_transcript() {
+    use agent::session::{Prompt, Session};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use pi_core::input::commands::Choice;
+
+    for rebuilt in [false, true] {
+        let mut ui = test_ui(48, 20);
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
+        let mut session = Session::new();
+        for n in 0..5 {
+            let prompt = if n == 2 {
+                "!pwd"
+            } else {
+                "the same prompt\nwith another line"
+            };
+            ui.submit(&mut view, prompt);
+            let id = if n == 2 {
+                session.push_bash(Prompt {
+                    text: "the command output".into(),
+                    shown: Some(prompt.into()),
+                    images: Vec::new(),
+                    relayed: None,
+                })
+            } else {
+                session.prompt(prompt)
+            };
+            view.surface.scrollback.bind_prompt(id);
+            let answer = (0..20)
+                .map(|i| format!("answer {n}, line {i}\n"))
+                .collect::<String>();
+            view.surface
+                .scrollback
+                .extend(Row::answer(&answer, &ui.paint));
+            session.push_assistant(vec![llm::message::AssistantContent::Text(
+                llm::message::Text { text: answer },
+            )]);
+        }
+        if rebuilt {
+            ui.rebuild(&mut view, &session, lane.root());
+        }
+        let entries = format!("{:?}", session.entries());
+        ui.said = session
+            .rewind_nodes()
+            .iter()
+            .map(|node| Choice {
+                name: node.id().0.to_string(),
+                note: node.show().to_string(),
+            })
+            .collect();
+        let ids: Vec<_> = session.rewind_nodes().iter().map(|n| n.id()).collect();
+        ui.open_page(vec![ratatui::text::Line::from("a command's answer").into()]);
+        ui.seed("/rewind ");
+        ui.flush(&lane, &mut view);
+        assert!(ui.page().is_none(), "the transcript is visible");
+
+        let assert_visible =
+            |ui: &crate::tui::Ui, view: &View, id| {
+                let visible =
+                    ui.regions.history.height.saturating_sub(
+                        ui.regions.history.intersection(ui.regions.overlay()).height,
+                    ) as usize;
+                let first = view
+                    .surface
+                    .scrollback
+                    .iter()
+                    .position(|row| row.entry() == Some(id))
+                    .unwrap();
+                assert!(
+                    ui.row_targets[..visible]
+                        .iter()
+                        .any(|target| matches!(target,
+                            crate::tui::mouse::Target::Scrollback(idx, 0) if *idx == first
+                        )),
+                    "the selected prompt is above the list (rebuilt={rebuilt})"
+                );
+            };
+        assert_visible(&ui, &view, ids[4]);
+        for id in ids[..4].iter().rev() {
+            ui.key(
+                &lane,
+                &mut view,
+                crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+                false,
+            );
+            ui.flush(&lane, &mut view);
+            assert_visible(&ui, &view, *id);
+        }
+        ui.key(
+            &lane,
+            &mut view,
+            crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            false,
+        );
+        ui.flush(&lane, &mut view);
+        assert_visible(&ui, &view, ids[1]);
+        ui.editor.set_line("/rewind !pwd");
+        ui.flush(&lane, &mut view);
+        assert_eq!(ui.menu().len(), 1);
+        assert_visible(&ui, &view, ids[2]);
+        ui.key(
+            &lane,
+            &mut view,
+            crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            false,
+        );
+        ui.flush(&lane, &mut view);
+        assert!(ui.menu().is_empty());
+        assert_eq!(
+            format!("{:?}", session.entries()),
+            entries,
+            "browsing leaves history intact"
+        );
+    }
+}
+
 // A page is read over the whole conversation: the rows the jobs held are
 // its own while it is up, so a click there lands on the page, not a job.
 #[test]

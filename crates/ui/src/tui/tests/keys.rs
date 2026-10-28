@@ -85,6 +85,45 @@ async fn an_idle_lane_opens_the_rewind_selector() {
     assert!(tui.ui.flash.is_none(), "and nothing was refused");
 }
 
+#[tokio::test]
+async fn an_echoed_prompt_gets_its_rewind_position_when_sent() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let token = tui.core.lane().token();
+    tui.settle(crate::tui::run::Done {
+        token,
+        kind: crate::tui::run::Kind::Turn,
+        ran: Some((
+            agent::session::Session::new(),
+            Ok(llm::stream::Usage::default()),
+        )),
+    })
+    .await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    crate::tui::view::opened(&mut tui.views, tui.core.lane(), &tui.ui.paint);
+    tui.echo("a prompt\nwith two lines");
+    tui.start_turn(
+        crate::tui::clipboard::prompt("a prompt\nwith two lines".into(), None, &[]),
+        &tx,
+    );
+    let done = rx.recv().await.expect("the run returned");
+    let id = done.ran.as_ref().unwrap().0.last_ask().unwrap();
+    assert_eq!(
+        view_at(&mut tui.views, token)
+            .surface
+            .scrollback
+            .iter()
+            .filter(|row| row.entry() == Some(id))
+            .count(),
+        2
+    );
+    tui.settle(done).await;
+    tui.open_rewind();
+    tui.ui
+        .flush(tui.core.lane(), view_at(&mut tui.views, token));
+    assert!(tui.ui.drawn.iter().any(|line| line.contains("a prompt")));
+}
+
 // The transcript rewinds in memory before it is written: a failed write must
 // still hand the unsent prompt back, its only copy, and say it was not saved.
 #[tokio::test]

@@ -32,6 +32,8 @@ impl Ui {
             self.leave_jobs();
         }
         let width = self.screen.width();
+        let menu = self.menu();
+        let rewind = self.rewind_follow(view, &menu);
         let paged = self.read.is_some();
         let text = self.page_lines();
         // The group live calls fold into, when it's the last scrollback
@@ -184,6 +186,9 @@ impl Ui {
         let hist_view = regions.history.height as usize;
         let most = self.most(&text, hist_view, width);
         self.search_land(view, &regions);
+        if let Some(at) = rewind {
+            self.land_at(view, at, &regions);
+        }
         let (scroll, top) = {
             let (scroll, top) = self.window_mut(view);
             (*scroll, *top)

@@ -28,7 +28,12 @@ use result::ToolOut;
 use steps::Group;
 pub use steps::{FoldedTool, PendingTool, Stage, Step, StepMark, out_for};
 
-pub struct Row(Kind, Height, Option<Box<render::Prefix>>);
+pub struct Row(
+    Kind,
+    Height,
+    Option<Box<render::Prefix>>,
+    Option<agent::session::EntryId>,
+);
 
 // The rows this row takes on screen at one width, wraps included —
 // counted per logical line and cached until width or content changes.
@@ -190,7 +195,15 @@ trait Fold {
 impl Row {
     // A row whose height is not measured yet; every constructor starts here.
     fn new(kind: Kind) -> Self {
-        Self(kind, Height::default(), None)
+        Self(kind, Height::default(), None, None)
+    }
+
+    pub(super) fn entry(&self) -> Option<agent::session::EntryId> {
+        self.3
+    }
+
+    pub(super) fn bind_entry(&mut self, id: agent::session::EntryId) {
+        self.3 = Some(id);
     }
 
     // The row as something that opens and closes, if it is one.
@@ -330,7 +343,7 @@ impl Row {
             return markdown(text).collect();
         }
         let blank = Self::gap;
-        let is_blank = |row: &Self| matches!(row, Self(Kind::Answer(l, _), _, _) if l.spans.is_empty() && row.2.is_none());
+        let is_blank = |row: &Self| matches!(row, Self(Kind::Answer(l, _), _, _, _) if l.spans.is_empty() && row.2.is_none());
         let mut rows: Vec<Self> = Vec::new();
         for piece in block::pieces(text) {
             match piece {
