@@ -125,12 +125,6 @@ pub(crate) const BUILTIN: &[Command] = &[
         |_, rest| Intent::Builtin(Builtin::Compact(rest)),
     ),
     Command::builtin(
-        "/tool",
-        "[name [key=value…]]",
-        "run one of the model's tools yourself, beside any turn; bare, list them",
-        |_, rest| Intent::Builtin(Builtin::Tool(rest)),
-    ),
-    Command::builtin(
         "/loop",
         "[text]",
         "repeat a line while it keeps changing the tree; bare, stop one",
@@ -208,7 +202,7 @@ pub fn commands(skills: &[Skill], words: &[Command], notes: &mut Vec<String>) ->
         out.push(Command {
             word: Cow::Owned(word),
             args: "[text]",
-            help: Cow::Owned(gist(&skill.description)),
+            help: Cow::Owned(format!("[skill] {}", gist(&skill.description))),
             intent: hand_on,
             source: Source::Skill(skill.clone()),
         });
@@ -239,7 +233,19 @@ pub fn with_prompts(table: Arc<Vec<Command>>, prompts: Vec<mcp::Prompt>) -> Arc<
     Arc::new(out)
 }
 
-pub(crate) fn help(commands: &[Command]) -> Listing {
+pub(crate) fn help(commands: &[Command], tools: &tool::Registry) -> Listing {
+    let mut out = command_help(commands);
+    let rows: Vec<Row> = slash_tools(commands, tools)
+        .map(|t| Row::new([format!("/{}", t.name()), tool_help(t.as_ref())]))
+        .collect();
+    if !rows.is_empty() {
+        out.rows.push(Row::new([""]));
+        out.rows.extend(rows);
+    }
+    out
+}
+
+fn command_help(commands: &[Command]) -> Listing {
     let row = |c: &Command| Row::new([format!("{} {}", c.word, c.args), c.help.to_string()]);
     // Where built-ins end, not where skills begin — a third source would
     // otherwise land in the built-in half. `commands` keeps them contiguous.
@@ -250,8 +256,6 @@ pub(crate) fn help(commands: &[Command]) -> Listing {
         return Listing::of(commands.iter().map(row));
     };
     let mut out: Vec<Row> = commands[..split].iter().map(row).collect();
-    // Without a prefix there is nothing in the word itself to say which group
-    // it came from, so the list says it once per group.
     let groups = [
         (
             "skills — the instructions load when you run one:",
@@ -320,16 +324,16 @@ fn offer(choices: &[Choice], head: &str, typed: &str) -> Vec<Candidate> {
         .collect()
 }
 
-/// `/tool` text read as a call: a tool's name, then only `key=value` for its
-/// keys. The tool and its arguments, or why the line does not read as one.
+/// A named tool's arguments: only `key=value` for its keys, or why the
+/// arguments do not read as a call.
 pub(crate) fn call_of(
+    name: &str,
     text: &str,
     tools: &tool::Registry,
-) -> Result<(String, serde_json::Value), String> {
-    let mut words = words(text).ok_or("a quote is left open")?.into_iter();
-    let name = words.next().unwrap_or_default();
+) -> Result<serde_json::Value, String> {
+    let words = words(text).ok_or("a quote is left open")?;
     let schema = tools
-        .get(&name)
+        .get(name)
         .ok_or_else(|| format!("no tool `{name}` here"))?
         .schema();
     let mut args = serde_json::Map::new();
@@ -352,20 +356,25 @@ pub(crate) fn call_of(
         .map(|p| p.name)
         .collect();
     match missing.as_slice() {
-        [] => Ok((name, serde_json::Value::Object(args))),
+        [] => Ok(serde_json::Value::Object(args)),
         _ => Err(format!("{name} needs {}", missing.join(", "))),
     }
 }
 
-/// What `/tool` bare answers: each tool by name, and the gist of it.
-pub(crate) fn tool_listing(tools: &tool::Registry) -> Listing {
-    Listing::of(
-        tools
-            .listed()
-            .into_iter()
-            .map(|t| Row::new([t.name().to_string(), gist(t.description())])),
-    )
-    .brief()
+// Existing commands keep their words; tools fill only the names still free.
+fn slash_tools<'a>(
+    commands: &'a [Command],
+    tools: &tool::Registry,
+) -> impl Iterator<Item = Arc<dyn tool::Tool>> + 'a {
+    tools.listed().into_iter().filter(|t| {
+        !commands
+            .iter()
+            .any(|c| c.word.strip_prefix('/') == Some(t.name()))
+    })
+}
+
+fn tool_help(tool: &dyn tool::Tool) -> String {
+    format!("[tool] {}", gist(tool.description()))
 }
 
 // Split at whitespace, a `"…"` run kept whole, `\"` a quote inside one;
@@ -446,7 +455,7 @@ fn params(schema: &serde_json::Value) -> impl Iterator<Item = Param<'_>> {
     out.into_iter()
 }
 
-// After `/tool <name> `: the keys not given yet, while no `=` is typed.
+// After a tool's command word: the keys not given yet, while no `=` is typed.
 fn tool_args(tool: &dyn tool::Tool, head: &str, typed: &str) -> Vec<Candidate> {
     let schema = tool.schema();
     let given: Vec<&str> = (head.split_whitespace().skip(1))
@@ -459,7 +468,7 @@ fn tool_args(tool: &dyn tool::Tool, head: &str, typed: &str) -> Vec<Candidate> {
         .filter(|p| p.name.starts_with(typed) && !given.contains(&p.name))
         .map(|p| Candidate {
             show: format!("{}=", p.name),
-            line: format!("/tool {head}{}=", p.name),
+            line: format!("{head}{}=", p.name),
             help: match p.required {
                 true => format!("required · {}", p.help),
                 false => format!("optional · {}", p.help),
@@ -470,7 +479,7 @@ fn tool_args(tool: &dyn tool::Tool, head: &str, typed: &str) -> Vec<Candidate> {
         .collect()
 }
 
-/// What the front lane gives completion: its tools for `/tool`, and what
+/// What the front lane gives completion: its tools for slash commands, and what
 /// was said, each named by its entry id, for `/rewind`.
 #[derive(Clone, Copy, Default)]
 pub struct Front<'a> {
@@ -482,7 +491,7 @@ pub struct Front<'a> {
 /// then that command's own argument once the word is settled.
 ///
 /// Only args with a known name set are completed (`/model`, `/resume`, `/rewind`,
-/// `/worktree`, `/edit`, `/tool`); a prompt or focus phrase is prose, not guessed.
+/// `/worktree`, `/edit`, and tools); a prompt or focus phrase is prose, not guessed.
 ///
 /// Sessions, worktrees and files are asked for lazily: walking transcripts,
 /// running `git worktree list` or reading directories is paid only by the
@@ -503,7 +512,7 @@ pub fn complete<'a>(
     let Some((word, rest)) = line.split_once(char::is_whitespace) else {
         // The exact word stays in the list: dropping it would leave only
         // `/news` when `/new` is typed in full, and accepting would pick wrong.
-        return commands
+        let mut offered: Vec<Candidate> = commands
             .iter()
             .filter(|c| c.word.starts_with(line))
             .map(|c| Candidate {
@@ -514,7 +523,30 @@ pub fn complete<'a>(
                 picked_only: false,
             })
             .collect();
+        if let Some(tools) = tools {
+            offered.extend(
+                slash_tools(commands, tools)
+                    .filter(|t| t.name().starts_with(&line[1..]))
+                    .map(|t| Candidate {
+                        show: format!("/{}", t.name()),
+                        line: format!("/{}", t.name()),
+                        help: tool_help(t.as_ref()),
+                        more: params(&t.schema()).next().is_some(),
+                        // Enter on a prefix must not run a tool nobody chose.
+                        picked_only: true,
+                    }),
+            );
+        }
+        return offered;
     };
+    if !commands.iter().any(|c| c.word == word)
+        && let Some(tool) = tools.and_then(|tools| tools.get(&word[1..]))
+    {
+        let last = rest
+            .rsplit_once(char::is_whitespace)
+            .map_or(rest, |(_, last)| last);
+        return tool_args(tool.as_ref(), &line[..line.len() - last.len()], last);
+    }
     let typed = rest.trim_start();
     match word {
         "/effort" => {
@@ -532,29 +564,6 @@ pub fn complete<'a>(
         "/model" if typed.contains(char::is_whitespace) => Vec::new(),
         "/model" => offer(models, "/model ", typed),
         "/edit" => offer(editable(), "/edit ", typed),
-        "/tool" if typed.contains(char::is_whitespace) => {
-            let (head, last) = typed.rsplit_once(char::is_whitespace).unwrap_or_default();
-            let named = head.split_whitespace().next().unwrap_or_default();
-            match tools.and_then(|t| t.get(named)) {
-                Some(tool) => tool_args(tool.as_ref(), &typed[..typed.len() - last.len()], last),
-                None => Vec::new(),
-            }
-        }
-        "/tool" => {
-            let listed = tools.map(tool::Registry::listed).unwrap_or_default();
-            listed
-                .into_iter()
-                .filter(|t| t.name().starts_with(typed) && t.name() != typed)
-                .map(|t| Candidate {
-                    show: t.name().to_string(),
-                    line: format!("/tool {}", t.name()),
-                    help: gist(t.description()),
-                    more: params(&t.schema()).next().is_some(),
-                    // Enter on a prefix must not run a tool nobody chose.
-                    picked_only: true,
-                })
-                .collect()
-        }
         // `rm` marks what follows it for removal; a bare `rm` still means the
         // name of a worktree, so nothing is offered until the space says.
         "/worktree" if typed == "rm" => Vec::new(),
@@ -660,12 +669,183 @@ pub(crate) fn ago(secs: u64) -> String {
 mod tests {
     use super::*;
 
+    struct Named(&'static str);
+
+    #[async_trait::async_trait]
+    impl tool::Tool for Named {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            "Bridge this session. More details."
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "description": "What to do"},
+                    "text": {"type": "string"},
+                    "enabled": {"type": "boolean"}
+                },
+                "required": ["action"]
+            })
+        }
+        fn tier(&self) -> tool::Tier {
+            tool::Tier::Read
+        }
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            _: &tool::Ctx,
+        ) -> Result<tool::ToolOutput, tool::ToolError> {
+            unreachable!("completion does not execute a tool")
+        }
+    }
+
+    fn offered(line: &str, commands: &[Command], tools: &tool::Registry) -> Vec<Candidate> {
+        complete(
+            line,
+            commands,
+            &[],
+            Front {
+                tools: Some(tools),
+                ..Default::default()
+            },
+            || &[],
+            || &[],
+            || &[],
+        )
+    }
+
+    #[test]
+    fn tools_share_slash_completion_without_taking_existing_words() {
+        let skills = [Skill {
+            name: "dotfiles".into(),
+            description: "Sync configuration. More details.".into(),
+            dir: "/nowhere".into(),
+            builtin: None,
+        }];
+        let table = commands(&skills, &[], &mut Vec::new());
+        let tools = tool::Registry::new()
+            .with(Named("wechat"))
+            .with(Named("edit"))
+            .with(Named("dotfiles"));
+        let rows = offered("/", &table, &tools);
+        let wechat = rows.iter().find(|c| c.line == "/wechat").unwrap();
+        assert_eq!(wechat.show, "/wechat");
+        assert_eq!(wechat.help, "[tool] Bridge this session");
+        assert!(wechat.more && wechat.picked_only);
+        for word in ["/edit", "/dotfiles"] {
+            assert_eq!(rows.iter().filter(|c| c.line == word).count(), 1);
+            assert!(
+                !offered(&format!("{word} "), &table, &tools)
+                    .iter()
+                    .any(|c| c.show == "action=")
+            );
+        }
+        assert_eq!(
+            rows.iter().find(|c| c.line == "/dotfiles").unwrap().help,
+            "[skill] Sync configuration"
+        );
+        assert_eq!(
+            crate::input::read("/edit", &table, Some(&tools)),
+            Intent::Builtin(Builtin::Edit(String::new()))
+        );
+        assert!(
+            matches!(crate::input::read("/dotfiles", &table, Some(&tools)),
+            Intent::Other { word, .. } if word == "/dotfiles")
+        );
+        let help = help(&table, &tools);
+        assert!(
+            help.rows
+                .iter()
+                .any(|r| r.cells == ["/wechat", "[tool] Bridge this session"])
+        );
+        assert!(
+            !help
+                .rows
+                .iter()
+                .any(|r| r.cells.first().is_some_and(|c| c.starts_with("/tool")))
+        );
+        for line in ["/tool", "/tool wechat", "/tool wechat action=bridge"] {
+            assert!(offered(line, &table, &tools).is_empty());
+            assert!(matches!(crate::input::read(line, &table, Some(&tools)),
+                Intent::Other { word, .. } if word == "/tool"));
+        }
+    }
+
+    #[test]
+    fn direct_tool_arguments_complete_and_parse_as_key_value_pairs() {
+        let tools = tool::Registry::new().with(Named("wechat"));
+        let rows = offered("/wechat ", BUILTIN, &tools);
+        assert_eq!(rows[0].show, "action=");
+        assert_eq!(rows[0].line, "/wechat action=");
+        assert!(rows[0].help.starts_with("required"));
+        assert!(rows[0].picked_only);
+        let rows = offered("/wechat action=bridge te", BUILTIN, &tools);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].line, "/wechat action=bridge text=");
+        assert!(rows[0].help.starts_with("optional"));
+        assert!(
+            !offered("/wechat action=bridge ", BUILTIN, &tools)
+                .iter()
+                .any(|c| c.show == "action=")
+        );
+        assert!(offered("/wechat text=", BUILTIN, &tools).is_empty());
+        let args = r#"action=bridge text="hello phone" enabled=true"#;
+        assert_eq!(
+            crate::input::read(&format!("/wechat {args}"), BUILTIN, Some(&tools)),
+            Intent::Tool {
+                name: "wechat".into(),
+                args: args.into()
+            }
+        );
+        assert_eq!(
+            call_of("wechat", args, &tools).unwrap(),
+            serde_json::json!({"action": "bridge", "text": "hello phone", "enabled": true})
+        );
+        for args in [
+            "",
+            "action=bridge enabled=no",
+            "action=bridge unknown=x",
+            "action=\"bridge",
+        ] {
+            assert!(call_of("wechat", args, &tools).is_err(), "{args}");
+        }
+    }
+
+    #[test]
+    fn direct_tool_words_follow_the_live_registry() {
+        struct Live(std::sync::Mutex<Vec<Arc<dyn tool::Tool>>>);
+        impl tool::Source for Live {
+            fn tools(&self) -> Vec<Arc<dyn tool::Tool>> {
+                self.0.lock().unwrap().clone()
+            }
+        }
+        let source = Arc::new(Live(Default::default()));
+        let mut tools = tool::Registry::new();
+        tools.read(source.clone());
+        assert!(offered("/wech", BUILTIN, &tools).is_empty());
+        source.0.lock().unwrap().push(Arc::new(Named("wechat")));
+        assert_eq!(offered("/wech", BUILTIN, &tools)[0].line, "/wechat");
+        assert!(matches!(
+            crate::input::read("/wechat", BUILTIN, Some(&tools)),
+            Intent::Tool { .. }
+        ));
+        source.0.lock().unwrap().clear();
+        assert!(offered("/wechat", BUILTIN, &tools).is_empty());
+        assert!(matches!(
+            crate::input::read("/wechat", BUILTIN, Some(&tools)),
+            Intent::Other { .. }
+        ));
+    }
+
     #[test]
     fn the_removed_job_command_is_not_parsed_or_completed() {
         assert!(!BUILTIN.iter().any(|command| command.word == "/job"));
         for line in ["/job", "/job stop 1", "/job restart 1", "/job run this"] {
             assert!(
-                matches!(crate::input::read(line, BUILTIN), Intent::Other { word, .. } if word == "/job")
+                matches!(crate::input::read(line, BUILTIN, None), Intent::Other { word, .. } if word == "/job")
             );
             assert!(
                 complete(line, BUILTIN, &[], Front::default(), || &[], || &[], || &[]).is_empty()

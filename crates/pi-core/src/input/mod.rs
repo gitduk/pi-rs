@@ -20,14 +20,15 @@ pub enum Intent {
     Builtin(Builtin),
     // A word the surface put in the table, for the surface to answer.
     Surface { word: String, args: String },
+    // A live tool named directly, with its arguments still as typed.
+    Tool { name: String, args: String },
     // Not a built-in word: the table's skill rows land here too, because what a
     // skill *is* — a line to expand — is `step_for`'s to say, not the door's.
     Other { word: String, args: String },
 }
 
-/// The words `read` answers by name. Grouped rather than spread among the kinds
-/// of input, so that the door reads four shapes and no more: prose, a shell
-/// command, one of these, or a word it does not know.
+/// The built-in operations `read` answers by name, grouped apart from prose,
+/// shell commands, live tools and words it does not know.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Builtin {
     Help,
@@ -56,9 +57,6 @@ pub enum Builtin {
     Edit(String),
     // What to run over and over, or empty to stop the loop in force.
     Loop(String),
-    // A tool to run by name with no model in between, as typed after `/tool`:
-    // only the lane knows its tools, so the line is read there. Empty lists them.
-    Tool(String),
     // Bare, the MCP servers and their tools; `restart [name]` reconnects.
     Mcp(String),
     // `/new` and whatever else the surface asks it by are one variant: a fresh
@@ -135,7 +133,7 @@ impl Intent {
             // Its first round is due at once, and a round wants the lane free.
             Intent::Builtin(Builtin::Loop(_)) => Fate::Queued,
             // Beside the run: it touches neither the transcript nor the turn.
-            Intent::Builtin(Builtin::Tool(_)) => Fate::Now,
+            Intent::Tool { .. } => Fate::Now,
             // A `!` files its result in the transcript, which the run has.
             Intent::Bash(_) => Fate::Queued,
             // Both reach for the transcript, and the run is holding it.
@@ -251,7 +249,7 @@ pub(crate) fn step_for(commands: &[Command], word: &str, args: &str) -> Step {
 /// An unknown word reads as prose, not a refused typo: refusing trades a
 /// recoverable "what did you mean" for an unrecoverable one.
 pub fn expand(commands: &[Command], line: &str) -> Option<Result<String, String>> {
-    let Intent::Other { word, args } = read(line, commands) else {
+    let Intent::Other { word, args } = read(line, commands, None) else {
         return None;
     };
     Some(expanded(skill_for(commands, &word)?, &args))
@@ -273,7 +271,7 @@ fn bash_command(line: &str) -> Option<&str> {
 /// something, and a line naming no command is prose for the model.
 ///
 /// `!` is read before the slash words, because a shell command is not one.
-pub fn read(line: &str, commands: &[Command]) -> Intent {
+pub fn read(line: &str, commands: &[Command], tools: Option<&tool::Registry>) -> Intent {
     if let Some(command) = bash_command(line) {
         return Intent::Bash(command.to_string());
     }
@@ -281,10 +279,14 @@ pub fn read(line: &str, commands: &[Command]) -> Intent {
         return Intent::Prompt(line.to_string());
     };
     let args = rest(line);
-    // The table is the only list of words: a built-in row says what it
-    // means, a skill's hands the line on; no match is nothing till `step_for`.
+    // Registered commands keep their words; only unclaimed words are looked
+    // up in the live tools. A skill's row hands the line on to `step_for`.
     match commands.iter().find(|c| c.word == word) {
         Some(found) => (found.intent)(word, args),
+        None if tools.is_some_and(|tools| tools.get(&word[1..]).is_some()) => Intent::Tool {
+            name: word[1..].to_string(),
+            args,
+        },
         None => Intent::Other {
             word: word.to_string(),
             args,
@@ -332,7 +334,7 @@ pub enum Step {
     },
     // Needs the network, so the surface runs it and reports.
     Compact(Option<String>),
-    // A tool to run off the loop by name, as `/tool` asked.
+    // A tool to run off the loop by name, as the user asked.
     Tool {
         name: String,
         args: serde_json::Value,

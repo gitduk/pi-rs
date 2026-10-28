@@ -951,7 +951,11 @@ impl Tui {
             }
             None => {
                 let intent = match next.as_typed {
-                    true => input::read(&next.line, &self.core.commands),
+                    true => input::read(
+                        &next.line,
+                        &self.core.commands,
+                        Some(&self.core.lane().agent().brief.registry),
+                    ),
                     false => Intent::Prompt(next.line.clone()),
                 };
                 if !next.note.is_empty() {

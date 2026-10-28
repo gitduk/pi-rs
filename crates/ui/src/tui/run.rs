@@ -1,7 +1,7 @@
 //! One run's life, armed to closed: starting a turn, a `!` line, or a
 //! `/compact` off the loop, and putting the transcript back when it returns.
 //! Beside them, what is asked off the loop without lending the transcript:
-//! a tool `/tool` names, and an MCP prompt's text.
+//! a tool named directly, and an MCP prompt's text.
 
 use agent::session::{Entry as LogEntry, Session};
 use agent::{AgentError, Event};
@@ -18,7 +18,7 @@ use super::{NO_TRANSCRIPT, Tui};
 use pi_core::core;
 use pi_core::driver::{Ended, Origin};
 
-// A tool `/tool` started, back from its call.
+// A tool the user started directly, back from its call.
 pub(super) struct Started {
     token: u64,
     name: String,
@@ -240,7 +240,7 @@ impl Tui {
         self.core.lane_mut().begin(cancel);
     }
 
-    // Runs the tool `/tool` named off the loop, beside whatever turn is going.
+    // Runs the tool the user named off the loop, beside whatever turn is going.
     pub(super) fn start_tool(
         &mut self,
         name: String,

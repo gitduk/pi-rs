@@ -560,7 +560,11 @@ impl Ui {
         if line.trim().is_empty() {
             return Asked::Own(Deed::Nothing);
         }
-        let intent = input::read(&line, &self.commands);
+        let intent = input::read(
+            &line,
+            &self.commands,
+            self.tools.as_ref().map(|brief| &brief.registry),
+        );
         // Bare, it asks which session: the line's completion of it lists them.
         if matches!(&intent, Intent::Builtin(Builtin::Resume(id)) if id.is_empty()) {
             self.seed(super::RESUME);

@@ -81,7 +81,7 @@ pub async fn run_named(
     })
 }
 
-// A call as `/tool` takes it: the name, then `key=value` for each argument
+// A call by name, then `key=value` for each argument
 // but a path that is just the checkout the job is listed under.
 fn called(name: &str, args: &serde_json::Value, root: &std::path::Path) -> String {
     let pairs = (args.as_object().into_iter().flatten()).filter_map(|(key, value)| match value {

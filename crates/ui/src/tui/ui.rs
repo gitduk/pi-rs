@@ -136,7 +136,7 @@ pub(super) struct Ui {
     pub(super) every_job: Vec<pi_core::driver::jobs::Job>,
     // Independent of the running-job list.
     pub(super) job_results_shown: bool,
-    // The front lane's tools, for `/tool` to complete; read only when it does,
+    // The front lane's tools, for slash commands; read only when needed,
     // since reading one re-stats the tools directory.
     pub(super) tools: Option<Arc<agent::Briefing>>,
     // The job a click opened under its row.

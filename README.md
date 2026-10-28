@@ -195,7 +195,7 @@ refused, and resuming one from another directory moves it here.
 | `/mv <dir>`                        | move this session to another directory; its jobs follow |
 | `/compact [focus]`                 | summarize everything but the working tail     |
 | `/loop <line>`                     | resubmit a line until a round edits no file   |
-| `/tool [name] [key=value…]`        | list the tools, or run one yourself beside any turn, as a background job; the model is told what it said |
+| `/<tool> [key=value…]`            | run a tool yourself beside any turn, as a background job; the model is told what it said |
 | `/mcp`, `/mcp restart [name]`      | MCP servers and their tools; reconnect        |
 | `/settings`                        | edit the project's config                     |
 | `/edit [file]`                     | edit a prompt, an `AGENTS.md`, or memory      |
@@ -208,6 +208,11 @@ refused, and resuming one from another directory moves it here.
 | click a code block's label         | copy it; a diagram or table, its source       |
 | drag, double or triple click       | copy the text, a word, or a line              |
 | `ctrl+v`                           | paste a clipboard image as `[Image #n]`       |
+
+Slash completion lists tools directly (for example, `/wechat`), then offers
+their `key=value` arguments. Descriptions mark tools with `[tool]` and skills
+with `[skill]`. Existing commands keep their names when a tool has the same
+name; there is no `/tool` entry point.
 
 In Vim Normal mode, `ctrl+k` focuses the last background job above the input.
 `ctrl+k`/`ctrl+j` move between jobs; `ctrl+j` below the last job or `esc` returns

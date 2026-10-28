@@ -336,10 +336,14 @@ impl Core {
     // Whether `goal` would start a turn. A skill is looked up, not
     // expanded — that would log it as invoked before any round has run.
     fn starts_turn(&self, goal: &str) -> bool {
-        match crate::input::read(goal, &self.commands) {
+        match crate::input::read(
+            goal,
+            &self.commands,
+            Some(&self.lane().agent().brief.registry),
+        ) {
             Intent::Prompt(_) | Intent::Bash(_) => true,
             Intent::Other { word, .. } => crate::input::starts_turn(&self.commands, &word),
-            Intent::Builtin(_) | Intent::Surface { .. } => false,
+            Intent::Builtin(_) | Intent::Surface { .. } | Intent::Tool { .. } => false,
         }
     }
 
@@ -353,12 +357,13 @@ impl Core {
             Intent::Bash(command) => Step::Bash(command),
             Intent::Prompt(send) => Step::Prompt { send, typed: None },
             Intent::Surface { word, args } => Step::Surface { word, args },
-            Intent::Builtin(Builtin::Tool(line)) if line.trim().is_empty() => Step::Handled(
-                crate::input::commands::tool_listing(&self.lane().agent().brief.registry),
-            ),
-            Intent::Builtin(Builtin::Tool(line)) => {
-                match crate::input::commands::call_of(&line, &self.lane().agent().brief.registry) {
-                    Ok((name, args)) => Step::Tool { name, args },
+            Intent::Tool { name, args } => {
+                match crate::input::commands::call_of(
+                    &name,
+                    &args,
+                    &self.lane().agent().brief.registry,
+                ) {
+                    Ok(args) => Step::Tool { name, args },
                     Err(why) => Step::Notice(why),
                 }
             }
@@ -370,7 +375,9 @@ impl Core {
                 )),
             },
             Intent::Builtin(Builtin::Quit) => Step::Quit,
-            Intent::Builtin(Builtin::Help) => Step::Handled(help(&self.commands)),
+            Intent::Builtin(Builtin::Help) => {
+                Step::Handled(help(&self.commands, &self.lane().agent().brief.registry))
+            }
             Intent::Builtin(Builtin::Status) => Step::Handled(self.status()),
             // Bare, it is asked; with a level, a change the surface shows.
             Intent::Builtin(Builtin::Effort(arg)) if arg.trim().is_empty() => {
@@ -677,7 +684,30 @@ mod tests {
     fn a_key_and_a_line_that_mean_the_same_thing_are_one_intent() {
         // The surface asks for it as `Intent::Builtin(Builtin::New)` too; the
         // typed word lands on the same variant, so `fate` sees one value.
-        assert_eq!(read("/new", BUILTIN), Intent::Builtin(Builtin::New));
+        assert_eq!(read("/new", BUILTIN, None), Intent::Builtin(Builtin::New));
+    }
+
+    #[test]
+    fn a_direct_tool_dispatches_beside_the_run_and_reports_bad_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = a_repl(
+            dir.path(),
+            std::sync::Arc::new(Recording::default()),
+            "model-a",
+        );
+        for (line, valid) in [("/read path=README.md", true), ("/read", false)] {
+            let intent = read(line, BUILTIN, Some(&core.lane().agent().brief.registry));
+            assert!(matches!(intent.fate(), Fate::Now));
+            match core.dispatch(intent) {
+                super::Step::Tool { name, args } if valid => {
+                    assert_eq!(name, "read");
+                    assert_eq!(args, serde_json::json!({"path": "README.md"}));
+                }
+                super::Step::Notice(why) if !valid => assert!(why.contains("needs path")),
+                step => panic!("unexpected step for {line}: {step:?}"),
+            }
+        }
+        assert!(!core.starts_turn("/read path=README.md"));
     }
 
     #[test]
@@ -711,7 +741,10 @@ mod tests {
             Intent::Builtin(Builtin::Worktree("tree".into())),
             Intent::Builtin(Builtin::Settings(String::new())),
             Intent::Builtin(Builtin::Edit("AGENTS.md".into())),
-            Intent::Builtin(Builtin::Tool("wechat".into())),
+            Intent::Tool {
+                name: "wechat".into(),
+                args: String::new(),
+            },
         ] {
             assert!(
                 matches!(intent.fate(), Fate::Now),

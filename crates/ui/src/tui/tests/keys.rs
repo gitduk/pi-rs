@@ -375,6 +375,38 @@ fn esc_takes_the_list_first_and_the_run_next() {
     );
 }
 
+#[test]
+fn direct_tools_complete_before_their_arguments_without_running_a_prefix() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut ui = test_ui(100, 24);
+    ui.tools = Some(pi_core::core::lane::a_resolved("").brief.clone());
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    let key = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+
+    ui.editor.set_line("/rea");
+    let menu = ui.menu();
+    assert_eq!(menu.len(), 1);
+    assert_eq!(menu[0].show(), "/read");
+    assert!(menu[0].help().starts_with("[tool] "));
+    let asked = ui.key(&lane, &mut view, key(KeyCode::Enter), true);
+    assert!(matches!(asked, Asked::Core(Intent::Other { word, .. }) if word == "/rea"));
+
+    ui.editor.set_line("/rea");
+    ui.key(&lane, &mut view, key(KeyCode::Tab), true);
+    assert_eq!(ui.editor.text(), "/read ");
+    let menu = ui.menu();
+    assert!(menu.iter().any(|entry| entry.show() == "path="));
+    ui.key(&lane, &mut view, key(KeyCode::Tab), true);
+    assert_eq!(ui.editor.text(), "/read path=");
+
+    ui.editor.set_line("/read path=README.md");
+    let asked = ui.key(&lane, &mut view, key(KeyCode::Enter), true);
+    assert!(matches!(asked, Asked::Core(Intent::Tool { name, args })
+        if name == "read" && args == "path=README.md"));
+}
+
 // A `ctrl+c` that closed something is not the first of a quit: two quick
 // presses to put a slash page away must not leave the app.
 #[tokio::test]
