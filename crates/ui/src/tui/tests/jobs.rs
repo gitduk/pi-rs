@@ -54,7 +54,7 @@ fn normal_keys_move_from_the_draft_through_jobs_and_back() {
     ui.key(&lane, &mut view, ctrl('k'), true);
     assert_eq!(ui.job_focus, Some(30));
     assert_eq!(
-        deed(ui.key(&lane, &mut view, typed('k'), true)),
+        deed(ui.key(&lane, &mut view, typed('x'), true)),
         Deed::StopJobs(vec![30])
     );
     assert_eq!(
@@ -62,7 +62,7 @@ fn normal_keys_move_from_the_draft_through_jobs_and_back() {
         Deed::RestartJobs(vec![30])
     );
     assert_eq!(
-        deed(ui.key(&lane, &mut view, typed('K'), true)),
+        deed(ui.key(&lane, &mut view, typed('X'), true)),
         Deed::StopJobs(Vec::new())
     );
     assert!(matches!(
@@ -199,7 +199,7 @@ fn the_selected_job_is_visible_and_highlighted_on_a_short_screen() {
             .contains(ratatui::style::Modifier::REVERSED)
     );
     assert!(
-        ui.drawn.iter().any(|line| line.contains("k stop")),
+        ui.drawn.iter().any(|line| line.contains("x stop")),
         "actions stay visible"
     );
 
@@ -263,7 +263,7 @@ async fn focused_controls_use_the_existing_driver_and_preserve_restartability() 
     tui.ui.sync_jobs(table.jobs(&root));
     tui.ui.vim = Some(Mode::Normal);
     press(&mut tui, ctrl('k'));
-    let asked = press(&mut tui, typed('k'));
+    let asked = press(&mut tui, typed('x'));
     tui.carry(deed(asked)).await;
     assert!(
         drawn_rows(crate::tui::view_at(&mut tui.views, tui.core.lane().token()))
@@ -291,7 +291,7 @@ async fn focused_controls_use_the_existing_driver_and_preserve_restartability() 
         .unwrap();
     assert_eq!(restarted.id(), id);
     tui.ui.sync_jobs(table.jobs(&root));
-    let asked = press(&mut tui, typed('K'));
+    let asked = press(&mut tui, typed('X'));
     tui.carry(deed(asked)).await;
     assert!(
         stop.is_cancelled(),

@@ -7,7 +7,7 @@ use pi_store::keys::Mode;
 use super::{Asked, Deed, Ui};
 
 pub(super) const HINT: &str =
-    "ctrl+k/j move · k stop · r restart · K stop all · enter output · esc back";
+    "ctrl+k/j move · x stop · r restart · X stop all · enter output · esc back";
 
 impl Ui {
     // A stopped row must remain available for restart while focused.
@@ -84,10 +84,10 @@ impl Ui {
                     None
                 }
                 KeyCode::Enter => return Some(Asked::Own(Deed::Job(id))),
-                KeyCode::Char('k') if key.modifiers.is_empty() => Some(Deed::StopJobs(vec![id])),
+                KeyCode::Char('x') if key.modifiers.is_empty() => Some(Deed::StopJobs(vec![id])),
                 KeyCode::Char('r') if key.modifiers.is_empty() => Some(Deed::RestartJobs(vec![id])),
-                KeyCode::Char('K') => Some(Deed::StopJobs(Vec::new())),
-                KeyCode::Char('k') if key.modifiers == KeyModifiers::SHIFT => {
+                KeyCode::Char('X') => Some(Deed::StopJobs(Vec::new())),
+                KeyCode::Char('x') if key.modifiers == KeyModifiers::SHIFT => {
                     Some(Deed::StopJobs(Vec::new()))
                 }
                 _ => None,

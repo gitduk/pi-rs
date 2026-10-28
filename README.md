@@ -217,7 +217,7 @@ name; there is no `/tool` entry point.
 In Vim Normal mode, `ctrl+k` focuses the last background job above the input.
 `ctrl+k`/`ctrl+j` move between jobs; `ctrl+j` below the last job or `esc` returns
 to the draft at its original cursor position. The selected job is highlighted:
-`k` stops it, `r` restarts it, `K` stops every running job in this workspace,
+`x` stops it, `r` restarts it, `X` stops every running job in this workspace,
 and `enter` expands or folds its output. Stopped rows stay available while
 focused so they can be restarted. Completion lists and reading pages keep
 their own keys; Insert mode keeps its editing keys. `/keys` includes this help.
