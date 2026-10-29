@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ---
 # description = "Ask the user a question with options when the decision belongs to them.\nExamples include choosing an approach, deciding whether to proceed, or selecting the next action.\nAsk only when the request, code, and reasonable defaults do not answer the question.\nThe answer must change your next action.\nOtherwise, choose the ordinary option, state it briefly, and continue.\nIf two applicable user rules conflict without stated precedence, ask the user to decide.\n\nWrite each option as the exact message the user would send to select it.\nUse words addressed to you or an available pi command.\nA selected command executes as if the user typed it.\nPut your recommended option first.\nThe user can select several text options, delivered together as one message with one option per line.\nA command must be selected alone.\n\nThe call returns immediately. End your turn after the call.\nThe selection, or text the user writes instead, arrives as their next message."
-# [args]
+# [required]
 # question = "Write one short sentence."
 # options = "Supply up to 9 options, one per line. Each option must be the exact one-line message that selects it."
 # ---

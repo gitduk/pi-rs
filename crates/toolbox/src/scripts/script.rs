@@ -20,15 +20,19 @@ pub(super) fn is_identifier(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-// An argument whose description starts with this may be left out.
-const OPTIONAL: &str = "optional:";
+#[derive(Debug, PartialEq)]
+pub(crate) struct Arg {
+    pub name: String,
+    pub description: String,
+    pub required: bool,
+}
 
 /// One discovered script: the frontmatter is the contract the schema shows the
 /// model, the file is the code a run executes.
 pub struct Script {
     pub(crate) name: String,
     pub(crate) description: String,
-    pub(crate) args: Vec<(String, String)>,
+    pub(crate) args: Vec<Arg>,
     pub(crate) path: PathBuf,
     pub(crate) runner: Runner,
     // Where a detached call is kept; without it a detach is refused.
@@ -78,7 +82,8 @@ impl Script {
         args: &'a Value,
         set: &'a [(String, String)],
     ) -> impl Iterator<Item = (&'a str, &'a str)> {
-        self.args.iter().filter_map(move |(name, _)| {
+        self.args.iter().filter_map(move |arg| {
+            let name = &arg.name;
             let value = args.get(name).and_then(Value::as_str)?;
             (is_identifier(name)
                 && std::env::var_os(name).is_none()
@@ -138,17 +143,13 @@ impl Tool for Script {
     fn schema(&self) -> Value {
         let mut properties = serde_json::Map::new();
         let mut required = Vec::new();
-        for (name, what) in &self.args {
-            let (what, optional) = match what.strip_prefix(OPTIONAL) {
-                Some(rest) => (rest.trim_start(), true),
-                None => (what.as_str(), false),
-            };
+        for arg in &self.args {
             properties.insert(
-                name.clone(),
-                json!({ "type": "string", "description": what }),
+                arg.name.clone(),
+                json!({ "type": "string", "description": arg.description }),
             );
-            if !optional {
-                required.push(json!(name));
+            if arg.required {
+                required.push(json!(arg.name));
             }
         }
         json!({
@@ -228,10 +229,17 @@ mod tests {
             name: "spy".into(),
             description: "Report PATH".into(),
             args: vec![
-                ("PATH".into(), "ignored, inherited wins".into()),
-                ("file".into(), "what to read".into()),
-                ("bad-name".into(), "not portable".into()),
-            ],
+                ("PATH", "ignored, inherited wins"),
+                ("file", "what to read"),
+                ("bad-name", "not portable"),
+            ]
+            .into_iter()
+            .map(|(name, description)| Arg {
+                name: name.into(),
+                description: description.into(),
+                required: true,
+            })
+            .collect(),
             path: PathBuf::from("spy.rs"),
             runner: Runner::Cargo,
             jobs: None,
@@ -246,27 +254,6 @@ mod tests {
         // Nor is a name the `.env` file sets: the model cannot swap a key.
         let set = [("file".to_string(), "from .env".to_string())];
         assert_eq!(script.env(&args, &set).count(), 0);
-    }
-
-    #[test]
-    fn an_optional_argument_is_left_out_of_required() {
-        let script = Script {
-            name: "greet".into(),
-            description: "Greet someone".into(),
-            args: vec![
-                ("who".into(), "whom to greet".into()),
-                ("greeting".into(), "optional: what to say".into()),
-            ],
-            path: PathBuf::from("greet"),
-            runner: Runner::Cargo,
-            jobs: None,
-        };
-        let schema = script.schema();
-        assert_eq!(schema["required"], json!(["who"]));
-        assert_eq!(
-            schema["properties"]["greeting"]["description"],
-            "what to say"
-        );
     }
 
     #[test]

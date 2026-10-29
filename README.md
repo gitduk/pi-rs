@@ -275,10 +275,13 @@ also continues when messages are waiting. Generation is never interrupted.
   not make the global directory a fallback.
   Keep a skill's helper scripts inside that skill's directory.
   One tool per script in `~/.pi/tools/`: any file whose first line is a `#!`,
-  its `description` and `[args]` written as TOML in a `# ---` comment block
+  its `description`, `[required]`, and `[optional]` written as TOML in a `# ---` comment block
   under that line; or a cargo script `*.rs`, described by its
-  `[package] description` and `[package.metadata.pi.args]`, which needs
-  `cargo +nightly -Zscript`. A script that does not read is listed as not
+  `[package] description`, `[package.metadata.pi.required]`, and
+  `[package.metadata.pi.optional]`, which needs
+  `cargo +nightly -Zscript`. Either argument table may be omitted; each entry
+  maps a parameter name to its string description.
+  A script that does not read is listed as not
   usable, with the reason. `~/.pi/tools/.env` holds `NAME=value` lines every
   script starts with, such as its service's key; `bash` never sees them.
   A checkout's own scripts go in the nearest `.pi/tools/` up to the
@@ -370,10 +373,10 @@ A skill is a directory with a `SKILL.md` in `~/.pi/skills/`, or in the nearest
 own) — the same two places a script is read from. Where both hold one name,
 for a script as for a skill, the project's is the one offered.
 
-The built-in `pi-extend` skill teaches the model to write both and to connect
-an MCP server, so a capability it lacks is one it can add; the built-in
-`pi-help` skill is this README, for questions about pi itself. A skill of
-either name on disk replaces it.
+The built-in `tool-creator` skill teaches the model to write tools, and
+`skill-creator` teaches it to write skills. `mcp-setup` covers connecting MCP
+servers. The built-in `pi-help` skill is this README, for questions about pi
+itself. A skill with the same name on disk replaces the built-in.
 
 An image pasted with `ctrl+v` goes with the message itself; its path rides
 along in the text. `read` also opens PNG, JPEG, GIF and WebP files as images.

@@ -1,9 +1,9 @@
 //! User-defined tools: a Rust script dropped into `$PI_HOME/tools/` (by
 //! default `~/.pi/tools/`) is a tool.
 //! Its cargo frontmatter is its interface: `[package] description` says what
-//! it does, and each `name = "what it is"` under `[package.metadata.pi.args]`
-//! declares one argument, however many, required unless its description
-//! starts with `optional:`. Arguments also arrive as environment
+//! it does, and each `name = "what it is"` under `[package.metadata.pi.required]`
+//! or `[package.metadata.pi.optional]` declares one string argument.
+//! Either table may be omitted. Arguments also arrive as environment
 //! variables `name`: absent when not passed, never shadowing an inherited
 //! name, and capped in size — while the call's full JSON stays on stdin and
 //! stdout is the result; stderr, compile errors included, only surfaces when
@@ -63,11 +63,8 @@ use tool::stamp::{Stamp, Stamped};
 
 use crate::background::JobSink;
 
-use script::Runner;
+use script::{Arg, Runner};
 pub use script::{Script, cargo_script, run_script};
-
-/// The built-in `pi-extend` skill: how to add a tool, an MCP server or a skill.
-pub const SKILL: &str = include_str!("../../skills/pi-extend/SKILL.md");
 
 /// The tools directory as a `tool::Source`: looked at whenever the tool set
 /// is asked, parsed again only when a file in it changed.
@@ -299,7 +296,7 @@ impl Tool for Broken {
     }
 }
 
-type Interface = (String, Vec<(String, String)>);
+type Interface = (String, Vec<Arg>);
 
 /// The frontmatter's manifest is the interface declaration: the same block
 /// cargo reads the script's dependencies from.
@@ -315,35 +312,49 @@ fn interface(text: &str) -> Result<Interface, String> {
         .ok_or("no [package] description")?;
     let declared = package
         .and_then(|p| p.get("metadata"))
-        .and_then(|m| m.get("pi"))
-        .and_then(|p| p.get("args"));
-    let args = declared_args(declared, "[package.metadata.pi.args]")?;
+        .and_then(|m| m.get("pi"));
+    let args = declared_args(declared, "package.metadata.pi.")?;
     Ok((description.to_string(), args))
 }
 
-// Each `name = "what it is"` in the table a header names its arguments in.
-fn declared_args(
-    table: Option<&toml::Value>,
-    called: &str,
-) -> Result<Vec<(String, String)>, String> {
+// Required and optional declarations share the same string descriptions.
+fn declared_args(table: Option<&toml::Value>, prefix: &str) -> Result<Vec<Arg>, String> {
     let Some(table) = table else {
         return Ok(Vec::new());
     };
-    let table = table.as_table().ok_or(format!("{called} is not a table"))?;
-    table
-        .iter()
-        .map(|(name, what)| {
-            let what = what
+    let table = table
+        .as_table()
+        .ok_or("argument declaration is not a table")?;
+    let mut args: Vec<Arg> = Vec::new();
+    for (section, required) in [("required", true), ("optional", false)] {
+        let Some(declared) = table.get(section) else {
+            continue;
+        };
+        let declared = declared
+            .as_table()
+            .ok_or_else(|| format!("[{prefix}{section}] is not a table"))?;
+        for (name, description) in declared {
+            if args.iter().any(|arg| arg.name == *name) {
+                return Err(format!(
+                    "argument {name} appears in both [{prefix}required] and [{prefix}optional]"
+                ));
+            }
+            let description = description
                 .as_str()
                 .ok_or_else(|| format!("argument {name}: describe it as a string"))?;
-            Ok((name.clone(), what.to_string()))
-        })
-        .collect()
+            args.push(Arg {
+                name: name.clone(),
+                description: description.to_string(),
+                required,
+            });
+        }
+    }
+    Ok(args)
 }
 
 /// Any other script's interface: TOML in a comment block right after the
 /// `#!` line, between `---` fences that carry the comment's own prefix —
-/// `# ---`, `// ---` — with `description` and an `[args]` table.
+/// `# ---`, `// ---` — with `description`, `[required]` and `[optional]`.
 fn header(text: &str) -> Result<Interface, String> {
     const NONE: &str = "no `# ---` header after the #! line";
     let mut lines = text.lines().skip(1).skip_while(|l| l.trim().is_empty());
@@ -371,14 +382,14 @@ fn header(text: &str) -> Result<Interface, String> {
     if !closed {
         return Err("the header is not closed by a second `---` line".into());
     }
-    let table: toml::Table = toml.parse().map_err(|e| format!("header: {e}"))?;
+    let table: toml::Value = toml::from_str(&toml).map_err(|e| format!("header: {e}"))?;
     let description = table
         .get("description")
         .and_then(toml::Value::as_str)
         .map(str::trim)
         .filter(|d| !d.is_empty())
         .ok_or("no description in the header")?;
-    let args = declared_args(table.get("args"), "[args]")?;
+    let args = declared_args(Some(&table), "")?;
     Ok((description.to_string(), args))
 }
 
@@ -405,41 +416,112 @@ fn frontmatter(text: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
-    // The skill is how a model learns to write a script; if its example stops
-    // parsing, every script written from it is skipped without a word.
+    // Exercise both declarations through discovery and the schema sent to callers.
+    fn discover_declarations(declaration: &str) -> (Vec<Script>, Vec<Skip>) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("cargo.rs"),
+            format!(
+                "---\n[package]\ndescription = \"Test\"\n[package.metadata.pi]\n{declaration}\n---\nfn main() {{}}\n"
+            ),
+        )
+        .unwrap();
+        let commented = declaration
+            .lines()
+            .map(|line| format!("# {line}\n"))
+            .collect::<String>();
+        std::fs::write(
+            dir.path().join("shell"),
+            format!("#!/bin/sh\n# ---\n# description = \"Test\"\n{commented}# ---\n"),
+        )
+        .unwrap();
+        discover_in(dir.path())
+    }
+
     #[test]
-    fn the_pi_tool_example_is_a_script_pi_accepts() {
-        let example = SKILL
-            .split("```rust\n")
-            .nth(1)
-            .and_then(|rest| rest.split("```").next())
-            .expect("a rust example");
-        let (description, args) = interface(example).unwrap();
-        assert!(!description.is_empty());
-        assert_eq!(args.len(), 1, "{args:?}");
-        assert!(example.contains(&format!("std::env::var(\"{}\")", args[0].0)));
+    fn required_and_optional_tables_define_the_schema_without_changing_descriptions() {
+        let (found, skipped) = discover_declarations(
+            "required = { prompt = 'optional: literal description' }\noptional = { after = 'A delay' }",
+        );
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(found.len(), 2);
+        for script in found {
+            assert_eq!(
+                script.schema(),
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "prompt": { "type": "string", "description": "optional: literal description" },
+                        "after": { "type": "string", "description": "A delay" },
+                    },
+                    "required": ["prompt"],
+                })
+            );
+        }
+    }
 
-        let example = SKILL
-            .split("```sh\n")
-            .nth(1)
-            .and_then(|rest| rest.split("```").next())
-            .expect("a script example");
-        assert!(script::shebang(example).is_some());
-        let (description, args) = header(example).unwrap();
-        assert!(!description.is_empty());
-        assert_eq!(args.len(), 1, "{args:?}");
-        assert!(example.contains(&format!("\"${}\"", args[0].0)));
+    #[test]
+    fn either_argument_table_may_be_omitted() {
+        for (declaration, expected, count) in [
+            ("", json!([]), 0),
+            ("required = {}\noptional = {}", json!([]), 0),
+            ("required = { prompt = 'A request' }", json!(["prompt"]), 1),
+            ("optional = { after = 'A delay' }", json!([]), 1),
+        ] {
+            let (found, skipped) = discover_declarations(declaration);
+            assert!(skipped.is_empty(), "{skipped:?}");
+            assert_eq!(found.len(), 2);
+            for script in found {
+                assert_eq!(script.schema()["required"], expected);
+                assert_eq!(script.args.len(), count);
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_argument_declarations_are_refused_in_both_formats() {
+        for (declaration, message) in [
+            (
+                "required = { prompt = 'A request' }\noptional = { prompt = 'Another request' }",
+                "argument prompt appears in both",
+            ),
+            ("required = 1", "required] is not a table"),
+            ("optional = 'delay'", "optional] is not a table"),
+            (
+                "required = { prompt = 1 }",
+                "argument prompt: describe it as a string",
+            ),
+            (
+                "optional = { after = false }",
+                "argument after: describe it as a string",
+            ),
+        ] {
+            let (found, skipped) = discover_declarations(declaration);
+            assert!(found.is_empty());
+            assert_eq!(skipped.len(), 2);
+            for skip in skipped {
+                assert!(skip.why.contains(message), "{skip}");
+            }
+        }
     }
 
     #[test]
     fn the_frontmatter_declares_description_and_args() {
         let text = "#!/usr/bin/env cargo\n---\n[package]\ndescription = \"Count lines\"\n\n\
-                    [package.metadata.pi.args]\nfile = \"file to count\"\n\n\
+                    [package.metadata.pi.required]\nfile = \"file to count\"\n\n\
                     [dependencies]\nserde_json = \"1\"\n---\nfn main() {}\n";
         let (description, args) = interface(text).unwrap();
         assert_eq!(description, "Count lines");
-        assert_eq!(args, vec![("file".into(), "file to count".into())]);
+        assert_eq!(
+            args,
+            vec![Arg {
+                name: "file".into(),
+                description: "file to count".into(),
+                required: true,
+            }]
+        );
     }
 
     #[test]
@@ -520,14 +602,14 @@ mod tests {
         );
         write(
             "greet.sh",
-            "#!/usr/bin/env bash\n# ---\n# description = \"Greet\"\n# [args]\n# who = \"whom\"\n# ---\necho hi\n",
+            "#!/usr/bin/env bash\n# ---\n# description = \"Greet\"\n# [required]\n# who = \"whom\"\n# ---\necho hi\n",
         );
         write("notes.md", "# not a script\n");
         write("old.sh", "#!/usr/bin/env bash\n# description: x\n");
         let (found, skipped) = discover_in(dir.path());
         let names: Vec<_> = found.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["count", "greet"]);
-        assert_eq!(found[1].args, [("who".to_string(), "whom".to_string())]);
+        assert_eq!(found[1].schema()["required"], serde_json::json!(["who"]));
         assert!(
             matches!(&found[1].runner, Runner::Shebang(p, Some(a)) if p == "/usr/bin/env" && a == "bash")
         );
@@ -561,7 +643,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("show.sh"),
-            "#!/bin/sh\n# ---\n# description = \"Show\"\n# [args]\n\
+            "#!/bin/sh\n# ---\n# description = \"Show\"\n# [required]\n\
              # PI_TEST_KEY = \"a name the file sets\"\n# ---\necho \"$PI_TEST_KEY\"\n",
         )
         .unwrap();
@@ -574,6 +656,31 @@ mod tests {
             .unwrap()
             .flatten();
         assert_eq!(out.trim(), "from-file");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_omitted_optional_argument_stays_absent_on_stdin_and_in_the_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("show"),
+            "#!/bin/sh\n# ---\n# description = \"Show\"\n# [optional]\n\
+             # pi_test_optional_delay = \"A delay\"\n# ---\n\
+             cat\nprintf '\\n%s' \"${pi_test_optional_delay-unset}\"\n",
+        )
+        .unwrap();
+        let (found, skipped) = discover_in(dir.path());
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let ctx = tool::Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        for (args, value) in [
+            (json!({}), "unset"),
+            (json!({ "pi_test_optional_delay": "" }), ""),
+            (json!({ "pi_test_optional_delay": "10m" }), "10m"),
+        ] {
+            let expected = format!("{args}\n{value}");
+            let out = found[0].execute(args, &ctx).await.unwrap().flatten();
+            assert_eq!(out, expected);
+        }
     }
 
     #[test]

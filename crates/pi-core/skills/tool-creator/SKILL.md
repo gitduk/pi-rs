@@ -1,37 +1,19 @@
 ---
-name: pi-extend
-description: Add or fix reusable tools, MCP servers, and skills for pi. Use when the model needs a new tool interface or reusable instructions. Task scripts do not need this skill.
+name: tool-creator
+description: Create or fix reusable tools for pi, including their script interfaces and background events. Use when the model needs a named interface for direct calls. Ordinary task scripts do not need this skill.
 ---
 
-# Extending pi
+# Creating a tool
 
-The `<pi_home>` block specifies pi's home.
-The path is `$PI_HOME` when set, or `~/.pi` otherwise.
-pi reads this directory live. A new tool or skill becomes available on your next turn without a restart.
-Use the tools currently offered to determine which capabilities are available.
-
-## Choose what to create
-
-A script is a code file that an interpreter or runtime executes.
 A tool is a named interface that the model can call directly.
-A tool can use a script as its implementation.
-A skill provides instructions and can include helper scripts.
+A script can implement a tool, but ordinary task scripts belong in the workspace and run through `bash`.
+Running a script repeatedly does not require a new tool.
+For a reusable interface, define its purpose, inputs, and output before writing its implementation.
+Pass the current task's data as arguments instead of hardcoding it.
 
-- For code that completes the current task, write a script in the workspace.
-  Run the script through `bash` with its interpreter or runtime.
-  Follow the project's directory conventions.
-  Running a script repeatedly does not require a new tool.
-- For a reusable interface that the model must call directly, add a tool.
-  Define its purpose, inputs, and output before writing its implementation.
-  Pass the current task's data as arguments.
-  Do not hardcode that data in the tool.
-- For reusable instructions, add a skill.
-  Keep its helper scripts inside the skill's directory.
-  Describe how to run them in `SKILL.md`.
-
-For example, a script that converts the current CSV file belongs in the workspace.
-A conversion tool accepts a file path as an argument and declares its output format.
-Both can use Python. The callable interface determines whether pi treats the script as a tool.
+The `<pi_home>` block specifies pi's home: `$PI_HOME` when set, or `~/.pi` otherwise.
+pi reads tool directories live. A new or updated tool becomes available on the next turn without a restart.
+Use the tools currently offered to determine which capabilities are available.
 
 ## Implement a tool with a script
 
@@ -75,7 +57,7 @@ It skips the home tool and reports the conflict.
 #!/usr/bin/env bash
 # ---
 # description = "Count the lines of a file. Return only the number."
-# [args]
+# [required]
 # file = "Path of the file to count, relative to the workspace."
 # ---
 # Every declared argument is also an environment variable of its name.
@@ -89,7 +71,7 @@ wc -l < "$file" || { echo "cannot read $file" >&2; exit 1; }
 edition = "2024"
 description = "Count the lines of a file. Return only the number."
 
-[package.metadata.pi.args]
+[package.metadata.pi.required]
 file = "Path of the file to count, relative to the workspace."
 ---
 
@@ -115,9 +97,24 @@ After you fix the problem, the tool becomes available on your next turn.
 The description is the caller's only tool documentation.
 State what the tool does and how it formats its answer.
 
-Each `name = "description"` under `[args]` declares one string argument.
-For Rust, use `[package.metadata.pi.args]`.
-Arguments are required unless their descriptions start with `optional:`.
+Each `name = "description"` under `[required]` or `[optional]` declares one string argument.
+For Rust, use `[package.metadata.pi.required]` and `[package.metadata.pi.optional]`.
+Either table may be omitted. Omit both for a tool with no arguments.
+A name cannot appear in both tables. Descriptions do not control whether an argument is required.
+
+For example, declare a reminder's arguments as:
+
+```toml
+[required]
+prompt = "What to do when the reminder comes due."
+
+[optional]
+after = "A delay: 30s / 10m / 2h / 1d."
+every = "A period of at least 1m."
+```
+
+Required means the argument must be provided; the script validates its value, including empty strings.
+The script supplies defaults for omitted optional arguments. Omission and an empty string are distinct.
 
 The script always receives the full call as JSON on stdin.
 Each argument also becomes an environment variable of the same name, except when:
@@ -186,7 +183,7 @@ After `follow`, the script also receives one reply for every other turn in its c
 #!/usr/bin/env python3
 # ---
 # description = "Watch a URL and report each content change. Run in the background until stopped."
-# [args]
+# [required]
 # url = "The page to watch."
 # ---
 import hashlib, json, os, sys, time, urllib.request
@@ -236,59 +233,3 @@ Other runs, including one-shot invocations and subagents, refuse detach and stop
 
 To check the event protocol manually, redirect fd 3 to the terminal:
 `echo '{"url":"https://example.com"}' | PI_EVENTS_FD=3 python3 <tools-dir>/watch 3>&1`.
-
-## An MCP server
-
-If the capability exists as an MCP server, connect that server instead of writing a tool.
-Add a section to `settings.toml` in pi's home.
-Within a second of the save, pi starts the server.
-After listing the server's tools, pi offers them as `<server>__<tool>`.
-
-```toml
-[mcp.github]                       # a-z, 0-9, - and _
-command = "github-mcp-server"      # stdio: a program and its arguments
-args    = ["stdio"]
-env     = { GITHUB_TOKEN = "$GITHUB_TOKEN" }   # $NAME reads pi's environment
-
-[mcp.docs]
-url     = "https://example.com/mcp"            # Streamable HTTP
-headers = { Authorization = "$DOCS_AUTHORIZATION" }  # the complete value, including "Bearer "
-```
-
-`~/.pi/settings.toml` applies to every checkout.
-A project's `.pi.toml` adds servers for that checkout alone.
-pi reports those servers at startup.
-
-A server that cannot start appears as `<server>__unavailable`.
-Its description explains the failure. The user can list servers and their tools, or reconnect a server.
-
-Check the server's documentation for its command and required variables.
-Never put a secret in the file. Reference the environment variable with `$`.
-
-## A skill
-
-Create a directory at `skills/<name>/`.
-Add a `SKILL.md` containing YAML frontmatter followed by instructions.
-
-```markdown
----
-description: State the skill's purpose and when to use it. The caller reads this before loading the instructions.
----
-
-The instructions to follow after loading the skill.
-```
-
-The `description` field is required. Without it, pi skips the skill.
-The `name` field is optional and defaults to the directory name.
-Use only a-z, 0-9, `-`, and `_` in the name.
-
-pi offers the skill through the `skill` tool.
-Users can also invoke a skill by name.
-Read other files within the skill directory with `skill(name: "<name>", file: "<path>")`.
-Reference these files in the instructions.
-
-A skill in `skills/` replaces a built-in skill with the same name.
-For a checkout-specific skill, use `.pi/skills/` at the repository root.
-Outside a repository, use `.pi/skills/` in the workspace.
-pi reads this directory live too.
-If both directories contain the same skill name, pi offers the checkout's skill.

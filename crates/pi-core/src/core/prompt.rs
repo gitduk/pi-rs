@@ -60,7 +60,9 @@ The user expects to find them there.\n\n\
 A script is a code file that an interpreter or runtime executes. \
 A tool is a named interface that the model can call directly. \
 A tool can use a script as its implementation. Writing a script does not require registering a tool. \
-Keep task scripts in the workspace. Run these scripts through bash. \
+When a registered tool supports the operation, call it directly through its tool interface. \
+Use bash for ordinary scripts or operations that other available tool interfaces cannot express. \
+Keep scripts written for the current task in the workspace. Run those task scripts through bash. \
 Running a script repeatedly does not require a new tool.\n\n\
 Reading may access files outside the workspace through absolute paths. URLs can access sources outside this machine.",
             escaped(self.workspace.display())
@@ -104,7 +106,7 @@ Add a tool here only when the user requests a tool shared across projects. \
 Keep project tools in the project's tool directory.\n\n\
 Tools and skills added here become available on your next turn. No restart is needed. \
 pi registers tools from scripts in `tools/`. Do not store task scripts or helper files in this directory. \
-Read the `pi-extend` skill for supported additions and instructions.\n</pi_home>",
+Read `tool-creator` to create tools, `skill-creator` to create skills, and `mcp-setup` to connect MCP servers.\n</pi_home>",
             escaped(home.display())
         ));
     }

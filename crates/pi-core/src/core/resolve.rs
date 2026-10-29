@@ -259,7 +259,7 @@ pub fn resolve(
         .collect();
     let shelf = (!pinned.no_skills).then(|| {
         let shelf = skills::Shelf::new(skill_dirs);
-        let builtins = [toolbox::scripts::SKILL, PI_SKILL];
+        let builtins = [TOOL_CREATOR, SKILL_CREATOR, MCP_SETUP, PI_SKILL];
         Arc::new(
             builtins
                 .into_iter()
@@ -365,10 +365,10 @@ pub fn resolve(
     let mut system = prompt_files.system.clone();
     // Everything the run needs to know about pi rides here rather than in the
     // system prompt, so that a replaced or empty one loses none of it.
-    // Said only where `pi-extend` is offered and the home may be written; the
+    // Said only where skills are offered and the home may be written; the
     // write tool's own check, so a symlinked home is judged as it is.
     let pi_home = pi_store::dir().filter(|home| {
-        found.skills.iter().any(|s| s.name == "pi-extend")
+        shelf.is_some()
             && tool::Tier::Write.under(tier)
             && home
                 .to_str()
@@ -457,6 +457,10 @@ fn system_file(pinned: &Pinned) -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(config::system_file)
 }
+
+const TOOL_CREATOR: &str = include_str!("../../skills/tool-creator/SKILL.md");
+const SKILL_CREATOR: &str = include_str!("../../skills/skill-creator/SKILL.md");
+const MCP_SETUP: &str = include_str!("../../skills/mcp-setup/SKILL.md");
 
 // pi as its README tells it, for when the user asks about pi itself: one
 // source, so a feature written up there is known here.
@@ -745,16 +749,86 @@ mod tests {
 
     // A built-in skill is dropped without a word when its header does not parse.
     #[test]
-    fn pi_extend_is_a_builtin_skill_and_its_skill_example_parses() {
-        let extend = skills::Skill::builtin(toolbox::scripts::SKILL).expect("pi-extend parses");
-        assert_eq!(extend.name, "pi-extend");
-        let example = toolbox::scripts::SKILL
+    fn the_skill_creators_and_mcp_instructions_are_builtin_skills() {
+        for (name, text) in [
+            ("tool-creator", super::TOOL_CREATOR),
+            ("skill-creator", super::SKILL_CREATOR),
+            ("mcp-setup", super::MCP_SETUP),
+        ] {
+            let skill = skills::Skill::builtin(text).expect("a valid built-in skill");
+            assert_eq!(skill.name, name);
+        }
+    }
+
+    #[test]
+    fn the_creators_are_offered_as_skills_and_commands_unless_skills_are_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tool::Workspace::new(dir.path()).unwrap();
+        let settings = pi_store::settings::Settings::new(toml::Table::new().into(), None);
+        for no_skills in [false, true] {
+            let pinned = crate::args::Pinned {
+                no_skills,
+                no_context_files: true,
+                ..Default::default()
+            };
+            let resolved = super::resolve(
+                &pinned,
+                &workspace,
+                &Default::default(),
+                &settings,
+                Some(std::sync::Arc::new(super::PromptFiles::default())),
+                &[],
+            )
+            .unwrap();
+            let loader = resolved.brief.registry.get(skills::Load::NAME);
+            assert_eq!(loader.is_some(), !no_skills);
+            for name in ["tool-creator", "skill-creator", "mcp-setup"] {
+                assert_eq!(
+                    resolved
+                        .commands
+                        .iter()
+                        .any(|command| command.word.strip_prefix('/') == Some(name)),
+                    !no_skills,
+                    "{name}"
+                );
+                if let Some(loader) = &loader {
+                    assert!(loader.description().contains(name), "{name}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_skill_creator_example_parses() {
+        let example = super::SKILL_CREATOR
             .split("```markdown\n")
             .nth(1)
             .and_then(|rest| rest.split("```").next())
             .expect("a skill example");
         let (_, description) = skills::frontmatter(example).unwrap();
         assert!(description.is_some_and(|d| !d.is_empty()));
+    }
+
+    // Models copy these examples, so exercise them through tool discovery.
+    #[test]
+    fn the_tool_creator_examples_are_scripts_pi_accepts() {
+        let dir = tempfile::tempdir().unwrap();
+        for (language, filename) in [("rust", "count.rs"), ("sh", "count-shell")] {
+            let example = super::TOOL_CREATOR
+                .split(&format!("```{language}\n"))
+                .nth(1)
+                .and_then(|rest| rest.split("```").next())
+                .expect("a tool example");
+            std::fs::write(dir.path().join(filename), example).unwrap();
+        }
+        let (found, skipped) = toolbox::scripts::discover_in(dir.path());
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(found.len(), 2);
+        for script in found {
+            let schema = tool::Tool::schema(&script);
+            assert_eq!(schema["required"], serde_json::json!(["file"]));
+            assert_eq!(schema["properties"]["file"]["type"], "string");
+        }
     }
 
     #[test]
