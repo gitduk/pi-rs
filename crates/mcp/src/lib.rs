@@ -168,6 +168,11 @@ impl Servers {
         Ok(chosen.len())
     }
 
+    /// The names restart accepts, including servers that are not connected.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.servers.iter().map(|s| s.name.as_str())
+    }
+
     /// Every server, its status and the tools it offers.
     pub fn shown(&self) -> Vec<Shown> {
         self.servers

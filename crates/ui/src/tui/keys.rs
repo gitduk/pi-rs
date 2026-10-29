@@ -10,6 +10,7 @@ use crossterm::event::{
 };
 use pi_core::core::lane::Lane;
 use pi_core::input::Builtin;
+use pi_core::input::commands::Acceptance;
 use pi_core::input::{self, Intent};
 use pi_store::keys::{Action, Key, Layers, Mode, Mods, Press, Surface};
 use std::time::Instant;
@@ -20,7 +21,7 @@ pub(super) const KEYS: &str = "/keys";
 /// The words this surface answers itself, listed beside the built-ins.
 pub const WORDS: &[input::commands::Command] = &[input::commands::Command::surface(
     KEYS,
-    "",
+    input::commands::Args::None,
     "what every key does, and the id to rebind it under",
 )];
 
@@ -254,8 +255,8 @@ impl Ui {
                 self.list.seeded = None;
                 // What is sent is answered on the transcript, not the page.
                 self.close_overlay(view);
-                // Enter with a menu open runs what's highlighted, the typed
-                // text a mere prefix. Pick before draining the editor.
+                // Resolve the highlighted completion before draining the
+                // editor: it may continue input rather than submit it.
                 let moved = self.list.picked.is_some();
                 return match self.highlighted().filter(|e| e.taken_by_enter(moved)) {
                     // What was marked, or with nothing marked the highlighted one.
@@ -266,12 +267,16 @@ impl Ui {
                         };
                         self.answer(&picks, None)
                     }
-                    Some(MenuEntry::Completion(c)) => {
-                        // The completion's line runs; the prefix that
-                        // produced it goes, so it can't resubmit as a stray prompt.
-                        self.editor.take();
-                        self.run_line(c.line)
-                    }
+                    Some(MenuEntry::Completion(c)) => match c.accept {
+                        Acceptance::Continue => {
+                            self.apply_completion(c);
+                            Asked::Own(Deed::Nothing)
+                        }
+                        Acceptance::Run => {
+                            self.editor.take();
+                            self.run_line(c.line)
+                        }
+                    },
                     Some(MenuEntry::File {
                         start,
                         end,
@@ -422,11 +427,7 @@ impl Ui {
             }
             Some(Action::MenuAccept) => match self.highlighted() {
                 Some(MenuEntry::Completion(c)) => {
-                    self.editor.set_line(&c.line);
-                    // Something still expected after it wants a space first.
-                    if c.more {
-                        self.editor.insert(' ');
-                    }
+                    self.apply_completion(c);
                 }
                 Some(MenuEntry::File {
                     start,

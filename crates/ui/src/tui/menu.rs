@@ -7,7 +7,7 @@ use super::search::{Place, Spot};
 use super::view::View;
 use pi_core::core;
 use pi_core::core::question::Question;
-use pi_core::input::commands::{Candidate, Choice};
+use pi_core::input::commands::{Candidate, Choice, Input, Sources};
 use pi_store::keys::Action;
 use pi_store::session::ResumeChoice;
 use pi_store::session::Store;
@@ -17,51 +17,60 @@ use ratatui::widgets::ListItem;
 use std::collections::BTreeSet;
 
 impl Ui {
-    // What the line could become: a completion while a command word is typed.
     pub(super) fn menu(&mut self) -> Vec<MenuEntry> {
-        // The line's row is the query's while one is typed; the list, the
-        // lines it is found on.
+        self.assistance().into_parts().0
+    }
+
+    pub(super) fn assistance(&mut self) -> Assistance {
         if self.search_typing() {
-            return self.search_menu();
+            return Assistance::new(self.search_menu(), None);
         }
         let (line, cursor) = self.list_line();
         let text = line.as_str();
         self.list.follow(text);
+        let input = Input::new(
+            text,
+            cursor,
+            &self.commands,
+            self.tools.as_ref().map(|brief| &brief.registry),
+        );
+        let hint = (text == self.editor.text()).then(|| input.hint()).flatten();
         if self.list.dismissed_at.as_deref() == Some(text) {
-            return Vec::new();
+            return Assistance::new(Vec::new(), hint);
         }
-        // A path token outranks the word completions: the filesystem holds
-        // the answer, not the command tables.
+        // Directory names can contain spaces.
+        // @ and ~/ complete only the token under the caret.
         use pi_core::input::complete as path;
-        // `/mv`'s argument is read first, `~/` and all: only a directory
-        // is somewhere to go there.
-        let found = (path::mv_prefix(text, cursor).map(|t| (t, Path::Mv)))
+        let found = input
+            .directory()
+            .map(|t| (t, Path::Directory))
             .or_else(|| path::at_prefix(text, cursor).map(|t| (t, Path::At)))
             .or_else(|| path::home_prefix(text, cursor).map(|t| (t, Path::Home)));
         if let Some(((start, end, query), kind)) = found {
-            // Keyed by the whole token: every keystroke moves it, but every
-            // frame redraws the menu against the same one.
             let token = &text[start..end];
-            if (self.at_menu.as_ref()).is_none_or(|(k, t, _)| (*k, t.as_str()) != (kind, token)) {
+            if self
+                .at_menu
+                .as_ref()
+                .is_none_or(|(k, t, _)| (*k, t.as_str()) != (kind, token))
+            {
                 let home = pi_core::core::instructions::home();
                 let items = match kind {
                     Path::At => path::candidates(query, &self.at_root),
                     Path::Home => home.map_or_else(Vec::new, |h| path::home_candidates(query, &h)),
-                    Path::Mv => path::mv_candidates(query, &self.at_root, home.as_deref()),
+                    Path::Directory => path::directories(query, &self.at_root, home.as_deref()),
                 };
                 self.at_menu = Some((kind, token.to_string(), items));
             }
             let lead = if kind == Path::At { "@" } else { "" };
-            // Nothing typed in the folder yet: the list is to browse, not a guess.
             let browse = query.is_empty() || query.ends_with('/');
             let (_, _, items) = self.at_menu.as_ref().expect("set above");
-            return items
+            let menu = items
                 .iter()
                 .rev()
                 .map(|f| MenuEntry::File {
                     start,
                     end,
-                    show: if kind == Path::Mv {
+                    show: if kind == Path::Directory {
                         format!("{}/", f.path)
                     } else {
                         at_row_name(&f.path, f.dir)
@@ -73,31 +82,33 @@ impl Ui {
                     picked_only: browse,
                 })
                 .collect();
+            return Assistance::new(menu, hint);
         }
-        // A question's options before the words they would complete: one may
-        // be a command, taken onto the line to send.
         let picks = self.picks(text);
         if !picks.is_empty() {
-            return picks;
+            return Assistance::new(picks, None);
         }
         self.lists.catch_up();
-        // Bottom-up: the best match belongs on the row right above the input.
-        pi_core::input::commands::complete(
-            text,
-            &self.commands,
-            &self.choices,
-            pi_core::input::commands::Front {
-                tools: self.tools.as_ref().map(|brief| &brief.registry),
-                said: &self.said,
-            },
-            || self.lists.sessions(),
-            || self.lists.worktrees(),
-            || self.lists.editable(),
+        let sessions = || self.lists.sessions();
+        let worktrees = || self.lists.worktrees();
+        let editable = || self.lists.editable();
+        let candidates = input.complete(&Sources {
+            models: &self.choices,
+            said: &self.said,
+            sessions: Some(&sessions),
+            worktrees: Some(&worktrees),
+            editable: Some(&editable),
+            servers: Some(&core::mcp::choices),
+        });
+        // Bottom-up: the best match belongs right above the input.
+        Assistance::new(
+            candidates
+                .into_iter()
+                .rev()
+                .map(MenuEntry::Completion)
+                .collect(),
+            hint,
         )
-        .into_iter()
-        .rev()
-        .map(MenuEntry::Completion)
-        .collect()
     }
 
     // The line as its list reads it, with the caret: a character that may be
@@ -192,6 +203,13 @@ impl Ui {
         self.editor.splice(start, end, &token);
     }
 
+    pub(super) fn apply_completion(&mut self, candidate: Candidate) {
+        self.editor.set_line(&candidate.line);
+        if candidate.more {
+            self.editor.insert(' ');
+        }
+    }
+
     // Every row muted but `picked`: the mark, `menu.selected` on its name (a
     // found line's stays plain), and the list's band.
     pub(super) fn menu_items(
@@ -228,22 +246,9 @@ impl Ui {
                     };
                     return ListItem::new(super::search::marked(line, query, None, look, look));
                 }
-                let show = shown[at].as_str();
-                // Only a command word carries an argument hint to set apart; a
-                // message or a file name is whole, spaces and all.
-                let (name, args) = match c {
-                    MenuEntry::Completion(c) if c.more => {
-                        show.split_once(' ').unwrap_or((show, ""))
-                    }
-                    _ => (show, ""),
-                };
-                let args = if args.is_empty() {
-                    String::new()
-                } else {
-                    format!(" {args}")
-                };
-                let pad = head.saturating_sub(pi_store::text::width(show));
-                let lead = format!("{args}{}  ", " ".repeat(pad));
+                let name = shown[at].as_str();
+                let pad = head.saturating_sub(pi_store::text::width(name));
+                let lead = format!("{}  ", " ".repeat(pad));
                 // Cut where the menu ends, marked, not mid-word at its edge.
                 let used = pi_store::text::width(marker)
                     + pi_store::text::width(name)
@@ -302,12 +307,39 @@ impl Ui {
     }
 }
 
+// Candidates and placeholders must never appear together.
+pub(super) enum Assistance {
+    None,
+    Menu(Vec<MenuEntry>),
+    Hint(String),
+}
+
+impl Assistance {
+    fn new(menu: Vec<MenuEntry>, hint: Option<String>) -> Self {
+        if !menu.is_empty() {
+            Self::Menu(menu)
+        } else if let Some(hint) = hint {
+            Self::Hint(hint)
+        } else {
+            Self::None
+        }
+    }
+
+    pub(super) fn into_parts(self) -> (Vec<MenuEntry>, Option<String>) {
+        match self {
+            Self::None => (Vec::new(), None),
+            Self::Menu(menu) => (menu, None),
+            Self::Hint(hint) => (Vec::new(), Some(hint)),
+        }
+    }
+}
+
 // What a path token is completed against.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Path {
     At,
     Home,
-    Mv,
+    Directory,
 }
 
 // Where the list over the line stands: its highlight and window, kept
@@ -427,7 +459,10 @@ impl MenuEntry {
     pub(super) fn help(&self) -> &str {
         match self {
             MenuEntry::Completion(c) => &c.help,
-            MenuEntry::File { kind: Path::Mv, .. } => "",
+            MenuEntry::File {
+                kind: Path::Directory,
+                ..
+            } => "",
             MenuEntry::File { path, .. } => path,
             MenuEntry::Hit { .. } | MenuEntry::Pick { .. } => "",
         }

@@ -372,7 +372,7 @@ fn esc_takes_the_list_first_and_the_run_next() {
     let mut ui = test_ui(80, 24);
     ui.commands = std::sync::Arc::new(vec![Command {
         word: "/new".into(),
-        args: "",
+        args: pi_core::input::commands::Args::None,
         help: "a fresh session".into(),
         intent: |_, _| Intent::Builtin(Builtin::New),
         source: Source::Builtin,
@@ -412,6 +412,153 @@ fn esc_takes_the_list_first_and_the_run_next() {
         "/new",
         "the half-typed word was completed"
     );
+}
+
+#[test]
+fn command_arguments_are_hints_after_completion_and_never_submitted() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut ui = test_ui(80, 24);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    let key = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+
+    ui.editor.set_line("/comp");
+    let menu = ui.menu();
+    assert_eq!(menu.len(), 1);
+    assert_eq!(menu[0].show(), "/compact");
+    ui.key(&lane, &mut view, key(KeyCode::Tab), false);
+    assert_eq!(ui.editor.text(), "/compact ");
+    let (rows, caret) = input(&mut ui, 80);
+    assert!(
+        rows[caret.0 as usize]
+            .to_string()
+            .ends_with("/compact [focus]")
+    );
+    assert_eq!(caret, ui.editor.view(&ui.paint, 80).1);
+    ui.flush(&lane, &mut view);
+    let cell = &ui.screen.test_buffer()[(caret.1, ui.regions.editor.y + caret.0)];
+    assert_eq!(cell.symbol(), "[");
+    assert_eq!(Some(cell.fg), ui.rat_style(&ui.paint.theme.muted).fg);
+
+    ui.key(&lane, &mut view, typed('x'), false);
+    assert!(input(&mut ui, 80).0[0].to_string().ends_with("/compact x"));
+    ui.key(&lane, &mut view, key(KeyCode::Backspace), false);
+    assert!(
+        input(&mut ui, 80).0[0]
+            .to_string()
+            .ends_with("/compact [focus]")
+    );
+
+    let asked = ui.key(&lane, &mut view, key(KeyCode::Enter), false);
+    assert!(matches!(
+        asked,
+        Asked::Core(Intent::Builtin(Builtin::Compact(focus))) if focus.is_empty()
+    ));
+    assert!(ui.editor.is_empty());
+    assert_eq!(ui.submitted.as_deref(), Some("/compact "));
+    assert!(ui.editor.history().is_empty());
+}
+
+#[test]
+fn argument_hints_fit_the_caret_row_and_only_show_for_empty_arguments() {
+    let mut ui = test_ui(80, 24);
+    ui.editor.set_line("/compact ");
+    for width in ui.prompt.width() + 1..=24 {
+        let (plain, caret) = ui.editor.view(&ui.paint, width);
+        let (hinted, hinted_caret) = input(&mut ui, width);
+        assert_eq!(hinted_caret, caret);
+        assert_eq!(hinted.len(), plain.len(), "width {width}");
+        let hint_row = &hinted[caret.0 as usize];
+        assert!(hint_row.width() <= width, "width {width}: {hint_row}");
+        if width > caret.1 as usize {
+            assert!(hint_row.width() > plain[caret.0 as usize].width());
+        }
+    }
+    for text in [
+        "/comp ",
+        "/compact",
+        "/compact x",
+        "/compact \n",
+        "/exit ",
+        "/unknown ",
+        "say /compact ",
+    ] {
+        ui.editor.set_line(text);
+        assert_eq!(
+            input(&mut ui, 80),
+            ui.editor.view(&ui.paint, 80),
+            "{text:?}"
+        );
+    }
+    ui.editor.set_line("/compact  ");
+    ui.editor.left();
+    assert_eq!(input(&mut ui, 80), ui.editor.view(&ui.paint, 80));
+
+    // A search query can contain a command word.
+    let mut view = View::default();
+    ui.search_open(&mut view);
+    ui.editor.set_line("/compact ");
+    assert!(ui.search_typing());
+    assert!(!input(&mut ui, 80).0[0].to_string().contains("[focus]"));
+}
+
+#[test]
+fn argument_completion_hides_the_hint_until_the_menu_is_dismissed() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut ui = test_ui(80, 24);
+    let (dir, lane) = a_running_lane();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    ui.at_root = dir.path().to_path_buf();
+    let mut view = View::default();
+
+    for command in ["/mv ", "/effort ", "/mcp "] {
+        ui.editor.set_line(command);
+        assert!(!ui.menu().is_empty(), "{command}");
+        let (_, caret) = ui.editor.view(&ui.paint, 80);
+        ui.flush(&lane, &mut view);
+        assert!(ui.regions.menu.height > 0);
+        let cell = &ui.screen.test_buffer()[(caret.1, ui.regions.editor.y + caret.0)];
+        assert_eq!(cell.symbol(), " ", "{command}: no hint beside the menu");
+
+        let esc = crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        ui.key(&lane, &mut view, esc, false);
+        ui.flush(&lane, &mut view);
+        assert!(ui.menu().is_empty());
+        let cell = &ui.screen.test_buffer()[(caret.1, ui.regions.editor.y + caret.0)];
+        assert_eq!(cell.symbol(), "[", "{command}: a hint without the menu");
+        assert_eq!(ui.editor.text(), command);
+    }
+}
+
+#[test]
+fn accepting_a_subcommand_or_tool_key_continues_into_its_arguments() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use pi_store::keys::Action;
+
+    let mut ui = test_ui(80, 24);
+    ui.tools = Some(pi_core::core::lane::a_resolved("").brief.clone());
+    ui.lists.worktrees.set(Vec::new()).unwrap();
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    for (prefix, completed) in [
+        ("/mcp r", "/mcp restart "),
+        ("/worktree r", "/worktree rm "),
+        ("/read p", "/read path="),
+    ] {
+        ui.editor.set_line(prefix);
+        assert_eq!(ui.menu().len(), 1);
+        ui.step_menu(Action::MenuPrevious);
+        let enter = crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let asked = ui.key(&lane, &mut view, enter, false);
+        assert!(
+            matches!(asked, Asked::Own(Deed::Nothing)),
+            "{prefix}: {asked:?}"
+        );
+        assert_eq!(ui.editor.text(), completed);
+        assert!(ui.submitted.is_none());
+    }
 }
 
 #[test]
@@ -615,7 +762,7 @@ async fn a_question_is_answered_from_the_list_over_the_line() {
     let asked = press(&mut tui, key(KeyCode::Enter));
     // Read as the line is: a command word runs as one.
     assert!(
-        matches!(&asked, Asked::Core(Intent::Other { word, .. }) if word == "/compact"),
+        matches!(&asked, Asked::Core(Intent::Builtin(Builtin::Compact(focus))) if focus.is_empty()),
         "{asked:?}"
     );
     assert_eq!(

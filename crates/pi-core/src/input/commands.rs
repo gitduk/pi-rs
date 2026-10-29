@@ -10,6 +10,9 @@ use super::{Builtin, Intent};
 use pi_store::listing::{Listing, Row};
 use pi_store::session::ResumeChoice;
 
+mod arguments;
+pub use arguments::{Args, Input, Parameter, Sources, Subcommand, Values};
+
 #[derive(Clone)]
 pub enum Source {
     // A word `read` knows: answered here, or by the surface that added it.
@@ -25,9 +28,8 @@ pub enum Source {
 pub struct Command {
     /// With the leading slash.
     pub word: Cow<'static, str>,
-    /// Shown in completion, in the shape prompt templates use elsewhere:
-    /// angle brackets required, square brackets optional.
-    pub args: &'static str,
+    /// Parameter behavior, shared by help, candidate lookup and hints.
+    pub args: Args,
     /// One line of it. A skill's description is written for the model and is
     /// routinely longer than a line, so it arrives here already cut down.
     pub help: Cow<'static, str>,
@@ -40,7 +42,7 @@ pub struct Command {
 impl Command {
     const fn builtin(
         word: &'static str,
-        args: &'static str,
+        args: Args,
         help: &'static str,
         intent: fn(&str, String) -> Intent,
     ) -> Self {
@@ -56,7 +58,7 @@ impl Command {
 
 impl Command {
     /// A word the surface answers itself, listed with the built-ins.
-    pub const fn surface(word: &'static str, args: &'static str, help: &'static str) -> Self {
+    pub const fn surface(word: &'static str, args: Args, help: &'static str) -> Self {
         Self::builtin(word, args, help, |word, args| Intent::Surface {
             word: word.to_string(),
             args,
@@ -78,98 +80,118 @@ fn hand_on(word: &str, args: String) -> Intent {
 pub(crate) const BUILTIN: &[Command] = &[
     Command::builtin(
         "/new",
-        "",
+        Args::None,
         "start a fresh session, keeping this one on disk",
         |_, _| Intent::Builtin(Builtin::New),
     ),
     Command::builtin(
         "/resume",
-        "[id]",
+        Args::optional("id", Values::Sessions),
         "list this workspace's sessions, or switch to one",
         |_, rest| Intent::Builtin(Builtin::Resume(rest)),
     ),
     Command::builtin(
         "/rewind",
-        "<said>",
+        Args::required("said", Values::Said),
         "go back to something you said",
         |_, rest| Intent::Builtin(Builtin::Rewind(rest)),
     ),
     Command::builtin(
         "/worktree",
-        "[name]",
+        Args::Subcommands {
+            commands: &[Subcommand {
+                word: "rm",
+                help: "remove a worktree",
+                args: Args::required("name", Values::Worktrees),
+            }],
+            fallback: Some(Parameter {
+                name: "name",
+                required: false,
+                values: Values::Worktrees,
+            }),
+        },
         "list this repository's worktrees, or work in one — rm removes one",
         |_, rest| Intent::Builtin(Builtin::Worktree(rest)),
     ),
     Command::builtin(
         "/mv",
-        "[dir]",
+        Args::optional("dir", Values::Directory),
         "move this session to another directory",
         |_, rest| Intent::Builtin(Builtin::Mv(rest)),
     ),
     Command::builtin(
         "/name",
-        "[text]",
+        Args::optional("text", Values::Text),
         "call this session something you will recognise",
         |_, rest| Intent::Builtin(Builtin::Name(rest)),
     ),
     Command::builtin(
         "/model",
-        "[name]",
+        Args::optional("name", Values::Models),
         "list the models in ~/.pi/settings.toml, or move this session to one",
         |_, rest| Intent::Builtin(Builtin::Model(rest)),
     ),
     Command::builtin(
         "/compact",
-        "[focus]",
+        Args::optional("focus", Values::Text),
         "summarize everything but what you are working on now",
         |_, rest| Intent::Builtin(Builtin::Compact(rest)),
     ),
     Command::builtin(
         "/loop",
-        "[text]",
+        Args::optional("text", Values::Text),
         "repeat a line while it keeps changing the tree; bare, stop one",
         |_, rest| Intent::Builtin(Builtin::Loop(rest)),
     ),
     Command::builtin(
         "/effort",
-        "[off|low|medium|high]",
+        Args::optional("level", Values::Fixed(pi_store::args::EffortArg::names)),
         "how hard the model thinks, from the next request on",
         |_, rest| Intent::Builtin(Builtin::Effort(rest)),
     ),
     Command::builtin(
         "/mcp",
-        "[restart [name]]",
+        Args::Subcommands {
+            commands: &[Subcommand {
+                word: "restart",
+                help: "reconnect one MCP server, or all",
+                args: Args::optional("name", Values::Servers),
+            }],
+            fallback: None,
+        },
         "the MCP servers and their tools; restart reconnects one, or all",
         |_, rest| Intent::Builtin(Builtin::Mcp(rest)),
     ),
     Command::builtin(
         "/status",
-        "",
+        Args::None,
         "what this session stands on, has spent, and where it writes",
         |_, _| Intent::Builtin(Builtin::Status),
     ),
     Command::builtin(
         "/content",
-        "",
+        Args::None,
         "everything the model is given before your first word, AGENTS.md included",
         |_, _| Intent::Builtin(Builtin::Content),
     ),
-    Command::builtin("/help", "", "this list", |_, _| {
+    Command::builtin("/help", Args::None, "this list", |_, _| {
         Intent::Builtin(Builtin::Help)
     }),
     Command::builtin(
         "/edit",
-        "[file]",
+        Args::optional("file", Values::Editable),
         "list what the model is given from files — SYSTEM.md, AGENTS.md, memory — or edit one",
         |_, rest| Intent::Builtin(Builtin::Edit(rest)),
     ),
     Command::builtin(
         "/settings",
-        "",
+        Args::None,
         "edit the project's .pi.toml, then reload",
         |_, rest| Intent::Builtin(Builtin::Settings(rest)),
     ),
-    Command::builtin("/exit", "", "leave", |_, _| Intent::Builtin(Builtin::Quit)),
+    Command::builtin("/exit", Args::None, "leave", |_, _| {
+        Intent::Builtin(Builtin::Quit)
+    }),
 ];
 
 // The first sentence, where the summary stops being one. How much of it
@@ -201,7 +223,7 @@ pub fn commands(skills: &[Skill], words: &[Command], notes: &mut Vec<String>) ->
         }
         out.push(Command {
             word: Cow::Owned(word),
-            args: "[text]",
+            args: Args::optional("text", Values::Text),
             help: Cow::Owned(format!("[skill] {}", gist(&skill.description))),
             intent: hand_on,
             source: Source::Skill(skill.clone()),
@@ -224,7 +246,7 @@ pub fn with_prompts(table: Arc<Vec<Command>>, prompts: Vec<mcp::Prompt>) -> Arc<
         }
         out.push(Command {
             word: Cow::Owned(word),
-            args: "[args]",
+            args: Args::optional("args", Values::Text),
             help: Cow::Owned(gist(&prompt.description)),
             intent: hand_on,
             source: Source::Prompt(prompt),
@@ -246,7 +268,14 @@ pub(crate) fn help(commands: &[Command], tools: &tool::Registry) -> Listing {
 }
 
 fn command_help(commands: &[Command]) -> Listing {
-    let row = |c: &Command| Row::new([format!("{} {}", c.word, c.args), c.help.to_string()]);
+    let row = |c: &Command| {
+        Row::new([
+            format!("{} {}", c.word, c.args.usage())
+                .trim_end()
+                .to_string(),
+            c.help.to_string(),
+        ])
+    };
     // Where built-ins end, not where skills begin — a third source would
     // otherwise land in the built-in half. `commands` keeps them contiguous.
     let Some(split) = commands
@@ -300,12 +329,19 @@ pub struct Candidate {
     /// What the whole line becomes when this is accepted.
     pub line: String,
     pub help: String,
-    /// Something is still expected after it, so accepting leaves a trailing
-    /// space and the caret past it.
+    pub accept: Acceptance,
+    /// Append a space when placing this completion in the input.
     pub more: bool,
     /// Taken only when picked; the line submitted as it stands runs what was
     /// typed, which this would turn into something else.
     pub picked_only: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Acceptance {
+    Run,
+    /// Complete this part of the input, then accept more arguments or a value.
+    Continue,
 }
 
 // The names among `choices` that `typed` begins and does not already finish,
@@ -318,6 +354,7 @@ fn offer(choices: &[Choice], head: &str, typed: &str) -> Vec<Candidate> {
             show: c.name.clone(),
             line: format!("{head}{}", c.name),
             help: c.note.clone(),
+            accept: Acceptance::Run,
             more: false,
             picked_only: false,
         })
@@ -469,6 +506,7 @@ fn tool_args(tool: &dyn tool::Tool, head: &str, typed: &str) -> Vec<Candidate> {
         .map(|p| Candidate {
             show: format!("{}=", p.name),
             line: format!("{head}{}=", p.name),
+            accept: Acceptance::Continue,
             help: match p.required {
                 true => format!("required · {}", p.help),
                 false => format!("optional · {}", p.help),
@@ -477,149 +515,6 @@ fn tool_args(tool: &dyn tool::Tool, head: &str, typed: &str) -> Vec<Candidate> {
             picked_only: true,
         })
         .collect()
-}
-
-/// What the front lane gives completion: its tools for slash commands, and what
-/// was said, each named by its entry id, for `/rewind`.
-#[derive(Clone, Copy, Default)]
-pub struct Front<'a> {
-    pub tools: Option<&'a tool::Registry>,
-    pub said: &'a [Choice],
-}
-
-/// What the line could still become: a command while its word is typed,
-/// then that command's own argument once the word is settled.
-///
-/// Only args with a known name set are completed (`/model`, `/resume`, `/rewind`,
-/// `/worktree`, `/edit`, and tools); a prompt or focus phrase is prose, not guessed.
-///
-/// Sessions, worktrees and files are asked for lazily: walking transcripts,
-/// running `git worktree list` or reading directories is paid only by the
-/// line that needs it.
-pub fn complete<'a>(
-    line: &str,
-    commands: &[Command],
-    models: &[Choice],
-    front: Front<'_>,
-    sessions: impl Fn() -> &'a [ResumeChoice],
-    worktrees: impl Fn() -> &'a [Choice],
-    editable: impl Fn() -> &'a [Choice],
-) -> Vec<Candidate> {
-    let Front { tools, said } = front;
-    if !line.starts_with('/') {
-        return Vec::new();
-    }
-    let Some((word, rest)) = line.split_once(char::is_whitespace) else {
-        // The exact word stays in the list: dropping it would leave only
-        // `/news` when `/new` is typed in full, and accepting would pick wrong.
-        let mut offered: Vec<Candidate> = commands
-            .iter()
-            .filter(|c| c.word.starts_with(line))
-            .map(|c| Candidate {
-                show: format!("{} {}", c.word, c.args).trim_end().to_string(),
-                line: c.word.to_string(),
-                help: c.help.to_string(),
-                more: !c.args.is_empty(),
-                picked_only: false,
-            })
-            .collect();
-        if let Some(tools) = tools {
-            offered.extend(
-                slash_tools(commands, tools)
-                    .filter(|t| t.name().starts_with(&line[1..]))
-                    .map(|t| Candidate {
-                        show: format!("/{}", t.name()),
-                        line: format!("/{}", t.name()),
-                        help: tool_help(t.as_ref()),
-                        more: params(&t.schema()).next().is_some(),
-                        // Enter on a prefix must not run a tool nobody chose.
-                        picked_only: true,
-                    }),
-            );
-        }
-        return offered;
-    };
-    if !commands.iter().any(|c| c.word == word)
-        && let Some(tool) = tools.and_then(|tools| tools.get(&word[1..]))
-    {
-        let last = rest
-            .rsplit_once(char::is_whitespace)
-            .map_or(rest, |(_, last)| last);
-        return tool_args(tool.as_ref(), &line[..line.len() - last.len()], last);
-    }
-    let typed = rest.trim_start();
-    match word {
-        "/effort" => {
-            let levels: Vec<Choice> = pi_store::args::EffortArg::names()
-                .into_iter()
-                .map(|e| Choice {
-                    name: e.to_string(),
-                    note: String::new(),
-                })
-                .collect();
-            offer(&levels, "/effort ", typed)
-        }
-        // A second word means the model name is settled and something else is
-        // being typed. There is no third thing to offer.
-        "/model" if typed.contains(char::is_whitespace) => Vec::new(),
-        "/model" => offer(models, "/model ", typed),
-        "/edit" => offer(editable(), "/edit ", typed),
-        // `rm` marks what follows it for removal; a bare `rm` still means the
-        // name of a worktree, so nothing is offered until the space says.
-        "/worktree" if typed == "rm" => Vec::new(),
-        "/worktree" if typed.starts_with("rm ") => {
-            let arg = typed["rm ".len()..].trim_start();
-            offer(worktrees(), "/worktree rm ", arg)
-        }
-        // A name may hold a slash (`feat/one`), so unlike a model it is not
-        // settled by the first word — only whitespace after it settles it.
-        "/worktree" if typed.contains(char::is_whitespace) => Vec::new(),
-        "/worktree" => offer(worktrees(), "/worktree ", typed),
-        // A message is remembered by any word in it; an accepted row's id
-        // names that row alone. Newest first, so nearest the line.
-        "/rewind" => {
-            let named = said.iter().any(|s| s.name == typed);
-            (said.iter().rev())
-                .filter(|s| match named {
-                    true => s.name == typed,
-                    false => pi_store::text::matches(&s.note, typed),
-                })
-                .map(|s| Candidate {
-                    show: s.note.clone(),
-                    line: format!("/rewind {}", s.name),
-                    help: String::new(),
-                    more: false,
-                    picked_only: false,
-                })
-                .collect()
-        }
-        // A session answers to a word of its first question, its name or id.
-        "/resume" => {
-            let offered: Vec<&ResumeChoice> = sessions()
-                .iter()
-                .filter(|s| {
-                    let holds = |text: &str| pi_store::text::matches(text, typed);
-                    (s.name.is_some() || !s.prompt.is_empty())
-                        && (s.name.as_deref().is_some_and(holds)
-                            || holds(&s.prompt)
-                            || holds(&s.id))
-                })
-                .collect();
-            let facts = session_facts(&offered);
-            offered
-                .into_iter()
-                .zip(facts)
-                .map(|(s, help)| Candidate {
-                    show: s.label(),
-                    line: format!("/resume {}", s.id),
-                    help,
-                    more: false,
-                    picked_only: false,
-                })
-                .collect()
-        }
-        _ => Vec::new(),
-    }
 }
 
 /// Each session's age, rounds and size, every column as wide as its widest
@@ -703,18 +598,7 @@ mod tests {
     }
 
     fn offered(line: &str, commands: &[Command], tools: &tool::Registry) -> Vec<Candidate> {
-        complete(
-            line,
-            commands,
-            &[],
-            Front {
-                tools: Some(tools),
-                ..Default::default()
-            },
-            || &[],
-            || &[],
-            || &[],
-        )
+        Input::new(line, line.len(), commands, Some(tools)).complete(&Sources::default())
     }
 
     #[test]
@@ -777,6 +661,12 @@ mod tests {
     #[test]
     fn direct_tool_arguments_complete_and_parse_as_key_value_pairs() {
         let tools = tool::Registry::new().with(Named("wechat"));
+        assert_eq!(
+            Input::new("/wechat ", 8, BUILTIN, Some(&tools))
+                .hint()
+                .as_deref(),
+            Some("<action=> [enabled=] [text=]")
+        );
         let rows = offered("/wechat ", BUILTIN, &tools);
         assert_eq!(rows[0].show, "action=");
         assert_eq!(rows[0].line, "/wechat action=");
@@ -848,11 +738,14 @@ mod tests {
                 matches!(crate::input::read(line, BUILTIN, None), Intent::Other { word, .. } if word == "/job")
             );
             assert!(
-                complete(line, BUILTIN, &[], Front::default(), || &[], || &[], || &[]).is_empty()
+                Input::new(line, line.len(), BUILTIN, None)
+                    .complete(&Sources::default())
+                    .is_empty()
             );
         }
         assert!(
-            !complete("/j", BUILTIN, &[], Front::default(), || &[], || &[], || &[])
+            !Input::new("/j", 2, BUILTIN, None)
+                .complete(&Sources::default())
                 .iter()
                 .any(|candidate| candidate.line.starts_with("/job"))
         );

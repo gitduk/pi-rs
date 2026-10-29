@@ -468,7 +468,7 @@ impl Core {
 #[cfg(test)]
 mod tests {
 
-    use crate::input::commands::{BUILTIN, Choice, Source, commands};
+    use crate::input::commands::{BUILTIN, Choice, Input, Source, Sources, commands};
     use crate::input::{Builtin, Fate, Intent, read};
     use agent::session::{Entry, Prompt, Session};
     use skills::Skill;
@@ -492,15 +492,12 @@ mod tests {
         let commands = commands(&[], &[], &mut notes);
         let line = |text: &str| {
             asked.borrow_mut().clear();
-            crate::input::commands::complete(
-                text,
-                &commands,
-                &[],
-                Default::default(),
-                sessions,
-                worktrees,
-                editable,
-            );
+            Input::new(text, text.len(), &commands, None).complete(&Sources {
+                sessions: Some(&sessions),
+                worktrees: Some(&worktrees),
+                editable: Some(&editable),
+                ..Default::default()
+            });
             asked.borrow().join(",")
         };
 
@@ -521,15 +518,11 @@ mod tests {
             rounds: 1,
             bytes: 0,
         }];
-        let offered = crate::input::commands::complete(
-            "/resume f",
-            &commands,
-            &[],
-            Default::default(),
-            || &one[..],
-            || &[],
-            || &[],
-        );
+        let sessions = || &one[..];
+        let offered = Input::new("/resume f", 9, &commands, None).complete(&Sources {
+            sessions: Some(&sessions),
+            ..Default::default()
+        });
         assert_eq!(offered.len(), 1);
         assert_eq!(offered[0].line, "/resume s1");
     }
@@ -551,21 +544,14 @@ mod tests {
             },
         ];
         let offered = |text: &str| -> Vec<String> {
-            crate::input::commands::complete(
-                text,
-                &commands,
-                &[],
-                crate::input::commands::Front {
+            Input::new(text, text.len(), &commands, None)
+                .complete(&Sources {
                     said: &said,
                     ..Default::default()
-                },
-                || &[],
-                || &[],
-                || &[],
-            )
-            .into_iter()
-            .map(|c| c.line)
-            .collect()
+                })
+                .into_iter()
+                .map(|c| c.line)
+                .collect()
         };
         assert_eq!(offered("/rewind 12"), ["/rewind 12"]);
         assert_eq!(offered("/rewind issue"), ["/rewind 40"]);
@@ -663,7 +649,7 @@ mod tests {
         ];
         let words = [crate::input::commands::Command::surface(
             "/look",
-            "",
+            crate::input::commands::Args::None,
             "the surface's",
         )];
         let mut notes = Vec::new();

@@ -126,6 +126,19 @@ pub fn prompts() -> Vec<mcp::Prompt> {
     running().map_or_else(Vec::new, |s| s.prompts())
 }
 
+/// Names accepted by the running set, including servers that are starting
+/// or failed. Requested only while a server-name argument is being edited.
+pub fn choices() -> Vec<crate::input::commands::Choice> {
+    running().map_or_else(Vec::new, |s| {
+        s.names()
+            .map(|name| crate::input::commands::Choice {
+                name: name.to_string(),
+                note: String::new(),
+            })
+            .collect()
+    })
+}
+
 /// What each running server is doing, for `/status`.
 pub fn summary() -> Vec<String> {
     RUNNING

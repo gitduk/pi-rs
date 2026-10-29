@@ -1,6 +1,6 @@
-//! The `@` and `~/` path completion's pure logic: pulling the token out of the line,
-//! walking the workspace, and ranking what it finds. No terminal here, so
-//! the tests run against a scratch tree.
+//! Path candidates: recognizing `@` and `~/` tokens, listing files or
+//! directories, and ranking matches. No terminal here, so tests run against
+//! a scratch tree.
 
 use std::path::Path;
 
@@ -97,18 +97,9 @@ pub fn home_candidates(query: &str, home: &Path) -> Vec<FileEntry> {
     listed(query, home, "~/", false)
 }
 
-/// The argument of `/mv` under the caret: from after the word's spacing to
-/// the caret, spaces and all, since a directory name may hold them.
-pub fn mv_prefix(line: &str, cursor: usize) -> Option<(usize, usize, &str)> {
-    let rest = line.strip_prefix("/mv")?;
-    let arg = rest.trim_start();
-    let start = line.len() - arg.len();
-    (arg.len() < rest.len() && start <= cursor).then(|| (start, cursor, &line[start..cursor]))
-}
-
-/// Directories `/mv` could go to, spelled as typed: from `~/` under `home`,
+/// Directories spelled as typed: from `~/` under `home`,
 /// from `/` absolute, otherwise against `root` — `..` included.
-pub fn mv_candidates(query: &str, root: &Path, home: Option<&Path>) -> Vec<FileEntry> {
+pub fn directories(query: &str, root: &Path, home: Option<&Path>) -> Vec<FileEntry> {
     if let Some(rest) = query.strip_prefix("~/") {
         return home.map_or_else(Vec::new, |home| listed(rest, home, "~/", true));
     }
@@ -292,24 +283,18 @@ mod tests {
     }
 
     #[test]
-    fn mv_offers_directories_against_the_root_or_as_spelled() {
+    fn directories_are_offered_against_the_root_or_as_spelled() {
         let (_dir, root) = tree();
-        assert_eq!(mv_prefix("/mv src/l", 9), Some((4, 9, "src/l")));
-        assert_eq!(mv_prefix("/mv", 3), None);
-        assert_eq!(mv_prefix("/mvx", 4), None);
+        assert_eq!(names(&directories("", &root, None)), vec!["src", "target"]);
+        assert_eq!(names(&directories("src/", &root, None)), vec!["src/lib"]);
         assert_eq!(
-            names(&mv_candidates("", &root, None)),
-            vec!["src", "target"]
-        );
-        assert_eq!(names(&mv_candidates("src/", &root, None)), vec!["src/lib"]);
-        assert_eq!(
-            names(&mv_candidates("src/../s", &root, None)),
+            names(&directories("src/../s", &root, None)),
             vec!["src/../src"]
         );
-        assert_eq!(names(&mv_candidates("~/", &root, Some(&root)))[0], "~/src");
+        assert_eq!(names(&directories("~/", &root, Some(&root)))[0], "~/src");
         let abs = format!("{}/s", root.display());
         assert_eq!(
-            names(&mv_candidates(&abs, &root, None)),
+            names(&directories(&abs, &root, None)),
             vec![format!("{}/src", root.display())]
         );
     }
@@ -332,8 +317,8 @@ mod tests {
         fs::create_dir(dir.path().join(".hidden")).unwrap();
         fs::write(dir.path().join("a_file"), "").unwrap();
         expected.sort();
-        assert_eq!(names(&mv_candidates("../", &root, None)), expected);
-        assert_eq!(mv_candidates("../project", &root, None).len(), 30);
+        assert_eq!(names(&directories("../", &root, None)), expected);
+        assert_eq!(directories("../project", &root, None).len(), 30);
 
         // File suggestions still have their own relevance ranking and bound.
         let files = candidates("project", dir.path());

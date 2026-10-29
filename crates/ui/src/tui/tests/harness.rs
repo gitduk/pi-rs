@@ -109,7 +109,7 @@ pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
         store: Store::new(dir.join("state")),
         config: std::sync::Arc::new(pi_store::config::Config::default()),
         pinned: pi_core::args::Pinned::default(),
-        commands: std::sync::Arc::new(Vec::new()),
+        commands: commands(),
         prompts_seen: 0,
         settings: pi_store::settings::Settings::new(toml::Value::Table(Default::default()), None),
         lanes: vec![running_lane(dir)],
@@ -162,10 +162,23 @@ pub(super) fn test_ui(width: u16, height: u16) -> crate::tui::Ui {
         crate::tui::screen::Screen::test(width, height),
         std::sync::Arc::new(Keys::default()),
         Vec::new(),
-        std::sync::Arc::new(Vec::new()),
+        commands(),
         crate::tui::Lists::new(Store::new(std::env::temp_dir()), std::env::temp_dir()),
         Paint::new(true),
     )
+}
+
+fn commands() -> std::sync::Arc<Vec<pi_core::input::commands::Command>> {
+    std::sync::Arc::new(pi_core::input::commands::commands(
+        &[],
+        crate::tui::WORDS,
+        &mut Vec::new(),
+    ))
+}
+
+pub(super) fn input(ui: &mut crate::tui::Ui, width: usize) -> (Vec<Line<'static>>, (u16, u16)) {
+    let (_, hint) = ui.assistance().into_parts();
+    ui.input_view(width, hint.as_deref())
 }
 
 // A lane as the bar holds one.

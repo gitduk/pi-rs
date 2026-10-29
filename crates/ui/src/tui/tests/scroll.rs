@@ -874,6 +874,7 @@ fn a_menu_entry_shows_no_escape_tail() {
         show: "\x1b[31mred\x1b[0m".into(),
         line: "red".into(),
         help: "\x1b[1mbold\x1b[0m".into(),
+        accept: pi_core::input::commands::Acceptance::Run,
         more: false,
         picked_only: false,
     });

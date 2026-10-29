@@ -107,13 +107,8 @@ impl Ui {
             }
         }
         let mut bar = self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width);
-        // A query being typed is the line's text, drawn as the search's row:
-        // `/`, the query, which hit of how many.
-        let (input, caret) = match self.search_line().filter(|_| self.search_typing()) {
-            Some((line, col)) => (vec![line], (0, col)),
-            None => self.editor.view(&self.paint, width),
-        };
-        let menu = self.menu();
+        let (menu, hint) = self.assistance().into_parts();
+        let (input, caret) = self.input_view(width, hint.as_deref());
         // A question heads its options, and stays up over words that match
         // none of them, since those answer it too; a command's list hides it.
         let picking = menu.iter().all(|e| matches!(e, MenuEntry::Pick { .. }));
@@ -425,6 +420,24 @@ impl Ui {
             self.paint
                 .span(color, icons::OVER_RULE.repeat(room - room / 2)),
         ])
+    }
+
+    pub(super) fn input_view(
+        &self,
+        width: usize,
+        hint: Option<&str>,
+    ) -> (Vec<Line<'static>>, (u16, u16)) {
+        if let Some((line, col)) = self.search_line().filter(|_| self.search_typing()) {
+            return (vec![line], (0, col));
+        }
+        let (mut rows, caret) = self.editor.view(&self.paint, width);
+        if let Some(hint) = hint {
+            let hint = pi_store::text::clip(hint, width.saturating_sub(caret.1 as usize));
+            rows[caret.0 as usize]
+                .spans
+                .push(self.paint.span(&self.paint.theme.muted, hint));
+        }
+        (rows, caret)
     }
 
     // The search's row, and the column the caret stands at in the query.
