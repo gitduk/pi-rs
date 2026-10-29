@@ -55,6 +55,83 @@ async fn a_flash_does_not_follow_the_surface_to_another_lane() {
     assert!(tui.ui.flash.is_none(), "the flash was left behind");
 }
 
+#[tokio::test]
+async fn a_restart_confirmation_survives_redraw_and_resume_without_entering_model_context() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let mut session = agent::session::Session::default();
+    session.send_prompt("the earlier request", None);
+    tui.core.lane_mut().return_session(session);
+    tui.core.lane_mut().finish();
+    tui.rebuild_front();
+    let context = tui.core.lane().session().unwrap().context();
+
+    let line = "restarted into a new build of v2.8.8";
+    tui.restarted(line);
+    assert!(tui.ui.flash.is_none());
+    tui.ui.flash("another notice");
+    let view = front_view(&mut tui.views, tui.core.lane());
+    tui.ui.tidy(view);
+    tui.ui.flush(tui.core.lane(), view);
+    let buf = tui.ui.screen.test_buffer();
+    assert!((0..tui.ui.regions.bar.y).any(|y| {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<String>()
+            .contains(line)
+    }));
+
+    tui.core.save_filed();
+    let lane = tui.core.lane();
+    let path = tui.core.store.path_of(lane.root(), lane.id());
+    let stored = pi_store::session::Store::read(&path).expect("the confirmation was saved");
+    let session = stored.into_session();
+    assert_eq!(session.context(), context);
+    let view = front_view(&mut tui.views, tui.core.lane());
+    tui.ui.rebuild(view, &session, dir.path());
+    let rows = drawn_rows(view);
+    assert!(rows.iter().any(|row| row.contains("the earlier request")));
+    assert_eq!(rows.iter().filter(|row| row.contains(line)).count(), 1);
+}
+
+#[tokio::test]
+async fn consecutive_restart_confirmations_fold_across_resume_and_live_updates() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let mut session = agent::session::Session::default();
+    let line = "restarted into a new build of v2.8.8";
+    for _ in 0..2 {
+        session.push_screen(crate::tui::stream::by_pi(line));
+    }
+    tui.core.lane_mut().return_session(session);
+    tui.core.lane_mut().finish();
+    tui.rebuild_front();
+    let view = front_view(&mut tui.views, tui.core.lane());
+    let rows = drawn_rows(view);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].ends_with("×2"), "{rows:?}");
+
+    tui.restarted(line);
+    let entries = tui.core.lane().session().unwrap().entries().to_vec();
+    assert_eq!(entries.len(), 3, "every restart remains recorded");
+    let view = front_view(&mut tui.views, tui.core.lane());
+    tui.ui.adopt(view, &entries);
+    let live = drawn_rows(view);
+    assert_eq!(live.len(), 1);
+    assert!(live[0].ends_with("×3"), "{live:?}");
+
+    tui.core.save_filed();
+    let lane = tui.core.lane();
+    let path = tui.core.store.path_of(lane.root(), lane.id());
+    let session = pi_store::session::Store::read(&path)
+        .expect("the restarts were saved")
+        .into_session();
+    assert_eq!(session.entries(), entries);
+    let view = front_view(&mut tui.views, tui.core.lane());
+    tui.ui.rebuild(view, &session, dir.path());
+    assert_eq!(drawn_rows(view), live);
+}
+
 // `rebuild` (used by `/resume` and a rewind) clears the banner along with
 // the rest, so a switch back must not read that as never drawn and re-open it.
 #[tokio::test]

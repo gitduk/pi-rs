@@ -295,18 +295,19 @@ impl Row {
     /// Fold a repeat into this row, if it is the same notice: the scrollback
     /// then shows `line ×2` where a second row would have gone.
     ///
-    /// Compares the spans, which is what makes it safe: two notices that
-    /// read alike but are styled differently are different rows, and a row of
-    /// any other kind never folds.
-    pub fn repeated(&mut self, line: &Line<'_>) -> bool {
-        match &mut self.0 {
-            // Only onto an aside: a count on a filed row would outlive a tidy.
-            Kind::Notice {
-                text,
-                times,
-                aside: true,
-            } if *text == *line => {
-                *times += 1;
+    /// Both notices must have the same spans and persistence. Other kinds
+    /// never fold, and a tidy cannot change a filed notice's count.
+    pub fn repeated(&mut self, row: &Self) -> bool {
+        match (&mut self.0, &row.0) {
+            (
+                Kind::Notice { text, times, aside },
+                Kind::Notice {
+                    text: next,
+                    times: more,
+                    aside: next_aside,
+                },
+            ) if text == next && aside == next_aside && text.width() > 0 => {
+                *times += more;
                 self.1.clear();
                 true
             }

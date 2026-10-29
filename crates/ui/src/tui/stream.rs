@@ -30,18 +30,12 @@ impl Ui {
     // splits at its newlines. Only a lone line folds: a block, a QR, is whole.
     pub(super) fn say(&self, view: &mut View, text: impl Into<Text<'static>>) {
         let Text { lines, style, .. } = text.into();
-        let lone = lines.len() == 1;
-        for line in lines {
-            let line = line.patch_style(style);
-            if lone
-                && line.width() > 0
-                && let Some(last) = view.surface.scrollback.last_mut()
-                && last.repeated(&line)
-            {
-                continue;
-            }
-            view.surface.scrollback.push(Row::aside(line));
-        }
+        view.surface.scrollback.append(
+            lines
+                .into_iter()
+                .map(|line| Row::aside(line.patch_style(style)))
+                .collect(),
+        );
     }
 
     // A short answer nobody reads back, for the bar row: no scrollback
@@ -282,7 +276,7 @@ impl Ui {
     }
 
     fn draw_kept(&self, view: &mut View, rows: Vec<Row>, kept: Option<agent::session::EntryId>) {
-        view.surface.scrollback.extend(rows);
+        view.surface.scrollback.append(rows);
         if let Some(id) = kept {
             view.surface.tail = Some(id);
         }
@@ -330,7 +324,7 @@ impl Ui {
                 } else if matches!(entry, LogEntry::Ask { .. }) {
                     self.submit_rows(view, rows);
                 } else {
-                    view.surface.scrollback.extend(rows);
+                    view.surface.scrollback.append(rows);
                 }
             }
             view.surface.tail = Some(entry.id());

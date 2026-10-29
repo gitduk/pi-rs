@@ -24,6 +24,17 @@ impl Scrollback {
         self.0.push(row);
     }
 
+    // Only a single notice folds. Multiline blocks keep their rows intact.
+    pub(super) fn append(&mut self, rows: Vec<Row>) {
+        if let [row] = rows.as_slice()
+            && let Some(last) = self.0.last_mut()
+            && last.repeated(row)
+        {
+            return;
+        }
+        self.0.extend(rows);
+    }
+
     // An echoed prompt precedes its transcript entry. Bind its rows once
     // the send (or completed command) supplies the id.
     pub(super) fn bind_prompt(&mut self, id: agent::session::EntryId) {
@@ -613,7 +624,7 @@ pub(super) fn scrollback_from(
                         if matches!(other, LogEntry::Ask { .. } | LogEntry::Bash { .. }) {
                             open_turn(&mut out);
                         }
-                        out.extend(rows);
+                        out.append(rows);
                     }
                 }
             }

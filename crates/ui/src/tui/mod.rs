@@ -197,7 +197,7 @@ pub struct Tui {
 }
 
 impl Tui {
-    /// `last` appears in the bar, without adding to the resumed transcript.
+    /// `last` is kept as a screen row at the end of the resumed transcript.
     pub fn new(mut core: Core, drivers: Drivers, last: Option<String>) -> Result<Self> {
         // The screen first, for raw mode: the answer to the background query
         // carries no newline, so a cooked read would wait for one forever.
@@ -239,11 +239,8 @@ impl Tui {
                 ui.rebuild(view, session, lane.root());
             }
         }
-        if let Some(line) = last {
-            ui.flash(line);
-        }
         let (events, hold) = reader();
-        Ok(Self {
+        let mut tui = Self {
             core,
             views,
             ui,
@@ -251,7 +248,17 @@ impl Tui {
             hold,
             drivers,
             bar: bar::BarScript::find(),
-        })
+        };
+        if let Some(line) = last {
+            tui.restarted(&line);
+        }
+        Ok(tui)
+    }
+
+    fn restarted(&mut self, line: &str) {
+        let lane = self.core.lane_mut();
+        let view = view::opened(&mut self.views, lane, &self.ui.paint);
+        self.ui.say_kept(lane, view, &by_pi(line));
     }
 
     // A surface on an in-memory screen, for tests driving the loop's

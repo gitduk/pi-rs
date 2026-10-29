@@ -5,6 +5,35 @@ use crate::tui::{View, following_terminal};
 use pi_store::theme::{Color, Theme};
 
 #[test]
+fn notice_folding_keeps_persistence_styles_blocks_and_prose_separate() {
+    let paint = Paint::new(true);
+    let blocks = [
+        vec![vec![Row::notice("same")], vec![Row::aside("same")]],
+        vec![
+            vec![Row::notice("same")],
+            vec![Row::notice(ratatui::text::Line::styled(
+                "same",
+                ratatui::style::Style::default().fg(ratatui::style::Color::Red),
+            ))],
+        ],
+        vec![Row::notice_lines("same\nsame", &paint)],
+        vec![vec![Row::notice("")], vec![Row::notice("")]],
+        vec![Row::answer("same", &paint), Row::answer("same", &paint)],
+    ];
+    for blocks in blocks {
+        let mut rows = Scrollback::default();
+        for block in blocks {
+            rows.append(block);
+        }
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .all(|row| !row.line(0, &paint, 80).0.to_string().contains('×'))
+        );
+    }
+}
+
+#[test]
 fn banner_height_tracks_wrapping_after_resizing() {
     use crate::tui::screen::{Piece, plain};
 
