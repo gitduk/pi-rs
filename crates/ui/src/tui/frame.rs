@@ -107,15 +107,6 @@ impl Ui {
             }
         }
         let mut bar = self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width);
-        if self.job_focus.is_some() {
-            bar.insert(
-                0,
-                Line::from(self.paint.span(
-                    &self.paint.theme.muted,
-                    pi_store::text::clip(super::jobs::HINT, width),
-                )),
-            );
-        }
         // A query being typed is the line's text, drawn as the search's row:
         // `/`, the query, which hit of how many.
         let (input, caret) = match self.search_line().filter(|_| self.search_typing()) {
@@ -320,14 +311,21 @@ impl Ui {
             None => (rows, jobs, bar),
         };
 
-        let below = (scroll > 0).then(|| {
+        self.below = if self.job_focus.is_some() { 0 } else { scroll };
+        let gap = if self.job_focus.is_some() {
+            Some(Line::from(self.paint.span(
+                &self.paint.theme.muted,
+                pi_store::text::clip(super::jobs::HINT, width),
+            )))
+        } else if scroll > 0 {
             let shine = self
                 .pointer
                 .is_some_and(|(_, row)| row_in(regions.gap, row).is_some());
             let more = format!("{scroll} more below");
-            Line::from(self.paint.action_hint(shine, more)).centered()
-        });
-        self.below = scroll;
+            Some(Line::from(self.paint.action_hint(shine, more)).centered())
+        } else {
+            None
+        };
 
         // Scrolled up, or on a hit, the next frame opens on this one's top
         // row: a hit stays where it was found as the rows under it grow.
@@ -368,8 +366,8 @@ impl Ui {
                 frame.buffer_mut().set_style(transcript, dim);
             }
             // Under the list, which may lie over the gap row.
-            if let Some(below) = &below {
-                frame.render_widget(below, regions.gap);
+            if let Some(gap) = &gap {
+                frame.render_widget(gap, regions.gap);
             }
             frame.render_widget(Rows(&jobs), regions.jobs);
             if regions.overlay().height > 0 {

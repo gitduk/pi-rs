@@ -906,7 +906,7 @@ impl Tui {
                 Step::Surface { word, .. } if word == keys::KEYS => {
                     let mut listing = self.ui.keys.listing();
                     listing.rows.push(pi_store::listing::Row::new([
-                        "Normal, with no menu: ctrl+k focuses the last job. In jobs: ctrl+k/j move; x stops; r restarts; X stops all; enter opens output; esc returns to input."
+                        "Normal, with no menu: ctrl+k focuses the last job. In jobs: ctrl+k/j move; x stops; r restarts; X stops all; enter opens output; q or esc returns to input."
                     ]));
                     self.land_lines(listing)
                 }

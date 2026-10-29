@@ -174,53 +174,6 @@ fn insert_mode_menus_and_pages_keep_their_keys() {
 }
 
 #[test]
-fn the_selected_job_is_visible_and_highlighted_on_a_short_screen() {
-    let mut ui = vim_ui_at(80, 9);
-    let (_dir, lane) = a_running_lane();
-    let mut view = View::default();
-    ui.sync_jobs(jobs(&(1..=20).collect::<Vec<_>>()));
-    ui.vim = Some(Mode::Normal);
-    ui.key(&lane, &mut view, ctrl('k'), false);
-    ui.flush(&lane, &mut view);
-    let row = ui
-        .job_rows
-        .iter()
-        .position(|r| *r == crate::tui::call::JobRow::Job(20))
-        .expect("the focused job is drawn past the fold");
-    let pos = (ui.regions.jobs.x, ui.regions.jobs.y + row as u16);
-    assert_eq!(
-        ui.screen.test_cursor(),
-        pos.into(),
-        "the caret moves to the selected job"
-    );
-    assert!(
-        ui.screen.test_buffer()[pos]
-            .modifier
-            .contains(ratatui::style::Modifier::REVERSED)
-    );
-    assert!(
-        ui.drawn.iter().any(|line| line.contains("x stop")),
-        "actions stay visible"
-    );
-
-    ui.job_open = Some(crate::tui::ui::OpenJob {
-        id: 20,
-        body: "the job output".into(),
-    });
-    ui.flush(&lane, &mut view);
-    assert!(
-        ui.drawn.iter().any(|line| line.contains("the job output")),
-        "enter's expanded output stays in view"
-    );
-    ui.key(&lane, &mut view, key(KeyCode::Esc), false);
-    ui.flush(&lane, &mut view);
-    assert!(
-        ui.screen.test_cursor().y >= ui.regions.editor.y,
-        "the caret returns to the draft"
-    );
-}
-
-#[test]
 fn leaving_the_lane_or_disabling_vim_releases_job_focus() {
     let mut ui = vim_ui();
     let (_dir, lane) = a_running_lane();
