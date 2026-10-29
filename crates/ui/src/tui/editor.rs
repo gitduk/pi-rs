@@ -201,24 +201,24 @@ impl Editor {
         }
     }
 
-    // Skip the run of spaces first, then the word: the caret lands where the
-    // word starts rather than on the space in front of it.
     fn word_start(&self) -> usize {
         let head = &self.text[..self.cursor];
         let trimmed = head.trim_end_matches(char::is_whitespace);
-        match trimmed.rfind(char::is_whitespace) {
-            Some(i) => i + self.text[i..].chars().next().map_or(1, char::len_utf8),
-            None => 0,
-        }
+        let Some(last) = trimmed.chars().next_back() else {
+            return 0;
+        };
+        let word = word_char(last);
+        trimmed
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace() || word_char(*c) != word)
+            .map_or(0, |(i, c)| i + c.len_utf8())
     }
 
     fn word_end(&self) -> usize {
         let tail = &self.text[self.cursor..];
         let skipped = tail.len() - tail.trim_start_matches(char::is_whitespace).len();
-        match tail[skipped..].find(char::is_whitespace) {
-            Some(i) => self.cursor + skipped + i,
-            None => self.text.len(),
-        }
+        self.cursor + skipped + word_run(&tail[skipped..])
     }
 
     pub fn word_left(&mut self) {
@@ -233,7 +233,7 @@ impl Editor {
     /// start — vim's `w`, as `word_right` is vim's `e`.
     pub fn word_next(&mut self) {
         let tail = &self.text[self.cursor..];
-        let word = tail.len() - tail.trim_start_matches(|c: char| !c.is_whitespace()).len();
+        let word = word_run(tail);
         let rest = &tail[word..];
         let space = rest.len() - rest.trim_start_matches(char::is_whitespace).len();
         self.cursor += word + space;
@@ -485,6 +485,19 @@ impl Editor {
     }
 }
 
+fn word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+fn word_run(text: &str) -> usize {
+    let Some(first) = text.chars().next() else {
+        return 0;
+    };
+    let word = word_char(first);
+    text.find(|c: char| c.is_whitespace() || word_char(c) != word)
+        .unwrap_or(text.len())
+}
+
 /// One entry per line, with the newlines inside an entry escaped, so a
 /// multi-line prompt recalls as the one thing it was.
 pub fn encode(entries: &[String]) -> String {
@@ -600,6 +613,64 @@ mod tests {
         assert_eq!(e.text, "fix the ");
         e.kill_word_back();
         assert_eq!(e.text, "fix ");
+    }
+
+    #[test]
+    fn word_deletion_stops_at_punctuation() {
+        for separator in ["，", ",", "。", "；", "、", "：", "！", "？", "/", "::"] {
+            let prefix = format!("提交{separator}");
+            let mut e = typed(&format!("{prefix}排除"));
+            assert!(e.edit(pi_store::keys::Action::DeleteWordBack));
+            assert_eq!(e.text, prefix);
+            assert_eq!(e.cursor, prefix.len());
+            e.kill_word_back();
+            assert_eq!(e.text, "提交", "punctuation is a separate run");
+            e.kill_word_back();
+            assert_eq!(e.text, "");
+            e.kill_word_back();
+            assert_eq!(e.cursor, 0);
+        }
+
+        let mut e = typed("提交，排除　 ");
+        e.kill_word_back();
+        assert_eq!(e.text, "提交，", "trailing whitespace goes with the word");
+    }
+
+    #[test]
+    fn word_deletion_keeps_the_text_after_the_caret() {
+        let mut e = typed("提交，排除后文");
+        e.cursor = "提交，排除".len();
+        e.kill_word_back();
+        assert_eq!(e.text, "提交，后文");
+        assert_eq!(e.cursor, "提交，".len());
+    }
+
+    #[test]
+    fn word_motion_uses_the_same_punctuation_boundaries_as_deletion() {
+        let mut e = typed("提交，排除 next_word42");
+        for prefix in ["提交，排除 ", "提交，", "提交", ""] {
+            e.word_left();
+            assert_eq!(&e.text[..e.cursor], prefix);
+        }
+        e.word_left();
+        assert_eq!(e.cursor, 0);
+        for prefix in ["提交", "提交，", "提交，排除", "提交，排除 next_word42"] {
+            e.word_right();
+            assert_eq!(&e.text[..e.cursor], prefix);
+        }
+        e.word_right();
+        assert_eq!(e.cursor, e.text.len());
+
+        e.cursor = 0;
+        for prefix in ["提交", "提交，", "提交，排除 ", "提交，排除 next_word42"] {
+            e.word_next();
+            assert_eq!(&e.text[..e.cursor], prefix);
+        }
+        e.word_next();
+        assert_eq!(e.cursor, e.text.len());
+        e.cursor = "提交，排除".len();
+        e.word_next();
+        assert_eq!(&e.text[..e.cursor], "提交，排除 ");
     }
 
     #[test]
