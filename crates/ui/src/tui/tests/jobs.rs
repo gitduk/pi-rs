@@ -40,6 +40,64 @@ fn press(tui: &mut crate::tui::Tui, key: TermEvent) -> Asked {
     )
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn detached_script_jobs_keep_arguments_from_the_call_through_the_list() {
+    use std::sync::Arc;
+    use tool::Source;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("later"),
+        "#!/bin/sh\n# ---\n# description = \"Keep a prompt\"\n# [optional]\n\
+         # after = \"A delay\"\n# prompt = \"What to do\"\n# ---\n\
+         cat > received\nprintf '%s\\n' '{\"detach\":\"waiting\"}' >&3\nsleep 30\n",
+    )
+    .unwrap();
+    let table = Arc::new(pi_core::driver::jobs::Table::default());
+    let sink = Arc::new(pi_core::driver::jobs::Jobs::new(table.clone()));
+    let scripts = toolbox::scripts::Dir::new(dir.path()).with_jobs(sink);
+    let script = scripts.tools().pop().unwrap();
+    let ctx = tool::Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+    let mut ui = test_ui(160, 24);
+    let lane = running_lane(dir.path());
+    let mut view = View::default();
+
+    for (args, expected) in [
+        (
+            serde_json::json!({ "after": "30m", "prompt": "check build\nreport status" }),
+            "later after=30m prompt=\"check build\\nreport status\"",
+        ),
+        (serde_json::json!({}), "later"),
+    ] {
+        script.execute(args.clone(), &ctx).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(dir.path().join("received")).unwrap()
+            )
+            .unwrap(),
+            args,
+        );
+        let jobs = table.jobs(dir.path());
+        let job = jobs.last().unwrap();
+        assert_eq!(job.description, expected);
+        let head = format!("#{} {expected}", job.id);
+        ui.sync_jobs(jobs);
+        ui.flush(&lane, &mut view);
+        let buffer = ui.screen.test_buffer();
+        let area = ui.regions.jobs;
+        let rows: Vec<String> = (area.y..area.bottom())
+            .map(|y| {
+                (area.x..area.right())
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+        assert!(rows.iter().any(|row| row.starts_with(&head)), "{rows:?}");
+    }
+    table.stop_running(dir.path(), "test finished");
+}
+
 #[test]
 fn normal_keys_move_from_the_draft_through_jobs_and_back() {
     let mut ui = vim_ui();

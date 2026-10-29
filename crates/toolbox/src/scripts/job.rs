@@ -53,8 +53,10 @@ enum Said {
 
 /// Run `cmd` with `input` on stdin and fd 3 open for what it says. Until it
 /// detaches, a timeout or the turn's cancellation take the whole group.
+/// `description` identifies the detached job, including its call arguments.
 pub async fn run(
     name: &str,
+    description: &str,
     cmd: Command,
     input: Vec<u8>,
     timeout: Duration,
@@ -81,7 +83,7 @@ pub async fn run(
     let stop = CancellationToken::new();
     let job = sink.start(
         ctx.workspace.root().to_path_buf(),
-        name.to_string(),
+        description.to_string(),
         stop.clone(),
         Some(told.clone()),
     );
@@ -446,6 +448,17 @@ mod tests {
         let mut cmd = Command::new("sh");
         cmd.arg(path).current_dir(dir);
         cmd
+    }
+
+    async fn run(
+        name: &str,
+        cmd: Command,
+        input: Vec<u8>,
+        timeout: Duration,
+        ctx: &Ctx,
+        jobs: Option<&dyn JobSink>,
+    ) -> Result<Ran, ToolError> {
+        super::run(name, name, cmd, input, timeout, ctx, jobs).await
     }
 
     const SECOND: Duration = Duration::from_secs(1);

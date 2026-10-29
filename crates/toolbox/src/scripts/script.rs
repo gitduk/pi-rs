@@ -179,9 +179,15 @@ impl Tool for Script {
             .envs(self.env(&args, &shared));
         let input = serde_json::to_vec(&args).unwrap_or_default();
         let preview = tool::summary(&args).into_owned();
+        let description = if args.as_object().is_some_and(|args| args.is_empty()) {
+            self.name.clone()
+        } else {
+            format!("{} {}", self.name, tool::arguments(&args))
+        };
         let before = crate::drift::before(ctx);
         let ran = super::job::run(
             &self.name,
+            &description,
             command,
             input,
             TIMEOUT,

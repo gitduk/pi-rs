@@ -31,7 +31,8 @@ pub fn summary(args: &Value) -> Cow<'_, str> {
         .unwrap_or_else(|| Cow::Owned(arguments(args)))
 }
 
-fn arguments(args: &Value) -> String {
+/// All supplied arguments as `key=value` pairs, quoting non-word strings.
+pub fn arguments(args: &Value) -> String {
     let Some(args) = args.as_object().filter(|args| !args.is_empty()) else {
         return args.to_string();
     };

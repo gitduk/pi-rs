@@ -28,6 +28,7 @@ mod job {
 
     pub async fn run(
         _name: &str,
+        _description: &str,
         cmd: tokio::process::Command,
         input: Vec<u8>,
         timeout: Duration,

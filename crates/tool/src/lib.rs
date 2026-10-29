@@ -3,7 +3,7 @@ use llm::message::ToolResultContent;
 use serde_json::{Deserializer, Value};
 
 mod arguments;
-pub use arguments::{asked, summary};
+pub use arguments::{arguments, asked, summary};
 
 /// A character every provider accepts in a tool name: a-z, A-Z, 0-9, `-`, `_`.
 pub fn name_char(c: char) -> bool {
