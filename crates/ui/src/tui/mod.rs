@@ -1,13 +1,13 @@
 //! The interactive surface: one loop holds raw mode for the whole session,
 //! servicing the agent's events, the keyboard, and the animation timer.
 
+mod background;
 mod bar;
 mod browse;
 mod call;
 mod clipboard;
 mod editor;
 mod frame;
-mod jobs;
 mod keys;
 pub use keys::WORDS;
 mod menu;
@@ -99,13 +99,13 @@ pub(crate) enum Deed {
     Interrupt,
     // Esc caught a prompt on its way out: stop the run, then unsend it.
     Unsend,
-    // A job's row clicked: what it said that is not back yet, on a page.
-    Job(u64),
-    // Show or hide the completed jobs waiting for delivery.
-    JobResults(bool),
-    // An empty list stops every running job in the current checkout.
-    StopJobs(Vec<u64>),
-    RestartJobs(Vec<u64>),
+    // A command's row clicked: what it said that is not back yet, on a page.
+    CommandOutput(u64),
+    // Show or hide the completed executions waiting for delivery.
+    BackgroundResults(bool),
+    // An empty list stops every running execution in the current checkout.
+    StopCommands(Vec<u64>),
+    RestartCommands(Vec<u64>),
     // Drop the asides: the rows only drawn, never filed.
     Tidy,
     // The person's answer to a question its asker waits on, or none.
@@ -127,10 +127,10 @@ impl Deed {
             | Deed::External
             | Deed::Interrupt
             | Deed::Unsend
-            | Deed::Job(_)
-            | Deed::JobResults(_)
-            | Deed::StopJobs(_)
-            | Deed::RestartJobs(_)
+            | Deed::CommandOutput(_)
+            | Deed::BackgroundResults(_)
+            | Deed::StopCommands(_)
+            | Deed::RestartCommands(_)
             | Deed::Tidy
             | Deed::Answer { .. } => Fate::Now,
         }
@@ -146,10 +146,10 @@ impl Deed {
             | Deed::Rewind
             | Deed::Interrupt
             | Deed::Unsend
-            | Deed::Job(_)
-            | Deed::JobResults(_)
-            | Deed::StopJobs(_)
-            | Deed::RestartJobs(_) => true,
+            | Deed::CommandOutput(_)
+            | Deed::BackgroundResults(_)
+            | Deed::StopCommands(_)
+            | Deed::RestartCommands(_) => true,
         }
     }
 }
@@ -407,7 +407,7 @@ impl Tui {
     async fn serve_lanes(&mut self) {
         for at in 0..self.core.lanes.len() {
             while let Ok(event) = self.core.lanes[at].inbox().try_recv() {
-                // Every lane, not just the one in front: a turn a job's input
+                // Every lane, not just the one in front: a turn a command's input
                 // opened is still owed its answer after a switch.
                 let lane = &self.core.lanes[at];
                 self.drivers.observe(lane.token(), lane.root(), &event);
@@ -524,38 +524,39 @@ impl Tui {
             Deed::Unsend => self.stop_current(true),
             Deed::Rewind => self.open_rewind(),
             Deed::External => self.edit_externally().await,
-            Deed::JobResults(shown) => self.ui.job_results_shown = shown,
-            Deed::Job(id) => {
-                if let Some(job) = self
+            Deed::BackgroundResults(shown) => self.ui.background_results_shown = shown,
+            Deed::CommandOutput(id) => {
+                if let Some(execution) = self
                     .ui
-                    .every_job
+                    .every_command
                     .iter()
-                    .find(|j| j.id == id && j.state == pi_core::driver::jobs::State::Back)
+                    .find(|j| j.id == id && j.state == pi_core::driver::background::State::Back)
                 {
-                    if let Some(body) = self.drivers.jobs().body(self.core.lane().root(), id) {
+                    if let Some(body) = self.drivers.background().body(self.core.lane().root(), id)
+                    {
                         self.ui
-                            .open_page(call::job_page(job, &body, &self.ui.paint));
+                            .open_page(call::background_page(execution, &body, &self.ui.paint));
                     }
                     return;
                 }
-                self.ui.job_open = match &self.ui.job_open {
+                self.ui.background_open = match &self.ui.background_open {
                     Some(open) if open.id == id => None,
-                    _ => Some(ui::OpenJob {
+                    _ => Some(ui::OpenCommand {
                         id,
                         body: String::new(),
                     }),
                 };
             }
-            Deed::StopJobs(ids) => {
-                let said = self.drivers.stop_jobs(self.core.lane().root(), &ids);
+            Deed::StopCommands(ids) => {
+                let said = self.drivers.stop_commands(self.core.lane().root(), &ids);
                 self.land_driven(said);
             }
-            Deed::RestartJobs(ids) => {
-                let said = self.drivers.restart_jobs(self.core.lane().root(), &ids);
+            Deed::RestartCommands(ids) => {
+                let said = self.drivers.restart_commands(self.core.lane().root(), &ids);
                 self.land_driven(said);
             }
             Deed::Tidy => self.ui.tidy(front_view(&mut self.views, self.core.lane())),
-            Deed::Answer { question, picked } => self.drivers.jobs().answer(question, picked),
+            Deed::Answer { question, picked } => self.drivers.background().answer(question, picked),
         }
     }
 
@@ -618,7 +619,7 @@ impl Tui {
         }
     }
 
-    // A job asked to stop the turn running in its checkout, as esc would;
+    // A command asked to stop the turn running in its checkout, as esc would;
     // with none running there is nothing to say.
     fn interrupt_at(&mut self, root: &std::path::Path) {
         let Some(at) = self.core.lane_at(root) else {
@@ -654,7 +655,7 @@ impl Tui {
         let version = core::update::newer()?;
         let settled = self.ui.read.is_none()
             && self.ui.editor.is_empty()
-            && self.ui.job_open.is_none()
+            && self.ui.background_open.is_none()
             && (self.views.values()).all(|v| v.draft.is_empty() && v.queued.is_empty())
             && !(self.core.lanes.iter()).any(|lane| self.drivers.holds(lane.token()));
         if !settled {
@@ -700,19 +701,19 @@ impl Tui {
             }
             self.refresh_tabs();
             self.bar.poke(self.core.lane());
-            let jobs = self.drivers.jobs();
-            jobs.relay_progress();
-            for root in jobs.take_interrupts() {
+            let executions = self.drivers.background();
+            executions.relay_progress();
+            for root in executions.take_interrupts() {
                 self.interrupt_at(&root);
             }
             // Taken down first, or the copy would put them back up.
             for question in std::mem::take(&mut self.ui.answered) {
-                jobs.answer(question, None);
+                executions.answer(question, None);
             }
             self.ui
-                .sync_questions(jobs.questions(self.core.lane().root()));
+                .sync_questions(executions.questions(self.core.lane().root()));
             let root = self.core.lane().root();
-            self.ui.sync_jobs(jobs.jobs(root));
+            self.ui.sync_background(executions.background(root));
             self.ui.tools = Some(self.core.lane().agent().brief.clone());
             // Walked once per line completing it, not on every pass: the
             // transcript holds still while `/rewind` is on the line.
@@ -721,11 +722,11 @@ impl Tui {
             } else if self.ui.said.is_empty() {
                 self.ui.said = said_of(self.core.lane());
             }
-            let open = self.ui.job_open.take();
-            let shown = |id: u64| self.ui.jobs.iter().any(|j| j.id == id);
-            self.ui.job_open = open.filter(|o| shown(o.id)).and_then(|o| {
-                let body = jobs.body(root, o.id)?;
-                Some(ui::OpenJob { id: o.id, body })
+            let open = self.ui.background_open.take();
+            let shown = |id: u64| self.ui.executions.iter().any(|j| j.id == id);
+            self.ui.background_open = open.filter(|o| shown(o.id)).and_then(|o| {
+                let body = executions.body(root, o.id)?;
+                Some(ui::OpenCommand { id: o.id, body })
             });
             let view = front_view(&mut self.views, self.core.lane());
             self.ui.flush(self.core.lane(), view);
@@ -765,8 +766,8 @@ impl Tui {
                 let held = self.ui.held().map(tokio::time::Instant::from_std);
                 // Only while the lane is free: a prompt due under a run would
                 // wake this loop again and again with nothing it may do.
-                let jobs = self.drivers.jobs();
-                let due_back = free.then(|| jobs.next_due(lane.root())).flatten();
+                let executions = self.drivers.background();
+                let due_back = free.then(|| executions.next_due(lane.root())).flatten();
                 // Every branch must be cancel-safe: a loser is dropped mid-poll.
                 // `recv()` and `tick()` are; a blocking read gets its own thread.
                 tokio::select! {
@@ -781,7 +782,7 @@ impl Tui {
                     }
                     // Only while something runs, or a flash is up — an idle
                     // loop waking ten times a second has nothing to spin.
-                    _ = tick.tick(), if anywhere || jobs.working(lane.root()) || self.ui.flash.is_some() || self.ui.copied.is_some() => {
+                    _ = tick.tick(), if anywhere || executions.working(lane.root()) || self.ui.flash.is_some() || self.ui.copied.is_some() => {
                         self.ui.spinner += 1;
                         Wake::Nothing
                     }
@@ -796,10 +797,10 @@ impl Tui {
                     _ = tokio::time::sleep_until(held.unwrap_or_else(tokio::time::Instant::now)),
                         if held.is_some() => Wake::Nothing,
                     // Something was left, cancelled or finished: look again.
-                    _ = jobs.changed().notified() => Wake::Nothing,
+                    _ = executions.changed().notified() => Wake::Nothing,
                     // A different pi installed: the bar says so.
                     _ = update.notified() => Wake::Nothing,
-                    // Left the way `/exit` leaves: runs settled, jobs taken down.
+                    // Left the way `/exit` leaves: runs settled, executions taken down.
                     () = hangup.recv() => {
                         tracing::info!(target: "pi::session", "hung up");
                         Wake::Leave("The terminal hung up; pi exited.")
@@ -874,7 +875,7 @@ impl Tui {
                 Step::Quit => {
                     break match origin {
                         Origin::Typed => "The user exited pi.",
-                        Origin::Loop | Origin::Job | Origin::Input(_) => {
+                        Origin::Loop | Origin::Background | Origin::Input(_) => {
                             "pi exited in response to a background command."
                         }
                     };
@@ -906,7 +907,7 @@ impl Tui {
                 Step::Surface { word, .. } if word == keys::KEYS => {
                     let mut listing = self.ui.keys.listing();
                     listing.rows.push(pi_store::listing::Row::new([
-                        "Normal, with no menu: ctrl+k focuses the last job. In jobs: ctrl+k/j move; x stops; r restarts; X stops all; enter opens output; q or esc returns to input."
+                        "Normal, with no menu: ctrl+k focuses the last execution. In executions: ctrl+k/j move; x stops; r restarts; X stops all; enter opens output; q or esc returns to input."
                     ]));
                     self.land_lines(listing)
                 }
@@ -942,7 +943,7 @@ impl Tui {
         };
         self.save_history();
         self.settle_all(&mut done_rx, leaving).await;
-        self.core.hand_over_jobs();
+        self.core.hand_over_background();
         Ok(ended)
     }
 
@@ -953,8 +954,8 @@ impl Tui {
         let next = self.drivers.next(lane.token(), lane.root())?;
         let view = front_view(&mut self.views, self.core.lane());
         view.surface.follow();
-        // A job's result is relayed under its label; a loop's line is read as
-        // typed. A person's line through a job is a prompt: what they send
+        // A command's result is relayed under its label; a loop's line is read as
+        // typed. A person's line through an execution is a prompt: what they send
         // never runs here as a command, and every one is answered. Only their
         // pick of offered options reads as typed, as it would picked here.
         let wake = match next.label {

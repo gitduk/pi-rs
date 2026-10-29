@@ -46,35 +46,40 @@ impl Ui {
             .map_or(0, |b| b.width())
     }
 
-    // What row of the job list is at screen row `row`.
-    fn job_row_at(&self, row: u16) -> Option<super::call::JobRow> {
+    // What row of the execution list is at screen row `row`.
+    fn command_row_at(&self, row: u16) -> Option<super::call::CommandRow> {
         if self.over_menu(row) {
             return None;
         }
-        self.job_rows.get(row_in(self.regions.jobs, row)?).copied()
+        self.command_rows
+            .get(row_in(self.regions.executions, row)?)
+            .copied()
     }
 
-    // Whether screen row `row` folds or unfolds the job list.
+    // Whether screen row `row` folds or unfolds the execution list.
     pub(super) fn fold_at(&self, row: u16) -> bool {
-        self.job_row_at(row) == Some(super::call::JobRow::Fold)
+        self.command_row_at(row) == Some(super::call::CommandRow::Fold)
     }
 
-    // The open job whose cut-off lines the row at screen row `row` stands for.
+    // The open execution whose cut-off lines the row at screen row `row` stands for.
     pub(super) fn earlier_at(&self, row: u16) -> Option<u64> {
-        match self.job_row_at(row)? {
-            super::call::JobRow::Earlier(id) => Some(id),
+        match self.command_row_at(row)? {
+            super::call::CommandRow::Earlier(id) => Some(id),
             _ => None,
         }
     }
 
-    // The job whose row of the list is at screen row `row`.
-    pub(super) fn job_at(&self, row: u16) -> Option<u64> {
-        let Some(super::call::JobRow::Job(id)) = self.job_row_at(row) else {
+    // The execution whose row of the list is at screen row `row`.
+    pub(super) fn command_at(&self, row: u16) -> Option<u64> {
+        let Some(super::call::CommandRow::BackgroundCommand(id)) = self.command_row_at(row) else {
             return None;
         };
-        let job = self.jobs.iter().find(|job| job.id == id)?;
-        let opens = super::call::job_opens(job, self.screen.width());
-        let open = self.job_open.as_ref().is_some_and(|o| o.id == id);
+        let execution = self
+            .executions
+            .iter()
+            .find(|execution| execution.id == id)?;
+        let opens = super::call::background_opens(execution, self.screen.width());
+        let open = self.background_open.as_ref().is_some_and(|o| o.id == id);
         (open || opens).then_some(id)
     }
 
@@ -155,16 +160,20 @@ impl Ui {
             return;
         }
         if self.fold_at(row) {
-            self.jobs_all = !self.jobs_all;
+            self.background_all = !self.background_all;
             return;
         }
-        // The page shows the whole of it, so the job folds: its tail twice
+        // The page shows the whole of it, so the execution folds: its tail twice
         // over would read as two outputs.
         if let Some(id) = self.earlier_at(row) {
-            let open = self.job_open.take();
-            let job = self.jobs.iter().find(|j| j.id == id);
-            if let (Some(open), Some(job)) = (open, job) {
-                self.open_page(super::call::job_page(job, &open.body, &self.paint));
+            let open = self.background_open.take();
+            let execution = self.executions.iter().find(|j| j.id == id);
+            if let (Some(open), Some(execution)) = (open, execution) {
+                self.open_page(super::call::background_page(
+                    execution,
+                    &open.body,
+                    &self.paint,
+                ));
             }
             return;
         }
@@ -244,8 +253,10 @@ impl Ui {
         self.selection = None;
         // Only transcript rows hold text to select; the pending-calls toggle
         // and the like answer the press itself, as they always did.
-        let [_, (jobs, _), (bar, _)] = self.regions.readable();
-        let in_bar = [jobs, bar].into_iter().any(|r| row_in(r, row).is_some());
+        let [_, (executions, _), (bar, _)] = self.regions.readable();
+        let in_bar = [executions, bar]
+            .into_iter()
+            .any(|r| row_in(r, row).is_some());
         let at = self.point(col, row).filter(|_| {
             in_bar
                 || matches!(
@@ -258,9 +269,9 @@ impl Ui {
             self.on_mouse_click(view, col, row);
             return;
         };
-        let job = self.job_at(row);
+        let execution = self.command_at(row);
         // A row that answers a click is clicked, never double-clicked.
-        let single = job.is_some() || self.fold_at(row) || self.earlier_at(row).is_some();
+        let single = execution.is_some() || self.fold_at(row) || self.earlier_at(row).is_some();
         let count = match &self.press {
             Some(p) if !single && p.at == at && p.when.elapsed() < MULTI_CLICK => (p.count % 3) + 1,
             _ => 1,
@@ -270,7 +281,7 @@ impl Ui {
             when: std::time::Instant::now(),
             count,
             moved: false,
-            job,
+            execution,
         });
         if count == 2
             && let Some((sel, text)) = self.unit_selection(view, at)
@@ -312,12 +323,12 @@ impl Ui {
         }
     }
 
-    // A click on a job's row that opens hands back that job to open.
+    // A click on a command's row that opens hands back that execution to open.
     pub(super) fn on_release(&mut self, view: &mut View, col: u16, row: u16) -> Option<u64> {
         let press = self.press.as_ref()?;
         if press.moved {
             self.copy_selection(view);
-        } else if let Some(id) = press.job {
+        } else if let Some(id) = press.execution {
             return Some(id);
         } else if press.count == 1 {
             self.on_mouse_click(view, col, row);
@@ -492,9 +503,9 @@ pub(super) enum Target {
     // Row `i` of the live block: a pending call, a click on it opening or
     // closing the batch, or the rest.
     PendingTools(usize),
-    // Completed jobs waiting to be delivered in the live block.
-    JobResults(usize),
-    JobResult(usize, u64),
+    // Completed executions waiting to be delivered in the live block.
+    BackgroundResults(usize),
+    BackgroundResult(usize, u64),
     Live(usize),
     // Line `n` of the text the reading page shows.
     Text(usize),
@@ -519,8 +530,8 @@ pub(super) struct Regions {
     pub(super) rule: Rect,
     // The completion list.
     pub(super) menu: Rect,
-    // The background jobs, over the input line.
-    pub(super) jobs: Rect,
+    // The background commands, over the input line.
+    pub(super) executions: Rect,
     // The input line, between the conversation and the bar.
     pub(super) editor: Rect,
     // The bar: the checkouts, or the flash that took its row; the bottom.
@@ -559,28 +570,28 @@ pub(super) fn row_in(area: Rect, row: u16) -> Option<usize> {
 
 impl Regions {
     /// The rows each part asks for, as many as `area` holds: the input line
-    /// parts the conversation, jobs and all, from the bar under it. A `page`
-    /// up is read over all of the conversation, so the jobs get no rows.
+    /// parts the conversation, executions and all, from the bar under it. A `page`
+    /// up is read over all of the conversation, so the executions get no rows.
     pub(super) fn layout(
         area: Rect,
         page: bool,
         asked: usize,
         menu: usize,
-        jobs: usize,
+        executions: usize,
         bar: usize,
         editor: usize,
     ) -> Self {
-        // A short screen takes from the editor, then the jobs, then the bar;
+        // A short screen takes from the editor, then the executions, then the bar;
         // a row of history and a row to type on stay.
         let mut left = (area.height as usize).saturating_sub(1 + HISTORY_GAP as usize);
         let bar = bar.min(left.saturating_sub(1));
         left -= bar;
-        let jobs = if page {
+        let executions = if page {
             0
         } else {
-            jobs.min(left.saturating_sub(1))
+            executions.min(left.saturating_sub(1))
         };
-        left -= jobs;
+        left -= executions;
         let editor = editor.min(left);
         left -= editor;
         if asked > 0 {
@@ -590,13 +601,13 @@ impl Regions {
             let rule = usize::from(shown > option + 1);
             let asked = asked.min(shown - option - rule);
             let menu = shown - asked - rule;
-            let [history, gap, asked, rule, menu, jobs, editor, bar] = Layout::vertical([
+            let [history, gap, asked, rule, menu, executions, editor, bar] = Layout::vertical([
                 Constraint::Fill(1),
                 Constraint::Length(HISTORY_GAP),
                 Constraint::Length(asked as u16),
                 Constraint::Length(rule as u16),
                 Constraint::Length(menu as u16),
-                Constraint::Length(jobs as u16),
+                Constraint::Length(executions as u16),
                 Constraint::Length(editor as u16),
                 Constraint::Length(bar as u16),
             ])
@@ -607,7 +618,7 @@ impl Regions {
                 asked,
                 rule,
                 menu,
-                jobs,
+                executions,
                 editor,
                 bar,
             };
@@ -615,15 +626,15 @@ impl Regions {
         let chunks = Layout::vertical([
             Constraint::Fill(1),
             Constraint::Length(HISTORY_GAP),
-            Constraint::Length(jobs as u16),
+            Constraint::Length(executions as u16),
             Constraint::Length(editor as u16),
             Constraint::Length(bar as u16),
         ])
         .split(area);
-        // The list lies over the jobs and the rows above them, next to the
+        // The list lies over the executions and the rows above them, next to the
         // line it completes: nothing under it moves as it grows and shrinks.
         // Half the history at most, so what it moves the view to stays in sight.
-        let shown = (asked + menu).min(jobs + left.div_ceil(2));
+        let shown = (asked + menu).min(executions + left.div_ceil(2));
         let asked = asked.min(shown);
         let above = chunks[0].union(chunks[2]);
         let [_, asked, rule, menu] = Layout::vertical([
@@ -639,7 +650,7 @@ impl Regions {
             asked,
             rule,
             menu,
-            jobs: chunks[2],
+            executions: chunks[2],
             editor: chunks[3],
             bar: chunks[4],
         }
@@ -654,7 +665,7 @@ impl Regions {
     // first row takes among them all.
     pub(super) fn readable(&self) -> [(Rect, usize); 3] {
         let mut base = 0;
-        [self.history, self.jobs, self.bar].map(|r| {
+        [self.history, self.executions, self.bar].map(|r| {
             let at = base;
             base += r.height as usize;
             (r, at)

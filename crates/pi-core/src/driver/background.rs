@@ -1,16 +1,11 @@
-//! `job`: what runs apart from the turn that started it — a subagent sent
-//! to the background, a script tool that detached — and what comes back from
-//! it to its checkout: queued results together in one turn, each input a line
-//! read as if typed, whose turn's answer goes back to the job.
+//! Background shell commands, their session channels, and queued results.
 //!
-//! Results can reach a run between model requests; inputs open their own
-//! turns. Nothing here outlives this process but a job no longer running
-//! that a restarted pi can start over; past that, use cron.
+//! Results reach the owning checkout between model requests. Inputs open their
+//! own turns and receive replies through the command's channel. Commands stop
+//! with this process; saved launch specifications allow restarting them later.
 //!
-//! The questions such calls put to the person stand here too, jobs' and
-//! those of calls still in their turn alike: numbered, up until answered
-//! from the screen or through a job that follows, and withdrawn once their
-//! asker is gone.
+//! The table also owns foreground questions and routes answers from the user
+//! or from commands that follow the checkout.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -24,27 +19,24 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tool::limit::MAX_CALL;
 use tool::{Ctx, ToolError, ToolOutput};
-use toolbox::background::{
-    Again, Answer, Ask, Asked, JobControls, JobHandle, JobSink, Peek, Rerun, Told,
-};
+use toolbox::background::{Again, Controls, Peek, Rerun, RunHandle, RunSink};
+use toolbox::channel::{Answer, Ask, Asked, Told};
 
 use crate::core::question::{Asker, Question};
 
 // How long a restart waits for the last run to let go before giving up.
 const LET_GO: std::time::Duration = std::time::Duration::from_secs(10);
-// What a job may have waiting at once; past it they are counted, not kept,
-// so a job that outruns its lane cannot grow without bound.
+// Bound queued messages even when a command outruns its checkout.
 const MAX_WAITING: usize = 100;
 pub(super) const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Every job of this process.
+/// Every execution of this process.
 #[derive(Default)]
 pub struct Table {
     inner: Mutex<Inner>,
     changed: Notify,
-    // Every call waiting on a job, woken together: `changed` wakes one.
+    // Every call waiting on an execution, woken together: `changed` wakes one.
     moved: Notify,
 }
 
@@ -87,7 +79,7 @@ impl Inner {
         match stale {
             Some(at) => {
                 let old = std::mem::replace(&mut self.standing[at].1, question).id;
-                tracing::info!(target: "pi::job", question = old, why = "asked again", "closed");
+                tracing::info!(target: "pi::background", question = old, why = "asked again", "closed");
                 self.tell_followers(&root, Told::Closed(old));
             }
             None => self.standing.push((root.clone(), question)),
@@ -95,12 +87,12 @@ impl Inner {
         self.tell_followers(&root, told);
     }
 
-    // Take question `id` down, if it is still up, and say so to every job
+    // Take question `id` down, if it is still up, and say so to every execution
     // that follows its checkout.
     fn close(&mut self, id: u64, why: &str) -> Option<Question> {
         let at = self.standing.iter().position(|(_, q)| q.id == id)?;
         let (root, question) = self.standing.remove(at);
-        tracing::info!(target: "pi::job", question = id, why, "closed");
+        tracing::info!(target: "pi::background", question = id, why, "closed");
         self.tell_followers(&root, Told::Closed(id));
         Some(question)
     }
@@ -118,10 +110,9 @@ impl Inner {
         }
     }
 
-    // Take down what job `id` asked: it is gone, or no longer the run that asked.
     fn withdraw(&mut self, id: u64, why: &str) {
         let asked: Vec<u64> = (self.standing.iter())
-            .filter(|(_, q)| matches!(q.from, Asker::Job { id: of, .. } if of == id))
+            .filter(|(_, q)| matches!(q.from, Asker::Background { id: of, .. } if of == id))
             .map(|(_, q)| q.id)
             .collect();
         for question in asked {
@@ -129,7 +120,7 @@ impl Inner {
         }
     }
 
-    // The running jobs on `root` told of every turn there.
+    // The running executions on `root` told of every turn there.
     fn followers<'a>(&'a self, root: &'a Path) -> impl Iterator<Item = &'a Item> {
         (self.items.iter()).filter(move |i| i.root == root && i.running() && i.listens.follows())
     }
@@ -140,7 +131,7 @@ impl Inner {
         }
     }
 
-    // Where run `run` of job `id` stands in the table, if it is still here.
+    // Where run `run` of execution `id` stands in the table, if it is still here.
     fn mine(&self, id: u64, run: u64) -> Option<usize> {
         (self.items.iter()).position(|i| i.id == id && i.run == run)
     }
@@ -196,17 +187,17 @@ impl Inner {
                 // What the stopped run still says is no one's to hear.
                 item.run += 1;
                 item.clear_run();
-                tracing::info!(target: "pi::job", job = id, why, "stopped");
+                tracing::info!(target: "pi::background", execution = id, why, "stopped");
             }
             (phase, false) => {
                 if let Phase::Running { stop } = phase {
                     stop.cancel();
                 }
                 self.items.remove(at);
-                tracing::info!(target: "pi::job", job = id, why, "stopped and forgotten");
+                tracing::info!(target: "pi::background", execution = id, why, "stopped and forgotten");
             }
         }
-        self.withdraw(id, "its job stopped");
+        self.withdraw(id, "its execution stopped");
         Ok(what)
     }
 }
@@ -221,7 +212,7 @@ struct Item {
     // The same moment on the wall clock, for a surface to say when.
     started_at: SystemTime,
     phase: Phase,
-    // What it said that is not yet delivered, oldest first. A job leaves the
+    // What it said that is not yet delivered, oldest first. A command leaves the
     // table once it has stopped running and these are gone.
     waiting: VecDeque<Back>,
     // What arrived while `waiting` was full.
@@ -241,7 +232,7 @@ struct Item {
     gone: CancellationToken,
 }
 
-// What a job is told of, and where.
+// What an execution is told of, and where.
 enum Listens {
     Never,
     // The turns its inputs opened.
@@ -263,7 +254,7 @@ impl Listens {
     }
 }
 
-// Where a job's latest run stands.
+// Where a command's latest run stands.
 enum Phase {
     // `stop` asks it to wind down: a subagent as a stopped run is, a process
     // by signal.
@@ -322,7 +313,7 @@ impl Item {
         self.dropped = 0;
     }
 
-    // The job as a person reads it: `judge #3`.
+    // The execution as a person reads it: `judge #3`.
     fn name(&self) -> String {
         format!("{} #{}", self.description, self.id)
     }
@@ -331,9 +322,9 @@ impl Item {
         let (id, name) = (self.id, &self.description);
         let first = text.lines().next().unwrap_or("").trim();
         Due {
-            line: format!("Background job #{id} ({name}) reports:\n\n{text}"),
+            line: format!("Background command #{id} ({name}) reports:\n\n{text}"),
             note: format!(
-                "This turn is a result of background job #{id} ({name}), which you \
+                "This turn is a result of background command #{id} ({name}), which you \
                  started. The user did not just type it."
             ),
             label: format!("{} {first}", self.name()),
@@ -356,7 +347,7 @@ impl Item {
 
     fn wait(&mut self, back: Back) {
         if self.waiting.len() >= MAX_WAITING {
-            tracing::warn!(target: "pi::job", job = self.id, "over the waiting cap, dropped");
+            tracing::warn!(target: "pi::background", execution = self.id, "over the waiting cap, dropped");
             self.dropped += 1;
         } else {
             self.waiting.push_back(back);
@@ -376,7 +367,7 @@ fn each(ids: &[u64], act: impl Fn(u64) -> Result<String, String>) -> (Vec<String
     (failed, done)
 }
 
-// A job that has stopped with nothing left to say leaves, unless it can
+// A command that has stopped with nothing left to say leaves, unless it can
 // be started over.
 fn settle(items: &mut Vec<Item>, at: usize) {
     if items[at].spent() {
@@ -384,7 +375,7 @@ fn settle(items: &mut Vec<Item>, at: usize) {
     }
 }
 
-/// A job a pi leaves behind that the next pi lists again, under the same
+/// A command a pi leaves behind that the next pi lists again, under the same
 /// id where it is free, stopped, to be started over there.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Carried {
@@ -397,10 +388,10 @@ pub struct Carried {
     pub again: Again,
 }
 
-/// Write `jobs` to `path` for the next pi to take over; with none, what an
+/// Write `executions` to `path` for the next pi to take over; with none, what an
 /// earlier pi left there goes, so it is not listed again later.
-pub fn hand_over(path: &Path, jobs: &[Carried]) -> anyhow::Result<()> {
-    if jobs.is_empty() {
+pub fn hand_over(path: &Path, executions: &[Carried]) -> anyhow::Result<()> {
+    if executions.is_empty() {
         return match std::fs::remove_file(path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
             _ => Ok(()),
@@ -411,12 +402,12 @@ pub fn hand_over(path: &Path, jobs: &[Carried]) -> anyhow::Result<()> {
     // Command lines can carry secrets, as transcripts can.
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut file, 0o600);
-    std::io::Write::write_all(&mut file.open(path)?, &serde_json::to_vec(jobs)?)?;
-    tracing::info!(target: "pi::job", jobs = jobs.len(), path = %path.display(), "handed over");
+    std::io::Write::write_all(&mut file.open(path)?, &serde_json::to_vec(executions)?)?;
+    tracing::info!(target: "pi::background", executions = executions.len(), path = %path.display(), "handed over");
     Ok(())
 }
 
-/// The jobs [`hand_over`] wrote to `path`, taken: the file goes once read.
+/// The executions [`hand_over`] wrote to `path`, taken: the file goes once read.
 pub fn take_over(path: &Path) -> anyhow::Result<Vec<Carried>> {
     let read = match std::fs::read(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -426,9 +417,9 @@ pub fn take_over(path: &Path) -> anyhow::Result<Vec<Carried>> {
     Ok(serde_json::from_slice(&read?)?)
 }
 
-/// A job as a surface lists it.
+/// A command as a surface lists it.
 #[derive(Clone)]
-pub struct Job {
+pub struct BackgroundCommand {
     pub id: u64,
     pub description: String,
     pub progress: String,
@@ -441,7 +432,7 @@ pub struct Job {
     pub last: String,
 }
 
-/// Where a listed job stands.
+/// Where a listed execution stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     Running,
@@ -470,7 +461,7 @@ impl State {
     }
 }
 
-/// What comes back from a job: a result, or a person speaking through it,
+/// What comes back from an execution: a result, or a person speaking through it,
 /// their words untouched; `note` says only what the cap dropped, if anything.
 /// Their words are a prompt, unless `as_typed`: a pick of offered options,
 /// read as if typed, so one that is a command runs.
@@ -484,7 +475,7 @@ pub enum Back {
 }
 
 impl Back {
-    /// What the job said, as it said it.
+    /// What the execution said, as it said it.
     pub fn text(&self) -> &str {
         match self {
             Back::Result(due) => &due.text,
@@ -500,12 +491,12 @@ pub struct Due {
     pub note: String,
     /// What the screen names the turn by, since nobody typed it.
     pub label: String,
-    /// What the job said, as it said it.
+    /// What the execution said, as it said it.
     pub text: String,
 }
 
 impl Table {
-    /// Signalled whenever a job starts, moves, reports, ends or goes, so a
+    /// Signalled whenever an execution starts, moves, reports, ends or goes, so a
     /// surface drawing them can look again.
     pub fn changed(&self) -> &Notify {
         &self.changed
@@ -520,7 +511,7 @@ impl Table {
         self.moved.notify_waiters();
     }
 
-    /// Wait, up to `within`, for job `id` of `root`'s to stop: what it said,
+    /// Wait, up to `within`, for execution `id` of `root`'s to stop: what it said,
     /// taken so it does not come back as a turn too; None while it runs.
     pub async fn wait(
         &self,
@@ -531,10 +522,10 @@ impl Table {
         self.wait_each(root, &[id], within)
             .await
             .pop()
-            .expect("one job was waited for")
+            .expect("one execution was waited for")
     }
 
-    /// Wait for all named jobs under one deadline, returning each result in
+    /// Wait for all named executions under one deadline, returning each result in
     /// order. Keep results queued until the wait ends so cancellation loses none.
     pub async fn wait_each(
         &self,
@@ -563,13 +554,13 @@ impl Table {
         ids.iter().map(|&id| self.take_results(root, id)).collect()
     }
 
-    // What job `id` of `root`'s said, taken, once it no longer runs; a
+    // What execution `id` of `root`'s said, taken, once it no longer runs; a
     // person's words through it stay in line for the lane.
     fn take_results(&self, root: &Path, id: u64) -> Result<Option<Vec<String>>, String> {
         let mut inner = self.lock();
         let at = (inner.items.iter())
             .position(|i| i.id == id && i.root == root)
-            .ok_or_else(|| format!("no job #{id} here"))?;
+            .ok_or_else(|| format!("no command #{id} here"))?;
         let item = &mut inner.items[at];
         match item.state() {
             State::Running => return Ok(None),
@@ -587,14 +578,14 @@ impl Table {
             }
             Back::Input { .. } => true,
         });
-        tracing::info!(target: "pi::job", job = id, results = said.len(), "results collected");
+        tracing::info!(target: "pi::background", execution = id, results = said.len(), "results collected");
         settle(&mut inner.items, at);
         drop(inner);
         self.wake();
         Ok(Some(said))
     }
 
-    /// Now, if a job for `root` has something waiting.
+    /// Now, if an execution for `root` has something waiting.
     pub fn next_due(&self, root: &Path) -> Option<Instant> {
         self.lock()
             .items
@@ -605,7 +596,7 @@ impl Table {
 
     /// Take the next queued message for `root`, combining consecutive results
     /// into one turn. A person's input stays separate, in its original place.
-    /// The id names the first result's job, or the input's sender.
+    /// The id names the first result's execution, or the input's sender.
     pub fn take_back(&self, root: &Path) -> Option<(u64, Back)> {
         self.take_next(root, false)
     }
@@ -626,39 +617,39 @@ impl Table {
         let mut due = match back {
             Back::Result(due) => due,
             input @ Back::Input { .. } => {
-                tracing::info!(target: "pi::job", job = id, kind = "input", "delivered");
+                tracing::info!(target: "pi::background", execution = id, kind = "input", "delivered");
                 return Some((id, input));
             }
         };
-        let mut jobs = vec![id];
+        let mut executions = vec![id];
         // Hold the lock through the snapshot; later arrivals form another batch.
         while let Some((at, back)) = inner.back_at(root, results_only) {
             match inner.items[at].waiting.get(back) {
                 Some(Back::Result(_)) => {}
                 Some(Back::Input { .. }) | None => break,
             }
-            let Some((job, Back::Result(next))) = inner.take_back(at, back) else {
+            let Some((execution, Back::Result(next))) = inner.take_back(at, back) else {
                 unreachable!("the next queued message was a result")
             };
             due.line.push_str("\n\n");
             due.line.push_str(&next.line);
             due.text.push_str("\n\n");
             due.text.push_str(&next.text);
-            jobs.push(job);
+            executions.push(execution);
         }
-        if jobs.len() > 1 {
-            due.label = format!("{} background job results", jobs.len());
+        if executions.len() > 1 {
+            due.label = format!("{} background command results", executions.len());
             due.note = format!(
-                "This turn combines {} queued results from background jobs you started. \
+                "This turn combines {} queued results from background commands you started. \
                  The user did not type these messages. Handle these results together in this turn.",
-                jobs.len()
+                executions.len()
             );
         }
-        tracing::info!(target: "pi::job", ?jobs, kind = "result", "delivered");
+        tracing::info!(target: "pi::background", ?executions, kind = "result", "delivered");
         Some((id, Back::Result(due)))
     }
 
-    /// Checkouts whose running turn a job asked to stop since last asked.
+    /// Checkouts whose running turn an execution asked to stop since last asked.
     pub fn take_interrupts(&self) -> Vec<PathBuf> {
         self.lock()
             .items
@@ -687,19 +678,21 @@ impl Table {
         self.wake();
     }
 
-    /// Tell job `id` about a turn its input opened, if it is still here.
+    /// Tell execution `id` about a turn its input opened, if it is still here.
     pub fn tell(&self, id: u64, told: Told) {
         match &told {
-            Told::Started => tracing::info!(target: "pi::job", job = id, "told started"),
+            Told::Started => {
+                tracing::info!(target: "pi::background", execution = id, "told started")
+            }
             Told::Progress(text) => tracing::info!(
-                target: "pi::job", job = id, chars = text.chars().count(), "told progress"
+                target: "pi::background", execution = id, chars = text.chars().count(), "told progress"
             ),
             Told::Reply(text) => tracing::info!(
-                target: "pi::job", job = id, chars = text.chars().count(), reply = %text, "told reply"
+                target: "pi::background", execution = id, chars = text.chars().count(), reply = %text, "told reply"
             ),
-            Told::Asked => tracing::info!(target: "pi::job", job = id, "told asked"),
+            Told::Asked => tracing::info!(target: "pi::background", execution = id, "told asked"),
             Told::Answer(answer) => {
-                tracing::info!(target: "pi::job", job = id, ?answer, "told answer")
+                tracing::info!(target: "pi::background", execution = id, ?answer, "told answer")
             }
             // Said where they happen: a question up or down, an answer refused.
             Told::Question { .. } | Told::Closed(_) | Told::Refused { .. } => {}
@@ -715,7 +708,7 @@ impl Table {
         }
     }
 
-    /// Relay changed output from running jobs to their checkout's followers.
+    /// Relay changed output from running executions to their checkout's followers.
     pub fn relay_progress(&self) {
         let watched: Vec<_> = {
             let mut inner = self.lock();
@@ -773,17 +766,17 @@ impl Table {
         }
     }
 
-    /// The running jobs on `root` told of every turn there.
+    /// The running executions on `root` told of every turn there.
     pub fn followers(&self, root: &Path) -> Vec<u64> {
         (self.lock().followers(root)).map(|i| i.id).collect()
     }
 
-    /// The jobs for `root`, oldest first.
-    pub fn jobs(&self, root: &Path) -> Vec<Job> {
-        let held: Vec<(Job, Peek)> = (self.lock().items.iter())
+    /// The executions for `root`, oldest first.
+    pub fn background(&self, root: &Path) -> Vec<BackgroundCommand> {
+        let held: Vec<(BackgroundCommand, Peek)> = (self.lock().items.iter())
             .filter(|i| i.root == root)
             .map(|i| {
-                let job = Job {
+                let execution = BackgroundCommand {
                     id: i.id,
                     description: i.description.clone(),
                     progress: i.progress.clone(),
@@ -792,18 +785,18 @@ impl Table {
                     state: i.state(),
                     last: String::new(),
                 };
-                (job, i.said())
+                (execution, i.said())
             })
             .collect();
         (held.into_iter())
-            .map(|(job, said)| Job {
+            .map(|(execution, said)| BackgroundCommand {
                 last: pi_store::text::last_line(&said()),
-                ..job
+                ..execution
             })
             .collect()
     }
 
-    /// What job `id` of `root`'s has to show under its row; None once it
+    /// What execution `id` of `root`'s has to show under its row; None once it
     /// has left.
     pub fn body(&self, root: &Path, id: u64) -> Option<String> {
         let said = {
@@ -814,7 +807,7 @@ impl Table {
         Some(said())
     }
 
-    /// What job `id` of `root`'s said that is not back yet, oldest first;
+    /// What execution `id` of `root`'s said that is not back yet, oldest first;
     /// None once it has left.
     pub fn waiting(&self, root: &Path, id: u64) -> Option<Vec<String>> {
         let inner = self.lock();
@@ -827,13 +820,13 @@ impl Table {
         )
     }
 
-    /// The latest of what job `id` of `root`'s printed.
+    /// The latest of what execution `id` of `root`'s printed.
     pub fn output(&self, root: &Path, id: u64) -> Result<String, String> {
         let peek = {
             let inner = self.lock();
             let item = (inner.items.iter())
                 .find(|i| i.id == id && i.root == root)
-                .ok_or_else(|| format!("no job #{id} here"))?;
+                .ok_or_else(|| format!("no command #{id} here"))?;
             item.output.clone().ok_or_else(|| {
                 format!("#{id} keeps no output to show. What it says comes back as turns")
             })?
@@ -845,9 +838,9 @@ impl Table {
         })
     }
 
-    /// The jobs for `root`, one line each.
+    /// The executions for `root`, one line each.
     pub fn listing(&self, root: &Path) -> Vec<String> {
-        self.jobs(root)
+        self.background(root)
             .into_iter()
             .map(|j| {
                 let state = match j.state {
@@ -862,7 +855,7 @@ impl Table {
             .collect()
     }
 
-    /// Whether a job for `root` is still running, so a surface keeps
+    /// Whether an execution for `root` is still running, so a surface keeps
     /// redrawing its clock.
     pub fn working(&self, root: &Path) -> bool {
         self.lock()
@@ -880,14 +873,14 @@ impl Table {
             .items
             .iter()
             .position(|i| i.id == id && i.root == root)
-            .ok_or_else(|| format!("no job #{id} here"))?;
+            .ok_or_else(|| format!("no command #{id} here"))?;
         let what = inner.stop(at, "requested")?;
         drop(inner);
         self.wake();
         Ok(what)
     }
 
-    /// Stop only jobs still running on `root`, returning their labels. The
+    /// Stop only executions still running on `root`, returning their labels. The
     /// caller supplies the cause so it can be kept with the state change.
     pub fn stop_running(&self, root: &Path, why: &str) -> Vec<String> {
         let mut inner = self.lock();
@@ -896,7 +889,7 @@ impl Table {
             let item = &inner.items[at];
             if item.root == root && item.running() {
                 let id = item.id;
-                let what = inner.stop(at, why).expect("the job is running");
+                let what = inner.stop(at, why).expect("the execution is running");
                 stopped.push(format!("#{id} ({what})"));
             }
         }
@@ -914,7 +907,7 @@ impl Table {
         let mut inner = self.lock();
         let item = (inner.items.iter_mut())
             .find(|i| i.id == id && i.root == root)
-            .ok_or_else(|| format!("no job #{id} here"))?;
+            .ok_or_else(|| format!("no command #{id} here"))?;
         let Some((rerun, _)) = item.rerun.clone() else {
             return Err(format!(
                 "#{id} ({}) cannot be started over",
@@ -932,16 +925,16 @@ impl Table {
         item.output = None;
         item.started = Instant::now();
         item.started_at = SystemTime::now();
-        let handle: Arc<dyn JobHandle> = Arc::new(Handle {
+        let handle: Arc<dyn RunHandle> = Arc::new(Handle {
             id,
             run: item.run,
             gone: item.gone.clone(),
             table: self.clone(),
         });
         let what = item.description.clone();
-        inner.withdraw(id, "its job started over");
+        inner.withdraw(id, "its execution started over");
         drop(inner);
-        tracing::info!(target: "pi::job", job = id, "restarting");
+        tracing::info!(target: "pi::background", execution = id, "restarting");
         self.wake();
         tokio::spawn(async move {
             // What the last run held, a port say, is let go before the next.
@@ -951,7 +944,7 @@ impl Table {
             {
                 let secs = LET_GO.as_secs();
                 let why = format!("could not start again: the last run held on past {secs}s");
-                handle.result(why);
+                handle.channel().result(why);
                 handle.end();
                 return;
             }
@@ -960,7 +953,9 @@ impl Table {
                 return;
             }
             if let Err(e) = rerun(handle.clone(), stop) {
-                handle.result(format!("could not start again: {e}"));
+                handle
+                    .channel()
+                    .result(format!("could not start again: {e}"));
                 handle.end();
             }
         });
@@ -973,7 +968,7 @@ impl Table {
         each(ids, |id| self.restart(root, id))
     }
 
-    /// Every job of `root`'s that says as data how it runs again, for the
+    /// Every execution of `root`'s that says as data how it runs again, for the
     /// next pi; one still running counts as stopped, since leaving stops it.
     pub fn carried(&self, root: &Path) -> Vec<Carried> {
         (self.lock().items.iter())
@@ -998,29 +993,29 @@ impl Table {
             .collect()
     }
 
-    /// List `job`, carried from the pi before this one, as it was there,
+    /// List `execution`, carried from the pi before this one, as it was there,
     /// started over through `rerun`. Ids given out later come after it.
-    pub fn revive(&self, mut job: Carried, rerun: Rerun) {
+    pub fn revive(&self, mut execution: Carried, rerun: Rerun) {
         let mut inner = self.lock();
         // Lanes reopened from different pis can bring the same id.
-        if inner.items.iter().any(|i| i.id == job.id) {
+        if inner.items.iter().any(|i| i.id == execution.id) {
             inner.next_id += 1;
-            job.id = inner.next_id;
+            execution.id = inner.next_id;
         }
-        inner.next_id = inner.next_id.max(job.id);
-        let ago = job.started_at.elapsed().unwrap_or_default();
+        inner.next_id = inner.next_id.max(execution.id);
+        let ago = execution.started_at.elapsed().unwrap_or_default();
         tracing::info!(
-            target: "pi::job", job = job.id, name = %job.description,
-            root = %job.root.display(), "carried over"
+            target: "pi::background", execution = execution.id, name = %execution.description,
+            root = %execution.root.display(), "carried over"
         );
         let phase = Phase::Over {
-            stopped: job.stopped,
+            stopped: execution.stopped,
         };
         let item = Item {
             started: Instant::now().checked_sub(ago).unwrap_or_else(Instant::now),
-            started_at: job.started_at,
-            rerun: Some((rerun, Some(job.again))),
-            ..Item::blank(job.id, job.root, job.description, phase)
+            started_at: execution.started_at,
+            rerun: Some((rerun, Some(execution.again))),
+            ..Item::blank(execution.id, execution.root, execution.description, phase)
         };
         // No last run here to let go of.
         item.gone.cancel();
@@ -1029,7 +1024,7 @@ impl Table {
         self.wake();
     }
 
-    /// Whether a job for `root` is running or has something to deliver:
+    /// Whether an execution for `root` is running or has something to deliver:
     /// one only kept to be started over holds nothing up.
     pub fn busy(&self, root: &Path) -> bool {
         (self.lock().items.iter())
@@ -1042,7 +1037,7 @@ impl Table {
     /// `#id (what)`.
     pub fn stop_each(&self, root: &Path, ids: &[u64]) -> (Vec<String>, Vec<String>) {
         let ids = if ids.is_empty() {
-            (self.jobs(root).iter())
+            (self.background(root).iter())
                 .filter(|j| j.state.stoppable())
                 .map(|j| j.id)
                 .collect()
@@ -1058,12 +1053,12 @@ impl Table {
         each(&ids, |id| self.stop(root, id))
     }
 
-    /// Every job of `from` comes back to `to` from now on: the conversation
+    /// Every execution of `from` comes back to `to` from now on: the conversation
     /// it reports to moved there. It goes on running where it started.
     pub fn rehome(&self, from: &Path, to: &Path) {
         let mut inner = self.lock();
         for item in inner.items.iter_mut().filter(|i| i.root == from) {
-            tracing::info!(target: "pi::job", job = item.id, to = %to.display(), "rehomed");
+            tracing::info!(target: "pi::background", execution = item.id, to = %to.display(), "rehomed");
             item.root = to.to_path_buf();
         }
         for (at, _) in inner.standing.iter_mut().filter(|(at, _)| at == from) {
@@ -1073,7 +1068,7 @@ impl Table {
         self.wake();
     }
 
-    /// Stop and forget every job of checkouts at or under `root`, saying how
+    /// Stop and forget every execution of checkouts at or under `root`, saying how
     /// many went: the checkout is gone, and a new one there is not it.
     pub fn drop_under(&self, root: &Path) -> usize {
         let mut inner = self.lock();
@@ -1081,7 +1076,7 @@ impl Table {
         inner.items.retain(|i| {
             let gone = i.root.starts_with(root);
             if gone {
-                tracing::info!(target: "pi::job", job = i.id, "stopped with its checkout");
+                tracing::info!(target: "pi::background", execution = i.id, "stopped with its checkout");
                 if let Phase::Running { stop } = &i.phase {
                     stop.cancel();
                 }
@@ -1108,18 +1103,14 @@ impl Table {
         root: PathBuf,
         description: String,
         stop: CancellationToken,
-        told: Option<UnboundedSender<Told>>,
     ) -> (u64, CancellationToken) {
         let mut inner = self.lock();
         inner.next_id += 1;
         let id = inner.next_id;
         tracing::info!(
-            target: "pi::job", job = id, name = %description, root = %root.display(), "started"
+            target: "pi::background", execution = id, name = %description, root = %root.display(), "started"
         );
-        let item = Item {
-            listens: told.map_or(Listens::Never, Listens::Inputs),
-            ..Item::blank(id, root, description, Phase::Running { stop })
-        };
+        let item = Item::blank(id, root, description, Phase::Running { stop });
         let gone = item.gone.clone();
         inner.items.push(item);
         drop(inner);
@@ -1127,7 +1118,7 @@ impl Table {
         (id, gone)
     }
 
-    // Change run `run` of job `id`, if it is still here, and wake whoever
+    // Change run `run` of execution `id`, if it is still here, and wake whoever
     // draws it.
     fn update(&self, id: u64, run: u64, change: impl FnOnce(&mut Item)) {
         let mut inner = self.lock();
@@ -1140,36 +1131,23 @@ impl Table {
     }
 }
 
-/// A job's id as a person or the model writes it: `3` or `#3`.
+/// A command's id as a person or the model writes it: `3` or `#3`.
 pub fn parse_id(word: &str) -> Option<u64> {
     word.trim_start_matches('#').parse().ok()
 }
 
 /// The shell controls, and where a call that outlives its turn is kept.
-pub struct Jobs {
+pub struct Commands {
     table: Arc<Table>,
-    // Single-run jobs must finish before their owner releases them.
-    scoped: bool,
 }
 
-impl Jobs {
+impl Commands {
     pub fn new(table: Arc<Table>) -> Self {
-        Self {
-            table,
-            scoped: false,
-        }
-    }
-
-    /// Job controls for a run whose unfinished commands end with it.
-    pub fn scoped(table: Arc<Table>) -> Self {
-        Self {
-            table,
-            scoped: true,
-        }
+        Self { table }
     }
 }
 
-impl Ask for Jobs {
+impl Ask for Commands {
     fn ask(&self, root: PathBuf, asker: &str, asked: Asked) -> Result<Option<Answer>, String> {
         let from = Asker::Tool {
             name: asker.to_string(),
@@ -1178,7 +1156,7 @@ impl Ask for Jobs {
         let mut inner = self.table.lock();
         let question = inner.number(question);
         tracing::info!(
-            target: "pi::job", tool = asker, question = question.id, back = asked.back,
+            target: "pi::background", tool = asker, question = question.id, back = asked.back,
             text = %question.text, options = ?question.options, "ask"
         );
         let answer = asked.back.then(|| {
@@ -1193,15 +1171,14 @@ impl Ask for Jobs {
     }
 }
 
-impl JobSink for Jobs {
+impl RunSink for Commands {
     fn start(
         &self,
         root: PathBuf,
         description: String,
         stop: CancellationToken,
-        told: Option<UnboundedSender<Told>>,
-    ) -> Arc<dyn JobHandle> {
-        let (id, gone) = self.table.add(root, description, stop, told);
+    ) -> Arc<dyn RunHandle> {
+        let (id, gone) = self.table.add(root, description, stop);
         Arc::new(Handle {
             id,
             run: 0,
@@ -1211,7 +1188,6 @@ impl JobSink for Jobs {
     }
 }
 
-// One run of a detached call's line back into the table.
 struct Handle {
     id: u64,
     run: u64,
@@ -1219,13 +1195,13 @@ struct Handle {
     table: Arc<Table>,
 }
 
-// The last holder gone ends the job, so one whose task died before saying
+// The last holder gone ends the execution, so one whose task died before saying
 // `end` — a panic — does not stay listed as running for good.
 impl Drop for Handle {
     fn drop(&mut self) {
         self.table.update(self.id, self.run, |i| {
             if i.running() {
-                tracing::warn!(target: "pi::job", job = i.id, "its task went without ending");
+                tracing::warn!(target: "pi::background", execution = i.id, "its task went without ending");
                 i.phase = Phase::Over { stopped: false };
             }
         });
@@ -1233,18 +1209,52 @@ impl Drop for Handle {
     }
 }
 
-impl JobHandle for Handle {
+impl RunHandle for Handle {
+    fn channel(&self) -> &dyn toolbox::channel::Channel {
+        self
+    }
+
     fn id(&self) -> u64 {
         self.id
     }
 
+    fn watch(&self, output: Peek) {
+        self.table
+            .update(self.id, self.run, |i| i.output = Some(output));
+    }
+
+    fn rerun(&self, how: Rerun, again: Option<Again>) {
+        self.table
+            .update(self.id, self.run, |i| i.rerun = Some((how, again)));
+    }
+
+    fn end(&self) {
+        self.table.update(self.id, self.run, |i| {
+            if i.running() {
+                tracing::info!(target: "pi::background", execution = self.id, "ended");
+                i.phase = Phase::Over { stopped: false };
+            }
+        });
+    }
+}
+
+impl toolbox::channel::Channel for Handle {
+    fn listen(&self, to: UnboundedSender<Told>) {
+        self.table
+            .update(self.id, self.run, |i| i.listens = Listens::Inputs(to));
+    }
+
     fn status(&self, text: String) {
-        tracing::info!(target: "pi::job", job = self.id, status = %text, "status");
-        self.table.update(self.id, self.run, |i| i.progress = text);
+        self.table.update(self.id, self.run, |i| {
+            if i.progress != text {
+                tracing::info!(target: "pi::background", execution = self.id, status = %text, "status");
+                i.progress = text;
+            }
+        });
     }
 
     fn result(&self, text: String) {
-        tracing::info!(target: "pi::job", job = self.id, text = %text, "result");
+        tracing::info!(target: "pi::background", execution = self.id, text = %text, "result");
         self.table.update(self.id, self.run, |i| {
             let due = i.due(&text);
             i.wait(Back::Result(due));
@@ -1254,7 +1264,7 @@ impl JobHandle for Handle {
     // Writing instead of picking answers every question that does not wait:
     // what they wrote is the answer.
     fn input(&self, text: String) {
-        tracing::info!(target: "pi::job", job = self.id, text = %text, "input");
+        tracing::info!(target: "pi::background", execution = self.id, text = %text, "input");
         let mut inner = self.table.lock();
         let Some(at) = inner.mine(self.id, self.run) else {
             return;
@@ -1282,19 +1292,19 @@ impl JobHandle for Handle {
             return;
         };
         let item = &inner.items[at];
-        let from = Asker::Job {
+        let from = Asker::Background {
             id: item.id,
             name: item.name(),
         };
         let question = match Question::of(from, &asked) {
             Ok(q) => inner.number(q),
             Err(why) => {
-                tracing::warn!(target: "pi::job", job = self.id, %why, "a question dropped");
+                tracing::warn!(target: "pi::background", execution = self.id, %why, "a question dropped");
                 return;
             }
         };
         tracing::info!(
-            target: "pi::job", job = self.id, question = question.id, text = %question.text,
+            target: "pi::background", execution = self.id, question = question.id, text = %question.text,
             options = ?question.options, "choose"
         );
         let root = inner.items[at].root.clone();
@@ -1318,7 +1328,7 @@ impl JobHandle for Handle {
             Ok(picked) => picked,
             Err(why) => {
                 tracing::warn!(
-                    target: "pi::job", job = self.id, question, ?picks, %why, "an answer refused"
+                    target: "pi::background", execution = self.id, question, ?picks, %why, "an answer refused"
                 );
                 if let Some(to) = inner.items[at].listens.to() {
                     let _ = to.send(Told::Refused { question, why });
@@ -1326,8 +1336,8 @@ impl JobHandle for Handle {
                 return;
             }
         };
-        tracing::info!(target: "pi::job", job = self.id, question, ?picks, "answer");
-        if let Some(text) = inner.answered(question, "answered through a job", picked) {
+        tracing::info!(target: "pi::background", execution = self.id, question, ?picks, "answer");
+        if let Some(text) = inner.answered(question, "answered through an execution", picked) {
             inner.items[at].wait(Back::Input {
                 text,
                 note: String::new(),
@@ -1339,18 +1349,12 @@ impl JobHandle for Handle {
     }
 
     fn interrupt(&self) {
-        tracing::info!(target: "pi::job", job = self.id, "interrupt");
+        tracing::info!(target: "pi::background", execution = self.id, "interrupt");
         self.table.update(self.id, self.run, |i| i.interrupt = true);
     }
 
-    fn watch(&self, output: Peek) {
-        self.table
-            .update(self.id, self.run, |i| i.output = Some(output));
-    }
-
-    // What is already up is told too, as if just asked.
     fn follow(&self) {
-        tracing::info!(target: "pi::job", job = self.id, "follows");
+        tracing::info!(target: "pi::background", execution = self.id, "follows");
         let mut inner = self.table.lock();
         let Some(at) = inner.mine(self.id, self.run) else {
             return;
@@ -1373,90 +1377,54 @@ impl JobHandle for Handle {
         drop(inner);
         self.table.wake();
     }
-
-    fn rerun(&self, how: Rerun, again: Option<Again>) {
-        self.table
-            .update(self.id, self.run, |i| i.rerun = Some((how, again)));
-    }
-
-    fn end(&self) {
-        tracing::info!(target: "pi::job", job = self.id, "ended");
-        self.table.update(self.id, self.run, |i| {
-            i.phase = Phase::Over { stopped: false }
-        });
-    }
 }
 
 #[async_trait]
-impl JobControls for Jobs {
+impl Controls for Commands {
     fn description(&self) -> &str {
-        if self.scoped {
-            "List this run's commands. Use `output` to read a command's latest output. \
+        "Call without a command to list background commands. Use `output` to read a command's latest output. \
              Use `stop` to stop commands by id, or `stop_all` to stop all commands. \
-             Use `restart` to run a command again under its existing id.\n\n\
-             Use `join` with one id or an array of ids to wait for commands. \
-             It waits for all specified commands under one timeout and returns results in request order. \
-             Wait for unfinished commands or stop them before finishing this run. They end when this run ends. \
-             Never use shell sleep or rerun a command merely because its shell call returned a running job id."
-        } else {
-            "Call without a command to list background jobs. Use `output` to read a job's latest output. \
-             Use `stop` to stop jobs by id, or `stop_all` to stop all jobs. \
              Use `restart` to run a command again under its existing id. It stops the previous run first.\n\n\
              Results arrive automatically before the next model request. \
              If the run ended, results open a new turn. \
              Continue independent work, or report progress and end this turn. \
              Do not poll or wait for background work."
-        }
     }
 
     fn parameters(&self) -> serde_json::Map<String, Value> {
-        let mut parameters = serde_json::Map::from_iter([
+        serde_json::Map::from_iter([
             (
                 "stop".into(),
                 json!({
                     "type": "array",
                     "items": { "type": "integer" },
-                    "description": "Specify the job ids to stop.",
+                    "description": "Specify the command ids to stop.",
                 }),
             ),
             (
                 "stop_all".into(),
-                json!({ "type": "boolean", "description": "Stop every running job." }),
+                json!({ "type": "boolean", "description": "Stop every running background command." }),
             ),
             (
                 "restart".into(),
                 json!({
                     "type": "array",
                     "items": { "type": "integer" },
-                    "description": "Specify the job ids to restart.",
+                    "description": "Specify the command ids to restart.",
                 }),
             ),
             (
                 "output".into(),
                 json!({
                     "type": "integer",
-                    "description": "Specify one job id to read its latest output while it runs.",
+                    "description": "Specify one command id to read its latest output while it runs.",
                 }),
             ),
-        ]);
-        if self.scoped {
-            parameters.insert("join".into(), json!({
-                "type": ["integer", "array"],
-                "items": { "type": "integer" },
-                "minItems": 1,
-                "description": "Specify one job id or an array of ids to wait for. Duplicate ids have no effect. All jobs share one `timeout_ms`. On timeout, completed jobs return results and running jobs return their latest output. Results follow request order, including errors for invalid ids.",
-            }));
-            parameters.insert("timeout_ms".into(), json!({
-                "type": "integer",
-                "description": format!("Set how long `join` waits, in milliseconds. The default and maximum are {}.", MAX_CALL.as_millis()),
-            }));
-        }
-        parameters
+        ])
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let root = ctx.workspace.root();
-        let present = |key: &str| args.get(key).is_some_and(|v| !v.is_null());
         let parameters = self.parameters();
         if let Some(fields) = args.as_object() {
             for (key, value) in fields {
@@ -1471,7 +1439,7 @@ impl JobControls for Jobs {
         let id = |v: &Value| {
             v.as_u64()
                 .or_else(|| parse_id(v.as_str()?))
-                .ok_or_else(|| ToolError::Invalid(format!("`{v}` is not a job id")))
+                .ok_or_else(|| ToolError::Invalid(format!("`{v}` is not a command id")))
         };
         let ids_of = |key: &str| -> Result<Vec<u64>, ToolError> {
             match args.get(key) {
@@ -1518,56 +1486,16 @@ impl JobControls for Jobs {
                 self.table.stop_each(root, if all { &[] } else { &ids }),
             );
         }
-        if present("join") {
-            let mut ids = ids_of("join")?;
-            let mut seen = HashSet::new();
-            ids.retain(|id| seen.insert(*id));
-            if ids.is_empty() {
-                return Err(ToolError::Invalid(
-                    "`join` needs at least one job id".into(),
-                ));
-            }
-            let asked = args.get("timeout_ms").and_then(Value::as_u64);
-            let within = tool::limit::timeout(asked, MAX_CALL, MAX_CALL);
-            let waited = tokio::select! {
-                w = self.table.wait_each(root, &ids, within) => w,
-                _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-            };
-            let failed = waited.iter().filter(|w| w.is_err()).count();
-            let out = ids
-                .iter()
-                .zip(waited)
-                .map(|(id, waited)| match waited {
-                    Ok(Some(said)) if said.is_empty() => format!("#{id} ended, saying nothing"),
-                    Ok(Some(said)) => format!("#{id} ended:\n{}", said.join("\n\n")),
-                    Ok(None) => {
-                        let latest = self.table.output(root, *id).unwrap_or_else(|why| why);
-                        let elapsed = llm::figures::elapsed(within);
-                        format!("#{id} still running after {elapsed}. Latest output:\n{latest}")
-                    }
-                    Err(why) => why,
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            if failed == ids.len() {
-                return Err(ToolError::Invalid(out));
-            }
-            let out = ToolOutput::text(out).with_preview(named("join", &ids));
-            return Ok(match failed {
-                0 => out,
-                _ => out.warned(),
-            });
-        }
         if let Some(v) = args.get("output").filter(|v| !v.is_null()) {
             let id = id(v)?;
             return (self.table.output(root, id))
                 .map(|out| ToolOutput::text(out).with_preview(named("output", &[id])))
                 .map_err(ToolError::Invalid);
         }
-        let jobs = self.table.listing(root);
-        let out = match jobs.is_empty() {
+        let executions = self.table.listing(root);
+        let out = match executions.is_empty() {
             true => "nothing in the background".to_string(),
-            false => jobs.join("\n"),
+            false => executions.join("\n"),
         };
         Ok(ToolOutput::text(out).with_preview("list"))
     }
@@ -1579,35 +1507,45 @@ mod tests {
     use tool::Tool;
 
     #[tokio::test]
-    async fn stopping_a_delayed_job_prevents_the_command_from_starting() {
+    async fn stopping_a_delayed_command_prevents_the_command_from_starting() {
         let (dir, ctx) = context();
         let table = Arc::new(Table::default());
-        let control = Arc::new(Jobs::new(table.clone()));
-        let jobs = toolbox::bash::Bash::new(control.clone()).with_controls(control);
-        jobs.execute(
-            json!({"background": true, "command": "echo started >> starts", "wait": 1}),
-            &ctx,
-        )
-        .await
-        .unwrap();
-        let listed = jobs.execute(json!({}), &ctx).await.unwrap().flatten();
+        let control = Arc::new(Commands::new(table.clone()));
+        let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        executions
+            .execute(
+                json!({"background": true, "command": "echo started >> starts", "wait": 1}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let listed = executions.execute(json!({}), &ctx).await.unwrap().flatten();
         assert!(
             listed.contains("waiting") && listed.contains("#1"),
             "{listed}"
         );
-        let output = jobs
+        let output = executions
             .execute(json!({"output": 1}), &ctx)
             .await
             .unwrap()
             .flatten();
         assert_eq!(output, "nothing printed yet");
-        jobs.execute(json!({"stop": [1]}), &ctx).await.unwrap();
+        executions
+            .execute(json!({"stop": [1]}), &ctx)
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
         assert!(!dir.path().join("starts").exists());
-        assert_eq!(table.jobs(ctx.workspace.root())[0].state, State::Stopped);
+        assert_eq!(
+            table.background(ctx.workspace.root())[0].state,
+            State::Stopped
+        );
         assert!(table.take_back(ctx.workspace.root()).is_none());
 
-        jobs.execute(json!({"restart": [1]}), &ctx).await.unwrap();
+        executions
+            .execute(json!({"restart": [1]}), &ctx)
+            .await
+            .unwrap();
         let result = table
             .wait(ctx.workspace.root(), 1, std::time::Duration::from_secs(5))
             .await
@@ -1621,18 +1559,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_job_without_a_start_delay_runs_immediately_in_its_cwd() {
+    async fn a_command_without_a_start_delay_runs_immediately_in_its_cwd() {
         for wait in [None, Some(0)] {
             let (dir, ctx) = context();
             let table = Arc::new(Table::default());
-            let control = Arc::new(Jobs::new(table.clone()));
-            let jobs = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+            let control = Arc::new(Commands::new(table.clone()));
+            let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
             std::fs::create_dir(dir.path().join("subdir")).unwrap();
             let mut args = json!({"background": true, "command": "echo made > result; echo failed >&2; exit 3", "cwd": "subdir"});
             if let Some(wait) = wait {
                 args["wait"] = json!(wait);
             }
-            jobs.execute(args, &ctx).await.unwrap();
+            executions.execute(args, &ctx).await.unwrap();
             let result = table
                 .wait(ctx.workspace.root(), 1, std::time::Duration::from_secs(5))
                 .await
@@ -1654,11 +1592,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_start_requests_do_not_create_jobs() {
+    async fn invalid_start_requests_do_not_create_commands() {
         let (dir, ctx) = context();
         let table = Arc::new(Table::default());
-        let control = Arc::new(Jobs::new(table.clone()));
-        let jobs = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        let control = Arc::new(Commands::new(table.clone()));
+        let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
         let marker = dir.path().join("starts");
         for args in [
             json!({"wait": [10], "timeout_ms": 420000}),
@@ -1672,9 +1610,13 @@ mod tests {
             json!({"background": true, "command": "echo started > starts", "stop_all": true}),
             json!({"background": true, "command": " "}),
             json!({"join": 10}),
+            json!({"command":"echo started > starts", "background":"true"}),
         ] {
-            assert!(jobs.execute(args.clone(), &ctx).await.is_err(), "{args}");
-            assert!(table.jobs(ctx.workspace.root()).is_empty(), "{args}");
+            assert!(
+                executions.execute(args.clone(), &ctx).await.is_err(),
+                "{args}"
+            );
+            assert!(table.background(ctx.workspace.root()).is_empty(), "{args}");
             assert!(!marker.exists());
         }
     }
@@ -1683,47 +1625,48 @@ mod tests {
     async fn a_scheduled_command_that_cannot_launch_reports_the_failure() {
         let (_dir, ctx) = context();
         let table = Arc::new(Table::default());
-        let control = Arc::new(Jobs::new(table.clone()));
-        let jobs = toolbox::bash::Bash::new(control.clone()).with_controls(control);
-        jobs.execute(
-            json!({"background": true, "command": "echo started", "cwd": "missing", "wait": 0}),
-            &ctx,
-        )
-        .await
-        .unwrap();
+        let control = Arc::new(Commands::new(table.clone()));
+        let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        executions
+            .execute(
+                json!({"background": true, "command": "echo started", "cwd": "missing", "wait": 0}),
+                &ctx,
+            )
+            .await
+            .unwrap();
         let result = table
             .wait(ctx.workspace.root(), 1, std::time::Duration::from_secs(5))
             .await
             .unwrap()
-            .expect("a failed launch must end the job");
+            .expect("a failed launch must end the execution");
         assert!(result[0].contains("could not start:"), "{result:?}");
-        assert_eq!(table.jobs(ctx.workspace.root())[0].state, State::Exited);
+        assert_eq!(
+            table.background(ctx.workspace.root())[0].state,
+            State::Exited
+        );
     }
 
     #[tokio::test]
-    async fn changed_job_output_is_paced_and_only_goes_to_its_checkout() {
+    async fn changed_command_output_is_paced_and_only_goes_to_its_checkout() {
         let table = Arc::new(Table::default());
         let root = Path::new("/checkout");
-        let sink = Jobs::new(table.clone());
+        let sink = Commands::new(table.clone());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let follower = sink.start(root.into(), "bridge".into(), Default::default(), Some(tx));
-        follower.follow();
+        let follower = sink.start(root.into(), "bridge".into(), Default::default());
+        follower.channel().listen(tx);
+        follower.channel().follow();
         let (elsewhere, mut quiet) = tokio::sync::mpsc::unbounded_channel();
-        let other = sink.start(
-            "/other".into(),
-            "bridge".into(),
-            Default::default(),
-            Some(elsewhere),
-        );
-        other.follow();
-        let job = start(&table, root, "scan");
+        let other = sink.start("/other".into(), "bridge".into(), Default::default());
+        other.channel().listen(elsewhere);
+        other.channel().follow();
+        let execution = start(&table, root, "scan");
         let output = Arc::new(Mutex::new("1/3\n".to_string()));
         let seen = output.clone();
-        job.watch(Arc::new(move || seen.lock().unwrap().clone()));
+        execution.watch(Arc::new(move || seen.lock().unwrap().clone()));
         table.relay_progress();
         assert_eq!(
             rx.try_recv(),
-            Ok(Told::Progress(format!("#{}: 1/3", job.id())))
+            Ok(Told::Progress(format!("#{}: 1/3", execution.id())))
         );
         *output.lock().unwrap() = "1/3\n2/3\n".into();
         table.relay_progress();
@@ -1732,29 +1675,28 @@ mod tests {
         table.relay_progress();
         assert_eq!(
             rx.try_recv(),
-            Ok(Told::Progress(format!("#{}: 2/3", job.id())))
+            Ok(Told::Progress(format!("#{}: 2/3", execution.id())))
         );
         table.lock().progress_at = Some(Instant::now() - PROGRESS_EVERY);
         table.relay_progress();
         assert!(rx.try_recv().is_err(), "unchanged output is silent");
-        job.end();
+        execution.end();
         *output.lock().unwrap() = "3/3\n".into();
         table.lock().progress_at = Some(Instant::now() - PROGRESS_EVERY);
         table.relay_progress();
         assert!(
             rx.try_recv().is_err(),
-            "ended jobs report through their result"
+            "ended executions report through their result"
         );
         assert!(quiet.try_recv().is_err(), "another checkout hears nothing");
     }
 
-    fn start(table: &Arc<Table>, root: &Path, name: &str) -> Arc<dyn JobHandle> {
-        JobSink::start(
-            &Jobs::new(table.clone()),
+    fn start(table: &Arc<Table>, root: &Path, name: &str) -> Arc<dyn RunHandle> {
+        RunSink::start(
+            &Commands::new(table.clone()),
             root.to_path_buf(),
             name.into(),
             CancellationToken::new(),
-            None,
         )
     }
 
@@ -1765,13 +1707,13 @@ mod tests {
         }
     }
 
-    // A wait wakes when its job ends, and takes the result from the lane.
+    // A wait wakes when its execution ends, and takes the result from the lane.
     #[tokio::test]
-    async fn a_wait_takes_the_result_its_job_ends_with() {
+    async fn a_wait_takes_the_result_its_command_ends_with() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
-        let job = start(&table, &root, "build");
-        let id = job.id();
+        let execution = start(&table, &root, "build");
+        let id = execution.id();
         let waiting = {
             let (table, root) = (table.clone(), root.clone());
             tokio::spawn(async move {
@@ -1781,10 +1723,10 @@ mod tests {
             })
         };
         tokio::task::yield_now().await;
-        assert!(!waiting.is_finished(), "it waits while the job runs");
-        job.input("a person's line".into());
-        job.result("exited 0".into());
-        job.end();
+        assert!(!waiting.is_finished(), "it waits while the execution runs");
+        execution.channel().input("a person's line".into());
+        execution.channel().result("exited 0".into());
+        execution.end();
         let said = waiting.await.expect("the wait ran");
         assert_eq!(said, Ok(Some(vec!["exited 0".to_string()])));
         assert!(
@@ -1795,12 +1737,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_wait_gives_up_on_a_job_still_running() {
+    async fn a_wait_gives_up_on_a_command_still_running() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
-        let job = start(&table, &root, "server");
+        let execution = start(&table, &root, "server");
         let waited = table
-            .wait(&root, job.id(), std::time::Duration::from_millis(20))
+            .wait(&root, execution.id(), std::time::Duration::from_millis(20))
             .await;
         assert_eq!(waited, Ok(None));
         assert!(table.wait(&root, 99, Default::default()).await.is_err());
@@ -1813,173 +1755,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_batch_join_keeps_request_order_and_takes_each_result_once() {
-        let (_dir, ctx) = context();
-        let root = ctx.workspace.root();
-        let table = Arc::new(Table::default());
-        let jobs = Jobs::scoped(table.clone());
-        let first = start(&table, root, "first");
-        let second = start(&table, root, "second");
-        let mut waiting =
-            Box::pin(jobs.execute(json!({"join": [first.id(), second.id(), first.id()]}), &ctx));
-        assert!(futures::poll!(waiting.as_mut()).is_pending());
-        second.input("a person's line".into());
-        second.result("second result".into());
-        second.end();
-        assert!(futures::poll!(waiting.as_mut()).is_pending());
-        assert_eq!(
-            table.waiting(root, second.id()).unwrap(),
-            ["a person's line", "second result"]
-        );
-        first.result("first result".into());
-        first.end();
-        let out = waiting.await.unwrap();
-        assert_eq!(out.preview(), "join #1, #2");
-        assert_eq!(
-            out.flatten(),
-            "#1 ended:\nfirst result\n\n#2 ended:\nsecond result"
-        );
-        assert!(!out.warned);
-        assert!(matches!(
-            table.take_back(root),
-            Some((_, Back::Input { .. }))
-        ));
-        assert!(
-            table.take_back(root).is_none(),
-            "results were delivered once"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_batch_join_uses_one_deadline_and_keeps_completed_results() {
-        let (_dir, ctx) = context();
-        let root = ctx.workspace.root();
-        let table = Arc::new(Table::default());
-        let jobs = Jobs::scoped(table.clone());
-        let first = start(&table, root, "first");
-        let second = start(&table, root, "second");
-        let done = start(&table, root, "done");
-        done.result("ready".into());
-        done.end();
-        let mut waiting = Box::pin(jobs.execute(
-            json!({"join": [first.id(), second.id(), done.id()], "timeout_ms": 20}),
-            &ctx,
-        ));
-        assert!(futures::poll!(waiting.as_mut()).is_pending());
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        // Poll explicitly: a separate timeout per job would start the second
-        // job's clock now and leave this pending for another timeout.
-        let std::task::Poll::Ready(out) = futures::poll!(waiting.as_mut()) else {
-            panic!("all jobs share the same deadline");
-        };
-        let text = out.unwrap().flatten();
-        assert!(text.starts_with("#1 still running after"), "{text}");
-        assert!(text.contains("#2 still running after"), "{text}");
-        assert!(text.ends_with("#3 ended:\nready"), "{text}");
-        assert!(table.jobs(root).iter().all(|j| j.state == State::Running));
-        assert!(table.take_back(root).is_none());
-    }
-
-    #[tokio::test]
-    async fn a_batch_join_reports_bad_ids_without_discarding_valid_results() {
-        let (_dir, ctx) = context();
-        let root = ctx.workspace.root();
-        let table = Arc::new(Table::default());
-        let jobs = Jobs::scoped(table.clone());
-        let job = start(&table, root, "build");
-        let elsewhere = start(&table, Path::new("/elsewhere"), "other checkout");
-        job.result("built".into());
-        job.end();
-        elsewhere.result("private".into());
-        elsewhere.end();
-        let out = jobs
-            .execute(json!({"join": [99, job.id(), elsewhere.id()]}), &ctx)
-            .await
-            .unwrap();
-        assert_eq!(
-            out.flatten(),
-            "no job #99 here\n\n#1 ended:\nbuilt\n\nno job #2 here"
-        );
-        assert!(out.warned);
-        assert_eq!(
-            table
-                .waiting(Path::new("/elsewhere"), elsewhere.id())
-                .unwrap(),
-            ["private"]
-        );
-        assert!(matches!(
-            jobs.execute(json!({"join": [98, 99]}), &ctx).await,
-            Err(ToolError::Invalid(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn cancelling_a_batch_join_leaves_completed_results_queued() {
-        let (_dir, ctx) = context();
-        let root = ctx.workspace.root();
-        let table = Arc::new(Table::default());
-        let jobs = Jobs::scoped(table.clone());
-        let done = start(&table, root, "done");
-        let running = start(&table, root, "running");
-        let mut waiting = Box::pin(jobs.execute(json!({"join": [done.id(), running.id()]}), &ctx));
-        assert!(futures::poll!(waiting.as_mut()).is_pending());
-        done.result("keep this".into());
-        done.end();
-        assert!(futures::poll!(waiting.as_mut()).is_pending());
-        ctx.cancel.cancel();
-        assert!(matches!(waiting.await, Err(ToolError::Cancelled)));
-        assert!(result_of(&table, root).unwrap().line.contains("keep this"));
-        assert_eq!(table.jobs(root)[0].state, State::Running);
-    }
-
-    #[tokio::test]
-    async fn join_accepts_single_ids_and_rejects_bad_arrays_before_taking_results() {
-        let (_dir, ctx) = context();
-        let table = Arc::new(Table::default());
-        let jobs = Jobs::scoped(table.clone());
-        for string_id in [false, true] {
-            let job = start(&table, ctx.workspace.root(), "build");
-            job.result("built".into());
-            job.end();
-            for ids in [json!([]), json!([job.id(), false])] {
-                assert!(matches!(
-                    jobs.execute(json!({"join": ids}), &ctx).await,
-                    Err(ToolError::Invalid(_))
-                ));
-            }
-            let id = if string_id {
-                json!(format!("#{}", job.id()))
-            } else {
-                json!(job.id())
-            };
-            let out = jobs.execute(json!({"join": id}), &ctx).await.unwrap();
-            assert_eq!(out.flatten(), format!("#{} ended:\nbuilt", job.id()));
-            assert_eq!(out.preview(), format!("join #{}", job.id()));
-            assert!(!out.warned);
-        }
-    }
-
-    // A person's line and a result keep the order they were said in, and the
-    // turn the line opens is told of through the job's own channel.
-    #[tokio::test]
-    async fn an_input_waits_in_line_and_its_job_hears_of_its_turn() {
+    async fn an_input_waits_in_line_and_its_command_hears_of_its_turn() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let job = JobSink::start(
-            &Jobs::new(table.clone()),
+        let execution = RunSink::start(
+            &Commands::new(table.clone()),
             root.clone(),
             "wechat".into(),
             CancellationToken::new(),
-            Some(tx),
         );
-        job.result("connected".into());
-        job.input("why did the tests fail".into());
+        execution.channel().listen(tx);
+        execution.channel().result("connected".into());
+        execution.channel().input("why did the tests fail".into());
         assert!(matches!(table.take_back(&root), Some((_, Back::Result(_)))));
         let Some((id, Back::Input { text, note, .. })) = table.take_back(&root) else {
             panic!("the input comes next")
         };
-        assert_eq!((id, text.as_str()), (job.id(), "why did the tests fail"));
+        assert_eq!(
+            (id, text.as_str()),
+            (execution.id(), "why did the tests fail")
+        );
         assert!(note.is_empty(), "a person's line is read as typed: {note}");
         table.tell(id, Told::Started);
         table.tell(id, Told::Reply("parse.rs:40".into()));
@@ -1993,9 +1789,9 @@ mod tests {
     async fn the_cap_is_noted_beside_a_persons_line_not_in_it() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
-        let job = start(&table, &root, "wechat");
+        let execution = start(&table, &root, "wechat");
         for n in 0..MAX_WAITING + 2 {
-            job.input(format!("line {n}"));
+            execution.channel().input(format!("line {n}"));
         }
         let mut last = None;
         while let Some((_, back)) = table.take_back(&root) {
@@ -2017,31 +1813,35 @@ mod tests {
         }
     }
 
-    // Said and gone: what a job leaves for the screen outlives its exit.
+    // Said and gone: what an execution leaves for the screen outlives its exit.
     #[tokio::test]
-    async fn a_question_outlives_its_job_and_a_newer_one_replaces_it() {
+    async fn a_question_outlives_its_command_and_a_newer_one_replaces_it() {
         let table = Arc::new(Table::default());
-        let job = start(&table, Path::new("/checkout"), "judge");
-        job.choose(asked("a new task?", &["/new"], false));
-        job.choose(asked("a long one?", &["/compact", "go on"], false));
-        job.choose(asked(
+        let execution = start(&table, Path::new("/checkout"), "judge");
+        execution
+            .channel()
+            .choose(asked("a new task?", &["/new"], false));
+        execution
+            .channel()
+            .choose(asked("a long one?", &["/compact", "go on"], false));
+        execution.channel().choose(asked(
             "hidden?",
             &["/compact\nand what was not shown"],
             false,
         ));
-        job.end();
+        execution.end();
         assert!(table.questions(Path::new("/elsewhere")).is_empty());
         let up = table.questions(Path::new("/checkout"));
         assert_eq!(up.len(), 1);
         assert_eq!(up[0].text, "a long one?");
         assert_eq!(up[0].options, ["/compact", "go on"]);
         assert!(
-            matches!(&up[0].from, Asker::Job { name, .. } if name.starts_with("judge #")),
+            matches!(&up[0].from, Asker::Background { name, .. } if name.starts_with("judge #")),
             "{:?}",
             up[0].from
         );
         assert!(
-            table.jobs(Path::new("/checkout")).is_empty(),
+            table.background(Path::new("/checkout")).is_empty(),
             "spent, so gone"
         );
         assert_eq!(
@@ -2056,13 +1856,18 @@ mod tests {
     #[tokio::test]
     async fn asking_again_replaces_unless_the_asker_waits() {
         let table = Arc::new(Table::default());
-        let jobs = Jobs::new(table.clone());
+        let executions = Commands::new(table.clone());
         let root = PathBuf::from("/checkout");
-        let job = start(&table, &root, "judge");
-        job.choose(asked("first?", &["/new"], false));
-        jobs.ask(root.clone(), "choose", asked("which?", &["a"], false))
+        let execution = start(&table, &root, "judge");
+        execution
+            .channel()
+            .choose(asked("first?", &["/new"], false));
+        executions
+            .ask(root.clone(), "choose", asked("which?", &["a"], false))
             .unwrap();
-        job.choose(asked("second?", &["/new"], false));
+        execution
+            .channel()
+            .choose(asked("second?", &["/new"], false));
         let texts = |table: &Table| -> Vec<String> {
             (table.questions(&root).into_iter())
                 .map(|q| q.text)
@@ -2070,18 +1875,18 @@ mod tests {
         };
         assert_eq!(texts(&table), ["second?", "which?"]);
         let _waits = (0..2)
-            .map(|_| jobs.ask(root.clone(), "guard", asked("allow?", &["yes"], true)))
+            .map(|_| executions.ask(root.clone(), "guard", asked("allow?", &["yes"], true)))
             .collect::<Vec<_>>();
         assert_eq!(texts(&table), ["second?", "which?", "allow?", "allow?"]);
     }
 
     #[tokio::test]
-    async fn stopping_a_job_withdraws_what_it_asked() {
+    async fn stopping_a_command_withdraws_what_it_asked() {
         let table = Arc::new(Table::default());
-        let job = start(&table, Path::new("/checkout"), "judge");
-        job.choose(asked("new?", &["/new"], false));
+        let execution = start(&table, Path::new("/checkout"), "judge");
+        execution.channel().choose(asked("new?", &["/new"], false));
         assert_eq!(table.questions(Path::new("/checkout")).len(), 1);
-        table.stop(Path::new("/checkout"), job.id()).unwrap();
+        table.stop(Path::new("/checkout"), execution.id()).unwrap();
         assert!(table.questions(Path::new("/checkout")).is_empty());
     }
 
@@ -2090,9 +1895,9 @@ mod tests {
     #[tokio::test]
     async fn an_answer_goes_back_to_the_call_that_waits_on_it() {
         let table = Arc::new(Table::default());
-        let jobs = Jobs::new(table.clone());
+        let executions = Commands::new(table.clone());
         let root = PathBuf::from("/checkout");
-        let mut answer = jobs
+        let mut answer = executions
             .ask(
                 root.clone(),
                 "guard",
@@ -2100,7 +1905,7 @@ mod tests {
             )
             .unwrap()
             .expect("it waits");
-        let fire = jobs
+        let fire = executions
             .ask(root.clone(), "choose", asked("which?", &["a"], false))
             .unwrap();
         assert!(
@@ -2123,79 +1928,83 @@ mod tests {
         table.answer(up[1].id, None);
         assert!(table.questions(&root).is_empty(), "answered, so down");
 
-        let gone = jobs.ask(root.clone(), "guard", asked("again?", &["yes"], true));
+        let gone = executions.ask(root.clone(), "guard", asked("again?", &["yes"], true));
         drop(gone);
         assert!(
             table.questions(&root).is_empty(),
             "withdrawn before it was ever shown"
         );
         assert!(
-            jobs.ask(root, "guard", asked("?", &[], true)).is_err(),
+            executions
+                .ask(root, "guard", asked("?", &[], true))
+                .is_err(),
             "one that cannot be put says why"
         );
     }
 
-    // A job that follows is told each question up on its checkout — even one
+    // A command that follows is told each question up on its checkout — even one
     // up before it followed — and when it comes down; its pick goes out as
     // typed, while writing instead lets every question that does not wait lapse.
     #[tokio::test]
     async fn a_follower_hears_each_question_and_answers_it() {
         let table = Arc::new(Table::default());
-        let jobs = Jobs::new(table.clone());
+        let executions = Commands::new(table.clone());
         let root = PathBuf::from("/checkout");
-        jobs.ask(
-            root.clone(),
-            "choose",
-            asked("which?", &["/compact", "go on"], false),
-        )
-        .unwrap();
+        executions
+            .ask(
+                root.clone(),
+                "choose",
+                asked("which?", &["/compact", "go on"], false),
+            )
+            .unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let bridge = JobSink::start(
-            &jobs,
+        let bridge = RunSink::start(
+            &executions,
             root.clone(),
             "telegram".into(),
             CancellationToken::new(),
-            Some(tx),
         );
-        bridge.follow();
+        bridge.channel().listen(tx);
+        bridge.channel().follow();
         let first = table.questions(&root)[0].id;
         assert!(matches!(rx.try_recv(), Ok(Told::Question { id, .. }) if id == first));
 
         for picks in [vec![5], vec![0, 1], vec![0, 0]] {
-            bridge.answer(first, picks.clone());
+            bridge.channel().answer(first, picks.clone());
             assert!(
                 matches!(rx.try_recv(), Ok(Told::Refused { question, .. }) if question == first),
                 "{picks:?} is told back why not"
             );
         }
         assert_eq!(table.questions(&root).len(), 1, "no such answer, still up");
-        bridge.answer(first, vec![0]);
+        bridge.channel().answer(first, vec![0]);
         assert_eq!(rx.try_recv(), Ok(Told::Closed(first)));
         let Some((_, Back::Input { text, as_typed, .. })) = table.take_back(&root) else {
             panic!("the pick went nowhere");
         };
         assert_eq!((text.as_str(), as_typed), ("/compact", true));
-        bridge.answer(first, vec![1]);
+        bridge.channel().answer(first, vec![1]);
         assert!(table.take_back(&root).is_none(), "answered once");
         assert!(
             matches!(rx.try_recv(), Ok(Told::Refused { .. })),
             "and told so"
         );
 
-        let mut waits = jobs
+        let mut waits = executions
             .ask(root.clone(), "guard", asked("allow?", &["yes", "no"], true))
             .unwrap()
             .expect("it waits");
-        jobs.ask(root.clone(), "choose", asked("next?", &["a"], false))
+        executions
+            .ask(root.clone(), "choose", asked("next?", &["a"], false))
             .unwrap();
         let up = table.questions(&root);
         for q in &up {
             assert!(matches!(rx.try_recv(), Ok(Told::Question { id, .. }) if id == q.id));
         }
-        bridge.input("neither".into());
+        bridge.channel().input("neither".into());
         assert_eq!(rx.try_recv(), Ok(Told::Closed(up[1].id)), "it lapsed");
         assert_eq!(table.questions(&root).len(), 1, "one that waits stays");
-        bridge.answer(up[0].id, vec![1]);
+        bridge.channel().answer(up[0].id, vec![1]);
         assert_eq!(waits.try_recv(), Ok(Some("no".into())));
         assert_eq!(rx.try_recv(), Ok(Told::Closed(up[0].id)));
         let Some((_, Back::Input { text, as_typed, .. })) = table.take_back(&root) else {
@@ -2209,11 +2018,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_interrupt_names_the_jobs_checkout_once() {
+    async fn an_interrupt_names_the_commands_checkout_once() {
         let table = Arc::new(Table::default());
-        let job = start(&table, Path::new("/checkout"), "wechat");
-        job.interrupt();
-        job.interrupt();
+        let execution = start(&table, Path::new("/checkout"), "wechat");
+        execution.channel().interrupt();
+        execution.channel().interrupt();
         assert_eq!(table.take_interrupts(), [PathBuf::from("/checkout")]);
         assert!(table.take_interrupts().is_empty());
     }
@@ -2222,89 +2031,90 @@ mod tests {
     async fn a_result_is_delivered_once() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
-        let job = start(&table, &root, "find callers");
+        let execution = start(&table, &root, "find callers");
         assert!(table.working(&root));
-        job.result("three callers".into());
-        job.end();
+        execution.channel().result("three callers".into());
+        execution.end();
         let due = result_of(&table, &root).unwrap();
         assert!(due.line.contains("three callers"), "{}", due.line);
         assert_eq!(due.label, "find callers #1 three callers");
         assert!(result_of(&table, &root).is_none(), "delivered once");
-        assert!(table.jobs(&root).is_empty());
+        assert!(table.background(&root).is_empty());
     }
 
     #[tokio::test]
-    async fn stopping_a_job_asks_it_to_wind_down_and_forgets_it() {
+    async fn stopping_a_command_asks_it_to_wind_down_and_forgets_it() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
         let stop = CancellationToken::new();
-        let job = JobSink::start(
-            &Jobs::new(table.clone()),
+        let execution = RunSink::start(
+            &Commands::new(table.clone()),
             root.clone(),
-            "long job".into(),
+            "long execution".into(),
             stop.clone(),
-            None,
         );
-        assert!(table.stop(Path::new("/elsewhere"), job.id()).is_err());
-        table.stop(&root, job.id()).unwrap();
+        assert!(table.stop(Path::new("/elsewhere"), execution.id()).is_err());
+        table.stop(&root, execution.id()).unwrap();
         assert!(stop.is_cancelled());
-        job.result("too late".into());
-        job.end();
+        execution.channel().result("too late".into());
+        execution.end();
         assert!(
             result_of(&table, &root).is_none(),
-            "a stopped job says nothing more"
+            "a stopped execution says nothing more"
         );
-        assert!(table.jobs(&root).is_empty());
+        assert!(table.background(&root).is_empty());
     }
 
-    // A crawler's queued results come back together, in order, and the job
+    // A crawler's queued results come back together, in order, and the execution
     // stays listed until they are delivered, even after it has exited.
     #[tokio::test]
-    async fn a_detached_job_reports_queued_results_together_in_order() {
+    async fn a_detached_command_reports_queued_results_together_in_order() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
-        let job = JobSink::start(
-            &Jobs::new(table.clone()),
+        let execution = RunSink::start(
+            &Commands::new(table.clone()),
             root.clone(),
             "crawl".into(),
             CancellationToken::new(),
-            None,
         );
-        job.status("1/2 pages".into());
-        job.result("page one".into());
-        job.result("page two".into());
-        job.end();
+        execution.channel().status("1/2 pages".into());
+        execution.channel().result("page one".into());
+        execution.channel().result("page two".into());
+        execution.end();
         assert_eq!(
-            table.waiting(&root, job.id()).unwrap(),
+            table.waiting(&root, execution.id()).unwrap(),
             ["page one", "page two"]
         );
-        assert!(table.waiting(Path::new("/elsewhere"), job.id()).is_none());
-        assert_eq!(table.jobs(&root)[0].progress, "1/2 pages");
-        assert_eq!(table.jobs(&root)[0].state, State::Back);
+        assert!(
+            table
+                .waiting(Path::new("/elsewhere"), execution.id())
+                .is_none()
+        );
+        assert_eq!(table.background(&root)[0].progress, "1/2 pages");
+        assert_eq!(table.background(&root)[0].state, State::Back);
         let first = result_of(&table, &root).unwrap();
         assert_eq!(
             first.line,
-            "Background job #1 (crawl) reports:\n\npage one\n\nBackground job #1 (crawl) reports:\n\npage two"
+            "Background command #1 (crawl) reports:\n\npage one\n\nBackground command #1 (crawl) reports:\n\npage two"
         );
         assert_eq!(first.text, "page one\n\npage two");
         assert!(result_of(&table, &root).is_none(), "reported once");
-        assert!(table.jobs(&root).is_empty());
+        assert!(table.background(&root).is_empty());
     }
 
-    // A job that outruns its lane keeps what fits and says what it lost.
+    // A command that outruns its lane keeps what fits and says what it lost.
     #[tokio::test]
     async fn results_past_the_cap_are_counted_not_kept() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
-        let job = JobSink::start(
-            &Jobs::new(table.clone()),
+        let execution = RunSink::start(
+            &Commands::new(table.clone()),
             root.clone(),
             "flood".into(),
             CancellationToken::new(),
-            None,
         );
         for n in 0..MAX_WAITING + 3 {
-            job.result(n.to_string());
+            execution.channel().result(n.to_string());
         }
         let mut last = None;
         while let Some(due) = result_of(&table, &root) {
@@ -2316,82 +2126,76 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_job_whose_task_died_without_ending_leaves() {
+    async fn a_command_whose_task_died_without_ending_leaves() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
-        let job = start(&table, &root, "crashy");
+        let execution = start(&table, &root, "crashy");
         let _ = tokio::spawn(async move {
-            let _job = job;
+            let _command = execution;
             panic!("died before end");
         })
         .await;
-        assert!(table.jobs(&root).is_empty());
+        assert!(table.background(&root).is_empty());
     }
 
     #[tokio::test]
-    async fn a_job_that_ends_with_nothing_to_say_leaves() {
+    async fn a_command_that_ends_with_nothing_to_say_leaves() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
-        let job = JobSink::start(
-            &Jobs::new(table.clone()),
+        let execution = RunSink::start(
+            &Commands::new(table.clone()),
             root.clone(),
             "quiet".into(),
             Default::default(),
-            None,
         );
-        job.end();
-        assert!(table.jobs(&root).is_empty());
+        execution.end();
+        assert!(table.background(&root).is_empty());
         assert!(result_of(&table, &root).is_none());
     }
 
     #[tokio::test]
-    async fn a_removed_checkout_stops_its_jobs() {
+    async fn a_removed_checkout_stops_its_commands() {
         let table = Arc::new(Table::default());
-        let (a, _) = table.add(
-            "/repo.worktrees/a".into(),
-            "a".into(),
-            Default::default(),
-            None,
-        );
-        table.add("/repo".into(), "main".into(), Default::default(), None);
+        let (a, _) = table.add("/repo.worktrees/a".into(), "a".into(), Default::default());
+        table.add("/repo".into(), "main".into(), Default::default());
         let stop = match &table.lock().items[0].phase {
             Phase::Running { stop } => stop.clone(),
             Phase::Over { .. } => panic!("it runs"),
         };
         table.drop_under(Path::new("/repo.worktrees/a"));
         assert!(stop.is_cancelled(), "#{a} was asked to stop");
-        assert!(table.jobs(Path::new("/repo.worktrees/a")).is_empty());
-        assert_eq!(table.jobs(Path::new("/repo")).len(), 1);
+        assert!(table.background(Path::new("/repo.worktrees/a")).is_empty());
+        assert_eq!(table.background(Path::new("/repo")).len(), 1);
     }
 
-    type Reruns = tokio::sync::mpsc::UnboundedReceiver<(Arc<dyn JobHandle>, CancellationToken)>;
+    type Reruns = tokio::sync::mpsc::UnboundedReceiver<(Arc<dyn RunHandle>, CancellationToken)>;
 
-    // A job that can run again: each rerun hands back the handle and stop
+    // A command that can run again: each rerun hands back the handle and stop
     // it was given, as a launch would keep them.
-    fn rerunnable(table: &Arc<Table>, root: &Path) -> (Arc<dyn JobHandle>, Reruns) {
-        let job = start(table, root, "serve");
+    fn rerunnable(table: &Arc<Table>, root: &Path) -> (Arc<dyn RunHandle>, Reruns) {
+        let execution = start(table, root, "serve");
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        job.rerun(
-            Arc::new(move |job, stop| {
-                let _ = tx.send((job, stop));
+        execution.rerun(
+            Arc::new(move |execution, stop| {
+                let _ = tx.send((execution, stop));
                 Ok(())
             }),
             None,
         );
-        (job, rx)
+        (execution, rx)
     }
 
     // Shutdown must preserve completed results and ignore late reports.
     #[tokio::test]
-    async fn shutdown_stops_only_running_jobs_on_its_checkout() {
+    async fn shutdown_stops_only_running_commands_on_its_checkout() {
         let table = Arc::new(Table::default());
         let root = Path::new("/checkout");
         let (running, _) = rerunnable(&table, root);
         let (finished, _) = rerunnable(&table, root);
-        finished.result("done".into());
+        finished.channel().result("done".into());
         finished.end();
         let stop = CancellationToken::new();
-        let plain = Jobs::new(table.clone()).start(root.into(), "plain".into(), stop.clone(), None);
+        let plain = Commands::new(table.clone()).start(root.into(), "plain".into(), stop.clone());
         let elsewhere = start(&table, Path::new("/elsewhere"), "elsewhere");
 
         let stopped = table.stop_running(root, "process exiting");
@@ -2400,12 +2204,15 @@ mod tests {
         assert!(stopped[1].starts_with(&format!("#{} ", plain.id())));
         assert!(stop.is_cancelled());
         assert!(table.stop_running(root, "process exiting").is_empty());
-        assert_eq!(table.jobs(root)[0].state, State::Stopped);
-        assert_eq!(table.jobs(root)[1].state, State::Back);
-        assert_eq!(table.jobs(Path::new("/elsewhere"))[0].id, elsewhere.id());
+        assert_eq!(table.background(root)[0].state, State::Stopped);
+        assert_eq!(table.background(root)[1].state, State::Back);
+        assert_eq!(
+            table.background(Path::new("/elsewhere"))[0].id,
+            elsewhere.id()
+        );
 
-        running.result("late".into());
-        plain.result("late".into());
+        running.channel().result("late".into());
+        plain.channel().result("late".into());
         running.end();
         assert_eq!(table.waiting(root, running.id()), Some(vec![]));
         assert_eq!(table.waiting(root, plain.id()), None);
@@ -2419,63 +2226,64 @@ mod tests {
     // Stopped, it stays listed; restarted, it runs again under its id once
     // the last run has let go, and that run's late words are not heard.
     #[tokio::test]
-    async fn a_restarted_job_waits_for_the_last_run_and_keeps_its_id() {
+    async fn a_restarted_command_waits_for_the_last_run_and_keeps_its_id() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
         let (old, mut reruns) = rerunnable(&table, &root);
         let id = old.id();
 
         table.stop(&root, id).unwrap();
-        old.result("said as it went".into());
-        assert_eq!(table.jobs(&root)[0].state, State::Stopped);
+        old.channel().result("said as it went".into());
+        assert_eq!(table.background(&root)[0].state, State::Stopped);
 
         table.restart(&root, id).unwrap();
-        assert_eq!(table.jobs(&root)[0].state, State::Running);
+        assert_eq!(table.background(&root)[0].state, State::Running);
         tokio::task::yield_now().await;
         assert!(reruns.try_recv().is_err(), "the last run still holds on");
 
-        old.result("late".into());
+        old.channel().result("late".into());
         drop(old);
         let (new, stop) = reruns.recv().await.expect("run again");
         assert_eq!(new.id(), id);
         assert!(table.waiting(&root, id).unwrap().is_empty(), "{id}");
-        assert_eq!(table.jobs(&root)[0].state, State::Running);
+        assert_eq!(table.background(&root)[0].state, State::Running);
 
         table.restart(&root, id).unwrap();
         assert!(stop.is_cancelled(), "a running one is stopped first");
-        new.result("exited 1".into());
+        new.channel().result("exited 1".into());
         new.end();
-        assert_eq!(table.jobs(&root)[0].state, State::Running);
+        assert_eq!(table.background(&root)[0].state, State::Running);
     }
 
-    // A job that says as data how it runs again crosses to the next pi
+    // A command that says as data how it runs again crosses to the next pi
     // through its file: listed there under its id, stopped even if it was
     // running, and it starts over; ids given out later pass it. One that
     // cannot say it is left behind, and the file is read once.
     #[tokio::test]
-    async fn a_job_is_carried_to_the_next_pi() {
+    async fn a_command_is_carried_to_the_next_pi() {
         let old = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
         let (plain, _reruns) = rerunnable(&old, &root);
-        let job = start(&old, &root, "serve");
+        let execution = start(&old, &root, "serve");
         let again = Again {
             command: "python3 serve.py".into(),
             cwd: root.clone(),
+            ..Again::default()
         };
-        job.rerun(Arc::new(|_, _| Ok(())), Some(again.clone()));
+        execution.rerun(Arc::new(|_, _| Ok(())), Some(again.clone()));
         let running = start(&old, &root, "watch");
         running.rerun(Arc::new(|_, _| Ok(())), Some(again.clone()));
         old.stop(&root, plain.id()).unwrap();
-        old.stop(&root, job.id()).unwrap();
+        old.stop(&root, execution.id()).unwrap();
 
         let carried = old.carried(&root);
         assert_eq!(carried.len(), 2, "{carried:?}");
-        assert_eq!((carried[0].id, carried[0].stopped), (job.id(), true));
+        assert_eq!((carried[0].id, carried[0].stopped), (execution.id(), true));
         assert_eq!((carried[1].id, carried[1].stopped), (running.id(), true));
         assert_eq!(carried[0].again, again);
         assert!(old.carried(Path::new("/elsewhere")).is_empty());
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("jobs.json");
+        let path = dir.path().join("background.json");
         hand_over(&path, &carried[..1]).unwrap();
         let back = take_over(&path).unwrap();
         assert!(take_over(&path).unwrap().is_empty(), "read once");
@@ -2486,22 +2294,25 @@ mod tests {
             let tx = tx.clone();
             new.revive(
                 c,
-                Arc::new(move |job, _| {
-                    let _ = tx.send(job.id());
+                Arc::new(move |execution, _| {
+                    let _ = tx.send(execution.id());
                     Ok(())
                 }),
             );
         }
-        let listed = new.jobs(&root);
+        let listed = new.background(&root);
         assert_eq!(listed.len(), 1);
-        assert_eq!((listed[0].id, listed[0].state), (job.id(), State::Stopped));
-        new.restart(&root, job.id()).unwrap();
-        assert_eq!(rx.recv().await, Some(job.id()));
-        assert!(start(&new, &root, "next").id() > job.id());
+        assert_eq!(
+            (listed[0].id, listed[0].state),
+            (execution.id(), State::Stopped)
+        );
+        new.restart(&root, execution.id()).unwrap();
+        assert_eq!(rx.recv().await, Some(execution.id()));
+        assert!(start(&new, &root, "next").id() > execution.id());
 
         // Another lane's pi gave out the same id: this one takes a free one.
         new.revive(carried[0].clone(), Arc::new(|_, _| Ok(())));
-        let ids: Vec<_> = new.jobs(&root).iter().map(|j| j.id).collect();
+        let ids: Vec<_> = new.background(&root).iter().map(|j| j.id).collect();
         let unique: std::collections::HashSet<_> = ids.iter().collect();
         assert_eq!(unique.len(), ids.len(), "{ids:?}");
 
@@ -2512,17 +2323,17 @@ mod tests {
 
     // One that ended by itself is kept to start over; a stop leaves it be.
     #[tokio::test]
-    async fn an_exited_job_is_kept_to_start_over() {
+    async fn an_exited_command_is_kept_to_start_over() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
-        let (job, _reruns) = rerunnable(&table, &root);
-        let id = job.id();
-        job.result("exited 1".into());
-        job.end();
+        let (execution, _reruns) = rerunnable(&table, &root);
+        let id = execution.id();
+        execution.channel().result("exited 1".into());
+        execution.end();
         assert!(result_of(&table, &root).is_some());
-        assert_eq!(table.jobs(&root)[0].state, State::Exited);
+        assert_eq!(table.background(&root)[0].state, State::Exited);
         assert!(table.stop(&root, id).is_err());
-        assert_eq!(table.jobs(&root)[0].state, State::Exited);
+        assert_eq!(table.background(&root)[0].state, State::Exited);
     }
 
     // Stopped while waiting for the last run to let go: nothing starts.
@@ -2539,15 +2350,15 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert!(reruns.try_recv().is_err(), "it was stopped first");
-        assert_eq!(table.jobs(&root)[0].state, State::Stopped);
+        assert_eq!(table.background(&root)[0].state, State::Stopped);
     }
 
     #[tokio::test]
-    async fn only_a_job_that_says_how_can_restart() {
+    async fn only_a_command_that_says_how_can_restart() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
-        let job = start(&table, &root, "find callers");
-        let why = table.restart(&root, job.id()).unwrap_err();
+        let execution = start(&table, &root, "find callers");
+        let why = table.restart(&root, execution.id()).unwrap_err();
         assert!(why.contains("cannot be started over"), "{why}");
         assert!(table.restart(&root, 99).is_err());
     }

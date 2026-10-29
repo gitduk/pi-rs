@@ -127,15 +127,15 @@ Read stdin when any exception can apply. An argument cannot replace an inherited
 
 Put shared keys and other shared values in `.env` beside the scripts.
 Use one `NAME=value` assignment per line.
-Scripts receive these values as environment variables. The `bash` tool does not receive them.
+Scripts receive these values as environment variables. Ordinary `bash` calls do not receive them. Background wrappers load them only for their subprocess.
 Never put a secret in a script. Read it from the environment.
 
 Write the answer to stdout.
 Exit with a nonzero status to fail. On failure, the caller receives stderr as the error.
-On success, pi discards stderr.
+On success, stderr is excluded from the model result; background output still retains it for the user.
 
 Scripts run in the workspace root at the exec tier, one call at a time.
-A call has a 300-second limit until the script detaches.
+A foreground script call has a 300-second limit. Background wrappers have no timeout.
 Large output is truncated and saved to a file, as with bash.
 pi reads the `#!` line itself. The file needs no execute permission.
 For Rust scripts, put crates under `[dependencies]` in the frontmatter.
@@ -157,21 +157,23 @@ For Rust scripts, put crates under `[dependencies]` in the frontmatter.
 
 For a long command, use `bash` with `background`.
 It runs independently of the turn and reports its exit status and output.
-Write a tool that detaches when the work needs repeated reports.
+For a named background tool, set `background = true` at the top of its shebang comment block,
+or under `[package.metadata.pi]` in Rust frontmatter.
+The named entry delegates to the same bash background executor, passing JSON on stdin
+and loading the tool directory’s `.env` for its subprocess.
 Examples include watchers, crawlers that return batches, and bridges that relay a person's messages to this session.
 
 A script sends events to pi through fd 3, one JSON object per line.
 When pi listens, `PI_EVENTS_FD` is `3`.
-A script that never writes to fd 3 remains a plain tool.
+Background mode is declared in metadata. It does not depend on fd 3 events.
 
 | Event | Meaning |
 |---|---|
-| `{"status": "..."}` | Report progress. During the call, this is call progress. After detach, it is job status. Each new status replaces the previous status. |
-| `{"detach": "..."}` | Return this text from the call immediately. Continue running as a job. |
-| `{"result": "..."}` | After detach, deliver one result as a separate turn in the job's checkout. |
+| `{"status": "..."}` | Report progress. In foreground mode, this is call progress. In background mode, it is command status. Each new status replaces the previous status. |
+| `{"result": "..."}` | In background mode, deliver one result as a separate turn in the command's checkout. |
 | `{"input": "..."}` | Deliver a person's words to the model unchanged. Do not execute them as a command. |
-| `{"interrupt": true}` | Stop the active turn in the job's checkout, as a user stop would. |
-| `{"follow": true}` | Receive replies for all subsequent turns in the job's checkout, including turns opened by other inputs. |
+| `{"interrupt": true}` | Stop the active turn in the command's checkout, as a user stop would. |
+| `{"follow": true}` | Receive replies for all subsequent turns in the command's checkout, including turns opened by other inputs. |
 
 For each turn opened by `input`, pi writes `{"started": true}` back through the same fd.
 It then writes `{"reply": "..."}` with the complete answer.
@@ -183,6 +185,7 @@ After `follow`, the script also receives one reply for every other turn in its c
 #!/usr/bin/env python3
 # ---
 # description = "Watch a URL and report each content change. Run in the background until stopped."
+# background = true
 # [required]
 # url = "The page to watch."
 # ---
@@ -195,7 +198,7 @@ fd3 = os.fdopen(3, "w")
 def say(**m):
     fd3.write(json.dumps(m) + "\n"); fd3.flush()
 
-say(detach=f"watching {url}; each change arrives as a turn")
+say(status=f"watching {url}; each change arrives as a turn")
 seen = None
 while True:
     digest = hashlib.sha256(urllib.request.urlopen(url).read()).hexdigest()
@@ -206,30 +209,28 @@ while True:
     time.sleep(300)
 ```
 
-### Job lifetime and channels
+### Background lifetime and channels
 
-Detach before starting slow work.
-Until detach, the call blocks the turn and the 300-second limit applies.
-After detach, there is no timeout.
-The job runs until it exits, is stopped, or pi exits.
-Stopping sends SIGTERM, then SIGKILL. Job termination also ends its process group.
+A background wrapper returns a command id immediately, before slow work starts.
+The command runs until it exits, is stopped, or pi exits. There is no timeout.
+Stopping sends SIGTERM, then SIGKILL, to its process group.
+Use bash controls to read output, stop, or restart the command.
+Restart reuses the original JSON input and reloads the tool directory’s `.env`.
 
-The events `result`, `input`, `interrupt`, and `follow` take effect only after `detach`.
-At exit, stdout becomes the job's final result. A nonzero exit also includes stderr.
-
-After detach, `status` and stderr are for the user. The model receives neither during execution.
+The events `result`, `input`, `interrupt`, and `follow` require background mode.
+At exit, stdout becomes the command's final result. A nonzero exit also includes stderr.
+In background mode, `status` and stderr are for the user during execution.
 Use `status` for what the user needs to know or do now, such as scanning a QR code.
 Use stderr for supporting content, such as the QR code itself.
 Only a failing exit sends stderr to the model.
 
 The script manages its own persistent state under `$PI_HOME`.
 Restrict saved login tokens to owner access.
-
 Use `input` only for words a person typed to this session.
-Send data discovered by the job as `result`.
+Send data discovered by the command as `result`.
 
-Only runs that support jobs allow detaching.
-Other runs, including one-shot invocations and subagents, refuse detach and stop the script.
+One-shot invocations and subagents do not offer background script wrappers.
+Foreground scripts can still use `status` and `choose`.
 
 To check the event protocol manually, redirect fd 3 to the terminal:
 `echo '{"url":"https://example.com"}' | PI_EVENTS_FD=3 python3 <tools-dir>/watch 3>&1`.

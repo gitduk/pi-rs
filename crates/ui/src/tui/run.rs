@@ -168,7 +168,7 @@ impl Tui {
         // Read where the run starts, not carried on the agent: a reload
         // between two turns reaches the next one this way.
         let retry = pi_core::core::retry(&self.core.config);
-        let input = self.core.lane_mut().listen(self.drivers.jobs());
+        let input = self.core.lane_mut().listen(self.drivers.background());
         tokio::spawn(async move {
             let out =
                 guard(agent.run_with_input(&mut carried, &ctx, &sent, &retry, input.as_ref()))
@@ -236,10 +236,9 @@ impl Tui {
         };
         self.ui.flash(format!("starting {name}…"));
         let ctx = self.core.lane().ctx_for(CancellationToken::new());
-        let jobs = self.core.job_sink();
         let (token, started) = (self.core.lane().token(), started.clone());
         tokio::spawn(async move {
-            let said = guard(core::tools::run_named(tool, args, &ctx, jobs.as_deref()))
+            let said = guard(core::tools::run_named(tool, args, &ctx))
                 .await
                 .unwrap_or_else(|| Some(Err("it panicked".into())));
             let _ = started.send(Started { token, name, said });
@@ -794,7 +793,7 @@ impl Tui {
         }
     }
 
-    // Shutdown must preserve transcripts and the cause of stopped jobs.
+    // Shutdown must preserve transcripts and the cause of stopped executions.
     pub(super) async fn settle_all(&mut self, done: &mut UnboundedReceiver<Done>, why: &str) {
         // A note filed while idle would otherwise wait for a turn that never comes.
         self.core.save_filed();
@@ -829,13 +828,13 @@ impl Tui {
                 eprintln!("{left} run(s) did not stop in time; their last save is what is on disk");
             }
         }
-        // A settling turn may detach one last job; collect after it returns.
-        let jobs = self.drivers.jobs();
+        // A settling turn may start another command before shutdown completes.
+        let executions = self.drivers.background();
         for lane in &mut self.core.lanes {
-            let stopped = jobs.stop_running(lane.root(), why);
+            let stopped = executions.stop_running(lane.root(), why);
             if !stopped.is_empty() {
                 lane.push_note(&format!(
-                    "{why} pi stopped running background jobs {} during shutdown. \
+                    "{why} pi stopped running background commands {} during shutdown. \
                      They did not finish normally; their results will not be reported.",
                     stopped.join(", ")
                 ));

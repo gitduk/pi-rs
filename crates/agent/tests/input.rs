@@ -213,7 +213,7 @@ async fn new_input_waits_for_the_whole_reply_then_continues_without_a_tool_call(
     assert!(second.messages.iter().any(|m| matches!(m, Message::Assistant { content, .. }
         if content.iter().any(|b| matches!(b, AssistantContent::Reasoning(r)
             if r.text() == "complete reasoning"
-                && matches!(r.replay_for(&common::spec()), llm::message::Replay::Signed { signature } if signature == "intact"))))));
+                && matches!(r.replay_for(&common::spec()), llm::message::Replay::Thinking { signature: Some("intact") }))))));
     assert_eq!(
         session
             .entries()

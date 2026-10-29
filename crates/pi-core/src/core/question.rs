@@ -12,15 +12,15 @@ pub const MAX_OPTIONS: usize = 9;
 pub enum Asker {
     /// A script tool's call, by the tool's name.
     Tool { name: String },
-    /// A background job: its id, and its name as a person reads it.
-    Job { id: u64, name: String },
+    /// A background command: its id, and its name as a person reads it.
+    Background { id: u64, name: String },
 }
 
 impl Asker {
     /// Who asks, as the person reads it.
     pub fn name(&self) -> &str {
         match self {
-            Asker::Tool { name } | Asker::Job { name, .. } => name,
+            Asker::Tool { name } | Asker::Background { name, .. } => name,
         }
     }
 }
@@ -39,15 +39,15 @@ pub struct Question {
 
 impl Question {
     /// The question a tool asked, checked as `new` checks one.
-    pub fn of(from: Asker, asked: &toolbox::background::Asked) -> Result<Self, String> {
+    pub fn of(from: Asker, asked: &toolbox::channel::Asked) -> Result<Self, String> {
         let mut question = Self::new(from, &asked.question, &asked.options)?;
         question.back = asked.back;
         Ok(question)
     }
 
-    /// The question as a job that follows is told it.
-    pub fn asked(&self) -> toolbox::background::Asked {
-        toolbox::background::Asked {
+    /// The question as an execution that follows is told it.
+    pub fn asked(&self) -> toolbox::channel::Asked {
+        toolbox::channel::Asked {
             question: self.text.clone(),
             options: self.options.clone(),
             back: self.back,

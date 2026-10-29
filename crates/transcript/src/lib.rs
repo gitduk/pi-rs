@@ -1567,7 +1567,7 @@ mod tests {
         }
     }
 
-    // Whatever the user's side files after a stop — a `!` command, a job's or
+    // Whatever the user's side files after a stop — a `!` command, a command's or
     // loop's note — must not split a `tool_use` from its result: providers
     // 400 on a result that is not first in its user turn.
     #[test]

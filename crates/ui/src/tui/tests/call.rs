@@ -565,10 +565,10 @@ fn mouse_event(kind: crossterm::event::MouseEventKind, row: u16) -> crossterm::e
     })
 }
 
-// An open job's tail stays within its rows, and every line not shown whole
+// An open execution's tail stays within its rows, and every line not shown whole
 // is counted for the page.
 #[test]
-fn an_open_jobs_tail_counts_what_it_leaves_out() {
+fn an_open_commands_tail_counts_what_it_leaves_out() {
     use crate::tui::call::tail_rows;
     let many: Vec<String> = (0..10).map(|_| "word ".repeat(30)).collect();
     let per = tail_rows(&many[..1], 40).1.len();

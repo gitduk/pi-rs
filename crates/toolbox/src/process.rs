@@ -143,11 +143,11 @@ pub(crate) async fn reap(group: Option<u32>) {
 #[cfg(not(unix))]
 pub(crate) async fn reap(_group: Option<u32>) {}
 
-// How long a job's pipes may stay open after its process exits: past it,
-// what the process left running is taken down so the job can end.
+// How long a command's pipes may stay open after its process exits: past it,
+// what the process left running is taken down so the execution can end.
 const LINGER: Duration = Duration::from_secs(2);
 
-/// A job's process group, killed when the job goes: stopped, removed with
+/// A command's process group, killed when the execution goes: stopped, removed with
 /// its checkout, or pi gone.
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct Group(pub(crate) u32);
@@ -156,16 +156,16 @@ impl Drop for Group {
     fn drop(&mut self) {
         #[cfg(unix)]
         if self.0 > 1 {
-            // SAFETY: a signal to a group this job made; a gone one is ESRCH.
+            // SAFETY: a signal to a group this execution made; a gone one is ESRCH.
             unsafe { libc::killpg(self.0 as libc::pid_t, libc::SIGKILL) };
         }
     }
 }
 
-// How much of what a job printed last can be read while it runs.
+// How much of what an execution printed last can be read while it runs.
 const PEEK: usize = 8 * 1024;
 
-/// The last of what a job's streams printed, both in the order it arrived.
+/// The last of what a command's streams printed, both in the order it arrived.
 #[derive(Clone, Default)]
 struct Tail(Arc<Mutex<(Vec<u8>, usize)>>);
 
@@ -242,7 +242,7 @@ async fn captured(task: &mut tokio::task::JoinHandle<Captured>) -> Captured {
 }
 
 /// A child's two pipes, each drained into a bounded capture on a task of its
-/// own, the latest of both kept to be read while it runs: how a job is watched.
+/// own, the latest of both kept to be read while it runs: how an execution is watched.
 pub(crate) struct Streams {
     tail: Tail,
     stdout: tokio::task::JoinHandle<Captured>,
@@ -273,7 +273,7 @@ impl Streams {
         }
     }
 
-    /// The latest of what it printed, for a job to watch.
+    /// The latest of what it printed, for an execution to watch.
     pub(crate) fn peek(&self) -> Peek {
         let tail = self.tail.clone();
         Arc::new(move || tail.read())
@@ -316,19 +316,6 @@ impl Streams {
         {
             Some(why) => Err(why),
             None => Ok(both),
-        }
-    }
-
-    /// Its output once its process has exited, taking down what it left
-    /// holding the pipes after a moment; `None` when the job was stopped.
-    pub(crate) async fn drained(
-        &mut self,
-        group: Option<u32>,
-        stop: &tokio_util::sync::CancellationToken,
-    ) -> Option<(Captured, Captured)> {
-        tokio::select! {
-            both = self.after_exit(group) => Some(both),
-            () = stop.cancelled() => None,
         }
     }
 }

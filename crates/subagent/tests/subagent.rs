@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
-use llm::meter::Meter;
 use llm::model::ModelSpec;
 use llm::request::Request;
 use llm::stream::{BlockKind, StopReason, StreamEvent, Usage};
@@ -395,7 +394,7 @@ async fn a_child_that_keeps_talking_outlives_the_deadline() {
 }
 
 #[test]
-fn the_subagent_takes_the_job_and_nothing_else() {
+fn the_subagent_takes_the_command_and_nothing_else() {
     let parent = Agent::new(
         Arc::new(Scripted {
             turns: vec![],
@@ -665,111 +664,25 @@ async fn two_calls_in_one_turn_both_reach_the_child() {
     assert_eq!(sessions.len(), 2, "both calls ran a child");
 }
 
-// A job host that records what its one job said and wakes the test at the end.
-#[derive(Default)]
-struct Host {
-    said: Arc<std::sync::Mutex<Vec<String>>>,
-    ended: Arc<tokio::sync::Notify>,
-}
-
-impl toolbox::background::JobSink for Host {
-    fn start(
-        &self,
-        _root: std::path::PathBuf,
-        description: String,
-        _stop: tokio_util::sync::CancellationToken,
-        _told: Option<tokio::sync::mpsc::UnboundedSender<toolbox::background::Told>>,
-    ) -> Arc<dyn toolbox::background::JobHandle> {
-        self.said
-            .lock()
-            .unwrap()
-            .push(format!("start {description}"));
-        Arc::new(Host {
-            said: self.said.clone(),
-            ended: self.ended.clone(),
-        })
-    }
-}
-
-impl toolbox::background::Ask for Host {
-    fn ask(
-        &self,
-        _root: std::path::PathBuf,
-        _asker: &str,
-        _asked: toolbox::background::Asked,
-    ) -> Result<Option<toolbox::background::Answer>, String> {
-        Err("no one to ask".into())
-    }
-}
-
-impl toolbox::background::JobHandle for Host {
-    fn id(&self) -> u64 {
-        4
-    }
-    fn status(&self, _text: String) {}
-    fn result(&self, text: String) {
-        self.said.lock().unwrap().push(text);
-    }
-    fn input(&self, _text: String) {}
-    fn choose(&self, _asked: toolbox::background::Asked) {}
-    fn answer(&self, _question: u64, _picks: Vec<usize>) {}
-    fn interrupt(&self) {}
-    fn watch(&self, _output: toolbox::background::Peek) {}
-    fn follow(&self) {}
-    fn end(&self) {
-        self.said.lock().unwrap().push("end".into());
-        self.ended.notify_one();
-    }
-}
-
-// The parent's meter comes back too: what the child spends is charged there.
-fn offered(turns: Vec<Vec<StreamEvent>>, host: Arc<Host>) -> (Subagent, Arc<Meter>) {
-    let parent = Agent::new(
-        Arc::new(Scripted {
-            turns,
-            next: AtomicUsize::new(0),
-            saw: Arc::default(),
-        }),
-        spec(),
-    );
+#[tokio::test]
+async fn a_subagent_has_no_independent_background_mode() {
+    let (_dir, agent, ctx, _seen, _kept) = harness(vec![text_turn("unused")]);
     let child = Subagent::new(
-        &parent,
-        parent.brief.clone(),
+        &agent,
+        agent.brief.clone(),
         Arc::new(Kept::default()),
         STANDING,
         Retry::default(),
-    )
-    .with_background(host);
-    (child, parent.meter.clone())
-}
-
-// Sent off, the child answers into the tool's job host, spend and all, and
-// the call returns at once with the job's id.
-#[tokio::test]
-async fn a_background_child_reports_through_the_tools_jobs() {
-    let dir = tempfile::tempdir().unwrap();
-    let host = Arc::new(Host::default());
-    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-    let ended = host.ended.notified();
-    let (child, meter) = offered(vec![text_turn("there are four files")], host.clone());
-    let out = child
+    );
+    assert!(child.schema()["properties"].get("background").is_none());
+    let error = child
         .execute(
-            serde_json::json!({"description": "count", "prompt": "count the files", "background": true}),
+            serde_json::json!({
+                "description": "count", "prompt": "count the files", "background": true
+            }),
             &ctx,
         )
         .await
-        .expect("sent off");
-    assert!(out.flatten().contains("#4"), "{}", out.flatten());
-    tokio::time::timeout(std::time::Duration::from_secs(5), ended)
-        .await
-        .expect("the child finished");
-    let said = host.said.lock().unwrap();
-    assert_eq!(said[0], "start count");
-    assert!(said[1].contains("there are four files"), "{said:?}");
-    assert_eq!(said[2], "end");
-    assert_eq!(
-        meter.read().usage.input,
-        1_000,
-        "charged to the parent's meter"
-    );
+        .unwrap_err();
+    assert!(error.to_string().contains("background"));
 }

@@ -920,7 +920,7 @@ pub fn placed(place: Option<&str>) -> String {
 /// nothing to read, and a `1s` that shows only to vanish reads as a flicker.
 pub const TIMED_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// A time as the tail of a line, ` · 5s`: how long a call or job ran, or
+/// A time as the tail of a line, ` · 5s`: how long a call or execution ran, or
 /// has been out so far.
 pub fn lasted(d: std::time::Duration) -> String {
     format!("{}{}", icons::PART_SEP, llm::figures::elapsed(d))

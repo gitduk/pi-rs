@@ -1,4 +1,4 @@
-//! A turn nobody typed, carrying background job results: one line naming it,
+//! A turn nobody typed, carrying background command results: one line naming it,
 //! its text under the line once opened.
 
 use ratatui::text::Line;

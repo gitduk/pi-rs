@@ -3,6 +3,7 @@ use tool::Registry;
 pub mod background;
 pub mod bash;
 mod blocks;
+pub mod channel;
 pub mod drift;
 pub mod edit;
 pub mod fetch;
@@ -20,7 +21,7 @@ mod testing;
 pub mod walk;
 pub mod write;
 
-/// Tools independent of their host. Shells, job controls and other stateful
+/// Tools independent of their host. Shells, execution controls and other stateful
 /// tools are added by the owner of their lifetime.
 pub fn builtin() -> Registry {
     Registry::new()

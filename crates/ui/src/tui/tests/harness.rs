@@ -56,7 +56,7 @@ pub(super) fn a_turn(committed: bool) -> Option<crate::tui::view::Work> {
 }
 
 // A lane just real enough to settle (real transcript/agent, `Run::Running`
-// standing in for the job); the temp-dir guard comes back so it stays alive.
+// standing in for the execution); the temp-dir guard comes back so it stays alive.
 pub(super) fn a_running_lane() -> (tempfile::TempDir, Lane) {
     let dir = tempfile::tempdir().expect("a temp dir");
     let lane = running_lane(dir.path());
@@ -99,7 +99,7 @@ pub(super) fn running_lane(dir: &std::path::Path) -> Lane {
             tool::Ctx::new(ws),
         )
     });
-    // What every `start_*` leaves behind while its job runs.
+    // What every `start_*` leaves behind while its execution runs.
     lane.begin(tokio_util::sync::CancellationToken::new());
     lane
 }
@@ -114,7 +114,7 @@ pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
         settings: pi_store::settings::Settings::new(toml::Value::Table(Default::default()), None),
         lanes: vec![running_lane(dir)],
         refused: Default::default(),
-        jobs: None,
+        executions: None,
         current: 0,
         surface: crate::tui::WORDS,
     };

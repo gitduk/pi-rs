@@ -131,7 +131,7 @@ fn main() -> Result<ExitCode> {
 }
 
 // Drop the runtime before acting on a restart: exec does not drop tasks,
-// so their process-group guards would otherwise leave background jobs alive.
+// so their process-group guards would otherwise leave background commands alive.
 fn drive(run: impl std::future::Future<Output = Result<Ended>>) -> Result<Ended> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -323,13 +323,13 @@ async fn run(updated_from: Option<String>) -> Result<Ended> {
             current: 0,
             lanes: vec![first],
             refused: Default::default(),
-            jobs: None,
+            executions: None,
             surface: words,
         };
         let drivers = pi_core::driver::Drivers::default();
-        core.enable_jobs(drivers.jobs());
+        core.enable_background(drivers.background());
         core.reopen(&args.lanes());
-        core.revive_jobs();
+        core.revive_commands();
         core::update::watch();
         core::update::check(env!("CARGO_PKG_REPOSITORY"));
         let out = tui::Tui::new(core, drivers, updated(updated_from.as_deref()))?

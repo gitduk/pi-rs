@@ -182,21 +182,22 @@ pub fn arm(
     resolved: Arc<Resolved>,
     archive: Arc<dyn Archive>,
     retry: agent::Retry,
-    jobs: Option<Arc<crate::driver::jobs::Table>>,
+    executions: Option<Arc<crate::driver::background::Table>>,
 ) -> Arc<Resolved> {
     let mut resolved = resolved;
     // The tools hung on below were not there when `resolve` read the script
     // directories, so a name one of them holds is a script's: it keeps it and
     // the built-in waits behind it, returning when the script releases it.
     let mut said = Vec::new();
-    let jobs = jobs.map(|table| Arc::new(crate::driver::jobs::Jobs::new(table)));
-    // Hooks ask where jobs are kept, a child's gates as the lane's do.
-    let ask: Arc<dyn toolbox::background::Ask> = match &jobs {
-        Some(jobs) => jobs.clone(),
-        None => Arc::new(toolbox::background::NoOne),
+    let executions =
+        executions.map(|table| Arc::new(crate::driver::background::Commands::new(table)));
+    // Hooks ask where executions are kept, a child's gates as the lane's do.
+    let ask: Arc<dyn toolbox::channel::Ask> = match &executions {
+        Some(executions) => executions.clone(),
+        None => Arc::new(toolbox::channel::NoOne),
     };
     let mut brief = resolved.brief.clone();
-    Arc::make_mut(&mut brief).hooks = resolved.hooks.arm(ask);
+    Arc::make_mut(&mut brief).hooks = resolved.hooks.arm(ask.clone());
     let mut subagent = Subagent::prompted(
         agent,
         brief.clone(),
@@ -205,13 +206,9 @@ pub fn arm(
         &resolved.standing,
         retry,
     )
-    .with_tools(Arc::new(super::shells::scoped));
+    .with_tools(Arc::new(|_, registry| super::shells::foreground(registry)));
     if let Some(deadline) = resolved.subagent_deadline {
         subagent = subagent.with_deadline(deadline);
-    }
-    // Its answer comes back as a job's does, so only with somewhere to keep it.
-    if let Some(jobs) = &jobs {
-        subagent = subagent.with_background(jobs.clone());
     }
     // Changed from here on a fresh `Arc`, since the child holds this one: it
     // runs on the registry it came from, and only the lane's copy carries the tool.
@@ -231,25 +228,23 @@ pub fn arm(
     }
     // The lane's copy only, as with the subagent: a child cannot reach the
     // lane its prompt would come back to.
-    if let Some(jobs) = jobs
+    if let Some(executions) = executions
         && tool::Tier::Exec.under(resolved.ceiling)
     {
         let patch = Arc::make_mut(&mut brief);
-        offer_fallback(
-            patch,
-            Arc::new(toolbox::bash::Bash::new(jobs.clone()).with_controls(jobs.clone())),
-            &mut said,
+        let shell = Arc::new(
+            toolbox::bash::Bash::new(executions.clone()).with_controls(executions.clone()),
         );
-        // Scripts likewise: the lane's may detach, the child's may not.
+        offer_fallback(patch, shell.clone(), &mut said);
         for dir in &resolved.scripts {
             let held: Arc<dyn tool::Source> = dir.clone();
-            let swapped =
-                (patch.registry).swap_source(&held, Arc::new(dir.with_jobs(jobs.clone())));
+            let swapped = (patch.registry)
+                .swap_source(&held, Arc::new(dir.with_shell(shell.clone(), ask.clone())));
             debug_assert!(swapped, "a script dir the brief never read");
         }
     }
     agent.apply(brief);
-    // Re-armed as often as the config or the job table moves; the same tool
+    // Re-armed as often as the config or the execution table moves; the same tool
     // stands down every time, so the note is kept once.
     for line in said {
         if !resolved.notes.contains(&line) {
@@ -380,7 +375,7 @@ impl Lane {
         }
     }
 
-    /// A job has given this lane's transcript back. The one place `Running`
+    /// A command has given this lane's transcript back. The one place `Running`
     /// ends: a lane left in it queues every later prompt and never drains.
     /// Says whether the stop asked for the prompt back.
     pub fn finish(&mut self) -> bool {
@@ -406,11 +401,11 @@ impl Lane {
     /// Supply messages to this run between requests. Only model runs listen.
     pub fn listen(
         &mut self,
-        jobs: Arc<crate::driver::jobs::Table>,
+        executions: Arc<crate::driver::background::Table>,
     ) -> Arc<crate::driver::input::Input> {
         let input = Arc::new(crate::driver::input::Input::new(
             self.root().to_path_buf(),
-            jobs,
+            executions,
         ));
         self.runner.input = Some(input.clone());
         input
@@ -475,12 +470,12 @@ impl Lane {
         resolved: Arc<Resolved>,
         archive: Arc<dyn Archive>,
         retry: agent::Retry,
-        jobs: Option<Arc<crate::driver::jobs::Table>>,
+        executions: Option<Arc<crate::driver::background::Table>>,
         change: impl FnOnce(&mut Agent),
     ) {
         let agent = Arc::make_mut(&mut self.checkout.agent);
         change(agent);
-        self.checkout.resolved = arm(agent, resolved, archive, retry, jobs);
+        self.checkout.resolved = arm(agent, resolved, archive, retry, executions);
     }
 
     /// Replace what was decided where the agent holds none of it — the
@@ -565,7 +560,7 @@ impl Lane {
         &mut self.checkout.ctx
     }
 
-    /// The context a job runs with: this lane's, with the job's own way out.
+    /// The context an execution runs with: this lane's, with the execution's own way out.
     pub fn ctx_for(&self, cancel: CancellationToken) -> Ctx {
         self.checkout.ctx.clone().with_cancel(cancel)
     }
@@ -615,7 +610,7 @@ impl Lane {
     }
 
     /// What this session has spent, counted at the wire: its runs, its
-    /// compactions and the children and jobs they started alike.
+    /// compactions and the children and executions they started alike.
     pub fn spent(&self) -> Totals {
         self.checkout.agent.meter.read()
     }
@@ -632,7 +627,7 @@ impl Lane {
         self.talk.tally.seed(self.checkout.agent.spec().pricing);
     }
 
-    /// Lend the transcript to a job for the length of its run.
+    /// Lend the transcript to an execution for the length of its run.
     pub fn take_session(&mut self) -> Option<Session> {
         match std::mem::replace(&mut self.talk.transcript, Transcript::Lent(Vec::new())) {
             Transcript::Home(session) => Some(session),
@@ -643,7 +638,7 @@ impl Lane {
         }
     }
 
-    /// Take it back: the job has finished, or never started. Whatever was
+    /// Take it back: the execution has finished, or never started. Whatever was
     /// filed for the screen while it was away lands here, in the order it was
     /// drawn — the transcript a rebuild reads has to hold the rows the screen
     /// was shown.
@@ -799,7 +794,7 @@ impl Core {
     fn becomes(&mut self, talk: Conversation) {
         let lane = self.lane_mut();
         lane.talk = talk;
-        // In place, not a new `Arc`: the subagent tool holds this one. A job
+        // In place, not a new `Arc`: the subagent tool holds this one. A command
         // of the old session still out charges the new one from here.
         lane.checkout.agent.meter.reset(Totals::default());
         lane.checkout.ctx = lane
@@ -910,8 +905,8 @@ impl Core {
         };
         self.lane_mut().talk.reclaim(claim);
         journal::switched(&self.store.journal_path(&to, &id), &id);
-        if let Some(jobs) = &self.jobs {
-            jobs.rehome(&from, &to);
+        if let Some(executions) = &self.executions {
+            executions.rehome(&from, &to);
         }
         // Earlier calls name paths against the old root; nothing rewrites them.
         self.lane_mut().push_note(&format!(
@@ -956,7 +951,7 @@ impl Core {
             Arc::new(resolved),
             archive,
             crate::core::retry(&self.config),
-            self.jobs.clone(),
+            self.executions.clone(),
         );
 
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
@@ -1068,7 +1063,7 @@ impl Core {
     // from a different model is demoted the same way as after `/model`.
     pub(super) fn resume(&mut self, id: &str) -> Result<Vec<String>, String> {
         // Same id is normally a no-op (else totals would zero); unless the
-        // transcript itself is gone (a panicked job), which must be reported.
+        // transcript itself is gone (a panicked execution), which must be reported.
         if id == self.lane().talk.id {
             if self.lane().session().is_none() {
                 return Err(
@@ -1142,10 +1137,9 @@ mod tests {
         assert_eq!(core.lane().drift(), None);
     }
 
-    // A child's detach would land as a turn on this lane, which the child
-    // never hears; only the lane's copy of the scripts may leave a turn.
+    // Only the lane offers wrappers that can start background commands.
     #[tokio::test]
-    async fn only_the_lanes_scripts_may_detach() {
+    async fn only_the_lane_offers_background_script_wrappers() {
         use std::sync::Arc;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1153,7 +1147,7 @@ mod tests {
         std::fs::create_dir(&tools).unwrap();
         std::fs::write(
             tools.join("off"),
-            "#!/bin/sh\n# ---\n# description = \"Go off\"\n# ---\necho '{\"detach\":\"x\"}' >&3\n",
+            "#!/bin/sh\n# ---\n# description = \"Go off\"\n# background = true\n# ---\necho '{\"status\":\"x\"}' >&3\n",
         )
         .unwrap();
         let scripts = Arc::new(toolbox::scripts::Dir::new(&tools));
@@ -1178,13 +1172,12 @@ mod tests {
         let off = |registry: &tool::Registry| registry.get("off").unwrap();
         let args = serde_json::json!({});
         let lane = off(&agent.brief.registry).execute(args.clone(), &ctx).await;
-        assert!(lane.unwrap().flatten().contains("job #1"));
-        let child = off(&resolved.brief.registry).execute(args, &ctx).await;
-        assert!(child.unwrap_err().to_string().contains("cannot keep"));
+        assert!(lane.unwrap().flatten().contains("command #1"));
+        assert!(resolved.brief.registry.get("off").is_none());
     }
 
     #[test]
-    fn a_lanes_shell_exposes_background_controls_without_a_separate_job_tool() {
+    fn a_lanes_shell_exposes_background_controls_without_a_separate_command_tool() {
         use std::sync::Arc;
 
         let mut agent = agent::Agent::new(
@@ -1206,7 +1199,10 @@ mod tests {
         }
         assert_eq!(schema["properties"]["wait"]["type"], "integer");
         assert!(schema["properties"].get("join").is_none());
-        assert!(schema.get("required").is_none(), "an empty call lists jobs");
+        assert!(
+            schema.get("required").is_none(),
+            "an empty call lists background commands"
+        );
     }
 
     // A script already holding a name the lane hands a tool keeps it: the

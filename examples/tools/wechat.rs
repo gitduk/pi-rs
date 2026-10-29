@@ -3,7 +3,10 @@
 # Bump this script's version whenever it changes.
 version = "0.1.1"
 edition = "2024"
-description = "Connect this session to WeChat when the user requests it.\nMessages sent from the user's phone arrive here as turns. Each answer returns to the phone.\nThe tool runs in the background until you stop the job.\nOn first use, the job provides a QR code for the user to scan.\nThe login persists for later use."
+description = "Connect this session to WeChat when the user requests it.\nMessages sent from the user's phone arrive here as turns. Each answer returns to the phone.\nThe tool runs in the background until you stop the background command.\nOn first use, the background command provides a QR code for the user to scan.\nThe login persists for later use."
+
+[package.metadata.pi]
+background = true
 
 [dependencies]
 base64 = "0.22"
@@ -48,7 +51,7 @@ async fn main() -> ExitCode {
 }
 
 mod bridge {
-    //! wechat as a pi job: what the person types on the phone goes up fd 3 as
+    //! wechat as a pi background command: what the person types on the phone goes up fd 3 as
     //! `input` (or `interrupt` for `/stop`). Once connected it follows, so every
     //! turn on the checkout comes back as `started`, progress, then `reply`, cut into
     //! messages and sent on to the phone — not only the ones the phone opened.
@@ -245,8 +248,8 @@ mod bridge {
         }
     }
 
-    /// Run as pi's job until the login fails or expires, or pi goes. The error
-    /// is what pi reports back to the model when the job ends.
+    /// Run as pi's background command until the login fails or expires, or pi goes. The error
+    /// is what pi reports back to the model when the background command ends.
     pub async fn run() -> Result<(), String> {
         if std::env::var("PI_EVENTS_FD").as_deref() != Ok("3") {
             return Err("wechat runs as a pi tool: there is no fd 3 here".into());
@@ -284,10 +287,10 @@ mod bridge {
         let pi = Pi(tx);
 
         let logged_in = state.token.is_some();
-        pi.say(json!({ "detach": if logged_in {
+        pi.say(json!({ "status": if logged_in {
             "connecting to WeChat with the saved login; messages from the phone will arrive here as turns"
         } else {
-            "logging in to WeChat: a QR is in this job for the user to scan; once they do, messages from the phone arrive here as turns"
+            "logging in to WeChat: a QR is in this background command for the user to scan; once they do, messages from the phone arrive here as turns"
         }}));
         let mut client = Client::new(base_of(&state));
         let kept = Kept {
@@ -324,7 +327,7 @@ mod bridge {
     }
 
     // QR → confirm → credentials. The QR goes to stderr, read by opening the
-    // job; progress to its status. The model reads neither.
+    // background command; progress to its status. The model reads neither.
     async fn login(client: &mut Client, kept: &Kept, pi: &Pi) -> Result<(), String> {
         pi.say(json!({ "status": "waiting for the QR to be scanned" }));
         let note = pi.clone();
@@ -346,7 +349,7 @@ mod bridge {
     }
 
     // Client-side timeouts are the normal empty result; real errors back off
-    // (the reference's 2s/30s rhythm); a stale token ends the job.
+    // (the reference's 2s/30s rhythm); a stale token ends the background command.
     async fn poll(
         client: &Client,
         kept: &Kept,
@@ -1405,7 +1408,7 @@ mod login {
     }
 
     /// Render a URL as a text QR the terminal can show, or `None` if the URL is
-    /// too large to encode. Same job as the reference's `qrcode-terminal`.
+    /// too large to encode. Equivalent to the reference's `qrcode-terminal`.
     pub fn render_qr(url: &str) -> Option<String> {
         use qrcode::render::unicode;
         let code = qrcode::QrCode::new(url.as_bytes()).ok()?;
@@ -1417,7 +1420,7 @@ mod login {
             .fetch_qrcode(&[])
             .await
             .map_err(|e| LoginError::Failed(e.to_string()))?;
-        (view.status)("scan the QR in this job with WeChat to connect this session");
+        (view.status)("scan the QR in this background command with WeChat to connect this session");
         if let Some(rendered) = render_qr(&qr.qrcode_img_content) {
             (view.show)(&rendered);
         }
@@ -1443,7 +1446,7 @@ mod login {
             .fetch_qrcode(&[])
             .await
             .map_err(|e| LoginError::Failed(e.to_string()))?;
-        (view.status)("the QR was refreshed — scan the new one in this job");
+        (view.status)("the QR was refreshed — scan the new one in this background command");
         if let Some(rendered) = render_qr(&qr.qrcode_img_content) {
             (view.show)(&rendered);
         }

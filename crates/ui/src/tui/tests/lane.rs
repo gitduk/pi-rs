@@ -193,9 +193,9 @@ async fn what_a_lane_out_of_front_posted_is_in_its_view_already() {
 }
 
 // A lane left `Running` queues every later prompt into a queue that only
-// drains once it stops running, so every job kind must come back idle.
+// drains once it stops running, so every execution kind must come back idle.
 #[tokio::test]
-async fn every_kind_of_job_leaves_its_lane_idle() {
+async fn every_kind_of_command_leaves_its_lane_idle() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let kinds = || {
         vec![
@@ -229,7 +229,7 @@ async fn every_kind_of_job_leaves_its_lane_idle() {
             "a {what} left its lane running"
         );
     }
-    // And the same when the job panicked and brought no transcript home.
+    // And the same when the execution panicked and brought no transcript home.
     for (what, kind) in kinds() {
         let mut tui = surface(dir.path());
         tui.settle(crate::tui::run::Done {
@@ -272,11 +272,11 @@ async fn a_panicked_bang_does_not_lay_its_transcript_down_again() {
     }
     tui.core.save_lane(0).expect("saved");
 
-    // The job took the transcript and panicked with it, the way `start_bash`
+    // The execution took the transcript and panicked with it, the way `start_bash`
     // lends one out. Nothing comes back but the archive on disk.
     let _ = tui.core.lane_mut().take_session();
 
-    // The job panicked: no lines, and no transcript came home.
+    // The execution panicked: no lines, and no transcript came home.
     tui.settle(crate::tui::run::Done {
         token,
         kind: crate::tui::run::Kind::Bash { lines: Vec::new() },
@@ -981,7 +981,7 @@ async fn leaving_with_a_run_in_flight_takes_the_transcript_back() {
         kind: crate::tui::run::Kind::Turn,
         ran: Some((carried, Ok(llm::stream::Usage::default()))),
     })
-    .expect("the job reports");
+    .expect("the execution reports");
 
     tui.settle_all(&mut rx, "The user exited pi.").await;
 
@@ -1068,10 +1068,10 @@ fn a_now_intent_runs_with_the_transcript_a_run_has() {
     drop(lane_dir);
 }
 
-// A line from a job that has to wait keeps where it came from, or the turn
-// it finally starts answers the terminal and the job hears nothing.
+// A line from an execution that has to wait keeps where it came from, or the turn
+// it finally starts answers the terminal and the execution hears nothing.
 #[tokio::test]
-async fn a_queued_line_remembers_the_job_it_came_from() {
+async fn a_queued_line_remembers_the_command_it_came_from() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     let token = tui.core.lane().token();
@@ -1102,7 +1102,7 @@ async fn a_typed_followup_reaches_the_running_agent_and_survives_cancellation() 
     let dir = tempfile::tempdir().unwrap();
     let mut tui = surface(dir.path());
     let token = tui.core.lane().token();
-    let input = tui.core.lane_mut().listen(tui.drivers.jobs());
+    let input = tui.core.lane_mut().listen(tui.drivers.background());
     let wake = tui.admit(
         Asked::Core(Intent::Prompt("new direction".into())),
         Origin::Typed,
@@ -1166,7 +1166,7 @@ async fn a_typed_followup_reaches_the_running_agent_and_survives_cancellation() 
 fn a_followup_does_not_pass_an_earlier_queued_command_or_enter_another_lane() {
     let dir = tempfile::tempdir().unwrap();
     let mut tui = surface(dir.path());
-    let input = tui.core.lane_mut().listen(tui.drivers.jobs());
+    let input = tui.core.lane_mut().listen(tui.drivers.background());
     let (done, _) = tokio::sync::mpsc::unbounded_channel();
     tui.admit(
         Asked::Core(Intent::Bash("echo first".into())),
@@ -1193,52 +1193,50 @@ fn a_followup_does_not_pass_an_earlier_queued_command_or_enter_another_lane() {
 }
 
 // Queued results open one turn under their batch label, even output that
-// reads like a command: it is the job's output, never something typed.
+// reads like a command: it is the execution's output, never something typed.
 #[tokio::test]
-async fn queued_job_results_open_one_turn_under_their_label() {
+async fn queued_command_results_open_one_turn_under_their_label() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    let job = toolbox::background::JobSink::start(
-        &pi_core::driver::jobs::Jobs::new(tui.drivers.jobs()),
+    let execution = toolbox::background::RunSink::start(
+        &pi_core::driver::background::Commands::new(tui.drivers.background()),
         dir.path().to_path_buf(),
         "build".into(),
         Default::default(),
-        None,
     );
-    job.result("check the build".into());
-    job.result("/compact".into());
-    job.end();
+    execution.channel().result("check the build".into());
+    execution.channel().result("/compact".into());
+    execution.end();
 
-    let Some((Origin::Job, crate::tui::Wake::Relay(ask))) = tui.driver_line() else {
+    let Some((Origin::Background, crate::tui::Wake::Relay(ask))) = tui.driver_line() else {
         panic!("the results are relayed together");
     };
     assert!(ask.text.contains("check the build"), "{}", ask.text);
     assert!(ask.text.ends_with("/compact"), "{}", ask.text);
-    assert_eq!(ask.shown.as_deref(), Some("2 background job results"));
+    assert_eq!(ask.shown.as_deref(), Some("2 background command results"));
     assert!(tui.driver_line().is_none(), "one turn takes both results");
     let token = tui.core.lane().token();
     assert!(
         lane_rows(&mut tui, token)
             .iter()
-            .any(|r| r.contains("2 background job results"))
+            .any(|r| r.contains("2 background command results"))
     );
 }
 
-// A person's line through a job is a prompt even when it looks like a
+// A person's line through an execution is a prompt even when it looks like a
 // command: nothing they send runs here, and every line gets its answer.
 #[tokio::test]
-async fn a_persons_line_through_a_job_is_always_a_prompt() {
+async fn a_persons_line_through_a_command_is_always_a_prompt() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    let job = toolbox::background::JobSink::start(
-        &pi_core::driver::jobs::Jobs::new(tui.drivers.jobs()),
+    let execution = toolbox::background::RunSink::start(
+        &pi_core::driver::background::Commands::new(tui.drivers.background()),
         dir.path().to_path_buf(),
         "wechat".into(),
         Default::default(),
-        None,
     );
     for line in ["/compact", "!rm -rf build"] {
-        job.input(line.into());
+        execution.channel().input(line.into());
         let got = tui.driver_line();
         assert!(
             matches!(&got, Some((Origin::Input(_), crate::tui::Wake::Do(Asked::Core(Intent::Prompt(p)), _))) if p == line),
@@ -1266,20 +1264,20 @@ async fn leaving_saves_what_an_idle_lane_filed() {
 
     tui.core
         .lane_mut()
-        .push_note("The user stopped background job #2.");
+        .push_note("The user stopped background command #2.");
     tui.settle_all(&mut rx, "The user exited pi.").await;
     let stored = pi_store::session::Store::read(&path).expect("saved on the way out");
     assert!(stored.session.entries().iter().any(|e| matches!(
         e,
-        agent::session::Entry::Note { note, .. } if note.contains("job #2")
+        agent::session::Entry::Note { note, .. } if note.contains("command #2")
     )));
 }
 
-// A job stopped by leaving has a cause in the resumed model context, even
+// A command stopped by leaving has a cause in the resumed model context, even
 // when the transcript was lent to a turn as shutdown began.
 #[tokio::test]
-async fn leaving_with_a_job_preserves_its_stop_cause_on_resume() {
-    use toolbox::background::{Again, JobSink as _};
+async fn leaving_with_a_command_preserves_its_stop_cause_on_resume() {
+    use toolbox::background::{Again, RunSink as _};
 
     for running in [false, true] {
         let dir = tempfile::tempdir().expect("a checkout");
@@ -1298,25 +1296,25 @@ async fn leaving_with_a_job_preserves_its_stop_cause_on_resume() {
             tui.core.lane_mut().finish();
             tui.core.lane_mut().return_session(carried);
         }
-        tui.core.enable_jobs(tui.drivers.jobs());
+        tui.core.enable_background(tui.drivers.background());
         let stop = tokio_util::sync::CancellationToken::new();
-        let job = pi_core::driver::jobs::Jobs::new(tui.drivers.jobs()).start(
+        let execution = pi_core::driver::background::Commands::new(tui.drivers.background()).start(
             dir.path().into(),
             "sleep 30; echo done".into(),
             stop.clone(),
-            None,
         );
-        job.rerun(
+        execution.rerun(
             std::sync::Arc::new(|_, _| Ok(())),
             Some(Again {
                 command: "sleep 30; echo done".into(),
                 cwd: dir.path().into(),
+                ..Again::default()
             }),
         );
         let path = tui.core.store.path_of(dir.path(), tui.core.lane().id());
 
         tui.settle_all(&mut rx, "The user exited pi.").await;
-        tui.core.hand_over_jobs();
+        tui.core.hand_over_background();
         assert!(stop.is_cancelled());
 
         let stored = pi_store::session::Store::read(&path).expect("saved on exit");
@@ -1332,16 +1330,16 @@ async fn leaving_with_a_job_preserves_its_stop_cause_on_resume() {
             .core
             .lane_mut()
             .return_session(stored.into_session());
-        resumed.core.enable_jobs(resumed.drivers.jobs());
-        resumed.core.revive_jobs();
-        let jobs = resumed.drivers.jobs();
+        resumed.core.enable_background(resumed.drivers.background());
+        resumed.core.revive_commands();
+        let executions = resumed.drivers.background();
         assert_eq!(
-            jobs.jobs(dir.path())[0].state,
-            pi_core::driver::jobs::State::Stopped
+            executions.background(dir.path())[0].state,
+            pi_core::driver::background::State::Stopped
         );
         assert!(
             resumed.driver_line().is_none(),
-            "resuming does not restart the job"
+            "resuming does not restart the execution"
         );
     }
 }

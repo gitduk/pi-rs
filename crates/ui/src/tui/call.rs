@@ -11,11 +11,11 @@ use super::browse::PageLine;
 use super::mouse::Target;
 use super::row::{self, PendingTool, Row, Stage, StepMark};
 use super::scrollback::{Folds, Scrollback};
-use super::ui::OpenJob;
+use super::ui::OpenCommand;
 use crate::render::Outcome;
 use crate::render::{Paint, named};
 use pi_core::core::tools::modifies;
-use pi_core::driver::jobs::{Job, State};
+use pi_core::driver::background::{BackgroundCommand, State};
 use pi_store::icons;
 
 // A tool call not yet settled. Its line is drawn by the group it will fold
@@ -150,22 +150,22 @@ pub(super) fn push_tool_row(
 }
 
 // More than this and the list would crowd out the history it sits under.
-pub(super) const JOBS_SHOWN: usize = 4;
+pub(super) const BACKGROUND_SHOWN: usize = 4;
 
-// What a job's row says, in two: what it is, then how long it has run,
+// What a command's row says, in two: what it is, then how long it has run,
 // which a narrow row keeps whole.
-fn job_text(job: &Job) -> (String, String) {
-    let head = match job.progress.as_str() {
-        "" => format!("#{} {}", job.id, job.description),
+fn background_text(execution: &BackgroundCommand) -> (String, String) {
+    let head = match execution.progress.as_str() {
+        "" => format!("#{} {}", execution.id, execution.description),
         progress => format!(
             "#{} {}{}{progress}",
-            job.id,
-            job.description,
+            execution.id,
+            execution.description,
             icons::PART_SEP
         ),
     };
-    let state = match job.state {
-        State::Running => crate::status::running_time(job.started.elapsed())
+    let state = match execution.state {
+        State::Running => crate::status::running_time(execution.started.elapsed())
             .map_or_else(String::new, |time| format!("{}{time}", icons::PART_SEP)),
         State::Back => format!("{}done, back when idle", icons::PART_SEP),
         State::Stopped => format!("{}stopped", icons::PART_SEP),
@@ -174,29 +174,28 @@ fn job_text(job: &Job) -> (String, String) {
     (head, state)
 }
 
-// A job's description can be prose, so shell syntax colours do not apply.
 // Truncation may cut the head inside the id.
-fn job_head(job: &Job, head: &str, hovered: bool, paint: &Paint) -> Vec<Span<'static>> {
-    let id = format!("#{} ", job.id);
+fn background_head(
+    execution: &BackgroundCommand,
+    head: &str,
+    hovered: bool,
+    paint: &Paint,
+) -> Vec<Span<'static>> {
+    let id = format!("#{} ", execution.id);
     let Some(rest) = head.strip_prefix(&id) else {
         return vec![paint.span_hovered(hovered, &paint.theme.muted, head)];
     };
-    let (description, progress) = match rest.strip_prefix(&job.description) {
-        Some(progress) => (job.description.as_str(), progress),
+    let (description, progress) = match rest.strip_prefix(&execution.description) {
+        Some(progress) => (execution.description.as_str(), progress),
         None => (rest, ""),
     };
-    let mut description = Span::raw(description.to_string());
-    if hovered && paint.color {
-        description = description.bold();
-    }
-    vec![
-        paint.span_hovered(hovered, &paint.theme.muted, id),
-        description,
-        paint.span_hovered(hovered, &paint.theme.muted, progress),
-    ]
+    let mut spans = vec![paint.span_hovered(hovered, &paint.theme.muted, id)];
+    spans.extend(paint.shell(description, hovered));
+    spans.push(paint.span_hovered(hovered, &paint.theme.muted, progress));
+    spans
 }
 
-// Under an open job: the last this many rows of what it printed.
+// Under an open execution: the last this many rows of what it printed.
 const BODY_SHOWN: usize = 8;
 
 // The last lines of `said` wrapped in `room`, in at most `BODY_SHOWN` rows,
@@ -220,19 +219,19 @@ pub(super) fn tail_rows(said: &[String], room: usize) -> (usize, Vec<Line<'stati
     (from, rows)
 }
 
-/// What a row of the job list is, for a click to find.
+/// What a row of the execution list is, for a click to find.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum JobRow {
-    Job(u64),
-    // Over the tail of what an open job printed: the lines cut above it.
+pub(super) enum CommandRow {
+    BackgroundCommand(u64),
+    // Over the tail of what an open execution printed: the lines cut above it.
     Earlier(u64),
-    // What an open job printed, under its row.
+    // What an open execution printed, under its row.
     Under,
-    // The row folding the list past `JOBS_SHOWN`, or unfolding it.
+    // The row folding the list past `BACKGROUND_SHOWN`, or unfolding it.
     Fold,
 }
 
-// What an open job printed, a line per row, blank ones left out.
+// What an open execution printed, a line per row, blank ones left out.
 fn said(body: &str) -> Vec<String> {
     (body.lines())
         .map(pi_store::text::screen_line)
@@ -240,27 +239,31 @@ fn said(body: &str) -> Vec<String> {
         .collect()
 }
 
-// A page of all an open job printed, headed by its row.
-pub(super) fn job_page(job: &Job, body: &str, paint: &Paint) -> Vec<PageLine> {
-    let (head, tail) = job_text(job);
-    let mut spans = job_head(job, &head, false, paint);
+// A page of all an open execution printed, headed by its row.
+pub(super) fn background_page(
+    execution: &BackgroundCommand,
+    body: &str,
+    paint: &Paint,
+) -> Vec<PageLine> {
+    let (head, tail) = background_text(execution);
+    let mut spans = background_head(execution, &head, false, paint);
     spans.push(paint.span(&paint.theme.muted, tail));
     let head = Line::from(spans);
     let said = said(body).into_iter().map(|l| Line::from(l).into());
     std::iter::once(head.into()).chain(said).collect()
 }
 
-// Finished jobs can accumulate while a turn holds their delivery.
-pub(super) fn job_results(
-    jobs: &[Job],
+// Finished executions can accumulate while a turn holds their delivery.
+pub(super) fn background_results(
+    executions: &[BackgroundCommand],
     open: bool,
     hovered: Option<Target>,
     paint: &Paint,
     width: usize,
     at: usize,
 ) -> (Vec<Line<'static>>, Vec<Target>) {
-    let jobs = jobs.iter().filter(|j| j.state == State::Back);
-    let count = jobs.clone().count();
+    let executions = executions.iter().filter(|j| j.state == State::Back);
+    let count = executions.clone().count();
     if count == 0 {
         return (Vec::new(), Vec::new());
     }
@@ -268,35 +271,39 @@ pub(super) fn job_results(
     let text = format!(
         "{} {} waiting{}click to {}",
         icons::RELAYED_MARK,
-        row::count(count, "job result"),
+        row::count(count, "execution result"),
         icons::PART_SEP,
         if open { "collapse" } else { "expand" },
     );
-    let shine = matches!(hovered, Some(Target::JobResults(_)));
+    let shine = matches!(hovered, Some(Target::BackgroundResults(_)));
     let mut spans = vec![paint.action_hint(shine, within(&text, room))];
-    if !open && let Some(job) = jobs.clone().rev().find(|j| !j.last.is_empty()) {
-        let latest = format!("{}#{} {}", icons::PART_SEP, job.id, job.last);
+    if !open && let Some(execution) = executions.clone().rev().find(|j| !j.last.is_empty()) {
+        let latest = format!("{}#{} {}", icons::PART_SEP, execution.id, execution.last);
         spans.push(paint.span(
             &paint.theme.muted,
             within(&latest, room.saturating_sub(pi_store::text::width(&text))),
         ));
     }
     let mut lines = vec![Line::from(spans)];
-    let mut targets = vec![Target::JobResults(at)];
+    let mut targets = vec![Target::BackgroundResults(at)];
     if open {
-        for job in jobs {
-            let (head, _) = job_text(job);
-            let ([head, last, tail], _) = fit_job_row(head, String::new(), &job.last, width);
-            let shine = matches!(hovered, Some(Target::JobResult(_, id)) if id == job.id);
-            lines.push(closed_job_line(job, &head, last, tail, shine, paint));
-            targets.push(Target::JobResult(at + targets.len(), job.id));
+        for execution in executions {
+            let (head, _) = background_text(execution);
+            let ([head, last, tail], _) =
+                fit_background_row(head, String::new(), &execution.last, width);
+            let shine =
+                matches!(hovered, Some(Target::BackgroundResult(_, id)) if id == execution.id);
+            lines.push(closed_command_line(
+                execution, &head, last, tail, shine, paint,
+            ));
+            targets.push(Target::BackgroundResult(at + targets.len(), execution.id));
         }
     }
     (lines, targets)
 }
 
-fn closed_job_line(
-    job: &Job,
+fn closed_command_line(
+    execution: &BackgroundCommand,
     head: &str,
     last: String,
     tail: String,
@@ -313,56 +320,59 @@ fn closed_job_line(
     if paint.color {
         said = said.italic();
     }
-    let mut spans = job_head(job, head, shine, paint);
+    let mut spans = background_head(execution, head, shine, paint);
     spans.extend([muted(sep), said, muted(tail)]);
     Line::from(spans)
 }
 
-// One row per job, `hovered` bold; the `open` one whole, wrapped, with the
-// tail of `body` under it. Also the job whose own row each is, for a click
+// One row per execution, `hovered` bold; the `open` one whole, wrapped, with the
+// tail of `body` under it. Also the execution whose own row each is, for a click
 // to find; what it printed under it is no one's.
-pub(super) fn job_lines(
-    jobs: &[Job],
-    hovered: Option<JobRow>,
-    open: Option<&OpenJob>,
+pub(super) fn background_lines(
+    executions: &[BackgroundCommand],
+    hovered: Option<CommandRow>,
+    open: Option<&OpenCommand>,
     all: bool,
     paint: &Paint,
     width: usize,
-) -> (Vec<Line<'static>>, Vec<JobRow>) {
+) -> (Vec<Line<'static>>, Vec<CommandRow>) {
     let room = width.saturating_sub(1);
     let (mut lines, mut ids) = (Vec::new(), Vec::new());
-    let folds = llm::figures::shown(jobs.len(), JOBS_SHOWN) < jobs.len();
+    let folds = llm::figures::shown(executions.len(), BACKGROUND_SHOWN) < executions.len();
     let shown = if all || !folds {
-        jobs.len()
+        executions.len()
     } else {
-        JOBS_SHOWN
+        BACKGROUND_SHOWN
     };
-    for job in jobs.iter().take(shown) {
-        let shine = hovered == Some(JobRow::Job(job.id));
-        let rows = if let Some(OpenJob { body, .. }) = open.filter(|o| o.id == job.id) {
-            let (head, tail) = job_text(job);
-            let mut spans = job_head(job, &head, shine, paint);
+    for execution in executions.iter().take(shown) {
+        let shine = hovered == Some(CommandRow::BackgroundCommand(execution.id));
+        let rows = if let Some(OpenCommand { body, .. }) = open.filter(|o| o.id == execution.id) {
+            let (head, tail) = background_text(execution);
+            let mut spans = background_head(execution, &head, shine, paint);
             spans.push(paint.span_hovered(shine, &paint.theme.muted, tail));
             let row = Line::from(spans);
             let (from, tail) = tail_rows(&said(body), room);
             let mut rows = super::screen::fit(&row, room);
-            ids.extend(std::iter::repeat_n(JobRow::Job(job.id), rows.len()));
+            ids.extend(std::iter::repeat_n(
+                CommandRow::BackgroundCommand(execution.id),
+                rows.len(),
+            ));
             if from > 0 {
                 let more = format!("  {from} more");
-                let shine = hovered == Some(JobRow::Earlier(job.id));
+                let shine = hovered == Some(CommandRow::Earlier(execution.id));
                 rows.push(Line::from(
                     paint.action_hint(shine, pi_store::text::clip(&more, room)),
                 ));
-                ids.push(JobRow::Earlier(job.id));
+                ids.push(CommandRow::Earlier(execution.id));
             }
             let own = rows.len();
             rows.extend(tail);
-            ids.extend(std::iter::repeat_n(JobRow::Under, rows.len() - own));
+            ids.extend(std::iter::repeat_n(CommandRow::Under, rows.len() - own));
             rows
         } else {
-            let ([head, last, tail], _) = job_row(job, width);
-            let row = closed_job_line(job, &head, last, tail, shine, paint);
-            ids.push(JobRow::Job(job.id));
+            let ([head, last, tail], _) = background_row(execution, width);
+            let row = closed_command_line(execution, &head, last, tail, shine, paint);
+            ids.push(CommandRow::BackgroundCommand(execution.id));
             vec![row]
         };
         lines.extend(rows);
@@ -370,24 +380,24 @@ pub(super) fn job_lines(
     if folds {
         let fold = match all {
             true => "click to collapse".to_string(),
-            false => format!("{} more", jobs.len() - JOBS_SHOWN),
+            false => format!("{} more", executions.len() - BACKGROUND_SHOWN),
         };
-        let shine = hovered == Some(JobRow::Fold);
+        let shine = hovered == Some(CommandRow::Fold);
         lines.push(Line::from(paint.action_hint(shine, fold)));
-        ids.push(JobRow::Fold);
+        ids.push(CommandRow::Fold);
     }
     (lines, ids)
 }
 
-// A job's row and whether its command was cut: the command, the last line
+// A command's row and whether its command was cut: the command, the last line
 // it printed, then its clock. A long command keeps half of what the clock
 // leaves; the line it printed takes the rest.
-fn job_row(job: &Job, width: usize) -> ([String; 3], bool) {
-    let (head, tail) = job_text(job);
-    fit_job_row(head, tail, &job.last, width)
+fn background_row(execution: &BackgroundCommand, width: usize) -> ([String; 3], bool) {
+    let (head, tail) = background_text(execution);
+    fit_background_row(head, tail, &execution.last, width)
 }
 
-fn fit_job_row(head: String, tail: String, last: &str, width: usize) -> ([String; 3], bool) {
+fn fit_background_row(head: String, tail: String, last: &str, width: usize) -> ([String; 3], bool) {
     let room = width.saturating_sub(1);
     let last = match last {
         "" => String::new(),
@@ -406,7 +416,7 @@ fn within(s: &str, cols: usize) -> String {
     pi_store::text::clip(s, cols)
 }
 
-// Whether a click on a job's row shows more than the row does.
-pub(super) fn job_opens(job: &Job, width: usize) -> bool {
-    !job.last.is_empty() || job_row(job, width).1
+// Whether a click on a command's row shows more than the row does.
+pub(super) fn background_opens(execution: &BackgroundCommand, width: usize) -> bool {
+    !execution.last.is_empty() || background_row(execution, width).1
 }

@@ -56,9 +56,14 @@ impl Core {
         let left_out = left_out.filter(|now| was.left_out(&root).as_ref() != Some(now));
         let archive = self.archive(root, lane.agent().spec().model.clone());
         let retry = crate::core::retry(&self.config);
-        let jobs = self.jobs.clone();
-        self.lane_mut()
-            .rearm(std::sync::Arc::new(resolved), archive, retry, jobs, |_| {});
+        let executions = self.executions.clone();
+        self.lane_mut().rearm(
+            std::sync::Arc::new(resolved),
+            archive,
+            retry,
+            executions,
+            |_| {},
+        );
         let said: Vec<String> = (!moved.is_empty())
             .then(|| format!("re-read — {}", moved.join(", ")))
             .into_iter()
@@ -139,15 +144,20 @@ impl Core {
         // one `rearm`, so the copy a run in flight forces is taken once.
         let archive = self.archive(root.clone(), model);
         let idle = retry.idle;
-        let jobs = self.jobs.clone();
+        let executions = self.executions.clone();
         self.lane_mut().ctx_mut().workspace = workspace;
-        self.lane_mut()
-            .rearm(std::sync::Arc::new(resolved), archive, retry, jobs, |ag| {
+        self.lane_mut().rearm(
+            std::sync::Arc::new(resolved),
+            archive,
+            retry,
+            executions,
+            |ag| {
                 ag.compactor = std::sync::Arc::new(agent::Summarizing::new(writer, idle));
                 if let Some((transport, spec)) = retarget {
                     ag.retarget(transport, spec);
                 }
-            });
+            },
+        );
         if let Some(settings) = settings {
             self.settings = settings;
         }
@@ -274,10 +284,11 @@ impl Core {
         let retry = crate::core::retry(&self.config);
         // The child is built from this agent, so the tool is hung again for it
         // to run on the model this session just moved to.
-        let jobs = self.jobs.clone();
-        self.lane_mut().rearm(resolved, archive, retry, jobs, |ag| {
-            ag.retarget(transport, spec)
-        });
+        let executions = self.executions.clone();
+        self.lane_mut()
+            .rearm(resolved, archive, retry, executions, |ag| {
+                ag.retarget(transport, spec)
+            });
     }
 }
 

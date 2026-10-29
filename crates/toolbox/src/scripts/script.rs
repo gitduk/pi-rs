@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use tool::{Concurrency, Ctx, Tier, Tool, ToolError, ToolOutput};
 
-use crate::background::JobSink;
+use crate::background::{Environment, OutputMode};
+use crate::bash::Bash;
+use crate::channel::Ask;
 
 const TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -35,8 +37,9 @@ pub struct Script {
     pub(crate) args: Vec<Arg>,
     pub(crate) path: PathBuf,
     pub(crate) runner: Runner,
-    // Where a detached call is kept; without it a detach is refused.
-    pub(crate) jobs: Option<Arc<dyn JobSink>>,
+    pub(crate) background: bool,
+    pub(crate) shell: Option<Arc<Bash>>,
+    pub(crate) asks: Arc<dyn Ask>,
 }
 
 /// How a script is started.
@@ -77,19 +80,21 @@ impl Script {
     // Declared string args also ride in as environment, under three guards: a
     // portable name, a value already set (inherited or `.env`) that always
     // wins, and a size cap.
+    fn arguments<'a>(&'a self, args: &'a Value) -> impl Iterator<Item = (&'a str, &'a str)> {
+        self.args.iter().filter_map(move |arg| {
+            let name = arg.name.as_str();
+            let value = args.get(name).and_then(Value::as_str)?;
+            (is_identifier(name) && value.len() <= MAX_ENV_VALUE).then_some((name, value))
+        })
+    }
+
     fn env<'a>(
         &'a self,
         args: &'a Value,
         set: &'a [(String, String)],
     ) -> impl Iterator<Item = (&'a str, &'a str)> {
-        self.args.iter().filter_map(move |arg| {
-            let name = &arg.name;
-            let value = args.get(name).and_then(Value::as_str)?;
-            (is_identifier(name)
-                && std::env::var_os(name).is_none()
-                && set.iter().all(|(key, _)| key != name)
-                && value.len() <= MAX_ENV_VALUE)
-                .then_some((name.as_str(), value))
+        self.arguments(args).filter(move |(name, _)| {
+            std::env::var_os(name).is_none() && set.iter().all(|(key, _)| key != name)
         })
     }
 }
@@ -179,33 +184,37 @@ impl Tool for Script {
             .envs(self.env(&args, &shared));
         let input = serde_json::to_vec(&args).unwrap_or_default();
         let preview = tool::summary(&args).into_owned();
-        let description = if args.as_object().is_some_and(|args| args.is_empty()) {
-            self.name.clone()
-        } else {
-            format!("{} {}", self.name, tool::arguments(&args))
-        };
+        if self.background {
+            let shell = self.shell.as_ref().ok_or_else(|| {
+                ToolError::Invalid("background script calls are unavailable in this run".into())
+            })?;
+            let quoted = |value: &std::ffi::OsStr| -> Result<String, ToolError> {
+                let value = value
+                    .to_str()
+                    .ok_or_else(|| ToolError::Invalid("the script command is not UTF-8".into()))?;
+                Ok(format!("'{}'", value.replace('\'', "'\\''")))
+            };
+            let specification = self.command();
+            let specification = specification.as_std();
+            let command_text = std::iter::once(specification.get_program())
+                .chain(specification.get_args())
+                .map(quoted)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(" ");
+            let environment = Environment {
+                directory: self.path.parent().map(Path::to_path_buf),
+                arguments: self
+                    .arguments(&args)
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .collect(),
+            };
+            return shell.execute_call(json!({
+                "command": command_text, "stdin": String::from_utf8(input).expect("JSON is UTF-8"), "background": true,
+            }), environment, OutputMode::Stdout, ctx).await;
+        }
         let before = crate::drift::before(ctx);
-        let ran = super::job::run(
-            &self.name,
-            &description,
-            command,
-            input,
-            TIMEOUT,
-            ctx,
-            self.jobs.as_deref(),
-        )
-        .await;
-        // Absorbed only on the path that tells it; a detach or a failure
-        // leaves what changed for drift.
-        let exited = match ran? {
-            super::job::Ran::Exited(exited) => exited,
-            super::job::Ran::Detached { said, id } => {
-                return Ok(ToolOutput::text(format!(
-                    "{said}\n\nRunning in the background as job #{id}. Its results arrive automatically later."
-                ))
-                .with_preview(format!("{preview} [background #{id}]")));
-            }
-        };
+        let exited =
+            super::run_asking(&self.name, command, input, TIMEOUT, ctx, self.asks.as_ref()).await?;
         let (status, errs) = (exited.status, exited.stderr);
 
         if !status.success() {
@@ -250,7 +259,9 @@ mod tests {
             .collect(),
             path: PathBuf::from("spy.rs"),
             runner: Runner::Cargo,
-            jobs: None,
+            background: false,
+            shell: None,
+            asks: Arc::new(crate::channel::NoOne),
         };
         let args = json!({
             "PATH": "/hijacked",

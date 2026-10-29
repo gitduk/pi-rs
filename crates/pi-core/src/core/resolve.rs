@@ -46,7 +46,7 @@ pub struct Resolved {
     /// prompt's files are `prompt_files`, so neither is here.
     pub watched: Vec<Stamp>,
     /// The script directories `brief` reads, for a lane to swap for ones whose
-    /// scripts may detach: the subagent keeps these.
+    /// background wrappers are armed: the subagent keeps these.
     pub scripts: Vec<Arc<toolbox::scripts::Dir>>,
     /// What the prompt was told from files, held through every reload.
     pub prompt_files: Arc<PromptFiles>,
@@ -406,7 +406,7 @@ pub fn resolve(
             summarize: prompt_files.prompt("summarize").to_string(),
             effort,
             approver: std::sync::Arc::new(agent::Ceiling(tier)),
-            hooks: hooks.arm(std::sync::Arc::new(toolbox::background::NoOne)),
+            hooks: hooks.arm(std::sync::Arc::new(toolbox::channel::NoOne)),
         }),
         hooks,
         subagent_deadline: config

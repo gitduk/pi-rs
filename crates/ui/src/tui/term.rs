@@ -184,7 +184,7 @@ pub(super) fn drop_shared_history() {
 pub(super) const HISTORY_KEEP: usize = 1_000;
 
 /// SIGHUP or SIGTERM: the terminal went, or something asked pi to end.
-/// Left unheard, either kills pi outright, and the jobs it started, each in
+/// Left unheard, either kills pi outright, and the executions it started, each in
 /// a group of its own, outlive it.
 #[cfg(unix)]
 pub(super) struct Hangup([tokio::signal::unix::Signal; 2]);

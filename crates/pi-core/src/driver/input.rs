@@ -6,19 +6,19 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use agent::session::Prompt;
 
-use super::jobs::Table;
+use super::background::Table;
 
 pub struct Input {
     root: PathBuf,
-    jobs: Arc<Table>,
+    executions: Arc<Table>,
     prompts: Mutex<VecDeque<Prompt>>,
 }
 
 impl Input {
-    pub fn new(root: PathBuf, jobs: Arc<Table>) -> Self {
+    pub fn new(root: PathBuf, executions: Arc<Table>) -> Self {
         Self {
             root,
-            jobs,
+            executions,
             prompts: Mutex::default(),
         }
     }
@@ -50,7 +50,7 @@ impl agent::seams::Input for Input {
         {
             return Some(prompt);
         }
-        let due = self.jobs.take_ready_results(&self.root)?;
+        let due = self.executions.take_ready_results(&self.root)?;
         Some(Prompt {
             text: due.line,
             images: Vec::new(),
@@ -64,7 +64,7 @@ impl agent::seams::Input for Input {
 mod tests {
     use super::*;
     use agent::seams::Input as _;
-    use toolbox::background::JobSink as _;
+    use toolbox::background::RunSink as _;
 
     fn prompt(text: &str) -> Prompt {
         Prompt {
@@ -79,22 +79,22 @@ mod tests {
     async fn results_join_the_active_run_once_without_taking_other_checkouts_or_user_inputs() {
         let root = PathBuf::from("/checkout");
         let other = PathBuf::from("/elsewhere");
-        let jobs = Arc::new(Table::default());
-        let sink = crate::driver::jobs::Jobs::new(jobs.clone());
-        let phone = sink.start(root.clone(), "phone".into(), Default::default(), None);
-        phone.input("a remote question".into());
-        phone.result("phone result".into());
-        let first = sink.start(root.clone(), "build".into(), Default::default(), None);
-        let elsewhere = sink.start(other.clone(), "other".into(), Default::default(), None);
-        let second = sink.start(root.clone(), "test".into(), Default::default(), None);
-        first.result("built".into());
+        let executions = Arc::new(Table::default());
+        let sink = crate::driver::background::Commands::new(executions.clone());
+        let phone = sink.start(root.clone(), "phone".into(), Default::default());
+        phone.channel().input("a remote question".into());
+        phone.channel().result("phone result".into());
+        let first = sink.start(root.clone(), "build".into(), Default::default());
+        let elsewhere = sink.start(other.clone(), "other".into(), Default::default());
+        let second = sink.start(root.clone(), "test".into(), Default::default());
+        first.channel().result("built".into());
         first.end();
-        second.result("tested".into());
+        second.channel().result("tested".into());
         second.end();
-        elsewhere.result("unrelated".into());
+        elsewhere.channel().result("unrelated".into());
         elsewhere.end();
 
-        let input = Input::new(root.clone(), jobs.clone());
+        let input = Input::new(root.clone(), executions.clone());
         input.push(prompt("typed direction"));
         assert_eq!(input.take().unwrap().text, "typed direction");
         let results = input.take().unwrap();
@@ -103,25 +103,27 @@ mod tests {
         assert!(!results.text.contains("unrelated"));
         assert!(
             results.relayed.is_some(),
-            "job output is not attributed to the user"
+            "execution output is not attributed to the user"
         );
         assert!(
             input.take().is_none(),
             "the active run consumes the batch once"
         );
-        let (_, super::super::jobs::Back::Input { text, .. }) = jobs.take_back(&root).unwrap()
+        let (_, super::super::background::Back::Input { text, .. }) =
+            executions.take_back(&root).unwrap()
         else {
             panic!("the remote input still opens its own turn");
         };
         assert_eq!(text, "a remote question");
-        assert!(jobs.take_back(&root).is_none());
+        assert!(executions.take_back(&root).is_none());
         assert!(
-            jobs.wait(&root, first.id(), std::time::Duration::ZERO)
+            executions
+                .wait(&root, first.id(), std::time::Duration::ZERO)
                 .await
                 .is_err()
         );
-        assert!(jobs.take_back(&other).is_some());
-        phone.result("later".into());
+        assert!(executions.take_back(&other).is_some());
+        phone.channel().result("later".into());
         assert!(input.take().unwrap().text.contains("later"));
         assert!(input.take().is_none());
     }

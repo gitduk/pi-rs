@@ -129,22 +129,22 @@ pub(super) struct Ui {
     // with a count; a click flips it. Outlives the calls themselves.
     pub(super) live_tools_shown: bool,
     // Keep stopped rows available for restart while this list has focus.
-    pub(super) jobs: Vec<pi_core::driver::jobs::Job>,
-    // List changes must not redirect a stop to a different job.
-    pub(super) job_focus: Option<u64>,
+    pub(super) executions: Vec<pi_core::driver::background::BackgroundCommand>,
+    // List changes must not redirect a stop to a different execution.
+    pub(super) background_focus: Option<u64>,
     // Queued results need rows even without a live process.
-    pub(super) every_job: Vec<pi_core::driver::jobs::Job>,
-    // Independent of the running-job list.
-    pub(super) job_results_shown: bool,
+    pub(super) every_command: Vec<pi_core::driver::background::BackgroundCommand>,
+    // Independent of the running-execution list.
+    pub(super) background_results_shown: bool,
     // The front lane's tools, for slash commands; read only when needed,
     // since reading one re-stats the tools directory.
     pub(super) tools: Option<Arc<agent::Briefing>>,
-    // The job a click opened under its row.
-    pub(super) job_open: Option<OpenJob>,
+    // The execution a click opened under its row.
+    pub(super) background_open: Option<OpenCommand>,
     // Whose own row each bar row the last frame drew is, from the top.
-    pub(super) job_rows: Vec<super::call::JobRow>,
-    // Every job listed, not the first few: the fold row flips it.
-    pub(super) jobs_all: bool,
+    pub(super) command_rows: Vec<super::call::CommandRow>,
+    // Every execution listed, not the first few: the fold row flips it.
+    pub(super) background_all: bool,
     // The rows under the window the last frame drew; scrolled up, the row
     // under the history says so, and a click on it goes down to them.
     pub(super) below: usize,
@@ -203,8 +203,8 @@ impl Ui {
     // view, and the state that was that lane's. A search found its hits
     // there, and gives the line back first.
     pub(super) fn leave_lane(&mut self, view: &mut View) {
-        self.leave_jobs();
-        self.job_results_shown = false;
+        self.leave_background();
+        self.background_results_shown = false;
         self.search_close(view);
         view.draft = self.editor.take_composing();
         self.flash = None;
@@ -258,14 +258,14 @@ impl Ui {
             flash: None,
             flash_hit: None,
             copied: None,
-            jobs: Vec::new(),
-            job_focus: None,
-            every_job: Vec::new(),
-            job_results_shown: false,
+            executions: Vec::new(),
+            background_focus: None,
+            every_command: Vec::new(),
+            background_results_shown: false,
             tools: None,
-            job_open: None,
-            job_rows: Vec::new(),
-            jobs_all: false,
+            background_open: None,
+            command_rows: Vec::new(),
+            background_all: false,
             below: 0,
             images: Vec::new(),
             layout: Default::default(),
@@ -391,12 +391,12 @@ pub(super) struct Press {
     pub(super) when: Instant,
     pub(super) count: u8,
     pub(super) moved: bool,
-    // The job a click on its row opens: no double click there, only this.
-    pub(super) job: Option<u64>,
+    // The execution a click on its row opens: no double click there, only this.
+    pub(super) execution: Option<u64>,
 }
 
-// A job opened under its row, and what it has to show there.
-pub(super) struct OpenJob {
+// A command opened under its row, and what it has to show there.
+pub(super) struct OpenCommand {
     pub(super) id: u64,
     pub(super) body: String,
 }

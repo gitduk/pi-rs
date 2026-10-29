@@ -12,48 +12,18 @@
 
 pub mod env;
 #[cfg(unix)]
-mod job;
-// Elsewhere a script runs to its end within its turn; it has no fd 3.
+pub use crate::channel::process::foreground as run_asking;
 #[cfg(not(unix))]
-mod job {
-    use std::time::Duration;
-    use tool::{Ctx, ToolError};
-
-    use crate::background::{Ask, JobSink};
-
-    pub enum Ran {
-        Exited(crate::process::Exited),
-        Detached { said: String, id: u64 },
-    }
-
-    pub async fn run(
-        _name: &str,
-        _description: &str,
-        cmd: tokio::process::Command,
-        input: Vec<u8>,
-        timeout: Duration,
-        ctx: &Ctx,
-        _jobs: Option<&dyn JobSink>,
-    ) -> Result<Ran, ToolError> {
-        crate::process::run(cmd, Some(input), timeout, ctx)
-            .await
-            .map(Ran::Exited)
-    }
-
-    pub async fn run_asking(
-        _name: &str,
-        cmd: tokio::process::Command,
-        input: Vec<u8>,
-        timeout: Duration,
-        ctx: &Ctx,
-        _asks: &dyn Ask,
-    ) -> Result<crate::process::Exited, ToolError> {
-        crate::process::run(cmd, Some(input), timeout, ctx).await
-    }
+pub async fn run_asking(
+    _name: &str,
+    cmd: tokio::process::Command,
+    input: Vec<u8>,
+    timeout: std::time::Duration,
+    ctx: &tool::Ctx,
+    _asks: &dyn crate::channel::Ask,
+) -> Result<crate::process::Exited, tool::ToolError> {
+    crate::process::run(cmd, Some(input), timeout, ctx).await
 }
-/// A command run with fd 3 open to say what a script says, asking included,
-/// within its turn.
-pub use job::run_asking;
 mod script;
 
 use std::path::{Path, PathBuf};
@@ -62,7 +32,8 @@ use std::sync::Arc;
 use tool::Tool;
 use tool::stamp::{Stamp, Stamped};
 
-use crate::background::JobSink;
+use crate::bash::Bash;
+use crate::channel::{Ask, NoOne};
 
 use script::{Arg, Runner};
 pub use script::{Script, cargo_script, run_script};
@@ -72,7 +43,8 @@ pub use script::{Script, cargo_script, run_script};
 pub struct Dir {
     dir: PathBuf,
     seen: Stamped<Seen>,
-    jobs: Option<Arc<dyn JobSink>>,
+    shell: Option<Arc<Bash>>,
+    asks: Arc<dyn Ask>,
 }
 
 struct Seen {
@@ -98,16 +70,18 @@ impl Dir {
         Self {
             dir: dir.into(),
             seen: Stamped::default(),
-            jobs: None,
+            shell: None,
+            asks: Arc::new(NoOne),
         }
     }
 
-    /// The same directory, its scripts able to detach into jobs kept by `jobs`.
-    pub fn with_jobs(&self, jobs: Arc<dyn JobSink>) -> Self {
+    /// Arm script wrappers with the same shell and question service as their caller.
+    pub fn with_shell(&self, shell: Arc<Bash>, asks: Arc<dyn Ask>) -> Self {
         Self {
             dir: self.dir.clone(),
             seen: Stamped::default(),
-            jobs: Some(jobs),
+            shell: Some(shell),
+            asks,
         }
     }
 
@@ -124,8 +98,12 @@ impl Dir {
         let (scripts, skipped) = discover_in(&self.dir);
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         for script in scripts {
+            if script.background && self.shell.is_none() {
+                continue;
+            }
             tools.push(Arc::new(Script {
-                jobs: self.jobs.clone(),
+                shell: self.shell.clone(),
+                asks: self.asks.clone(),
                 ..script
             }));
         }
@@ -221,7 +199,7 @@ pub fn discover_in(dir: &Path) -> (Vec<Script>, Vec<Skip>) {
             Runner::Cargo => interface(&text),
             Runner::Shebang(..) => header(&text),
         };
-        let (description, args) = match read {
+        let (description, args, background) = match read {
             Ok(found) => found,
             Err(why) => {
                 skipped.push(Skip { path, why });
@@ -232,9 +210,11 @@ pub fn discover_in(dir: &Path) -> (Vec<Script>, Vec<Skip>) {
             name: name.to_string(),
             description,
             args,
+            background,
             path,
             runner,
-            jobs: None,
+            shell: None,
+            asks: Arc::new(NoOne),
         });
     }
     (tools, skipped)
@@ -297,7 +277,7 @@ impl Tool for Broken {
     }
 }
 
-type Interface = (String, Vec<Arg>);
+type Interface = (String, Vec<Arg>, bool);
 
 /// The frontmatter's manifest is the interface declaration: the same block
 /// cargo reads the script's dependencies from.
@@ -315,7 +295,16 @@ fn interface(text: &str) -> Result<Interface, String> {
         .and_then(|p| p.get("metadata"))
         .and_then(|m| m.get("pi"));
     let args = declared_args(declared, "package.metadata.pi.")?;
-    Ok((description.to_string(), args))
+    Ok((description.to_string(), args, background_mode(declared)?))
+}
+
+fn background_mode(table: Option<&toml::Value>) -> Result<bool, String> {
+    match table.and_then(|table| table.get("background")) {
+        None => Ok(false),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "background must be true or false".to_string()),
+    }
 }
 
 // Required and optional declarations share the same string descriptions.
@@ -391,7 +380,11 @@ fn header(text: &str) -> Result<Interface, String> {
         .filter(|d| !d.is_empty())
         .ok_or("no description in the header")?;
     let args = declared_args(Some(&table), "")?;
-    Ok((description.to_string(), args))
+    Ok((
+        description.to_string(),
+        args,
+        background_mode(Some(&table))?,
+    ))
 }
 
 /// The manifest between the `---` fences, after an optional shebang.
@@ -439,6 +432,30 @@ mod tests {
         )
         .unwrap();
         discover_in(dir.path())
+    }
+
+    #[test]
+    fn background_mode_is_declared_in_both_script_formats() {
+        for (text, expected) in [
+            ("true", Ok(true)),
+            ("false", Ok(false)),
+            ("42", Err("background must be true or false")),
+        ] {
+            let rust = format!(
+                "---\n[package]\ndescription = \"x\"\n[package.metadata.pi]\nbackground = {text}\n---\n"
+            );
+            let shell =
+                format!("#!/bin/sh\n# ---\n# description = \"x\"\n# background = {text}\n# ---\n");
+            for parsed in [interface(&rust), header(&shell)] {
+                assert_eq!(
+                    parsed
+                        .map(|(_, _, mode)| mode)
+                        .as_ref()
+                        .map_err(String::as_str),
+                    expected.as_ref().map_err(|error| *error)
+                );
+            }
+        }
     }
 
     #[test]
@@ -513,7 +530,7 @@ mod tests {
         let text = "#!/usr/bin/env cargo\n---\n[package]\ndescription = \"Count lines\"\n\n\
                     [package.metadata.pi.required]\nfile = \"file to count\"\n\n\
                     [dependencies]\nserde_json = \"1\"\n---\nfn main() {}\n";
-        let (description, args) = interface(text).unwrap();
+        let (description, args, _) = interface(text).unwrap();
         assert_eq!(description, "Count lines");
         assert_eq!(
             args,

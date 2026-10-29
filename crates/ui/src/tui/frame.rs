@@ -28,8 +28,8 @@ const MENU_PADDING: usize = 2;
 
 impl Ui {
     pub(super) fn flush(&mut self, lane: &Lane, view: &mut View) {
-        if self.job_focus.is_some() && (self.reading() || !self.menu().is_empty()) {
-            self.leave_jobs();
+        if self.background_focus.is_some() && (self.reading() || !self.menu().is_empty()) {
+            self.leave_background();
         }
         let width = self.screen.width();
         let menu = self.menu();
@@ -87,22 +87,25 @@ impl Ui {
                 .collect();
             self.search_answer(view, &laid);
         }
-        let hovered_job = self.pointer.and_then(|(_, row)| {
-            (self.job_at(row).map(call::JobRow::Job))
-                .or(self.earlier_at(row).map(call::JobRow::Earlier))
-                .or(self.fold_at(row).then_some(call::JobRow::Fold))
+        let hovered_command = self.pointer.and_then(|(_, row)| {
+            (self
+                .command_at(row)
+                .map(call::CommandRow::BackgroundCommand))
+            .or(self.earlier_at(row).map(call::CommandRow::Earlier))
+            .or(self.fold_at(row).then_some(call::CommandRow::Fold))
         });
-        let open = self.job_open.as_ref();
-        let (mut jobs, mut job_rows) = call::job_lines(
-            &self.jobs,
-            hovered_job,
+        let open = self.background_open.as_ref();
+        let (mut executions, mut command_rows) = call::background_lines(
+            &self.executions,
+            hovered_command,
             open,
-            self.jobs_all || self.job_focus.is_some(),
+            self.background_all || self.background_focus.is_some(),
             &self.paint,
             width,
         );
-        for (line, row) in jobs.iter_mut().zip(&job_rows) {
-            if matches!(row, call::JobRow::Job(id) if Some(*id) == self.job_focus) {
+        for (line, row) in executions.iter_mut().zip(&command_rows) {
+            if matches!(row, call::CommandRow::BackgroundCommand(id) if Some(*id) == self.background_focus)
+            {
                 line.style = line.style.add_modifier(ratatui::style::Modifier::REVERSED);
             }
         }
@@ -125,42 +128,43 @@ impl Ui {
             paged,
             asked.len(),
             menu.len(),
-            jobs.len(),
+            executions.len(),
             bar.len(),
             input.len(),
         );
         asked.truncate(regions.asked.height as usize);
         // A hidden selection must never receive destructive keys.
-        let focus_row = self.job_focus.and_then(|id| {
-            job_rows
+        let focus_row = self.background_focus.and_then(|id| {
+            command_rows
                 .iter()
-                .position(|row| *row == call::JobRow::Job(id))
+                .position(|row| *row == call::CommandRow::BackgroundCommand(id))
         });
-        let job_top = focus_row.map_or(0, |at| {
-            let id = self.job_focus.expect("a focused row");
-            let end = job_rows
+        let command_top = focus_row.map_or(0, |at| {
+            let id = self.background_focus.expect("a focused row");
+            let end = command_rows
                 .iter()
                 .enumerate()
                 .skip(at + 1)
                 .find(|(_, row)| {
-                    matches!(row, call::JobRow::Job(other) if *other != id)
-                        || **row == call::JobRow::Fold
+                    matches!(row, call::CommandRow::BackgroundCommand(other) if *other != id)
+                        || **row == call::CommandRow::Fold
                 })
-                .map_or(job_rows.len(), |(at, _)| at);
-            end.saturating_sub(regions.jobs.height as usize).min(at)
+                .map_or(command_rows.len(), |(at, _)| at);
+            end.saturating_sub(regions.executions.height as usize)
+                .min(at)
         });
-        jobs.drain(..job_top.min(jobs.len()));
-        job_rows.drain(..job_top.min(job_rows.len()));
-        jobs.truncate(regions.jobs.height as usize);
-        job_rows.truncate(regions.jobs.height as usize);
-        let job_caret = focus_row.and_then(|at| {
-            let row = at.saturating_sub(job_top);
-            (row < regions.jobs.height as usize)
-                .then_some((regions.jobs.x, regions.jobs.y + row as u16))
+        executions.drain(..command_top.min(executions.len()));
+        command_rows.drain(..command_top.min(command_rows.len()));
+        executions.truncate(regions.executions.height as usize);
+        command_rows.truncate(regions.executions.height as usize);
+        let command_caret = focus_row.and_then(|at| {
+            let row = at.saturating_sub(command_top);
+            (row < regions.executions.height as usize)
+                .then_some((regions.executions.x, regions.executions.y + row as u16))
         });
-        self.job_rows = job_rows;
-        if self.job_focus.is_some() && job_caret.is_none() {
-            self.leave_jobs();
+        self.command_rows = command_rows;
+        if self.background_focus.is_some() && command_caret.is_none() {
+            self.leave_background();
         }
         bar.truncate(regions.bar.height as usize);
         // A paste taller than the terminal keeps the caret's row in view.
@@ -291,26 +295,30 @@ impl Ui {
         let plain = |l: &Line<'_>| l.spans.iter().map(|s| s.content.as_ref()).collect();
         // Each readable stretch's rows are selected under the one above, at
         // its full height.
-        let [_, (_, jobs_base), (_, bar_base)] = regions.readable();
+        let [_, (_, commands_base), (_, bar_base)] = regions.readable();
         self.drawn = rows.iter().map(plain).collect();
-        self.drawn.resize(jobs_base, String::new());
-        self.drawn.extend(jobs.iter().map(plain));
+        self.drawn.resize(commands_base, String::new());
+        self.drawn.extend(executions.iter().map(plain));
         self.drawn.resize(bar_base, String::new());
         self.drawn.extend(bar.iter().map(plain));
-        let (rows, jobs, bar) = match &self.selection {
+        let (rows, executions, bar) = match &self.selection {
             Some(sel) => (
                 super::select::highlight(rows, sel, 0, |at| self.lead(view, at)),
-                super::select::highlight(jobs, sel, jobs_base, |_| 0),
+                super::select::highlight(executions, sel, commands_base, |_| 0),
                 super::select::highlight(bar, sel, bar_base, |_| 0),
             ),
-            None => (rows, jobs, bar),
+            None => (rows, executions, bar),
         };
 
-        self.below = if self.job_focus.is_some() { 0 } else { scroll };
-        let gap = if self.job_focus.is_some() {
+        self.below = if self.background_focus.is_some() {
+            0
+        } else {
+            scroll
+        };
+        let gap = if self.background_focus.is_some() {
             Some(Line::from(self.paint.span(
                 &self.paint.theme.muted,
-                pi_store::text::clip(super::jobs::HINT, width),
+                pi_store::text::clip(super::background::HINT, width),
             )))
         } else if scroll > 0 {
             let shine = self
@@ -364,7 +372,7 @@ impl Ui {
             if let Some(gap) = &gap {
                 frame.render_widget(gap, regions.gap);
             }
-            frame.render_widget(Rows(&jobs), regions.jobs);
+            frame.render_widget(Rows(&executions), regions.executions);
             if regions.overlay().height > 0 {
                 frame.render_widget(ratatui::widgets::Clear, regions.overlay());
                 frame.render_widget(Rows(&asked), regions.asked);
@@ -393,7 +401,7 @@ impl Ui {
             }
             frame.render_widget(Rows(&input_view), regions.editor);
             let caret_row = regions.editor.y + caret_in_view as u16;
-            frame.set_cursor_position(job_caret.unwrap_or((caret.1, caret_row)));
+            frame.set_cursor_position(command_caret.unwrap_or((caret.1, caret_row)));
         });
         // Bold doesn't move a row, so a second frame settles it.
         let over = self
@@ -610,7 +618,7 @@ impl Ui {
                 rows.extend(screen::fit(&painted, width));
             }
         }
-        // Typed lines precede job results to match delivery priority.
+        // Typed lines precede execution results to match delivery priority.
         let waiting = |mark: &str, line: &str| {
             let first = line.lines().next().unwrap_or_default();
             let more = if line.trim_end().contains('\n') {
@@ -640,9 +648,9 @@ impl Ui {
             })
             .collect();
         let hovered = self.pointer.and_then(|(_, row)| self.target_at(row));
-        let (results, result_targets) = call::job_results(
-            &self.every_job,
-            self.job_results_shown,
+        let (results, result_targets) = call::background_results(
+            &self.every_command,
+            self.background_results_shown,
             hovered,
             &self.paint,
             width,
@@ -654,7 +662,7 @@ impl Ui {
     }
 
     // `judge #3 · tests failed, now what? · space mark · tab take …`: who
-    // asks only when it is a job, apart from the turn; then the keys that do
+    // asks only when it is an execution, apart from the turn; then the keys that do
     // each thing with `layers` up, as many as fit beside the question in
     // `width`, the ones nobody would guess first.
     pub(super) fn question_head(
@@ -672,7 +680,7 @@ impl Ui {
             .collect::<Vec<_>>()
             .join("/");
         let asker = match &question.from {
-            Asker::Job { name, .. } => format!("{name}{}", icons::PART_SEP),
+            Asker::Background { name, .. } => format!("{name}{}", icons::PART_SEP),
             Asker::Tool { .. } => String::new(),
         };
         let said = format!("{asker}{}", question.text);

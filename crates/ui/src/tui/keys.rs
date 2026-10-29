@@ -87,7 +87,7 @@ impl Ui {
                 return Asked::Own(Deed::Nothing);
             }
             TermEvent::Paste(text) => {
-                if self.job_focus.is_some() {
+                if self.background_focus.is_some() {
                     return Asked::Own(Deed::Nothing);
                 }
                 self.last_press = None;
@@ -102,7 +102,7 @@ impl Ui {
             }
             TermEvent::Mouse(mouse) => {
                 if matches!(mouse.kind, MouseEventKind::Down(_)) {
-                    self.leave_jobs();
+                    self.leave_background();
                 }
                 return self.mouse(view, mouse);
             }
@@ -147,7 +147,7 @@ impl Ui {
             Some(Action::AppQuit) => return Asked::Core(Intent::Builtin(Builtin::Quit)),
             _ => {}
         }
-        if let Some(asked) = self.job_key(key) {
+        if let Some(asked) = self.background_key(key) {
             return asked;
         }
         if self.search_key(view, action) {
@@ -207,8 +207,8 @@ impl Ui {
     // The stop: whatever is over the editor closes, and a run stops. With
     // neither, it says the next one leaves.
     fn cancel(&mut self, view: &mut View, running: bool) -> Asked {
-        let focused = self.job_focus.is_some();
-        self.leave_jobs();
+        let focused = self.background_focus.is_some();
+        self.leave_background();
         let closed = self.close_overlay(view) || focused;
         if running {
             return Asked::Own(Deed::Interrupt);
@@ -508,10 +508,12 @@ impl Ui {
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                 if !self.reading() {
                     let deed = match self.target_at(mouse.row) {
-                        Some(super::mouse::Target::JobResults(_)) => {
-                            Some(Deed::JobResults(!self.job_results_shown))
+                        Some(super::mouse::Target::BackgroundResults(_)) => {
+                            Some(Deed::BackgroundResults(!self.background_results_shown))
                         }
-                        Some(super::mouse::Target::JobResult(_, id)) => Some(Deed::Job(id)),
+                        Some(super::mouse::Target::BackgroundResult(_, id)) => {
+                            Some(Deed::CommandOutput(id))
+                        }
                         _ => None,
                     };
                     if let Some(deed) = deed {
@@ -524,7 +526,7 @@ impl Ui {
             }
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
                 if let Some(id) = self.on_release(view, mouse.column, mouse.row) {
-                    return Asked::Own(Deed::Job(id));
+                    return Asked::Own(Deed::CommandOutput(id));
                 }
             }
             _ => {}

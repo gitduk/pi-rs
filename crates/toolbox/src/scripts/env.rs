@@ -1,6 +1,6 @@
 //! `.env` beside the scripts: values every script is started with, such as
-//! the keys their services want. Only scripts get them — never `bash`, whose
-//! output the model reads, and never pi's own environment.
+//! the keys their services want. Script wrappers load these for their own
+//! subprocess only; ordinary shell calls and the host environment do not.
 
 use std::path::Path;
 

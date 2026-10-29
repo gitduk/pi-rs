@@ -1,9 +1,10 @@
-//! For tests: a job host that records what its one job said, in order, and
+//! For tests: an execution host that records what its one execution said, in order, and
 //! a context over a directory.
 
 use std::sync::{Arc, Mutex};
 
-use crate::background::{JobHandle, Peek, Told};
+use crate::background::{Peek, RunHandle};
+use crate::channel::Told;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tool::Ctx;
@@ -13,25 +14,26 @@ pub(crate) struct Sink {
     pub(crate) said: Arc<Mutex<Vec<String>>>,
     pub(crate) ended: Arc<Notify>,
     pub(crate) stop: Mutex<Option<CancellationToken>>,
-    pub(crate) told: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Told>>>,
+    pub(crate) told: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Told>>>>,
     pub(crate) output: Arc<Mutex<Option<Peek>>>,
     // Where the answer to the question last asked with `back` goes.
     pub(crate) answer: Mutex<Option<tokio::sync::oneshot::Sender<Option<String>>>>,
 }
 
 struct Handle {
+    told: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Told>>>>,
     said: Arc<Mutex<Vec<String>>>,
     ended: Arc<Notify>,
     output: Arc<Mutex<Option<Peek>>>,
 }
 
-impl crate::background::Ask for Sink {
+impl crate::channel::Ask for Sink {
     fn ask(
         &self,
         _root: std::path::PathBuf,
         asker: &str,
-        asked: crate::background::Asked,
-    ) -> Result<Option<crate::background::Answer>, String> {
+        asked: crate::channel::Asked,
+    ) -> Result<Option<crate::channel::Answer>, String> {
         self.said
             .lock()
             .unwrap()
@@ -45,21 +47,20 @@ impl crate::background::Ask for Sink {
     }
 }
 
-impl crate::background::JobSink for Sink {
+impl crate::background::RunSink for Sink {
     fn start(
         &self,
         _root: std::path::PathBuf,
         description: String,
         stop: CancellationToken,
-        told: Option<tokio::sync::mpsc::UnboundedSender<Told>>,
-    ) -> Arc<dyn JobHandle> {
+    ) -> Arc<dyn RunHandle> {
         self.said
             .lock()
             .unwrap()
             .push(format!("start {description}"));
         *self.stop.lock().unwrap() = Some(stop);
-        *self.told.lock().unwrap() = told;
         Arc::new(Handle {
+            told: self.told.clone(),
             said: self.said.clone(),
             ended: self.ended.clone(),
             output: self.output.clone(),
@@ -67,10 +68,28 @@ impl crate::background::JobSink for Sink {
     }
 }
 
-impl JobHandle for Handle {
+impl RunHandle for Handle {
+    fn channel(&self) -> &dyn crate::channel::Channel {
+        self
+    }
+
     fn id(&self) -> u64 {
         7
     }
+    fn watch(&self, output: Peek) {
+        *self.output.lock().unwrap() = Some(output);
+    }
+    fn end(&self) {
+        self.said.lock().unwrap().push("end".into());
+        self.ended.notify_one();
+    }
+}
+
+impl crate::channel::Channel for Handle {
+    fn listen(&self, to: tokio::sync::mpsc::UnboundedSender<Told>) {
+        *self.told.lock().unwrap() = Some(to);
+    }
+
     fn status(&self, text: String) {
         self.said.lock().unwrap().push(format!("status {text}"));
     }
@@ -83,7 +102,7 @@ impl JobHandle for Handle {
     fn input(&self, text: String) {
         self.said.lock().unwrap().push(format!("input {text}"));
     }
-    fn choose(&self, asked: crate::background::Asked) {
+    fn choose(&self, asked: crate::channel::Asked) {
         self.said.lock().unwrap().push(format!(
             "choose {}: {}",
             asked.question,
@@ -101,13 +120,6 @@ impl JobHandle for Handle {
     }
     fn follow(&self) {
         self.said.lock().unwrap().push("follow".into());
-    }
-    fn watch(&self, output: Peek) {
-        *self.output.lock().unwrap() = Some(output);
-    }
-    fn end(&self) {
-        self.said.lock().unwrap().push("end".into());
-        self.ended.notify_one();
     }
 }
 

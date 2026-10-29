@@ -14,7 +14,7 @@ impl Ui {
 
     pub(super) fn set_mode(&mut self, mode: Mode) {
         if mode != Mode::Normal {
-            self.leave_jobs();
+            self.leave_background();
         }
         if let Some(m) = &mut self.vim {
             *m = mode;
@@ -61,7 +61,7 @@ impl Ui {
     // never resumes Normal without an intervening keystroke.
     pub(super) fn set_vim(&mut self, cfg: &pi_store::config::Vim) {
         if !cfg.enabled {
-            self.leave_jobs();
+            self.leave_background();
         }
         // Every pair of bare characters is a vim key; with vim off none forms,
         // so `j k` typed as text stays text.

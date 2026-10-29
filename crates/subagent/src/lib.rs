@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc::unbounded_channel, watch};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
-use toolbox::background::JobSink;
 use toolbox::bash;
 
 use agent::session::Session;
@@ -21,17 +20,16 @@ pub const PROMPT: &str = include_str!("../prompts/subagent.md");
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Args {
     // Never read by the child — this is the caller's word to the screen and
-    // the log, which otherwise show a delegated job as a bare `subagent`.
+    // the log, which otherwise show a delegated task as a bare `subagent`.
     description: String,
     prompt: String,
     // Run after the child stops, in the same checkout. Never seen by the
     // child: a check it knows about is a check it can write itself around.
     #[serde(default)]
     verify: Option<String>,
-    #[serde(default)]
-    background: bool,
 }
 
 // How many written paths the result names before counting the rest — kept
@@ -73,9 +71,6 @@ pub struct Subagent {
     // The retry schedule the child runs on, handed in when the tool is hung:
     // a tool has no way to reach the config where it is called.
     retry: Retry,
-    // Where a call sent to the background is kept; without it `background`
-    // is not offered and every call blocks its turn.
-    background: Option<Arc<dyn JobSink>>,
     tools: Option<ToolFactory>,
 }
 
@@ -129,16 +124,8 @@ impl Subagent {
             archive,
             deadline: DEADLINE,
             retry,
-            background: None,
             tools: None,
         }
-    }
-
-    /// Offer `background`: a call may leave its turn as a job kept by
-    /// `jobs`, its answer coming back with other queued job results in a turn.
-    pub fn with_background(mut self, jobs: Arc<dyn JobSink>) -> Self {
-        self.background = Some(jobs);
-        self
     }
 
     pub fn with_deadline(mut self, deadline: Duration) -> Self {
@@ -244,50 +231,43 @@ impl Tool for Subagent {
     }
 
     fn description(&self) -> &str {
-        "Assign a self-contained job to a subagent and receive its conclusion. \
+        "Assign a self-contained task to a subagent and receive its conclusion. \
          The subagent uses the same checkout and tools, with a separate context. \
          You receive only its final message, not the files it reads or commands it runs.\n\n\
          Use it for searches across many files, test suites, or summaries of large unfamiliar areas. \
          Several calls can run in parallel. \
          Do not delegate work you can finish in one or two calls. The extra call costs more than it saves.\n\n\
-         Do not assign work that requires answers from you during execution. \
+         Do not assign work that requires answers from you while it runs. \
          The subagent cannot ask you questions and will guess missing details. \
          Specify the required result and its format. \
          The subagent cannot call this tool or delegate further. Assign work it can finish itself.\n\n\
          The result ends with paths changed through `write` or `edit`. \
          This list excludes changes made through shell commands. \
-         Supply `verify` whenever the job has a check, such as tests, a build, or a linter. \
+         Supply `verify` whenever the task has a check, such as tests, a build, or a linter. \
          Its exit status accompanies the result and can check changes made through commands. \
          The subagent's own report has no independent check. You cannot ask it follow-up questions."
     }
 
     fn schema(&self) -> Value {
-        let mut schema = json!({
+        json!({
             "type": "object",
             "properties": {
                 "description": {
                     "type": "string",
-                    "description": "Name the job in three to six words, such as \"find every caller of spans\" or \"run the test suite\". The user sees this label while the job runs. The subagent does not receive it.",
+                    "description": "Name the task in three to six words, such as \"find every caller of spans\" or \"run the test suite\". The user sees this label while the task runs. The subagent does not receive it.",
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Describe the complete job: what to do, where to look, and what to report. The subagent does not receive this conversation.",
+                    "description": "Describe the complete task: what to do, where to look, and what to report. The subagent does not receive this conversation.",
                 },
                 "verify": {
                     "type": "string",
-                    "description": "A shell command to check the job, such as tests, a build, or a linter. It runs in the workspace root after the subagent stops. Its exit status accompanies the result. Omit it when the job has no check.",
+                    "description": "A shell command to check the task, such as tests, a build, or a linter. It runs in the workspace root after the subagent stops. Its exit status accompanies the result. Omit it when the task has no check.",
                 },
             },
             "required": ["description", "prompt"],
             "additionalProperties": false,
-        });
-        if self.background.is_some() {
-            schema["properties"]["background"] = json!({
-                "type": "boolean",
-                "description": "Run the subagent independently of this turn. The call returns an id immediately. Its answer arrives later in a turn with other queued job results. Use this for long jobs whose results you do not need immediately. Continue independent work or end the turn.\n\nThe subagent shares this checkout. Assign work that does not change files you are editing.",
-            });
-        }
-        schema
+        })
     }
 
     // What the child may do, because that is what the caller is authorising.
@@ -305,52 +285,11 @@ impl Tool for Subagent {
                 "the subagent's `prompt` is empty — say what it should do".into(),
             ));
         }
-        match &self.background {
-            Some(jobs) if args.background => self.send_off(args, ctx, jobs.as_ref()),
-            _ => self.run(args, ctx).await,
-        }
+        self.run(args, ctx).await
     }
 }
 
 impl Subagent {
-    // Started apart from the turn: the job's own token, so a stop leaves it
-    // running, and its own record of writes, since the caller's run will end.
-    fn send_off(&self, args: Args, ctx: &Ctx, jobs: &dyn JobSink) -> Result<ToolOutput, ToolError> {
-        let description = args.description.replace('\n', " ");
-        let stop = tokio_util::sync::CancellationToken::new();
-        let job = jobs.start(
-            ctx.workspace.root().to_path_buf(),
-            description.clone(),
-            stop.clone(),
-            None,
-        );
-        let id = job.id();
-        let this = self.clone();
-        let progress: tool::Progress = {
-            let job = job.clone();
-            Arc::new(move |said| job.status(said))
-        };
-        let ctx = ctx
-            .clone()
-            .with_own_writes()
-            .with_cancel(stop)
-            .with_progress(progress);
-        tokio::spawn(async move {
-            // What it spent was charged as it went, to the meter it shares.
-            let answer = match this.run(args, &ctx).await {
-                Ok(out) => format!("{}\n\n{}", out.preview(), out.flatten()),
-                Err(why) => why.to_string(),
-            };
-            job.result(answer);
-            job.end();
-        });
-        let preview = format!("{} [background #{id}]", description.trim());
-        Ok(ToolOutput::text(format!(
-            "started in the background as #{id}. Its answer arrives automatically later."
-        ))
-        .with_preview(preview))
-    }
-
     async fn run(&self, args: Args, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let id = format!(
             "{}-subagent-{}",
@@ -579,18 +518,18 @@ impl Subagent {
     }
 }
 
-// The finished-call line: job, then its cost in brackets. The job leads
+// The finished-call line: task, then its cost in brackets. The task leads
 // because several children run at once, so a bare cost names none of them.
 fn sketch(description: &str, heard: &Heard) -> String {
     let spent = llm::figures::slash(heard.spent.input, heard.spent.output);
     // Flattened, not trusted: this row is written one line at a time, and a
     // newline in it would stair-step everything drawn after.
-    let job = description.replace('\n', " ");
-    match job.trim() {
+    let task = description.replace('\n', " ");
+    match task.trim() {
         // Nothing to hold apart from, so the brackets would enclose the row
         // rather than rank it.
         "" => spent,
-        job => format!("{job} [{spent}]"),
+        task => format!("{task} [{spent}]"),
     }
 }
 

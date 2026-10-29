@@ -41,8 +41,9 @@ If an available tool supports background execution, use it for these checks.
 Report the result when it arrives instead of asking the user to inspect it.
 Do not use sleep to wait for a check. Sleep only guesses how long the check takes.
 
-If your answer requires the result, wait on the job itself. This wait returns when the job ends.
-Otherwise, end the turn. The result opens the next turn.
+Run a command in the foreground when its result is needed before your answer.
+For a background command, continue independent work or end the turn with progress.
+Its completion arrives automatically and opens the next turn. Do not poll for completion.
 
 Some actions cannot be undone:
 

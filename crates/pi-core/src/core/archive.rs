@@ -40,7 +40,7 @@ pub struct Filed {
 impl Filed {
     /// Handed straight out as the trait object the tool takes: nothing here
     /// needs the concrete type, and a caller that has to spell the coercion is
-    /// a caller doing this crate's job.
+    /// a caller doing this crate's execution.
     pub fn armed(store: Store, root: std::path::PathBuf, model: String) -> Arc<dyn Archive> {
         Arc::new(Self { store, root, model })
     }

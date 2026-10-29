@@ -1,17 +1,17 @@
-//! What drives a lane from outside the keyboard: a job, a `/loop`.
+//! What drives a lane from outside the keyboard: an execution, a `/loop`.
 //!
 //! A driver hears the progress and end of turns its own lines began; `Drivers`
 //! keeps that ledger so the surface need not know which driver cares.
 
+pub mod background;
 pub mod input;
-pub mod jobs;
 pub mod looping;
 
 use std::sync::Arc;
 
 use agent::Event;
 use tool::Ctx;
-use toolbox::background::Told;
+use toolbox::channel::Told;
 
 use crate::input::Drive;
 use looping::Loops;
@@ -21,8 +21,8 @@ use looping::Loops;
 pub enum Origin {
     Typed,
     Loop,
-    Job,
-    /// A person speaking through job `0`: the turn's answer goes back to it.
+    Background,
+    /// A person speaking through execution `0`: the turn's answer goes back to it.
     Input(u64),
 }
 
@@ -63,14 +63,14 @@ pub struct Next {
 #[derive(Default)]
 pub struct Drivers {
     loops: Loops,
-    jobs: Arc<jobs::Table>,
-    // Runs a job is told the end of — its input opened them, or it follows
+    executions: Arc<background::Table>,
+    // Runs an execution is told the end of — its input opened them, or it follows
     // its checkout — each with its answer so far.
     owed: Vec<Owed>,
 }
 
 struct Owed {
-    job: u64,
+    execution: u64,
     lane: u64,
     said: String,
     // Where the current turn's text began: a retried request starts over.
@@ -82,29 +82,29 @@ struct Owed {
 impl Drivers {
     /// What the shell controls and calls that outlive their turn write into: the
     /// lanes' tools and this driver share it.
-    pub fn jobs(&self) -> Arc<jobs::Table> {
-        self.jobs.clone()
+    pub fn background(&self) -> Arc<background::Table> {
+        self.executions.clone()
     }
 
     /// The line a driver sends `lane`, the checkout at `root`, next. Asked
     /// only when the lane is free and nothing typed is waiting: what the user
     /// says comes first.
     ///
-    /// Queued job results together first: they were due already, and a loop's
+    /// Queued execution results together first: they were due already, and a loop's
     /// next round can wait one turn where a loop that never settles would hold
-    /// them off for good. Inputs through jobs keep their own turns.
+    /// them off for good. Inputs through executions keep their own turns.
     pub fn next(&mut self, lane: u64, root: &std::path::Path) -> Option<Next> {
-        Some(match self.jobs.take_back(root) {
-            Some((_, jobs::Back::Result(due))) => Next {
+        Some(match self.executions.take_back(root) {
+            Some((_, background::Back::Result(due))) => Next {
                 line: due.line,
                 note: due.note,
-                origin: Origin::Job,
+                origin: Origin::Background,
                 label: Some(due.label),
                 as_typed: false,
             },
             Some((
-                job,
-                jobs::Back::Input {
+                execution,
+                background::Back::Input {
                     text,
                     note,
                     as_typed,
@@ -112,7 +112,7 @@ impl Drivers {
             )) => Next {
                 line: text,
                 note,
-                origin: Origin::Input(job),
+                origin: Origin::Input(execution),
                 label: None,
                 as_typed,
             },
@@ -156,10 +156,10 @@ impl Drivers {
         match origin {
             // Only a model turn ends with an answer to send back: a `!` never
             // reaches `Done`, so its answer would be owed forever.
-            Origin::Input(job) if prompt && started => self.owe(job, lane),
+            Origin::Input(execution) if prompt && started => self.owe(execution, lane),
             Origin::Loop if started => self.loops.ask(lane),
             Origin::Loop => return self.loops.unstarted(lane),
-            Origin::Typed | Origin::Job | Origin::Input(_) => {}
+            Origin::Typed | Origin::Background | Origin::Input(_) => {}
         }
         None
     }
@@ -170,8 +170,8 @@ impl Drivers {
         // Each request, not just the run's first: one that follows from
         // mid-run still hears how the run ends.
         if let Event::TurnStart { .. } = event {
-            for job in self.jobs.followers(root) {
-                self.owe(job, lane);
+            for execution in self.executions.followers(root) {
+                self.owe(execution, lane);
             }
         }
         for owed in self.owed.iter_mut().filter(|o| o.lane == lane) {
@@ -182,16 +182,18 @@ impl Drivers {
                 Event::ToolQueued { .. } => {
                     let text = &owed.said[owed.sent..];
                     if !text.trim().is_empty() {
-                        self.jobs.tell(owed.job, Told::Progress(text.to_string()));
+                        self.executions
+                            .tell(owed.execution, Told::Progress(text.to_string()));
                         owed.sent = owed.said.len();
                     }
                 }
                 Event::ToolProgress { text, .. } if !text.trim().is_empty() => {
                     let now = tokio::time::Instant::now();
                     if owed.progress.as_ref().is_none_or(|(last, at)| {
-                        last != text && now.duration_since(*at) >= jobs::PROGRESS_EVERY
+                        last != text && now.duration_since(*at) >= background::PROGRESS_EVERY
                     }) {
-                        self.jobs.tell(owed.job, Told::Progress(text.clone()));
+                        self.executions
+                            .tell(owed.execution, Told::Progress(text.clone()));
                         owed.progress = Some((text.clone(), now));
                     }
                 }
@@ -210,8 +212,8 @@ impl Drivers {
         cap: Option<usize>,
     ) -> Option<String> {
         for owed in self.owed.extract_if(.., |o| o.lane == lane) {
-            self.jobs.tell(
-                owed.job,
+            self.executions.tell(
+                owed.execution,
                 Told::Reply(reply(owed.said[owed.sent..].into(), ended)),
             );
         }
@@ -227,10 +229,10 @@ impl Drivers {
 
     /// End the loops of lanes that are gone, saying which ended.
     pub fn retain(&mut self, live: impl Fn(u64) -> bool) -> Vec<String> {
-        // A job left waiting on a reply would wait for good.
+        // A command left waiting on a reply would wait for good.
         for owed in self.owed.extract_if(.., |o| !live(o.lane)) {
-            self.jobs.tell(
-                owed.job,
+            self.executions.tell(
+                owed.execution,
                 Told::Reply(reply(owed.said[owed.sent..].into(), &Ended::Stopped)),
             );
         }
@@ -239,24 +241,28 @@ impl Drivers {
 }
 
 impl Drivers {
-    // A job is owed a run's answer once, however many reasons it has.
-    fn owe(&mut self, job: u64, lane: u64) {
-        if self.owed.iter().any(|o| o.job == job && o.lane == lane) {
+    // A command is owed a run's answer once, however many reasons it has.
+    fn owe(&mut self, execution: u64, lane: u64) {
+        if self
+            .owed
+            .iter()
+            .any(|o| o.execution == execution && o.lane == lane)
+        {
             return;
         }
         self.owed.push(Owed {
-            job,
+            execution,
             lane,
             said: String::new(),
             turn_from: 0,
             sent: 0,
             progress: None,
         });
-        self.jobs.tell(job, Told::Started);
+        self.executions.tell(execution, Told::Started);
     }
 }
 
-// A turn's answer as its job is told it: what it said, then how it ended
+// A turn's answer as its execution is told it: what it said, then how it ended
 // when that was not cleanly, so a stop never reads as silence.
 fn reply(mut said: String, ended: &Ended) -> String {
     let how = match ended {
@@ -272,8 +278,8 @@ fn reply(mut said: String, ended: &Ended) -> String {
 }
 
 // What the user's controls changed: failures are notices; successful
-// changes are also told to the model, since the jobs will not report them.
-fn job_note(
+// changes are also told to the model, since the executions will not report them.
+fn command_note(
     (failed, done): (Vec<String>, Vec<String>),
     note: impl Fn(&str, bool) -> String,
 ) -> Said {
@@ -285,24 +291,28 @@ fn job_note(
 }
 
 impl Drivers {
-    /// Stop the named jobs, or all running jobs when none are named, and
+    /// Stop the named executions, or all running executions when none are named, and
     /// tell the model what the user changed.
-    pub fn stop_jobs(&self, root: &std::path::Path, ids: &[u64]) -> Said {
-        job_note(self.jobs.stop_each(root, ids), |ids, one| {
-            let (job, it) = if one { ("job", "it") } else { ("jobs", "them") };
+    pub fn stop_commands(&self, root: &std::path::Path, ids: &[u64]) -> Said {
+        command_note(self.executions.stop_each(root, ids), |ids, one| {
+            let (execution, it) = if one {
+                ("command", "it")
+            } else {
+                ("commands", "them")
+            };
             format!(
-                "The user stopped background {job} {ids}; nothing more will come back from {it}."
+                "The user stopped background {execution} {ids}; nothing more will come back from {it}."
             )
         })
     }
 
-    /// Restart the named jobs and tell the model that their earlier,
+    /// Restart the named executions and tell the model that their earlier,
     /// unreported results no longer apply.
-    pub fn restart_jobs(&self, root: &std::path::Path, ids: &[u64]) -> Said {
-        job_note(self.jobs.restart_each(root, ids), |ids, one| {
-            let job = if one { "job" } else { "jobs" };
+    pub fn restart_commands(&self, root: &std::path::Path, ids: &[u64]) -> Said {
+        command_note(self.executions.restart_each(root, ids), |ids, one| {
+            let execution = if one { "command" } else { "commands" };
             format!(
-                "The user restarted background {job} {ids}: each runs again under the same id, and what the earlier run had not yet reported is dropped."
+                "The user restarted background {execution} {ids}: each runs again under the same id, and what the earlier run had not yet reported is dropped."
             )
         })
     }
@@ -312,12 +322,12 @@ impl Drivers {
 mod tests {
     use super::*;
     use tool::Tool as _;
-    use toolbox::background::JobSink as _;
+    use toolbox::background::RunSink as _;
 
-    // The start delay belongs to the job. Ending the scheduling turn does
+    // The start delay belongs to the execution. Ending the scheduling turn does
     // not cancel it; completion opens a later turn through the same driver.
     #[tokio::test]
-    async fn a_delayed_job_returns_before_starting_and_reports_in_a_later_turn() {
+    async fn a_delayed_command_returns_before_starting_and_reports_in_a_later_turn() {
         use serde_json::json;
         use std::time::Duration;
 
@@ -325,13 +335,13 @@ mod tests {
         let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
         let root = ctx.workspace.root();
         let mut drivers = Drivers::default();
-        let table = drivers.jobs();
-        let control = Arc::new(jobs::Jobs::new(table.clone()));
-        let jobs = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        let table = drivers.background();
+        let control = Arc::new(background::Commands::new(table.clone()));
+        let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
         let marker = root.join("started");
         let out = tokio::time::timeout(
             Duration::from_millis(500),
-            jobs.execute(
+            executions.execute(
                 json!({"command": "echo started > started; echo finished", "background": true, "wait": 1}),
                 &ctx,
             ),
@@ -339,9 +349,13 @@ mod tests {
         .await
         .expect("scheduling must not wait for the start delay")
         .unwrap();
-        assert!(out.flatten().contains("job #1"));
+        assert!(out.flatten().contains("command #1"));
         assert!(!marker.exists(), "the command has not started");
-        assert!(table.jobs(root)[0].progress.contains("before starting"));
+        assert!(
+            table.background(root)[0]
+                .progress
+                .contains("before starting")
+        );
         assert!(drivers.next(1, root).is_none());
         ctx.cancel.cancel();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -357,7 +371,7 @@ mod tests {
         })
         .await
         .expect("completion is delivered without another user input");
-        assert_eq!(next.origin, Origin::Job);
+        assert_eq!(next.origin, Origin::Background);
         assert!(next.line.contains("finished"));
         assert!(marker.exists());
         assert!(drivers.next(1, root).is_none(), "reported once");
@@ -368,25 +382,25 @@ mod tests {
         let mut drivers = Drivers::default();
         let root = std::path::Path::new("/checkout");
         let elsewhere = std::path::Path::new("/elsewhere");
-        let table = drivers.jobs();
-        let sink = jobs::Jobs::new(table.clone());
-        let first = sink.start(root.into(), "build".into(), Default::default(), None);
-        let other = sink.start(elsewhere.into(), "other".into(), Default::default(), None);
-        let second = sink.start(root.into(), "test".into(), Default::default(), None);
+        let table = drivers.background();
+        let sink = background::Commands::new(table.clone());
+        let first = sink.start(root.into(), "build".into(), Default::default());
+        let other = sink.start(elsewhere.into(), "other".into(), Default::default());
+        let second = sink.start(root.into(), "test".into(), Default::default());
         // Arrival order differs from registration order, as it can in a run.
-        second.result("tests passed".into());
+        second.channel().result("tests passed".into());
         second.end();
-        other.result("another checkout".into());
+        other.channel().result("another checkout".into());
         other.end();
-        first.result("built".into());
+        first.channel().result("built".into());
         first.end();
 
         let next = drivers.next(1, root).unwrap();
-        assert_eq!(next.origin, Origin::Job);
-        assert_eq!(next.label.as_deref(), Some("2 background job results"));
+        assert_eq!(next.origin, Origin::Background);
+        assert_eq!(next.label.as_deref(), Some("2 background command results"));
         assert_eq!(
             next.line,
-            "Background job #1 (build) reports:\n\nbuilt\n\nBackground job #3 (test) reports:\n\ntests passed"
+            "Background command #1 (build) reports:\n\nbuilt\n\nBackground command #3 (test) reports:\n\ntests passed"
         );
         assert!(next.note.contains("2 queued results"));
         assert!(!next.as_typed);
@@ -394,10 +408,13 @@ mod tests {
             drivers.next(1, root).is_none(),
             "one turn drains the backlog"
         );
-        assert!(table.jobs(root).is_empty(), "ended jobs are settled");
+        assert!(
+            table.background(root).is_empty(),
+            "ended executions are settled"
+        );
         let next = drivers.next(2, elsewhere).unwrap();
         assert!(next.line.ends_with("another checkout"));
-        assert!(next.note.contains("background job #2 (other)"));
+        assert!(next.note.contains("background command #2 (other)"));
         assert!(drivers.next(2, elsewhere).is_none());
     }
 
@@ -405,55 +422,55 @@ mod tests {
     async fn batching_preserves_inputs_and_leaves_future_results_for_later() {
         let mut drivers = Drivers::default();
         let root = std::path::Path::new("/checkout");
-        let sink = jobs::Jobs::new(drivers.jobs());
-        let job = sink.start(root.into(), "watch".into(), Default::default(), None);
-        let other = sink.start(root.into(), "build".into(), Default::default(), None);
-        job.result("first".into());
-        job.result("second".into());
-        job.input("what happened?".into());
-        job.result("third".into());
-        job.input("and now?".into());
-        other.result("built".into());
+        let sink = background::Commands::new(drivers.background());
+        let execution = sink.start(root.into(), "watch".into(), Default::default());
+        let other = sink.start(root.into(), "build".into(), Default::default());
+        execution.channel().result("first".into());
+        execution.channel().result("second".into());
+        execution.channel().input("what happened?".into());
+        execution.channel().result("third".into());
+        execution.channel().input("and now?".into());
+        other.channel().result("built".into());
         other.end();
 
         let batch = drivers.next(1, root).unwrap();
-        assert_eq!(batch.label.as_deref(), Some("2 background job results"));
+        assert_eq!(batch.label.as_deref(), Some("2 background command results"));
         assert!(batch.line.ends_with("second"));
         assert!(!batch.line.contains("third"));
         let input = drivers.next(1, root).unwrap();
-        assert_eq!(input.origin, Origin::Input(job.id()));
+        assert_eq!(input.origin, Origin::Input(execution.id()));
         assert_eq!(input.line, "what happened?");
         assert!(input.label.is_none());
         assert!(input.note.is_empty());
         assert!(drivers.next(1, root).unwrap().line.ends_with("third"));
         let input = drivers.next(1, root).unwrap();
-        assert_eq!(input.origin, Origin::Input(job.id()));
+        assert_eq!(input.origin, Origin::Input(execution.id()));
         assert_eq!(input.line, "and now?");
         assert!(drivers.next(1, root).unwrap().line.ends_with("built"));
         assert!(drivers.next(1, root).is_none());
 
-        job.result("later".into());
-        job.end();
+        execution.channel().result("later".into());
+        execution.end();
         let next = drivers.next(1, root).unwrap();
         assert!(next.line.ends_with("later"));
-        assert!(next.note.contains("background job #1 (watch)"));
+        assert!(next.note.contains("background command #1 (watch)"));
         assert!(drivers.next(1, root).is_none());
     }
 
     #[tokio::test]
-    async fn progress_reaches_the_job_before_tools_without_repeating_in_the_reply() {
+    async fn progress_reaches_the_command_before_tools_without_repeating_in_the_reply() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let ctx = Ctx::new(tool::Workspace::new(&root).unwrap());
         let mut drivers = Drivers::default();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let job = jobs::Jobs::new(drivers.jobs()).start(
+        let execution = background::Commands::new(drivers.background()).start(
             root.clone(),
             "bridge".into(),
             Default::default(),
-            Some(tx),
         );
-        drivers.dispatched(Origin::Input(job.id()), 1, true, true);
+        execution.channel().listen(tx);
+        drivers.dispatched(Origin::Input(execution.id()), 1, true, true);
         assert_eq!(rx.try_recv(), Ok(Told::Started));
         drivers.observe(1, &root, &Event::TurnStart { turn: 1 });
         drivers.observe(1, &root, &Event::TextDelta("checking now".into()));
@@ -508,26 +525,26 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    // The line a person sent through a job opens a turn as if typed; the
-    // job hears it begin, then gets the whole answer, cut short or not.
+    // The line a person sent through an execution opens a turn as if typed; the
+    // execution hears it begin, then gets the whole answer, cut short or not.
     #[tokio::test]
-    async fn a_turn_an_input_opened_is_told_back_to_its_job() {
+    async fn a_turn_an_input_opened_is_told_back_to_its_command() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let ctx = Ctx::new(tool::Workspace::new(&root).unwrap());
         let mut drivers = Drivers::default();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let job = jobs::Jobs::new(drivers.jobs()).start(
+        let execution = background::Commands::new(drivers.background()).start(
             root.clone(),
             "wechat".into(),
             Default::default(),
-            Some(tx),
         );
-        job.input("why did it fail".into());
+        execution.channel().listen(tx);
+        execution.channel().input("why did it fail".into());
 
         let next = drivers.next(1, &root).expect("the input is due");
         assert_eq!(next.line, "why did it fail");
-        assert_eq!(next.origin, Origin::Input(job.id()));
+        assert_eq!(next.origin, Origin::Input(execution.id()));
         assert!(next.label.is_none(), "read as typed, not relayed");
 
         drivers.dispatched(next.origin, 1, true, true);
@@ -543,33 +560,32 @@ mod tests {
         assert!(rx.try_recv().is_err(), "told once");
     }
 
-    // The model is told of a job the user stopped; one it could not stop
+    // The model is told of an execution the user stopped; one it could not stop
     // leaves it nothing to be told.
     #[tokio::test]
-    async fn a_job_the_user_stops_is_noted_for_the_model() {
+    async fn a_command_the_user_stops_is_noted_for_the_model() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let drivers = Drivers::default();
-        let job = jobs::Jobs::new(drivers.jobs()).start(
+        let execution = background::Commands::new(drivers.background()).start(
             root.clone(),
             "http.server 8080".into(),
             Default::default(),
-            None,
         );
-        let Said::Noted(_, note) = drivers.stop_jobs(&root, &[job.id()]) else {
+        let Said::Noted(_, note) = drivers.stop_commands(&root, &[execution.id()]) else {
             panic!("a stop is noted")
         };
         assert!(
-            note.contains(&format!("#{} (http.server 8080)", job.id())),
+            note.contains(&format!("#{} (http.server 8080)", execution.id())),
             "{note}"
         );
         assert!(matches!(
-            drivers.stop_jobs(&root, &[job.id()]),
+            drivers.stop_commands(&root, &[execution.id()]),
             Said::Notice(_)
         ));
     }
 
-    // A retried request streams its turn again: the job hears the retry's
+    // A retried request streams its turn again: the execution hears the retry's
     // text once, and what earlier turns of the run said stays.
     #[tokio::test]
     async fn a_retried_turn_is_told_back_once() {
@@ -578,13 +594,13 @@ mod tests {
         let ctx = Ctx::new(tool::Workspace::new(&root).unwrap());
         let mut drivers = Drivers::default();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let job = jobs::Jobs::new(drivers.jobs()).start(
+        let execution = background::Commands::new(drivers.background()).start(
             root.clone(),
             "wechat".into(),
             Default::default(),
-            Some(tx),
         );
-        job.input("btc".into());
+        execution.channel().listen(tx);
+        execution.channel().input("btc".into());
         let next = drivers.next(1, &root).expect("the input is due");
         drivers.dispatched(next.origin, 1, true, true);
         assert_eq!(rx.try_recv(), Ok(Told::Started));
@@ -608,28 +624,25 @@ mod tests {
         assert_eq!(rx.try_recv(), Ok(Told::Reply("checking. 83057.6".into())));
     }
 
-    // A job that follows hears every run on its checkout from its next
+    // A command that follows hears every run on its checkout from its next
     // request on — typed ones too — and its own input's run only once.
     #[tokio::test]
-    async fn a_job_that_follows_is_told_every_run() {
+    async fn a_command_that_follows_is_told_every_run() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let ctx = Ctx::new(tool::Workspace::new(&root).unwrap());
         let mut drivers = Drivers::default();
-        let sink = jobs::Jobs::new(drivers.jobs());
+        let sink = background::Commands::new(drivers.background());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let job = sink.start(root.clone(), "wechat".into(), Default::default(), Some(tx));
+        let execution = sink.start(root.clone(), "wechat".into(), Default::default());
+        execution.channel().listen(tx);
         let (quiet_tx, mut quiet) = tokio::sync::mpsc::unbounded_channel();
-        let _quiet = sink.start(
-            root.clone(),
-            "build".into(),
-            Default::default(),
-            Some(quiet_tx),
-        );
+        let _quiet = sink.start(root.clone(), "build".into(), Default::default());
+        _quiet.channel().listen(quiet_tx);
 
         drivers.observe(1, &root, &Event::TurnStart { turn: 1 });
         drivers.observe(1, &root, &Event::TextDelta("before".into()));
-        job.follow();
+        execution.channel().follow();
         drivers.observe(1, &root, &Event::TurnStart { turn: 2 });
         assert_eq!(rx.try_recv(), Ok(Told::Started));
         drivers.observe(1, &root, &Event::TextDelta("connected".into()));
@@ -640,7 +653,7 @@ mod tests {
             "one that does not follow hears nothing"
         );
 
-        job.input("btc".into());
+        execution.channel().input("btc".into());
         let next = drivers.next(1, &root).expect("the input is due");
         drivers.dispatched(next.origin, 1, true, true);
         drivers.observe(1, &root, &Event::TurnStart { turn: 1 });

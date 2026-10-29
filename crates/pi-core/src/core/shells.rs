@@ -1,34 +1,13 @@
-//! Shell jobs owned by a single run rather than an interactive session.
+//! Shell executions owned by a single run rather than an interactive session.
 
 use std::sync::Arc;
 
-use tool::{Ctx, Registry};
-
-use crate::driver::jobs::{Jobs, Table};
+use tool::Registry;
 
 /// Give a run a shell that waits for each command to exit. There are no
 /// detached commands to control; cancellation releases the active process.
 pub fn foreground(mut registry: Registry) -> Registry {
-    let jobs = Arc::new(Jobs::scoped(Arc::new(Table::default())));
-    registry.fallback(Arc::new(toolbox::bash::Bash::scoped(jobs).until_exit()));
-    registry
-}
-
-/// Give a run a shell and job controls of its own. Its cancellation releases
-/// unfinished commands; another run cannot list or stop them.
-pub fn scoped(ctx: &Ctx, mut registry: Registry) -> Registry {
-    let table = Arc::new(Table::default());
-    let jobs = Arc::new(Jobs::scoped(table.clone()));
-    registry.fallback(Arc::new(
-        toolbox::bash::Bash::scoped(jobs.clone()).with_controls(jobs),
-    ));
-
-    let stop = ctx.cancel.clone();
-    let root = ctx.workspace.root().to_path_buf();
-    tokio::spawn(async move {
-        stop.cancelled().await;
-        table.stop_running(&root, "the owning run ended");
-    });
+    registry.fallback(Arc::new(toolbox::bash::Bash::foreground()));
     registry
 }
 
@@ -36,58 +15,54 @@ pub fn scoped(ctx: &Ctx, mut registry: Registry) -> Registry {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tool::Ctx;
 
     use llm::message::{Message, UserContent};
     use llm::stream::{BlockKind, StopReason, StreamEvent};
     use serde_json::{Value, json};
 
     #[tokio::test]
-    async fn scoped_shell_registration_respects_tool_cuts_and_live_sources() {
-        let registrations: [fn(&Ctx, Registry) -> Registry; 2] =
-            [scoped, |_, registry| foreground(registry)];
-        for register in registrations {
-            let dir = tempfile::tempdir().unwrap();
-            let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
-            let _stop = ctx.cancel.clone().drop_guard();
-            let full = register(&ctx, toolbox::builtin());
-            assert!(full.get("job").is_none());
-            let shell = full.get(toolbox::bash::Bash::NAME).unwrap();
-            assert!(shell.schema()["properties"].get("wait").is_none());
-            assert!(shell.schema()["properties"].get("background").is_none());
-            let read_only = register(&ctx, toolbox::builtin().within(tool::Tier::Read));
-            assert!(read_only.get(toolbox::bash::Bash::NAME).is_none());
-            let hidden = register(&ctx, toolbox::builtin().without(toolbox::bash::Bash::NAME));
-            assert!(hidden.get(toolbox::bash::Bash::NAME).is_none());
+    async fn foreground_shell_registration_respects_tool_cuts_and_live_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let _stop = ctx.cancel.clone().drop_guard();
+        let full = foreground(toolbox::builtin());
+        let shell = full.get(toolbox::bash::Bash::NAME).unwrap();
+        assert!(shell.schema()["properties"].get("wait").is_none());
+        assert!(shell.schema()["properties"].get("background").is_none());
+        let read_only = foreground(toolbox::builtin().within(tool::Tier::Read));
+        assert!(read_only.get(toolbox::bash::Bash::NAME).is_none());
+        let hidden = foreground(toolbox::builtin().without(toolbox::bash::Bash::NAME));
+        assert!(hidden.get(toolbox::bash::Bash::NAME).is_none());
 
-            let script = dir.path().join("bash");
-            std::fs::write(
-                &script,
-                "#!/bin/sh\n# ---\n# description = \"custom shell\"\n# ---\nprintf custom\n",
-            )
-            .unwrap();
-            let mut registry = toolbox::builtin();
-            registry.read(Arc::new(toolbox::scripts::Dir::new(dir.path())));
-            let registry = register(&ctx, registry);
-            let custom = registry.get(toolbox::bash::Bash::NAME).unwrap();
-            assert!(
-                custom
-                    .execute(json!({}), &ctx)
-                    .await
-                    .unwrap()
-                    .flatten()
-                    .contains("custom")
-            );
-            std::fs::remove_file(script).unwrap();
-            let builtin = registry.get(toolbox::bash::Bash::NAME).unwrap();
-            assert!(
-                builtin
-                    .execute(json!({"command": "echo builtin"}), &ctx)
-                    .await
-                    .unwrap()
-                    .flatten()
-                    .contains("builtin")
-            );
-        }
+        let script = dir.path().join("bash");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n# ---\n# description = \"custom shell\"\n# ---\nprintf custom\n",
+        )
+        .unwrap();
+        let mut registry = toolbox::builtin();
+        registry.read(Arc::new(toolbox::scripts::Dir::new(dir.path())));
+        let registry = foreground(registry);
+        let custom = registry.get(toolbox::bash::Bash::NAME).unwrap();
+        assert!(
+            custom
+                .execute(json!({}), &ctx)
+                .await
+                .unwrap()
+                .flatten()
+                .contains("custom")
+        );
+        std::fs::remove_file(script).unwrap();
+        let builtin = registry.get(toolbox::bash::Bash::NAME).unwrap();
+        assert!(
+            builtin
+                .execute(json!({"command": "echo builtin"}), &ctx)
+                .await
+                .unwrap()
+                .flatten()
+                .contains("builtin")
+        );
     }
 
     #[test]
@@ -96,17 +71,16 @@ mod tests {
         let shell = registry.get(toolbox::bash::Bash::NAME).unwrap();
         let schema = shell.schema();
         let properties = schema["properties"].as_object().unwrap();
-        assert_eq!(properties.len(), 2);
+        assert_eq!(properties.len(), 3);
         assert!(properties.contains_key("command"));
         assert!(properties.contains_key("cwd"));
         assert_eq!(schema["required"], json!(["command"]));
         assert!(shell.description().contains("Wait for the command to exit"));
-        assert!(!shell.description().contains("job id"));
+        assert!(!shell.description().contains("command id"));
     }
 
     struct ShellModel {
         step: AtomicUsize,
-        root: std::path::PathBuf,
     }
 
     #[async_trait::async_trait]
@@ -139,28 +113,13 @@ mod tests {
                 0 => (
                     toolbox::bash::Bash::NAME,
                     json!({
-                        "command": "echo start >> starts; echo ready; while [ ! -f release ]; do sleep 0.01; done; echo finished; exit 3"
+                        "command": "echo start >> starts; echo ready; sleep 0.02; echo finished; exit 3"
                     }),
                 ),
                 1 => {
-                    assert!(result().contains("job #1"));
-                    (
-                        toolbox::bash::Bash::NAME,
-                        json!({"join": 1, "timeout_ms": 20}),
-                    )
-                }
-                2 => {
-                    assert!(result().contains("still running"));
-                    std::fs::write(self.root.join("release"), "").unwrap();
-                    (
-                        toolbox::bash::Bash::NAME,
-                        json!({"join": 1, "timeout_ms": 5000}),
-                    )
-                }
-                3 => {
                     let result = result();
                     assert!(
-                        result.contains("exited 3") && result.contains("finished"),
+                        result.contains("exit 3") && result.contains("finished"),
                         "{result}"
                     );
                     return Ok(Box::pin(futures::stream::iter([
@@ -201,14 +160,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_model_can_continue_a_soft_timed_out_command_in_either_run() {
+    async fn foreground_commands_finish_in_the_call_in_both_run_types() {
         for child in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
             let _stop = ctx.cancel.clone().drop_guard();
             let transport = Arc::new(ShellModel {
                 step: AtomicUsize::new(0),
-                root: dir.path().to_path_buf(),
             });
             let mut agent =
                 agent::Agent::new(transport.clone(), crate::core::tests::test_spec("m"));
@@ -234,7 +192,7 @@ mod tests {
                 assert!(out.flatten().contains("resolved"));
             } else {
                 let patch = Arc::make_mut(&mut agent.brief);
-                patch.registry = scoped(&ctx, std::mem::take(&mut patch.registry));
+                patch.registry = foreground(std::mem::take(&mut patch.registry));
                 let mut session = agent::session::Session::with_prompt("run it");
                 let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
                 agent
@@ -242,7 +200,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            assert_eq!(transport.step.load(Ordering::SeqCst), 4);
+            assert_eq!(transport.step.load(Ordering::SeqCst), 2);
             assert!(
                 !ctx.cancel.is_cancelled(),
                 "the child's cleanup leaves its parent running"

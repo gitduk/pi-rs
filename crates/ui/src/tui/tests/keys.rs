@@ -32,7 +32,7 @@ async fn an_idle_lane_opens_the_rewind_selector() {
     );
     assert!(tui.ui.flash.is_some(), "and says why");
 
-    // `esc` stopped the run and its job came home: the same lane, idle.
+    // `esc` stopped the run and its execution came home: the same lane, idle.
     let mut session = Session::new();
     session.prompt("the first question");
     tui.ui.flash = None;
@@ -175,7 +175,7 @@ async fn an_unsent_prompt_survives_a_failed_write() {
     }
 }
 
-// A panicked job leaves the lane idle with nothing in it (`NO_TRANSCRIPT`).
+// A panicked execution leaves the lane idle with nothing in it (`NO_TRANSCRIPT`).
 // `esc esc` still arrives since `fate` only guards a run, not this state.
 #[tokio::test]
 async fn the_rewind_of_a_lane_with_no_transcript_says_so() {
@@ -734,14 +734,14 @@ async fn a_question_is_answered_from_the_list_over_the_line() {
     };
     let wide = head(&tui, 200);
     assert!(wide.contains("space") && wide.contains("enter"), "{wide:?}");
-    // A job asks apart from the turn, so it is named.
-    let mut from_job = tui.ui.questions[0].clone();
-    from_job.from = Asker::Job {
+    // A command asks apart from the turn, so it is named.
+    let mut from_command = tui.ui.questions[0].clone();
+    from_command.from = Asker::Background {
         id: 3,
         name: "judge #3".into(),
     };
     let layers = tui.ui.layers_with(false, true);
-    let named: String = (tui.ui.question_head(&from_job, 40, layers).spans.iter())
+    let named: String = (tui.ui.question_head(&from_command, 40, layers).spans.iter())
         .map(|s| s.content.as_ref())
         .collect();
     assert!(named.starts_with("judge #3"), "{named:?}");

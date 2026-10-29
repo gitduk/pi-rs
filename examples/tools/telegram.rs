@@ -1,9 +1,12 @@
 ---
 [package]
 # Bump this script's version whenever it changes.
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
-description = "Connect this session to Telegram when the user requests it.\nMessages sent to the user's bot arrive here as turns. Each answer returns to the chat.\nSet TELEGRAM_BOT_TOKEN in the tools' .env file to a bot token from @BotFather.\n\nThe tool runs in the background until you stop the job.\nOn first use, the job provides a link and QR code for the user to pair their account.\nThe pairing persists for later use."
+description = "Connect this session to Telegram when the user requests it.\nMessages sent to the user's bot arrive here as turns. Each answer returns to the chat.\nSet TELEGRAM_BOT_TOKEN in the tools' .env file to a bot token from @BotFather.\n\nThe tool runs in the background until you stop the background command.\nOn first use, the background command provides a link and QR code for the user to pair their account.\nThe pairing persists for later use."
+
+[package.metadata.pi]
+background = true
 
 [dependencies]
 pulldown-cmark = { version = "0.13", default-features = false }
@@ -41,14 +44,14 @@ async fn main() -> ExitCode {
 }
 
 mod bridge {
-    //! telegram as a pi job: what the paired account sends goes up fd 3 as
+    //! telegram as a pi background command: what the paired account sends goes up fd 3 as
     //! `input` (or `interrupt` for `/stop`). It follows, so every turn on the
     //! checkout comes back as `started`, progress, then `reply`, sent to the chat;
     //! each question put there comes too, its options as buttons: a press
     //! answers with that one, a reply of numbers only with several.
     //!
     //! Anyone can message a bot, and a turn here can run commands, so only
-    //! the account that sent the pairing code shown in the job is heard.
+    //! the account that sent the pairing code shown in the background command is heard.
 
     use std::collections::{BTreeSet, VecDeque};
     use std::os::fd::FromRawFd;
@@ -286,7 +289,7 @@ mod bridge {
         }
     }
 
-    /// Run as pi's job until the token is refused, another client takes the
+    /// Run as pi's background command until the token is refused, another client takes the
     /// updates, or pi goes. The error is what pi reports back to the model.
     pub async fn run() -> Result<(), String> {
         if std::env::var("PI_EVENTS_FD").as_deref() != Ok("3") {
@@ -346,13 +349,13 @@ mod bridge {
 
         let mut code = None;
         if state.user.is_some() {
-            pi.say(json!({ "detach": format!(
+            pi.say(json!({ "status": format!(
                 "connected to Telegram as @{bot}; messages from the paired account will arrive here as turns"
             )}));
             pi.say(json!({ "status": "connected" }));
         } else {
-            pi.say(json!({ "detach": format!(
-                "waiting for the user to pair @{bot}: a link and a QR are in this job; once they open it, messages from their account arrive here as turns"
+            pi.say(json!({ "status": format!(
+                "waiting for the user to pair @{bot}: a link and a QR are in this background command; once they open it, messages from their account arrive here as turns"
             )}));
             let fresh = format!("{:08}", rand::random::<u32>() % 100_000_000);
             show_pairing(&pi, &bot, &fresh);
@@ -380,11 +383,10 @@ mod bridge {
             .map(|root| root.join("telegram.json"))
     }
 
-    // The deep link sends `/start <code>` by itself; the QR lets a phone camera
-    // open it. Both on stderr, read by opening the job; the model reads neither.
+    // Pairing links and QR codes belong on stderr, outside the model result.
     fn show_pairing(pi: &Pi, bot: &str, code: &str) {
         let link = format!("https://t.me/{bot}?start={code}");
-        pi.status("pair Telegram with this session: the link and QR are in this job");
+        pi.status("pair Telegram with this session: the link and QR are in this background command");
         eprintln!("open {link} and press Start, or send `/start {code}` to @{bot}");
         if let Some(qr) = render_qr(&link) {
             eprintln!("{qr}");
@@ -397,7 +399,7 @@ mod bridge {
         Some(code.render::<unicode::Dense1x2>().build())
     }
 
-    // A refused token or a second reader ends the job; anything else backs off.
+    // Invalid tokens and competing readers cannot recover through retries.
     async fn poll(
         client: &Client,
         kept: &Kept,

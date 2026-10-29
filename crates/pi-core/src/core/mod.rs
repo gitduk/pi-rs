@@ -95,8 +95,8 @@ pub struct Core {
     /// them, so a broken file is said once rather than once a second.
     pub refused: std::collections::HashMap<u64, Vec<tool::stamp::Stamp>>,
     /// Where calls that outlive their turn are kept, when a surface serves
-    /// them; a run with nothing to come back to keeps no jobs.
-    pub jobs: Option<std::sync::Arc<crate::driver::jobs::Table>>,
+    /// them; a run with nothing to come back to keeps no executions.
+    pub executions: Option<std::sync::Arc<crate::driver::background::Table>>,
     /// Words the surface answers itself, listed beside the built-ins: each
     /// comes back as [`Step::Surface`]. Every resolve is handed them.
     pub surface: &'static [Command],
@@ -206,23 +206,17 @@ impl Core {
         self.lanes.iter().position(|lane| lane.root() == root)
     }
 
-    /// Where a call that outlives its turn is kept, when jobs are served.
-    pub fn job_sink(&self) -> Option<std::sync::Arc<dyn toolbox::background::JobSink>> {
-        let jobs = crate::driver::jobs::Jobs::new(self.jobs.clone()?);
-        Some(std::sync::Arc::new(jobs))
-    }
-
     /// Offer background controls through each lane's shell, writing into
     /// `table`, which the surface serves; re-arm lanes already open.
-    pub fn enable_jobs(&mut self, table: std::sync::Arc<crate::driver::jobs::Table>) {
-        self.jobs = Some(table);
+    pub fn enable_background(&mut self, table: std::sync::Arc<crate::driver::background::Table>) {
+        self.executions = Some(table);
         let retry = retry(&self.config);
         for at in 0..self.lanes.len() {
             let lane = &self.lanes[at];
             let archive =
                 self.archive(lane.root().to_path_buf(), lane.agent().spec().model.clone());
             let resolved = lane.resolved().clone();
-            self.lanes[at].rearm(resolved, archive, retry, self.jobs.clone(), |_| {});
+            self.lanes[at].rearm(resolved, archive, retry, self.executions.clone(), |_| {});
         }
     }
 
@@ -265,8 +259,8 @@ impl Core {
         {
             return None;
         }
-        if let Some(jobs) = &self.jobs
-            && self.lanes.iter().any(|lane| jobs.busy(lane.root()))
+        if let Some(executions) = &self.executions
+            && self.lanes.iter().any(|lane| executions.busy(lane.root()))
         {
             return None;
         }
@@ -286,49 +280,49 @@ impl Core {
         })
     }
 
-    /// Leave each saved lane's jobs beside its transcript, for the pi that
+    /// Leave each saved lane's executions beside its transcript, for the pi that
     /// opens that session next; an unsaved lane has nowhere to keep them.
-    pub fn hand_over_jobs(&self) {
-        let Some(table) = &self.jobs else {
+    pub fn hand_over_background(&self) {
+        let Some(table) = &self.executions else {
             return;
         };
         for lane in &self.lanes {
-            let jobs = table.carried(lane.root());
+            let executions = table.carried(lane.root());
             if !self.store.filed(lane.root(), lane.id()) {
-                if !jobs.is_empty() {
-                    tracing::warn!(target: "pi::job", jobs = jobs.len(), session = lane.id(), "not carried: session never saved");
+                if !executions.is_empty() {
+                    tracing::warn!(target: "pi::background", executions = executions.len(), session = lane.id(), "not carried: session never saved");
                 }
                 continue;
             }
-            let path = self.store.jobs_path(lane.root(), lane.id());
-            if let Err(e) = crate::driver::jobs::hand_over(&path, &jobs) {
-                tracing::warn!(target: "pi::job", error = %e, path = %path.display(), jobs = jobs.len(), "not carried");
+            let path = self.store.background_path(lane.root(), lane.id());
+            if let Err(e) = crate::driver::background::hand_over(&path, &executions) {
+                tracing::warn!(target: "pi::background", error = %e, path = %path.display(), executions = executions.len(), "not carried");
             }
         }
     }
 
-    /// List again the jobs an earlier pi left with each lane's session.
-    pub fn revive_jobs(&self) {
-        let Some(table) = &self.jobs else {
+    /// List again the executions an earlier pi left with each lane's session.
+    pub fn revive_commands(&self) {
+        let Some(table) = &self.executions else {
             return;
         };
         for lane in &self.lanes {
-            let path = self.store.jobs_path(lane.root(), lane.id());
-            let carried = match crate::driver::jobs::take_over(&path) {
+            let path = self.store.background_path(lane.root(), lane.id());
+            let carried = match crate::driver::background::take_over(&path) {
                 Ok(carried) => carried,
                 Err(e) => {
-                    tracing::warn!(target: "pi::job", error = %e, path = %path.display(), "carried jobs lost");
+                    tracing::warn!(target: "pi::background", error = %e, path = %path.display(), "carried executions lost");
                     continue;
                 }
             };
-            for job in carried {
-                // A session moved here from another checkout: its jobs ran there.
-                if job.root != lane.root() {
-                    tracing::warn!(target: "pi::job", job = job.id, root = %job.root.display(), "no lane to carry it to");
+            for execution in carried {
+                // A session moved here from another checkout: its executions ran there.
+                if execution.root != lane.root() {
+                    tracing::warn!(target: "pi::background", execution = execution.id, root = %execution.root.display(), "no lane to carry it to");
                     continue;
                 }
-                let rerun = toolbox::bash::rerun(job.again.clone(), lane.ctx());
-                table.revive(job, rerun);
+                let rerun = toolbox::bash::rerun(execution.again.clone(), lane.ctx());
+                table.revive(execution, rerun);
             }
         }
     }
@@ -887,7 +881,7 @@ mod tests {
             ),
             lanes: vec![lane],
             refused: Default::default(),
-            jobs: None,
+            executions: None,
             current: 0,
             surface: &[],
         }

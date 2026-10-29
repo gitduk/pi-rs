@@ -16,7 +16,7 @@ use pi_store::config::{Hook, HookOn};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tool::{Ctx, ToolOutput};
-use toolbox::background::Ask;
+use toolbox::channel::Ask;
 
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -408,7 +408,7 @@ mod tests {
     use agent::Hooks;
 
     fn shell(ctx: &Ctx, hooks: Vec<Hook>) -> Arc<dyn Hooks> {
-        of(&hooks, &ctx.workspace, Arc::new(toolbox::background::NoOne))
+        of(&hooks, &ctx.workspace, Arc::new(toolbox::channel::NoOne))
     }
 
     fn hook(on: HookOn, command: &str) -> Hook {
@@ -422,13 +422,13 @@ mod tests {
     // Answers every question with `picked` at once, as a person might.
     struct Says(&'static str);
 
-    impl toolbox::background::Ask for Says {
+    impl toolbox::channel::Ask for Says {
         fn ask(
             &self,
             _root: std::path::PathBuf,
             asker: &str,
-            asked: toolbox::background::Asked,
-        ) -> Result<Option<toolbox::background::Answer>, String> {
+            asked: toolbox::channel::Asked,
+        ) -> Result<Option<toolbox::channel::Answer>, String> {
             assert_eq!(asker, "hook");
             assert!(asked.back, "a gate waits on its answer");
             let (to, answer) = tokio::sync::oneshot::channel();

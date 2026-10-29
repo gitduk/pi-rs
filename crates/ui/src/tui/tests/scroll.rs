@@ -1321,15 +1321,15 @@ fn the_rewind_list_follows_prompts_without_changing_the_transcript() {
     }
 }
 
-// A page is read over the whole conversation: the rows the jobs held are
-// its own while it is up, so a click there lands on the page, not a job.
+// A page is read over the whole conversation: the rows the executions held are
+// its own while it is up, so a click there lands on the page, not an execution.
 #[test]
-fn a_page_lies_over_the_jobs() {
-    use pi_core::driver::jobs::{Job, State};
+fn a_page_lies_over_the_commands() {
+    use pi_core::driver::background::{BackgroundCommand, State};
     let mut ui = test_ui(80, 24);
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
-    ui.jobs = vec![Job {
+    ui.executions = vec![BackgroundCommand {
         id: 1,
         description: "serve".into(),
         progress: String::new(),
@@ -1340,7 +1340,7 @@ fn a_page_lies_over_the_jobs() {
     }];
     ui.flush(&lane, &mut view);
     let talk = ui.regions.history.height;
-    assert_eq!(ui.regions.jobs.height, 1, "the job has its row");
+    assert_eq!(ui.regions.executions.height, 1, "the execution has its row");
 
     ui.open_page(
         (0..60)
@@ -1351,7 +1351,7 @@ fn a_page_lies_over_the_jobs() {
     assert_eq!(
         ui.regions.history.height,
         talk + 1,
-        "the job's row is the page's"
+        "the execution's row is the page's"
     );
     let last = ui.regions.history.bottom() - 1;
     assert!(
@@ -1359,5 +1359,5 @@ fn a_page_lies_over_the_jobs() {
         "{:?}",
         ui.target_at(last)
     );
-    assert!((0..24).all(|row| ui.job_at(row).is_none()));
+    assert!((0..24).all(|row| ui.command_at(row).is_none()));
 }

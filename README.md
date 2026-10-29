@@ -194,10 +194,10 @@ refused, and resuming one from another directory moves it here.
 | `/model [name]`                    | list the models, or move the session to one   |
 | `/effort [level]`                  | `off` `low` `medium` `high`, from now on      |
 | `/worktree [name]`, `/worktree rm` | work in `<repo>.worktrees/<name>`             |
-| `/mv <dir>`                        | move this session to another directory; its jobs follow |
+| `/mv <dir>`                        | move this session to another directory; its background commands follow |
 | `/compact [focus]`                 | summarize everything but the working tail     |
 | `/loop <line>`                     | resubmit a line until a round edits no file   |
-| `/<tool> [key=value…]`            | run a tool yourself beside any turn, as a background job; the model is told what it said |
+| `/<tool> [key=value…]`            | run a named tool yourself; tools marked background return immediately |
 | `/mcp`, `/mcp restart [name]`      | MCP servers and their tools; reconnect        |
 | `/settings`                        | edit the project's config                     |
 | `/edit [file]`                     | edit a prompt, an `AGENTS.md`, or memory      |
@@ -216,10 +216,10 @@ their `key=value` arguments. Descriptions mark tools with `[tool]` and skills
 with `[skill]`. Existing commands keep their names when a tool has the same
 name; there is no `/tool` entry point.
 
-In Vim Normal mode, `ctrl+k` focuses the last background job above the input.
-`ctrl+k`/`ctrl+j` move between jobs; `ctrl+j` below the last job or `esc` returns
-to the draft at its original cursor position. The selected job is highlighted:
-`x` stops it, `r` restarts it, `X` stops every running job in this workspace,
+In Vim Normal mode, `ctrl+k` focuses the last background command above the input.
+`ctrl+k`/`ctrl+j` move between commands; `ctrl+j` below the last command or `esc` returns
+to the draft at its original cursor position. The selected command is highlighted:
+`x` stops it, `r` restarts it, `X` stops every running command in this workspace,
 and `enter` expands or folds its output. Stopped rows stay available while
 focused so they can be restarted. Completion lists and reading pages keep
 their own keys; Insert mode keeps its editing keys. `/keys` includes this help.
@@ -239,29 +239,22 @@ also continues when messages are waiting. Generation is never interrupted.
   not start is listed as `<name>__unavailable`, with the reason; `/mcp`
   shows each server and its tools, and `/mcp restart` reconnects them. A call
   with no answer in 10 minutes is given up.
-- In interactive mode, `bash` runs commands and manages background work. A regular
-  command waits at most 10 seconds, then returns a job id and the latest output while the original
-  command keeps running. `background: true` returns immediately. Add `wait` to
-  delay the start **in seconds**, for example:
-  `{"command":"python3 report.py","background":true,"wait":30}`. The delay
-  happens in the background; omit `wait` or use 0 to start immediately.
-  With no command, `{}` lists jobs, `{"output":3}` shows a job's latest output,
-  `{"stop":[3]}` stops it, `{"stop_all":true}` stops all, and `{"restart":[3]}`
-  runs a command again under its id. Stopping during a delay prevents execution.
-  Background results automatically open later turns once the checkout is idle;
-  the model can continue independent work or report progress and end its turn.
-  The separate job tool and its former completion-wait interface are removed.
-  One-shot runs such as `pi "fix the flaky test"` wait for each command to exit,
-  without automatically moving it to the background or imposing a timeout.
-  Interrupting the run stops the command and its process group.
-  Subagents keep their commands isolated and stop them when their owning run
-  ends; their shell offers `join` to collect results before ending.
-  One-shot runs and subagents do not offer delayed background starts.
-  A `subagent` call with `background`, or a script that detaches, uses the same
-  job table and shell controls. Jobs appear above the input line; clicking one
-  shows its output. The task-list keys and bash controls stop or restart jobs;
-  user actions are reported to the model before it next speaks. Jobs last while
-  pi runs; past that, use cron.
+- `bash` waits for a regular command to exit. In interactive mode,
+  `background: true` returns a command id immediately. Add `wait` to delay
+  the start **in seconds**, for example:
+  `{"command":"python3 report.py","background":true,"wait":30}`.
+  With no command, `{}` lists background commands; `{"output":3}` reads output,
+  `{"stop":[3]}` stops a command, `{"stop_all":true}` stops all, and
+  `{"restart":[3]}` starts one again under its id. Stopping during a delay
+  prevents launch. Background results open later turns once the checkout is
+  idle. Commands appear above the input; clicking one opens its output.
+  Their titles use shell highlighting. User stop and restart actions reach
+  the model before it next speaks.
+  Foreground commands have no automatic timeout or background promotion.
+  Interrupting their run stops their process group. One-shot runs and
+  subagents offer foreground commands only; a subagent call also waits for
+  completion. Background commands stop when pi exits; use cron for work
+  that must outlive pi.
 - A script is executable code. A tool is a named interface the model can call
   directly. A tool can use a script as its implementation.
   Keep task scripts in the workspace. Run these scripts through `bash`.
@@ -283,33 +276,40 @@ also continues when messages are waiting. Generation is never interrupted.
   maps a parameter name to its string description.
   A script that does not read is listed as not
   usable, with the reason. `~/.pi/tools/.env` holds `NAME=value` lines every
-  script starts with, such as its service's key; `bash` never sees them.
+  script starts with, such as its service's key. A background wrapper loads
+  them only for its subprocess; ordinary bash calls do not receive them.
   A checkout's own scripts go in the nearest `.pi/tools/` up to the
   repository root (outside a repository, the workspace's own), with its own
   `.env`; of a name both use, the checkout's is the one offered, and the
   other is reported as skipped. A built-in tool's name is not free either:
   a script that takes one keeps it, and the built-in stands down with a note
   saying to rename one of them.
+  Set `background = true` at the top of a shebang tool's comment block, or
+  under `[package.metadata.pi]` for a Rust tool, to make its named entry
+  launch through bash background. `/telegram` and similar manual calls keep
+  their names. The wrapper supplies JSON on stdin, mirrors declared arguments
+  into the environment, and saves the launch specification for restart.
+  These wrappers are offered only in interactive sessions.
   A script may also write JSON lines to fd 3 (`PI_EVENTS_FD`): `status` for
-  its progress, `detach` to end the call and run on as a job, then `result`
+  its progress and `result`
   for each turn it sends back (its stdout at exit is the last), `input` for a
   person's line, sent to the model as written, never run as a command
-  (what only the person reads, a QR say, goes to stderr: they open the job
+  (what only the person reads, a QR say, goes to stderr: they open the command
   to see it), `choose` with
-  `options` to ask a question as the `choose` tool does (stopping the job
+  `options` to ask a question as the `choose` tool does (stopping the command
   takes it back), `interrupt` to stop the checkout's turn, and `follow` to
   hear every turn there. A turn an input opened, or any once it follows, is
   told back on fd 3: `started`, optional `{"progress": "..."}` messages,
   then `reply` with the remaining answer (excluding text already sent as
   progress). Progress includes completed model text before tool calls and
-  changed tool or job output, paced while work continues. One that follows is
+  changed tool or command output, paced while work continues. One that follows is
   also told each question up on the checkout, as
   `{"question": {"id", "text", "options", "back"}}`, then
   `{"closed": <id>}` once it is answered anywhere or withdrawn; it answers
   one with `{"answer": <id>, "picks": [0]}`, by place, the pick going out as
   if typed there, or hears `{"refused": <id>, "why"}` when it is not taken,
   and an `input` closes every question that does not wait.
-  `choose` works before a detach too, where pi answers it with one line on
+  Foreground scripts can use `choose`, where pi answers with one line on
   fd 3: `{"asked": true}` once it is up, or an `error` saying why not. There
   `"answer": "back"` keeps the pick from going out: it comes down fd 3 as
   `{"answer": "<option>"}`, your own words if you wrote some, or
@@ -343,7 +343,7 @@ also continues when messages are waiting. Generation is never interrupted.
   before the run ends and retry temporary send failures. Unsent pieces stay
   in memory, in order, until another incoming message triggers a retry;
   stopping the channel discards that queue. Updating them requires copying
-  the scripts again and restarting their jobs along with the updated pi.
+  the scripts again and restarting their background commands along with the updated pi.
 
 A server's prompts are commands too: `/<name>:<prompt> [args]` asks the server
 for the prompt's text and sends it, one typed word per argument, the last
