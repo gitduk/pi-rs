@@ -86,6 +86,7 @@ impl Ui {
         }
         let picks = self.picks(text);
         if !picks.is_empty() {
+            self.list.picked.get_or_insert(0);
             return Assistance::new(picks, None);
         }
         self.lists.catch_up();
@@ -127,7 +128,7 @@ impl Ui {
     }
 
     // The first question's options the line narrows to — by their words or
-    // their number — all of them on an empty line, the first nearest it.
+    // their number — all of them on an empty line, in the order asked.
     fn picks(&self, line: &str) -> Vec<MenuEntry> {
         // Not over a page or a search: Normal's bare letters are theirs.
         let Some(question) = self.questions.first().filter(|_| !self.reading()) else {
@@ -152,7 +153,6 @@ impl Ui {
                     show: format!("{} {mark}{option}", at + 1),
                 }
             })
-            .rev()
             .collect()
     }
 
