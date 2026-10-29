@@ -91,11 +91,13 @@ fn encode_tool_result(r: &ToolResult) -> Value {
 // `Reasoning::replay_for`'s call, shared with the estimate that sizes it.
 fn encode_reasoning(r: &Reasoning, spec: &ModelSpec) -> Option<Value> {
     match r.replay_for(spec) {
-        Replay::Signed { signature } => Some(json!({
-            "type": "thinking",
-            "thinking": r.text(),
-            "signature": signature,
-        })),
+        Replay::Thinking { signature } => {
+            let mut block = json!({ "type": "thinking", "thinking": r.text() });
+            if let Some(signature) = signature {
+                block["signature"] = json!(signature);
+            }
+            Some(block)
+        }
         // No Anthropic spec ever encrypts one: the transport is chosen by the
         // same format `replay_for` reads.
         Replay::Encrypted { .. } | Replay::Dropped => None,
@@ -538,15 +540,85 @@ mod tests {
         assert_eq!(done.cache_write, 0);
     }
 
+    #[test]
+    fn thinking_survives_a_tool_result_with_or_without_a_signature() {
+        let spec = spec();
+        for signature in [None, Some("original-signature")] {
+            let mut acc = crate::stream::Accumulator::new(spec.model.clone());
+            let mut stop = StopReason::default();
+            let mut usage = Usage::default();
+            let mut gaps = Gaps::new("anthropic");
+            let mut frames = vec![
+                json!({ "type": "content_block_start", "index": 0,
+                    "content_block": { "type": "thinking", "thinking": "" } }),
+                json!({ "type": "content_block_delta", "index": 0,
+                    "delta": { "type": "thinking_delta", "thinking": "Check the path first.\n" } }),
+            ];
+            let mut thinking = json!({ "type": "thinking", "thinking": "Check the path first.\n" });
+            if let Some(signature) = signature {
+                frames.push(json!({ "type": "content_block_delta", "index": 0,
+                    "delta": { "type": "signature_delta", "signature": signature } }));
+                thinking["signature"] = json!(signature);
+            }
+            frames.extend([
+                json!({ "type": "content_block_stop", "index": 0 }),
+                json!({ "type": "content_block_start", "index": 1,
+                    "content_block": { "type": "tool_use", "id": "call_1", "name": "read" } }),
+                json!({ "type": "content_block_delta", "index": 1,
+                    "delta": { "type": "input_json_delta", "partial_json": "{\"path\":\"main.rs\"}" } }),
+                json!({ "type": "content_block_stop", "index": 1 }),
+                json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" } }),
+                json!({ "type": "message_stop" }),
+            ]);
+            for frame in frames {
+                if let Some(event) = decode_frame(&frame, &mut stop, &mut usage, &mut gaps) {
+                    acc.push(event);
+                }
+            }
+            let req = Request {
+                messages: vec![
+                    Message::user("check the file"),
+                    acc.finish().message,
+                    Message::tool_results(vec![ToolResult::text(
+                        "call_1",
+                        "read",
+                        "file contents",
+                    )]),
+                ],
+                ..Default::default()
+            };
+            let body = build_body(&spec, &req);
+            assert_eq!(
+                body["messages"][1]["content"],
+                json!([
+                    thinking,
+                    { "type": "tool_use", "id": "call_1", "name": "read", "input": { "path": "main.rs" } },
+                ])
+            );
+            assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], "call_1");
+
+            let other = ModelSpec {
+                model: "another-model".into(),
+                ..spec.clone()
+            };
+            assert_eq!(
+                build_body(&other, &req)["messages"][1]["content"],
+                json!([
+                    { "type": "tool_use", "id": "call_1", "name": "read", "input": { "path": "main.rs" } },
+                ])
+            );
+        }
+    }
+
     // The estimate and encoder must agree on what ships; a gap between them
     // silently drops real context to make room for bytes never sent.
     #[test]
     fn the_estimate_counts_what_the_wire_carries() {
         let thinking = "z".repeat(20_000);
         let spec = spec();
-        // Signed by the target itself it replays; from any other model it
-        // is left out.
-        let req = |by: &str| Request {
+        // The target's text replays with or without a signature; another
+        // model's reasoning is left out.
+        let req = |by: &str, signature: Option<&str>| Request {
             messages: vec![
                 Message::user("go"),
                 Message::Assistant {
@@ -554,7 +626,7 @@ mod tests {
                         id: None,
                         content: vec![ReasoningContent::Text {
                             text: thinking.clone(),
-                            signature: Some("sig".into()),
+                            signature: signature.map(str::to_string),
                         }],
                         by: Some(by.into()),
                     })],
@@ -562,27 +634,29 @@ mod tests {
             ],
             ..Default::default()
         };
-        let (kept, dropped) = (req(&spec.model), req("another-model"));
+        for signature in [None, Some("sig")] {
+            let (kept, dropped) = (req(&spec.model, signature), req("another-model", signature));
 
-        let sent = |r: &Request| build_body(&spec, r).to_string();
-        assert!(
-            !sent(&dropped).contains(&thinking),
-            "it was dropped from the body"
-        );
-        assert!(sent(&kept).contains(&thinking), "it rode the body");
+            let sent = |r: &Request| build_body(&spec, r).to_string();
+            assert!(
+                !sent(&dropped).contains(&thinking),
+                "it was dropped from the body"
+            );
+            assert!(sent(&kept).contains(&thinking), "it rode the body");
 
-        let counted = |r: &Request| crate::estimate::tokens(&r.messages, &spec);
-        let bare = crate::estimate::tokens(&[Message::user("go")], &spec);
-        assert!(
-            counted(&dropped) < bare + 100,
-            "a block that never leaves must cost nothing: {} vs {bare}",
-            counted(&dropped)
-        );
-        assert!(
-            counted(&kept) > counted(&dropped) * 10,
-            "a block that does leave must be paid for: {} vs {}",
-            counted(&kept),
-            counted(&dropped)
-        );
+            let counted = |r: &Request| crate::estimate::tokens(&r.messages, &spec);
+            let bare = crate::estimate::tokens(&[Message::user("go")], &spec);
+            assert!(
+                counted(&dropped) < bare + 100,
+                "a block that never leaves must cost nothing: {} vs {bare}",
+                counted(&dropped)
+            );
+            assert!(
+                counted(&kept) > counted(&dropped) * 10,
+                "a block that does leave must be paid for: {} vs {}",
+                counted(&kept),
+                counted(&dropped)
+            );
+        }
     }
 }

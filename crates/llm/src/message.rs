@@ -111,9 +111,8 @@ pub struct Reasoning {
     pub id: Option<String>,
     pub content: Vec<ReasoningContent>,
     /// Which model produced it, as the endpoint names it. Absent means locally
-    /// synthesized; anything but an exact match against the target is demoted
-    /// rather than replayed, because a signature or a ciphertext is only ever
-    /// readable by the model that made it.
+    /// synthesized. Only an exact match against the target replays, so a
+    /// different model does not inherit the previous model's scratch work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
 }
@@ -134,8 +133,8 @@ pub enum ReasoningContent {
 /// Decided once, so transports and the token estimate can't disagree: an
 /// outrun count compacts bytes that never leave; a lagging one risks a 400.
 pub enum Replay<'a> {
-    // The target's own, signed: the block replays as itself.
-    Signed { signature: &'a str },
+    // The target's own text, with its signature when the endpoint supplied one.
+    Thinking { signature: Option<&'a str> },
     // The target's own, encrypted: the ciphertext is the whole of what goes.
     Encrypted { id: &'a str, encrypted: &'a str },
     // Nothing leaves.
@@ -166,8 +165,12 @@ impl Reasoning {
                         ReasoningContent::Text { signature, .. } => signature.as_deref(),
                         ReasoningContent::Encrypted(_) => None,
                     });
-                    if let Some(signature) = signature {
-                        return Replay::Signed { signature };
+                    if self
+                        .content
+                        .iter()
+                        .any(|c| matches!(c, ReasoningContent::Text { .. }))
+                    {
+                        return Replay::Thinking { signature };
                     }
                 }
                 Format::OpenAi => {
@@ -187,8 +190,7 @@ impl Reasoning {
             }
         }
 
-        // Foreign or unsigned: left out, as the providers' docs say to do on
-        // a model change, and a target that ignores it still bills for it.
+        // Foreign or without a shape this format can replay: left out.
         Replay::Dropped
     }
 }

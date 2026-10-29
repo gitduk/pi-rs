@@ -93,9 +93,9 @@ fn encode_reasoning(r: &Reasoning, spec: &ModelSpec) -> Option<Value> {
             "summary": [],
             "encrypted_content": encrypted,
         })),
-        // No OpenAI spec ever signs one: the transport is chosen by the same
+        // No OpenAI spec replays text: the transport is chosen by the same
         // format `replay_for` reads.
-        Replay::Signed { .. } | Replay::Dropped => None,
+        Replay::Thinking { .. } | Replay::Dropped => None,
     }
 }
 
