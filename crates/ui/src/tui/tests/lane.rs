@@ -291,7 +291,7 @@ async fn a_panicked_bang_does_not_lay_its_transcript_down_again() {
 
     let rows = lane_rows(&mut tui, token);
     assert_eq!(
-        rows.iter().filter(|r| *r == "! ls").count(),
+        rows.iter().filter(|r| *r == "!ls").count(),
         1,
         "the recovered transcript is not laid down twice: {rows:?}"
     );

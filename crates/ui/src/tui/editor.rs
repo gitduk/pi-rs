@@ -20,8 +20,6 @@ pub struct Editor {
     draft: String,
     // The styled first-row sigil, so the theme can restyle it.
     prompt: Span<'static>,
-    // The same sigil for a `!` line: the bang takes the prompt's place, so
-    // `! cmd` reads as a command rather than `┃ ! cmd`.
     prompt_bang: Span<'static>,
 }
 
@@ -753,11 +751,9 @@ mod tests {
     #[test]
     fn a_bang_line_wraps_with_the_bang_in_the_sigil() {
         let e = typed("!abcdefgh");
-        // Width 6 leaves 4 columns after the sigil, as in the plain case;
-        // the bang does not eat a column of the body.
         let (rows, caret) = e.view(&paint(), 6);
-        assert_eq!(rows.len(), 3);
-        assert_eq!(caret, (2, 2));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(caret, (1, 4));
     }
 
     #[test]
@@ -801,19 +797,18 @@ mod tests {
     #[test]
     fn a_wrapped_line_puts_the_caret_on_the_row_it_belongs_to() {
         let mut e = typed("abcdefgh");
-        // Width 6 leaves 4 columns after the sigil.
-        let (rows, caret) = e.view(&paint(), 6);
+        let (rows, caret) = e.view(&paint(), 4);
         assert_eq!(rows.len(), 3);
         assert_eq!(
             caret,
-            (2, 2),
+            (2, 0),
             "past a full second row, the caret starts a third"
         );
         e.home();
         assert_eq!(
-            e.view(&paint(), 6).1,
-            (0, 2),
-            "and back in the sigil's shadow"
+            e.view(&paint(), 4).1,
+            (0, 0),
+            "home returns to the first column"
         );
     }
 
@@ -824,14 +819,14 @@ mod tests {
             e.left();
         }
         // Column 4 of a 4-wide row does not exist; it is column 0 of the next.
-        assert_eq!(e.view(&paint(), 6).1, (1, 2));
+        assert_eq!(e.view(&paint(), 4).1, (1, 0));
     }
 
     #[test]
     fn an_explicit_newline_starts_a_row_of_its_own() {
         let (rows, caret) = typed("one\ntwo").view(&paint(), 40);
         assert_eq!(rows.len(), 2);
-        assert_eq!(caret, (1, 5));
+        assert_eq!(caret, (1, 3));
     }
 
     #[test]

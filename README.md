@@ -112,15 +112,25 @@ before it.
 From `cost` down, the parts are the status line's, read off the run in flight
 or the one that last ended.
 
-The default colours follow Codex's Catppuccin palettes: Mocha on dark terminal
-backgrounds and Latte on light ones. Code blocks use syntax highlighting;
-inline code, links and clickable hints such as `n more` and `more below` use
-the theme blue (`#89b4fa`). Prose keeps the terminal foreground; headings use
-a colour per level without `#` markers, bold text is
-red, italic keeps its foreground, and secondary text and quotes use the
-terminal's default foreground with `Dim`. Tool names, the input
-sigil and selected items use the accent blue (`#63a8f8`). Shell commands use
-syntax highlighting, and timing stays grey. If the terminal
+The default colours use the cool colours from Codex's Catppuccin palettes:
+Mocha on dark terminal backgrounds and Latte on light ones. Code blocks keep
+their syntax highlighting; inline code, links and clickable hints
+such as `n more` and `more below` use blue. Prose keeps the terminal
+foreground; headings follow Codex's level styles without `#` markers:
+H1 is red, bold and underlined; H2 is peach and bold; H3 is yellow, bold and
+italic; H4–H6 are yellow and italic. Bold text uses the theme green,
+and italic text and quotes use teal. Wide tables shown as source alternate
+column text between blue and green. The current search match uses blue with
+reversed colours. Secondary text uses the terminal's default foreground with
+`Dim`. Tool names and command sigils use Codex's accent blue (`#63a8f8` on
+dark backgrounds, `#1c64c8` on light
+ones). Selected menu rows use the input background with bold theme-blue text.
+Success and failure use the terminal's green and red; warnings use yellow
+on dark backgrounds and the terminal foreground on light ones. Input and
+submitted text keep their original
+background shading, derived from the terminal background with the input
+more pronounced. Both areas start at the left edge without a prefix or padding.
+Shell commands use syntax highlighting, and timing stays grey. If the terminal
 does not report its background, pi uses Mocha. Existing `[theme]` styles still
 override the defaults. For example:
 
@@ -130,7 +140,7 @@ syntax = "auto" # or "catppuccin-mocha" / "catppuccin-latte"
 link = { color = "#89b4fa", sgr = ["underline"] }
 muted = { color = "39", sgr = ["dim"] } # 39: terminal's default foreground
 quote = { color = "39", sgr = ["dim"] }
-strong = { color = "#f38ba8", sgr = ["bold"] }
+strong = { color = "#a6e3a1", sgr = ["bold"] }
 ```
 
 Markdown lists retain their nesting and hanging indent when wrapped. Tasks
@@ -140,9 +150,9 @@ their destinations and titles; bare URLs and email addresses are recognized
 outside code. Images show their description, complete address and title.
 
 Run statistics keep labels and separators grey, with blue token counts,
-speed and cache figures, and a dim green cost. Context usage turns yellow
-at 80% of the window and red at 95%. Archived statistics use the same colours;
-explicitly styled bar parts keep their configured style.
+speed and cache figures, and a dim green cost. Context usage takes the warning
+style at 80% of the window and the error style at 95%. Archived statistics use
+the same colours; explicitly styled bar parts keep their configured style.
 While a run is active, its statistics start with a `⠴ ⠦ ⠖ ⠲` spinner;
 once it ends, a grey `π ` keeps the figures in the same columns, including
 when the archived line is redrawn.
@@ -205,7 +215,7 @@ refused, and resuming one from another directory moves it here.
 | `/exit`                            | leave; `ctrl+d` does the same                 |
 | `/content`                         | everything the model is given before you type |
 | `/<skill> [args]`                  | run a skill (also one-shot: `pi "/commit"`)   |
-| `! <command>`                      | run a shell command and record its output     |
+| `!<command>`                       | run a shell command and record its output     |
 | `@path`                            | complete a workspace file                     |
 | click a code block's label         | copy it; a diagram or table, its source       |
 | drag, double or triple click       | copy the text, a word, or a line              |

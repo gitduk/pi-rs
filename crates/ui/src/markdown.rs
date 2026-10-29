@@ -40,14 +40,21 @@ impl Palette {
             .expect("embedded syntax theme must be valid");
         let highlighter = Highlighter::new(&tokens);
         let headings = std::array::from_fn(|i| {
-            let scope = Scope::new(&format!("heading.{}.markdown", i + 1))
+            let scope = Scope::new(&format!("markup.heading.{}.markdown", i + 1))
                 .expect("fixed heading scope must be valid");
-            highlighter
+            let style = highlighter
                 .style_mod_for_stack(&[scope])
                 .foreground
                 .map_or_else(Style::default, |c| {
                     Style::new().fg(Color::Rgb(c.r, c.g, c.b))
-                })
+                });
+            let modifiers = match i {
+                0 => Modifier::BOLD | Modifier::UNDERLINED,
+                1 => Modifier::BOLD,
+                2 => Modifier::BOLD | Modifier::ITALIC,
+                _ => Modifier::ITALIC,
+            };
+            style.add_modifier(modifiers)
         });
         Self {
             code: CodeTheme::from_textmate(source).expect("embedded syntax theme must be valid"),
@@ -98,7 +105,6 @@ pub(super) struct Sheet {
 impl StyleSheet for Sheet {
     fn heading(&self, level: u8) -> Style {
         self.headings[usize::from(level.clamp(1, 6) - 1)]
-            .patch(style_to_ratatui(&self.theme.heading))
     }
 
     fn heading_marker(&self, _level: u8) -> &str {
@@ -164,10 +170,13 @@ impl Format {
 
 pub(super) fn options(theme: Arc<Theme>) -> Format {
     let palette = Palette::get(theme.syntax);
-    let sheet = Sheet {
-        theme,
-        headings: palette.headings,
-    };
+    // The generic heading style also labels content outside Markdown headings.
+    let override_heading =
+        (theme.heading != Theme::default().heading).then(|| style_to_ratatui(&theme.heading));
+    let headings = palette
+        .headings
+        .map(|style| override_heading.map_or(style, |custom| style.patch(custom)));
+    let sheet = Sheet { theme, headings };
     Format {
         options: Options::new(sheet.clone()).code_theme(palette.code.clone()),
         sheet,

@@ -113,6 +113,8 @@ pub fn mark(text: &str) -> Cow<'_, str> {
 }
 
 // The renderer's own, so what is code here is code there.
+// Math stays off: a pair of `$` around prices parses as a formula and swallows
+// the prose between them.
 pub(crate) fn options() -> Options {
     Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
@@ -120,7 +122,6 @@ pub(crate) fn options() -> Options {
         | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
         | Options::ENABLE_SUPERSCRIPT
         | Options::ENABLE_SUBSCRIPT
-        | Options::ENABLE_MATH
         | Options::ENABLE_FOOTNOTES
         | Options::ENABLE_DEFINITION_LIST
         | Options::ENABLE_GFM

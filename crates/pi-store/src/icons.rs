@@ -4,15 +4,18 @@
 //! The two prompt sigils are also config: `settings.toml` may override either.
 //! A name carries the surface it draws on (e.g. `MENU_SIGIL`, `CURRENT_ITEM`).
 
-// The bar the prompt wears, on the input line and on the rows it lands as:
-// one shape, so what is being typed and what was said wear the same mark.
-pub const PROMPT_BAR: &str = "┃";
+pub const PROMPT_BAR: &str = "";
 
 /// The bar as every line that wears one writes it: the glyph and the column
 /// of air after it — written once, so the input line and the lines it lands
-/// as put their first character in the same place.
+/// as put their first character in the same place. Empty icons and the command
+/// prefix add no space.
 pub fn bar(icon: &str) -> String {
-    format!("{icon} ")
+    if icon.is_empty() || icon == BANG_SIGIL {
+        icon.to_string()
+    } else {
+        format!("{icon} ")
+    }
 }
 
 /// The blank as wide as [`bar`] of `icon`, before each line after a barred
@@ -21,7 +24,7 @@ pub fn under_bar(icon: &str) -> String {
     " ".repeat(crate::text::width(&bar(icon)))
 }
 
-pub const SAID_RULE: &str = PROMPT_BAR; // the rule beside a line the user said
+pub const SAID_RULE: &str = PROMPT_BAR; // prefix beside a line the user said
 pub const PI_MARK: &str = "π"; // what pi itself says, and the banner it opens on
 
 /// The version line that opens the scrollback.

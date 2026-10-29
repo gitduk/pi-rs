@@ -89,7 +89,6 @@ enum Kind {
     // One logical line of a said prompt: border and body kept apart so
     // a wrap can repeat the border. `band` is the whole row's background.
     Said {
-        // The rule and its column: `SAID_RULE` in the prompt colour.
         border: Line<'static>,
         // The line's text, in the input style, without the border.
         body: Line<'static>,
@@ -589,30 +588,21 @@ impl Row {
         Self::notice(Line::from(spans))
     }
 
-    // One logical line of a prompt the user said: the rule it wears, the text
-    // under it, and the panel both sit in. The border lives apart from the body.
     fn said(border: Line<'static>, body: Line<'static>, band: Option<RStyle>) -> Self {
         Self::new(Kind::Said { border, body, band })
     }
 
-    /// A prompt's lines as the stream echoed them: the input bar, on a
-    /// band one step off where it was typed, so it reads as typed there.
+    /// A prompt's lines as the stream echoed them, on a band one step off
+    /// where it was typed, with the same alignment.
     pub fn prompt(text: &str, paint: &Paint) -> Vec<Self> {
         let band = paint.band(&paint.theme.prompt.panel.said);
         if text.starts_with('!') {
-            // A `!` is a command, not something said: the bang takes the
-            // prompt's place, and the lines under it keep the plain indent.
             let bang = paint.span(&paint.theme.prompt.color, icons::bar(icons::BANG_SIGIL));
-            // Measured, never assumed: the continuation rows indent under the
-            // bang by the columns the bang really takes.
             let indent = Span::raw(" ".repeat(bang.width()));
             let mut rows = Vec::new();
             for (i, line) in text.lines().enumerate() {
                 let (prefix, body) = if i == 0 {
-                    (
-                        bang.clone(),
-                        line.strip_prefix('!').unwrap_or(line).trim_start(),
-                    )
+                    (bang.clone(), line.strip_prefix('!').unwrap_or(line))
                 } else {
                     (indent.clone(), line)
                 };
@@ -624,8 +614,6 @@ impl Row {
             }
             return rows;
         }
-        // Unbroken down every line said: the icon marks what is being typed,
-        // and a landed line wearing it reads as another place to type.
         let border =
             Line::from(paint.span(&paint.theme.prompt.color, icons::bar(icons::SAID_RULE)));
         text.lines()

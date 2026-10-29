@@ -353,8 +353,8 @@ pub struct Theme {
 // in `for_background`, so explicitly configured styles stay untouched.
 const GREEN: Color = Color::Rgb(166, 227, 161);
 const RED: Color = Color::Rgb(243, 139, 168);
-const YELLOW: Color = Color::Rgb(249, 226, 175);
 const BLUE: Color = Color::Rgb(137, 180, 250);
+const TEAL: Color = Color::Rgb(148, 226, 213);
 const ACCENT_BLUE: Color = Color::Rgb(99, 168, 248);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -428,10 +428,7 @@ pub struct Prompt {
     pub color: Style,
     #[serde(default = "default_icon")]
     pub icon: String,
-    /// What the prompt sigil shows while vim keys are in Normal. The same bar
-    /// as `icon` by default — the caret's shape is what says which mode is
-    /// up — but its own setting, for a terminal that will not reshape the
-    /// caret.
+    /// The alternate prompt prefix. Both prefixes are blank by default.
     #[serde(default = "default_normal_icon")]
     pub normal: String,
     /// The bands for editable and submitted text, the editable one brighter.
@@ -476,13 +473,13 @@ fn default_muted() -> Style {
     Style::dimmed()
 }
 fn default_heading() -> Style {
-    Style::attrs(&[Attr::Bold])
+    Style::color(BLUE).adding(Attr::Bold)
 }
 fn default_emphasis() -> Style {
-    Style::attrs(&[Attr::Italic])
+    Style::color(TEAL).adding(Attr::Italic)
 }
 fn default_strong() -> Style {
-    Style::color(RED).adding(Attr::Bold)
+    Style::color(GREEN).adding(Attr::Bold)
 }
 fn default_code() -> Style {
     Style::color(BLUE)
@@ -491,18 +488,10 @@ fn default_link() -> Style {
     Style::color(BLUE).adding(Attr::Underline)
 }
 fn default_quote() -> Style {
-    default_muted()
+    Style::color(TEAL)
 }
 fn default_table() -> Vec<Style> {
-    [
-        (249, 226, 175),
-        (148, 226, 213),
-        (203, 166, 247),
-        (250, 179, 135),
-    ]
-    .into_iter()
-    .map(|(r, g, b)| Style::color(Color::Rgb(r, g, b)))
-    .collect()
+    [BLUE, GREEN].into_iter().map(Style::color).collect()
 }
 fn default_add() -> Style {
     Style::color(GREEN)
@@ -511,22 +500,22 @@ fn default_del() -> Style {
     Style::color(RED)
 }
 fn default_ok() -> Style {
-    Style::color(GREEN)
+    Style::color(Color::Basic(32)).adding(Attr::Bold)
 }
 fn default_err() -> Style {
-    Style::color(RED)
+    Style::color(Color::Basic(31)).adding(Attr::Bold)
 }
 fn default_warn() -> Style {
-    Style::color(YELLOW)
+    Style::color(Color::Basic(39)).adding(Attr::Bold)
 }
 fn default_match() -> Style {
     Style::attrs(&[Attr::Reverse])
 }
 fn default_match_current() -> Style {
-    Style::color(YELLOW).adding(Attr::Reverse)
+    Style::color(BLUE).adding(Attr::Reverse)
 }
 fn default_selected() -> Style {
-    default_prompt_color().adding(Attr::Bold)
+    Style::color(BLUE).adding(Attr::Bold)
 }
 fn default_prompt_color() -> Style {
     Style::color(ACCENT_BLUE)
@@ -589,16 +578,28 @@ impl Theme {
         }
         if light {
             for (style, default, color) in [
-                (&mut theme.strong, &defaults.strong, (210, 15, 57)),
+                (&mut theme.heading, &defaults.heading, (30, 102, 245)),
+                (&mut theme.emphasis, &defaults.emphasis, (23, 146, 153)),
+                (&mut theme.strong, &defaults.strong, (64, 160, 43)),
+                (&mut theme.code, &defaults.code, (30, 102, 245)),
+                (&mut theme.link, &defaults.link, (30, 102, 245)),
+                (
+                    &mut theme.menu.selected,
+                    &defaults.menu.selected,
+                    (30, 102, 245),
+                ),
+                (&mut theme.quote, &defaults.quote, (23, 146, 153)),
+                (
+                    &mut theme.prompt.color,
+                    &defaults.prompt.color,
+                    (28, 100, 200),
+                ),
                 (&mut theme.diff.add, &defaults.diff.add, (64, 160, 43)),
                 (&mut theme.diff.del, &defaults.diff.del, (210, 15, 57)),
-                (&mut theme.status.ok, &defaults.status.ok, (64, 160, 43)),
-                (&mut theme.status.err, &defaults.status.err, (210, 15, 57)),
-                (&mut theme.status.warn, &defaults.status.warn, (143, 103, 0)),
                 (
                     &mut theme.match_current,
                     &defaults.match_current,
-                    (143, 103, 0),
+                    (30, 102, 245),
                 ),
             ] {
                 if style == default {
@@ -610,16 +611,14 @@ impl Theme {
                 }
             }
             if theme.table == defaults.table {
-                theme.table = [
-                    (143, 103, 0),
-                    (23, 146, 153),
-                    (136, 57, 239),
-                    (254, 100, 11),
-                ]
-                .into_iter()
-                .map(|(r, g, b)| Style::color(Color::Rgb(r, g, b)))
-                .collect();
+                theme.table = [(30, 102, 245), (64, 160, 43)]
+                    .into_iter()
+                    .map(|(r, g, b)| Style::color(Color::Rgb(r, g, b)))
+                    .collect();
             }
+        }
+        if !light && theme.status.warn == defaults.status.warn {
+            theme.status.warn = Style::color(Color::Basic(33)).adding(Attr::Bold);
         }
         let bands = bands_for(bg);
         if theme.prompt.panel.input == defaults.prompt.panel.input {

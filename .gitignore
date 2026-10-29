@@ -1,4 +1,5 @@
 /target/
 /docs/
 /.claude/
-.pi.toml
+/.pi/
+/.pi.toml

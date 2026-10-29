@@ -347,6 +347,7 @@ impl Ui {
         let cursor = (menu.get(picked))
             .filter(|e| e.taken_by_enter(moved))
             .and_then(|_| self.paint.band(&self.paint.theme.prompt.panel.input))
+            .map(|band| band.patch(self.rat_style(&self.paint.theme.menu.selected)))
             .unwrap_or_default();
         self.regions = regions;
         let menu_rule = self.over_rule(width, false);
@@ -626,7 +627,7 @@ impl Ui {
             } else {
                 ""
             };
-            let text = format!("{mark} {first}{more}");
+            let text = format!("{}{first}{more}", icons::bar(mark));
             let muted = Line::from(self.paint.span(&self.paint.theme.muted, text));
             screen::fit(&muted, width)
         };
