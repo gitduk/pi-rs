@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::process::Command;
 
-use crate::background::{Again, Controls, Environment, OutputMode, Rerun, RunSink};
+use crate::background::{Again, Controls, Environment, Invocation, OutputMode, Rerun, RunSink};
 
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput, output};
 
@@ -131,8 +131,9 @@ async fn schedule(
     executions: &dyn RunSink,
     environment: Environment,
     output: OutputMode,
+    invocation: Invocation,
 ) -> Result<ToolOutput, ToolError> {
-    let preview = first_line(&args.command).to_string();
+    let preview = invocation.title().into_owned();
     let mut again = prepare(args, Tier::Exec, ctx).await?;
     again.environment = environment;
     again.output = output;
@@ -140,11 +141,7 @@ async fn schedule(
         .checked_add(after)
         .ok_or_else(|| ToolError::Invalid("the start delay is too large".into()))?;
     let stop = tokio_util::sync::CancellationToken::new();
-    let execution = executions.start(
-        ctx.workspace.root().to_path_buf(),
-        preview.clone(),
-        stop.clone(),
-    );
+    let execution = executions.start(ctx.workspace.root().to_path_buf(), invocation, stop.clone());
     let id = execution.id();
     execution.watch(Arc::new(String::new));
     let launch = rerun(again.clone(), ctx);
@@ -245,7 +242,7 @@ impl Tool for Bash {
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        self.execute_call(args, Environment::default(), OutputMode::All, ctx)
+        self.execute_call(args, Environment::default(), OutputMode::All, None, ctx)
             .await
     }
 }
@@ -256,6 +253,7 @@ impl Bash {
         mut args: Value,
         environment: Environment,
         output: OutputMode,
+        invocation: Option<Invocation>,
         ctx: &Ctx,
     ) -> Result<ToolOutput, ToolError> {
         let present = |key: &str| args.get(key).is_some_and(|v| !v.is_null());
@@ -317,6 +315,7 @@ impl Bash {
             ));
         }
         if background {
+            let invocation = invocation.unwrap_or_else(|| Invocation::shell(args.command.clone()));
             return schedule(
                 args,
                 std::time::Duration::from_secs(after.unwrap_or(0)),
@@ -324,6 +323,7 @@ impl Bash {
                 self.executions.as_deref().expect("background mode checked"),
                 environment,
                 output,
+                invocation,
             )
             .await;
         }

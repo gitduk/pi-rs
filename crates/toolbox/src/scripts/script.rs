@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use tool::{Concurrency, Ctx, Tier, Tool, ToolError, ToolOutput};
 
-use crate::background::{Environment, OutputMode};
+use crate::background::{Environment, Invocation, OutputMode};
 use crate::bash::Bash;
 use crate::channel::Ask;
 
@@ -208,9 +208,22 @@ impl Tool for Script {
                     .map(|(name, value)| (name.to_string(), value.to_string()))
                     .collect(),
             };
-            return shell.execute_call(json!({
-                "command": command_text, "stdin": String::from_utf8(input).expect("JSON is UTF-8"), "background": true,
-            }), environment, OutputMode::Stdout, ctx).await;
+            return shell
+                .execute_call(
+                    json!({
+                        "command": command_text,
+                        "stdin": String::from_utf8(input).expect("JSON is UTF-8"),
+                        "background": true,
+                    }),
+                    environment,
+                    OutputMode::Stdout,
+                    Some(Invocation::Tool {
+                        name: self.name.clone(),
+                        args,
+                    }),
+                    ctx,
+                )
+                .await;
         }
         let before = crate::drift::before(ctx);
         let exited =

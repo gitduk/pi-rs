@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::background::{Peek, RunHandle};
+use crate::background::{Invocation, Peek, RunHandle};
 use crate::channel::Told;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -51,13 +51,13 @@ impl crate::background::RunSink for Sink {
     fn start(
         &self,
         _root: std::path::PathBuf,
-        description: String,
+        invocation: Invocation,
         stop: CancellationToken,
     ) -> Arc<dyn RunHandle> {
         self.said
             .lock()
             .unwrap()
-            .push(format!("start {description}"));
+            .push(format!("start {}", invocation.title()));
         *self.stop.lock().unwrap() = Some(stop);
         Arc::new(Handle {
             told: self.told.clone(),

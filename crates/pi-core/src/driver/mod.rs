@@ -384,9 +384,21 @@ mod tests {
         let elsewhere = std::path::Path::new("/elsewhere");
         let table = drivers.background();
         let sink = background::Commands::new(table.clone());
-        let first = sink.start(root.into(), "build".into(), Default::default());
-        let other = sink.start(elsewhere.into(), "other".into(), Default::default());
-        let second = sink.start(root.into(), "test".into(), Default::default());
+        let first = sink.start(
+            root.into(),
+            toolbox::background::Invocation::shell("build"),
+            Default::default(),
+        );
+        let other = sink.start(
+            elsewhere.into(),
+            toolbox::background::Invocation::shell("other"),
+            Default::default(),
+        );
+        let second = sink.start(
+            root.into(),
+            toolbox::background::Invocation::shell("test"),
+            Default::default(),
+        );
         // Arrival order differs from registration order, as it can in a run.
         second.channel().result("tests passed".into());
         second.end();
@@ -423,8 +435,16 @@ mod tests {
         let mut drivers = Drivers::default();
         let root = std::path::Path::new("/checkout");
         let sink = background::Commands::new(drivers.background());
-        let execution = sink.start(root.into(), "watch".into(), Default::default());
-        let other = sink.start(root.into(), "build".into(), Default::default());
+        let execution = sink.start(
+            root.into(),
+            toolbox::background::Invocation::shell("watch"),
+            Default::default(),
+        );
+        let other = sink.start(
+            root.into(),
+            toolbox::background::Invocation::shell("build"),
+            Default::default(),
+        );
         execution.channel().result("first".into());
         execution.channel().result("second".into());
         execution.channel().input("what happened?".into());
@@ -466,7 +486,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let execution = background::Commands::new(drivers.background()).start(
             root.clone(),
-            "bridge".into(),
+            toolbox::background::Invocation::shell("bridge"),
             Default::default(),
         );
         execution.channel().listen(tx);
@@ -536,7 +556,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let execution = background::Commands::new(drivers.background()).start(
             root.clone(),
-            "wechat".into(),
+            toolbox::background::Invocation::shell("wechat"),
             Default::default(),
         );
         execution.channel().listen(tx);
@@ -569,7 +589,7 @@ mod tests {
         let drivers = Drivers::default();
         let execution = background::Commands::new(drivers.background()).start(
             root.clone(),
-            "http.server 8080".into(),
+            toolbox::background::Invocation::shell("http.server 8080"),
             Default::default(),
         );
         let Said::Noted(_, note) = drivers.stop_commands(&root, &[execution.id()]) else {
@@ -596,7 +616,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let execution = background::Commands::new(drivers.background()).start(
             root.clone(),
-            "wechat".into(),
+            toolbox::background::Invocation::shell("wechat"),
             Default::default(),
         );
         execution.channel().listen(tx);
@@ -634,10 +654,18 @@ mod tests {
         let mut drivers = Drivers::default();
         let sink = background::Commands::new(drivers.background());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let execution = sink.start(root.clone(), "wechat".into(), Default::default());
+        let execution = sink.start(
+            root.clone(),
+            toolbox::background::Invocation::shell("wechat"),
+            Default::default(),
+        );
         execution.channel().listen(tx);
         let (quiet_tx, mut quiet) = tokio::sync::mpsc::unbounded_channel();
-        let _quiet = sink.start(root.clone(), "build".into(), Default::default());
+        let _quiet = sink.start(
+            root.clone(),
+            toolbox::background::Invocation::shell("build"),
+            Default::default(),
+        );
         _quiet.channel().listen(quiet_tx);
 
         drivers.observe(1, &root, &Event::TurnStart { turn: 1 });

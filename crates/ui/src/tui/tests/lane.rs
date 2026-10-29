@@ -1201,7 +1201,7 @@ async fn queued_command_results_open_one_turn_under_their_label() {
     let execution = toolbox::background::RunSink::start(
         &pi_core::driver::background::Commands::new(tui.drivers.background()),
         dir.path().to_path_buf(),
-        "build".into(),
+        toolbox::background::Invocation::shell("build"),
         Default::default(),
     );
     execution.channel().result("check the build".into());
@@ -1232,7 +1232,7 @@ async fn a_persons_line_through_a_command_is_always_a_prompt() {
     let execution = toolbox::background::RunSink::start(
         &pi_core::driver::background::Commands::new(tui.drivers.background()),
         dir.path().to_path_buf(),
-        "wechat".into(),
+        toolbox::background::Invocation::shell("wechat"),
         Default::default(),
     );
     for line in ["/compact", "!rm -rf build"] {
@@ -1300,7 +1300,7 @@ async fn leaving_with_a_command_preserves_its_stop_cause_on_resume() {
         let stop = tokio_util::sync::CancellationToken::new();
         let execution = pi_core::driver::background::Commands::new(tui.drivers.background()).start(
             dir.path().into(),
-            "sleep 30; echo done".into(),
+            toolbox::background::Invocation::shell("sleep 30; echo done"),
             stop.clone(),
         );
         execution.rerun(

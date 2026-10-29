@@ -15,7 +15,7 @@ use super::ui::OpenCommand;
 use crate::render::Outcome;
 use crate::render::{Paint, named};
 use pi_core::core::tools::modifies;
-use pi_core::driver::background::{BackgroundCommand, State};
+use pi_core::driver::background::{BackgroundCommand, Invocation, State};
 use pi_store::icons;
 
 // A tool call not yet settled. Its line is drawn by the group it will fold
@@ -155,14 +155,10 @@ pub(super) const BACKGROUND_SHOWN: usize = 4;
 // What a command's row says, in two: what it is, then how long it has run,
 // which a narrow row keeps whole.
 fn background_text(execution: &BackgroundCommand) -> (String, String) {
+    let title = execution.invocation.title();
     let head = match execution.progress.as_str() {
-        "" => format!("#{} {}", execution.id, execution.description),
-        progress => format!(
-            "#{} {}{}{progress}",
-            execution.id,
-            execution.description,
-            icons::PART_SEP
-        ),
+        "" => format!("#{} {title}", execution.id),
+        progress => format!("#{} {}{}{progress}", execution.id, title, icons::PART_SEP),
     };
     let state = match execution.state {
         State::Running => crate::status::running_time(execution.started.elapsed())
@@ -185,12 +181,16 @@ fn background_head(
     let Some(rest) = head.strip_prefix(&id) else {
         return vec![paint.span_hovered(hovered, &paint.theme.muted, head)];
     };
-    let (description, progress) = match rest.strip_prefix(&execution.description) {
-        Some(progress) => (execution.description.as_str(), progress),
+    let title = execution.invocation.title();
+    let (description, progress) = match rest.strip_prefix(title.as_ref()) {
+        Some(progress) => (title.as_ref(), progress),
         None => (rest, ""),
     };
     let mut spans = vec![paint.span_hovered(hovered, &paint.theme.muted, id)];
-    spans.extend(paint.shell(description, hovered));
+    spans.extend(match execution.invocation.as_ref() {
+        Invocation::Shell { .. } => paint.shell(description, hovered),
+        Invocation::Tool { name, .. } => paint.tool_call(name, description, hovered),
+    });
     spans.push(paint.span_hovered(hovered, &paint.theme.muted, progress));
     spans
 }
@@ -239,6 +239,31 @@ fn said(body: &str) -> Vec<String> {
         .collect()
 }
 
+fn launch_lines(execution: &BackgroundCommand, paint: &Paint) -> Vec<Line<'static>> {
+    let Some(launch) = &execution.launch else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    for (index, line) in launch.command.lines().enumerate() {
+        let prefix = if index == 0 {
+            "  command: "
+        } else {
+            "           "
+        };
+        let mut spans = vec![paint.span(&paint.theme.muted, prefix)];
+        spans.extend(paint.shell(&pi_store::text::screen_line(line), false));
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::from(paint.span(
+        &paint.theme.muted,
+        format!(
+            "  cwd: {}",
+            pi_store::text::screen_line(&launch.cwd.display().to_string())
+        ),
+    )));
+    lines
+}
+
 // A page of all an open execution printed, headed by its row.
 pub(super) fn background_page(
     execution: &BackgroundCommand,
@@ -250,7 +275,10 @@ pub(super) fn background_page(
     spans.push(paint.span(&paint.theme.muted, tail));
     let head = Line::from(spans);
     let said = said(body).into_iter().map(|l| Line::from(l).into());
-    std::iter::once(head.into()).chain(said).collect()
+    std::iter::once(head.into())
+        .chain(launch_lines(execution, paint).into_iter().map(Into::into))
+        .chain(said)
+        .collect()
 }
 
 // Finished executions can accumulate while a turn holds their delivery.
@@ -357,6 +385,13 @@ pub(super) fn background_lines(
                 CommandRow::BackgroundCommand(execution.id),
                 rows.len(),
             ));
+            let details = launch_lines(execution, paint);
+            let details = details
+                .iter()
+                .flat_map(|line| super::screen::fit(line, room))
+                .collect::<Vec<_>>();
+            ids.extend(std::iter::repeat_n(CommandRow::Under, details.len()));
+            rows.extend(details);
             if from > 0 {
                 let more = format!("  {from} more");
                 let shine = hovered == Some(CommandRow::Earlier(execution.id));
@@ -418,5 +453,5 @@ fn within(s: &str, cols: usize) -> String {
 
 // Whether a click on a command's row shows more than the row does.
 pub(super) fn background_opens(execution: &BackgroundCommand, width: usize) -> bool {
-    !execution.last.is_empty() || background_row(execution, width).1
+    execution.launch.is_some() || !execution.last.is_empty() || background_row(execution, width).1
 }

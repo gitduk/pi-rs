@@ -248,8 +248,11 @@ also continues when messages are waiting. Generation is never interrupted.
   `{"restart":[3]}` starts one again under its id. Stopping during a delay
   prevents launch. Background results open later turns once the checkout is
   idle. Commands appear above the input; clicking one opens its output.
-  Their titles use shell highlighting. User stop and restart actions reach
-  the model before it next speaks.
+  Shell calls show the original command with shell highlighting. Named wrappers
+  show the tool name and supplied arguments with tool-call colours. Expanding
+  a command shows the actual launch command, working directory, and output.
+  The original call and launch specification both survive restart and session
+  recovery. User stop and restart actions reach the model before it next speaks.
   Foreground commands have no automatic timeout or background promotion.
   Interrupting their run stops their process group. One-shot runs and
   subagents offer foreground commands only; a subagent call also waits for

@@ -1,9 +1,41 @@
 //! Lifecycle and controls for commands started by bash background.
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
+
+/// The original call, independent of the command prepared to execute it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Invocation {
+    Shell {
+        command: String,
+    },
+    Tool {
+        name: String,
+        args: serde_json::Value,
+    },
+}
+
+impl Invocation {
+    pub fn shell(command: impl Into<String>) -> Self {
+        Self::Shell {
+            command: command.into(),
+        }
+    }
+
+    /// A single-line description of the original call, without width limits.
+    pub fn title(&self) -> Cow<'_, str> {
+        match self {
+            Self::Shell { command } => Cow::Borrowed(command.lines().next().unwrap_or_default()),
+            Self::Tool { name, args } if args.as_object().is_some_and(|args| args.is_empty()) => {
+                Cow::Borrowed(name)
+            }
+            Self::Tool { name, args } => Cow::Owned(format!("{name} {}", tool::arguments(args))),
+        }
+    }
+}
 
 /// Reads the latest of what a running execution has printed, on demand.
 pub type Peek = Arc<dyn Fn() -> String + Send + Sync>;
@@ -38,7 +70,7 @@ pub trait RunSink: Send + Sync {
     fn start(
         &self,
         root: PathBuf,
-        description: String,
+        invocation: Invocation,
         stop: CancellationToken,
     ) -> Arc<dyn RunHandle>;
 }

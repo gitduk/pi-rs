@@ -81,12 +81,28 @@ mod tests {
         let other = PathBuf::from("/elsewhere");
         let executions = Arc::new(Table::default());
         let sink = crate::driver::background::Commands::new(executions.clone());
-        let phone = sink.start(root.clone(), "phone".into(), Default::default());
+        let phone = sink.start(
+            root.clone(),
+            toolbox::background::Invocation::shell("phone"),
+            Default::default(),
+        );
         phone.channel().input("a remote question".into());
         phone.channel().result("phone result".into());
-        let first = sink.start(root.clone(), "build".into(), Default::default());
-        let elsewhere = sink.start(other.clone(), "other".into(), Default::default());
-        let second = sink.start(root.clone(), "test".into(), Default::default());
+        let first = sink.start(
+            root.clone(),
+            toolbox::background::Invocation::shell("build"),
+            Default::default(),
+        );
+        let elsewhere = sink.start(
+            other.clone(),
+            toolbox::background::Invocation::shell("other"),
+            Default::default(),
+        );
+        let second = sink.start(
+            root.clone(),
+            toolbox::background::Invocation::shell("test"),
+            Default::default(),
+        );
         first.channel().result("built".into());
         first.end();
         second.channel().result("tested".into());

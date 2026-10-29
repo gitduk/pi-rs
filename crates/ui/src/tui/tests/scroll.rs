@@ -1325,19 +1325,11 @@ fn the_rewind_list_follows_prompts_without_changing_the_transcript() {
 // its own while it is up, so a click there lands on the page, not an execution.
 #[test]
 fn a_page_lies_over_the_commands() {
-    use pi_core::driver::background::{BackgroundCommand, State};
+    use pi_core::driver::background::Invocation;
     let mut ui = test_ui(80, 24);
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
-    ui.executions = vec![BackgroundCommand {
-        id: 1,
-        description: "serve".into(),
-        progress: String::new(),
-        started: tokio::time::Instant::now(),
-        started_at: std::time::SystemTime::now(),
-        state: State::Running,
-        last: String::new(),
-    }];
+    ui.executions = vec![background_command(1, Invocation::shell("serve"))];
     ui.flush(&lane, &mut view);
     let talk = ui.regions.history.height;
     assert_eq!(ui.regions.executions.height, 1, "the execution has its row");

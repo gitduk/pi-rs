@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pi_core::driver::background::{BackgroundCommand, State};
+use pi_core::driver::background::{BackgroundCommand, Invocation, State};
 use pi_store::keys::Mode;
 
 use super::harness::*;
@@ -7,15 +7,7 @@ use crate::tui::{Asked, Deed, TermEvent, View};
 
 fn background(ids: &[u64]) -> Vec<BackgroundCommand> {
     ids.iter()
-        .map(|&id| BackgroundCommand {
-            id,
-            description: format!("command {id}"),
-            progress: String::new(),
-            started: tokio::time::Instant::now(),
-            started_at: std::time::SystemTime::now(),
-            state: State::Running,
-            last: String::new(),
-        })
+        .map(|&id| background_command(id, Invocation::shell(format!("command {id}"))))
         .collect()
 }
 
@@ -92,13 +84,15 @@ async fn named_scripts_use_bash_background_with_original_input_and_environment()
         );
         let executions = table.background(dir.path());
         let execution = executions.last().unwrap();
-        assert!(execution.description.contains("later"));
+        assert!(
+            matches!(execution.invocation.as_ref(), Invocation::Tool { name, args: actual } if name == "later" && actual == &args)
+        );
         let carried = table.carried(dir.path());
         assert_eq!(
             carried.last().unwrap().again.stdin.as_deref(),
             Some(args.to_string().as_str())
         );
-        let head = format!("#{} {}", execution.id, execution.description);
+        let head = format!("#{} {}", execution.id, execution.invocation.title());
         ui.sync_background(executions);
         ui.flush(&lane, &mut view);
         let buffer = ui.screen.test_buffer();
@@ -165,7 +159,12 @@ printf '%s\n' 'private stderr' >&2
             .unwrap()
             .contains("private stderr")
     );
+    let invocation = Invocation::Tool {
+        name: "show".into(),
+        args: args.clone(),
+    };
     let carried = table.carried(dir.path());
+    assert_eq!(carried[0].invocation, invocation);
     let saved = serde_json::to_string(&carried).unwrap();
     assert!(
         !saved.contains("from-file"),
@@ -176,6 +175,17 @@ printf '%s\n' 'private stderr' >&2
         Some(args.to_string().as_str())
     );
 
+    let table = Arc::new(pi_core::driver::background::Table::default());
+    let restored: Vec<pi_core::driver::background::Carried> = serde_json::from_str(&saved).unwrap();
+    for carried in restored {
+        let rerun = toolbox::bash::rerun(carried.again.clone(), &ctx);
+        table.revive(carried, rerun);
+    }
+    assert_eq!(
+        table.background(dir.path())[0].invocation.as_ref(),
+        &invocation
+    );
+    assert!(table.listing(dir.path())[0].contains(invocation.title().as_ref()));
     std::fs::write(&env, "PI_BACKGROUND_TEST_VALUE=updated-file\n").unwrap();
     table.restart(dir.path(), 1).unwrap();
     let second = table
@@ -184,6 +194,10 @@ printf '%s\n' 'private stderr' >&2
         .unwrap()
         .unwrap();
     assert!(second[0].contains("updated-file"), "{second:?}");
+    assert_eq!(
+        table.background(dir.path())[0].invocation.as_ref(),
+        &invocation
+    );
 
     std::fs::remove_file(&env).unwrap();
     table.restart(dir.path(), 1).unwrap();
@@ -213,6 +227,67 @@ printf '%s\n' 'private stderr' >&2
         .await
         .unwrap();
     assert!(ordinary.flatten().contains("unset"));
+}
+
+#[test]
+fn expanded_launch_details_do_not_become_command_targets() {
+    use crate::render::Paint;
+    use crate::tui::{call, ui::OpenCommand};
+    use pi_core::driver::background::Launch;
+
+    let mut command = background_command(
+        1,
+        Invocation::Tool {
+            name: "bridge".into(),
+            args: serde_json::json!({"channel":"some words"}),
+        },
+    );
+    command.launch = Some(Launch {
+        command: "cargo +nightly -Zscript /some/path/bridge.rs\necho finished".into(),
+        cwd: "/some/workspace".into(),
+    });
+    let open = OpenCommand {
+        id: 1,
+        body: (0..20).map(|i| format!("output {i}\n")).collect(),
+    };
+    for width in [12, 80] {
+        let (lines, targets) = call::background_lines(
+            &[command.clone()],
+            None,
+            Some(&open),
+            false,
+            &Paint::new(false),
+            width,
+        );
+        assert_eq!(lines.len(), targets.len());
+        let earlier = targets
+            .iter()
+            .position(|target| *target == call::CommandRow::Earlier(1))
+            .unwrap();
+        let last_head = targets
+            .iter()
+            .rposition(|target| *target == call::CommandRow::BackgroundCommand(1))
+            .unwrap();
+        assert!(
+            earlier > last_head + 1,
+            "launch details remain between the heading and output"
+        );
+        assert!(
+            targets[last_head + 1..earlier]
+                .iter()
+                .all(|target| *target == call::CommandRow::Under)
+        );
+        assert!(
+            targets[earlier + 1..]
+                .iter()
+                .all(|target| *target == call::CommandRow::Under)
+        );
+    }
+    command.last.clear();
+    assert!(
+        call::background_opens(&command, 80),
+        "a quiet command still has launch details"
+    );
 }
 
 #[tokio::test]
@@ -431,8 +506,16 @@ async fn focused_controls_use_the_existing_driver_and_preserve_restartability() 
     let table = tui.drivers.background();
     let sink = pi_core::driver::background::Commands::new(table.clone());
     let stop = tokio_util::sync::CancellationToken::new();
-    let first = sink.start(root.clone(), "first".into(), stop.clone());
-    let second = sink.start(root.clone(), "second".into(), Default::default());
+    let first = sink.start(
+        root.clone(),
+        toolbox::background::Invocation::shell("first"),
+        stop.clone(),
+    );
+    let second = sink.start(
+        root.clone(),
+        toolbox::background::Invocation::shell("second"),
+        Default::default(),
+    );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Arc<dyn RunHandle>>();
     second.rerun(
         Arc::new(move |execution, _| {
@@ -520,7 +603,10 @@ fn waiting_results_fold_without_wrapping_long_commands() {
     let mut pending = background(&(1..=14).collect::<Vec<_>>());
     for execution in &mut pending {
         execution.state = State::Back;
-        execution.description = format!("python3 -c '{}'", "长命令 ".repeat(100));
+        execution.invocation = std::sync::Arc::new(Invocation::shell(format!(
+            "python3 -c '{}'",
+            "长命令 ".repeat(100)
+        )));
     }
     pending.last_mut().unwrap().last = "KeyError: 'agentId'".into();
     pending.extend(background(&[15]));
@@ -572,7 +658,7 @@ async fn waiting_results_expand_and_open_the_original_output_without_delivering_
     let execution = toolbox::background::RunSink::start(
         &sink,
         root.clone(),
-        command.clone(),
+        toolbox::background::Invocation::shell(command.clone()),
         Default::default(),
     );
     let output = "exited 1:\nTraceback (most recent call last):\nKeyError: 'agentId'";

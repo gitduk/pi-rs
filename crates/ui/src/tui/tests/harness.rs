@@ -9,6 +9,22 @@ use pi_store::keys::{Keys, Mode};
 use pi_store::session::Store;
 use ratatui::text::Line;
 
+pub(super) fn background_command(
+    id: u64,
+    invocation: pi_core::driver::background::Invocation,
+) -> pi_core::driver::background::BackgroundCommand {
+    pi_core::driver::background::BackgroundCommand {
+        id,
+        invocation: std::sync::Arc::new(invocation),
+        launch: None,
+        progress: String::new(),
+        started: tokio::time::Instant::now(),
+        started_at: std::time::SystemTime::now(),
+        state: pi_core::driver::background::State::Running,
+        last: String::new(),
+    }
+}
+
 pub(super) fn drawn_rows(view: &View) -> Vec<String> {
     ScrollbackRows::new(&view.surface.scrollback, &Paint::new(false), 80)
         .map(text)

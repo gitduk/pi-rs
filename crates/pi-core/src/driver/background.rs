@@ -20,6 +20,7 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tool::{Ctx, ToolError, ToolOutput};
+pub use toolbox::background::Invocation;
 use toolbox::background::{Again, Controls, Peek, Rerun, RunHandle, RunSink};
 use toolbox::channel::{Answer, Ask, Asked, Told};
 
@@ -178,7 +179,7 @@ impl Inner {
     fn stop(&mut self, at: usize, why: &str) -> Result<String, String> {
         let item = &mut self.items[at];
         let id = item.id;
-        let what = item.description.clone();
+        let what = item.invocation.title().into_owned();
         match (&item.phase, item.rerun.is_some()) {
             (Phase::Over { .. }, true) => return Err(format!("#{id} ({what}) is not running")),
             (Phase::Running { stop }, true) => {
@@ -206,7 +207,7 @@ struct Item {
     id: u64,
     // The checkout it comes back to: one lane holds one.
     root: PathBuf,
-    description: String,
+    invocation: Arc<Invocation>,
     progress: String,
     started: Instant,
     // The same moment on the wall clock, for a surface to say when.
@@ -265,11 +266,11 @@ enum Phase {
 
 impl Item {
     // Started now, running nothing yet and with nothing to say.
-    fn blank(id: u64, root: PathBuf, description: String, phase: Phase) -> Self {
+    fn blank(id: u64, root: PathBuf, invocation: Invocation, phase: Phase) -> Self {
         Item {
             id,
             root,
-            description,
+            invocation: Arc::new(invocation),
             progress: String::new(),
             started: Instant::now(),
             started_at: SystemTime::now(),
@@ -315,11 +316,11 @@ impl Item {
 
     // The execution as a person reads it: `judge #3`.
     fn name(&self) -> String {
-        format!("{} #{}", self.description, self.id)
+        format!("{} #{}", self.invocation.title(), self.id)
     }
 
     fn due(&self, text: &str) -> Due {
-        let (id, name) = (self.id, &self.description);
+        let (id, name) = (self.id, self.invocation.title());
         let first = text.lines().next().unwrap_or("").trim();
         Due {
             line: format!("Background command #{id} ({name}) reports:\n\n{text}"),
@@ -381,7 +382,7 @@ fn settle(items: &mut Vec<Item>, at: usize) {
 pub struct Carried {
     pub id: u64,
     pub root: PathBuf,
-    pub description: String,
+    pub invocation: Invocation,
     /// Stopped by the user or by pi leaving, not ended by itself.
     pub stopped: bool,
     pub started_at: SystemTime,
@@ -421,7 +422,8 @@ pub fn take_over(path: &Path) -> anyhow::Result<Vec<Carried>> {
 #[derive(Clone)]
 pub struct BackgroundCommand {
     pub id: u64,
-    pub description: String,
+    pub invocation: Arc<Invocation>,
+    pub launch: Option<Launch>,
     pub progress: String,
     pub started: Instant,
     /// When it started, by the wall clock.
@@ -430,6 +432,13 @@ pub struct BackgroundCommand {
     /// The last line of what it printed, or of what it sends back for one
     /// that keeps no output; empty when nothing yet.
     pub last: String,
+}
+
+/// The execution details a caller can inspect, excluding stdin and environment.
+#[derive(Clone)]
+pub struct Launch {
+    pub command: String,
+    pub cwd: PathBuf,
 }
 
 /// Where a listed execution stands.
@@ -776,9 +785,18 @@ impl Table {
         let held: Vec<(BackgroundCommand, Peek)> = (self.lock().items.iter())
             .filter(|i| i.root == root)
             .map(|i| {
+                let launch = i
+                    .rerun
+                    .as_ref()
+                    .and_then(|(_, again)| again.as_ref())
+                    .map(|again| Launch {
+                        command: again.command.clone(),
+                        cwd: again.cwd.clone(),
+                    });
                 let execution = BackgroundCommand {
                     id: i.id,
-                    description: i.description.clone(),
+                    invocation: i.invocation.clone(),
+                    launch,
                     progress: i.progress.clone(),
                     started: i.started,
                     started_at: i.started_at,
@@ -850,7 +868,7 @@ impl Table {
                     State::Stopped => "stopped, can restart".to_string(),
                     State::Exited => "exited, can restart".to_string(),
                 };
-                format!("#{}  {state}: {}", j.id, j.description)
+                format!("#{}  {state}: {}", j.id, j.invocation.title())
             })
             .collect()
     }
@@ -911,7 +929,7 @@ impl Table {
         let Some((rerun, _)) = item.rerun.clone() else {
             return Err(format!(
                 "#{id} ({}) cannot be started over",
-                item.description
+                item.invocation.title()
             ));
         };
         if let Phase::Running { stop } = &item.phase {
@@ -931,7 +949,7 @@ impl Table {
             gone: item.gone.clone(),
             table: self.clone(),
         });
-        let what = item.description.clone();
+        let what = item.invocation.title().into_owned();
         inner.withdraw(id, "its execution started over");
         drop(inner);
         tracing::info!(target: "pi::background", execution = id, "restarting");
@@ -984,7 +1002,7 @@ impl Table {
                 Some(Carried {
                     id: i.id,
                     root: i.root.clone(),
-                    description: i.description.clone(),
+                    invocation: i.invocation.as_ref().clone(),
                     stopped,
                     started_at: i.started_at,
                     again: again.clone(),
@@ -1005,8 +1023,8 @@ impl Table {
         inner.next_id = inner.next_id.max(execution.id);
         let ago = execution.started_at.elapsed().unwrap_or_default();
         tracing::info!(
-            target: "pi::background", execution = execution.id, name = %execution.description,
-            root = %execution.root.display(), "carried over"
+            target: "pi::background", execution = execution.id, invocation = ?execution.invocation,
+            root = %execution.root.display(), command = %execution.again.command, cwd = %execution.again.cwd.display(), "carried over"
         );
         let phase = Phase::Over {
             stopped: execution.stopped,
@@ -1015,7 +1033,7 @@ impl Table {
             started: Instant::now().checked_sub(ago).unwrap_or_else(Instant::now),
             started_at: execution.started_at,
             rerun: Some((rerun, Some(execution.again))),
-            ..Item::blank(execution.id, execution.root, execution.description, phase)
+            ..Item::blank(execution.id, execution.root, execution.invocation, phase)
         };
         // No last run here to let go of.
         item.gone.cancel();
@@ -1101,16 +1119,16 @@ impl Table {
     fn add(
         &self,
         root: PathBuf,
-        description: String,
+        invocation: Invocation,
         stop: CancellationToken,
     ) -> (u64, CancellationToken) {
         let mut inner = self.lock();
         inner.next_id += 1;
         let id = inner.next_id;
         tracing::info!(
-            target: "pi::background", execution = id, name = %description, root = %root.display(), "started"
+            target: "pi::background", execution = id, invocation = ?invocation, root = %root.display(), "started"
         );
-        let item = Item::blank(id, root, description, Phase::Running { stop });
+        let item = Item::blank(id, root, invocation, Phase::Running { stop });
         let gone = item.gone.clone();
         inner.items.push(item);
         drop(inner);
@@ -1175,10 +1193,10 @@ impl RunSink for Commands {
     fn start(
         &self,
         root: PathBuf,
-        description: String,
+        invocation: Invocation,
         stop: CancellationToken,
     ) -> Arc<dyn RunHandle> {
-        let (id, gone) = self.table.add(root, description, stop);
+        let (id, gone) = self.table.add(root, invocation, stop);
         Arc::new(Handle {
             id,
             run: 0,
@@ -1224,8 +1242,12 @@ impl RunHandle for Handle {
     }
 
     fn rerun(&self, how: Rerun, again: Option<Again>) {
-        self.table
-            .update(self.id, self.run, |i| i.rerun = Some((how, again)));
+        self.table.update(self.id, self.run, |i| {
+            if let Some(again) = &again {
+                tracing::info!(target: "pi::background", execution = self.id, command = %again.command, cwd = %again.cwd.display(), "prepared");
+            }
+            i.rerun = Some((how, again));
+        });
     }
 
     fn end(&self) {
@@ -1652,11 +1674,19 @@ mod tests {
         let root = Path::new("/checkout");
         let sink = Commands::new(table.clone());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let follower = sink.start(root.into(), "bridge".into(), Default::default());
+        let follower = sink.start(
+            root.into(),
+            toolbox::background::Invocation::shell("bridge"),
+            Default::default(),
+        );
         follower.channel().listen(tx);
         follower.channel().follow();
         let (elsewhere, mut quiet) = tokio::sync::mpsc::unbounded_channel();
-        let other = sink.start("/other".into(), "bridge".into(), Default::default());
+        let other = sink.start(
+            "/other".into(),
+            toolbox::background::Invocation::shell("bridge"),
+            Default::default(),
+        );
         other.channel().listen(elsewhere);
         other.channel().follow();
         let execution = start(&table, root, "scan");
@@ -1695,7 +1725,7 @@ mod tests {
         RunSink::start(
             &Commands::new(table.clone()),
             root.to_path_buf(),
-            name.into(),
+            toolbox::background::Invocation::shell(name),
             CancellationToken::new(),
         )
     }
@@ -1705,6 +1735,47 @@ mod tests {
             Back::Result(due) => Some(due),
             Back::Input { .. } => panic!("an input, not a result"),
         }
+    }
+
+    #[test]
+    fn result_notifications_keep_the_original_call_identity() {
+        let table = Arc::new(Table::default());
+        let root = Path::new("/checkout");
+        let invocation = Invocation::Tool {
+            name: "bridge".into(),
+            args: json!({"channel":"some words"}),
+        };
+        let execution = Commands::new(table.clone()).start(
+            root.into(),
+            invocation.clone(),
+            CancellationToken::new(),
+        );
+        execution.rerun(
+            Arc::new(|_, _| Ok(())),
+            Some(Again {
+                command: "cargo +nightly -Zscript /actual/bridge.rs".into(),
+                cwd: root.into(),
+                ..Again::default()
+            }),
+        );
+        execution.channel().result("delivered".into());
+        execution.end();
+        let (_, Back::Result(due)) = table.take_back(root).unwrap() else {
+            panic!("a result")
+        };
+        assert!(due.line.contains(invocation.title().as_ref()));
+        assert!(due.note.contains(invocation.title().as_ref()));
+        assert!(!due.line.contains("/actual/bridge.rs"));
+        let snapshot = table.background(root);
+        assert_eq!(snapshot[0].invocation.as_ref(), &invocation);
+        assert!(
+            snapshot[0]
+                .launch
+                .as_ref()
+                .unwrap()
+                .command
+                .contains("/actual/bridge.rs")
+        );
     }
 
     // A wait wakes when its execution ends, and takes the result from the lane.
@@ -1762,7 +1833,7 @@ mod tests {
         let execution = RunSink::start(
             &Commands::new(table.clone()),
             root.clone(),
-            "wechat".into(),
+            toolbox::background::Invocation::shell("wechat"),
             CancellationToken::new(),
         );
         execution.channel().listen(tx);
@@ -1961,7 +2032,7 @@ mod tests {
         let bridge = RunSink::start(
             &executions,
             root.clone(),
-            "telegram".into(),
+            toolbox::background::Invocation::shell("telegram"),
             CancellationToken::new(),
         );
         bridge.channel().listen(tx);
@@ -2050,7 +2121,7 @@ mod tests {
         let execution = RunSink::start(
             &Commands::new(table.clone()),
             root.clone(),
-            "long execution".into(),
+            toolbox::background::Invocation::shell("long execution"),
             stop.clone(),
         );
         assert!(table.stop(Path::new("/elsewhere"), execution.id()).is_err());
@@ -2074,7 +2145,7 @@ mod tests {
         let execution = RunSink::start(
             &Commands::new(table.clone()),
             root.clone(),
-            "crawl".into(),
+            toolbox::background::Invocation::shell("crawl"),
             CancellationToken::new(),
         );
         execution.channel().status("1/2 pages".into());
@@ -2110,7 +2181,7 @@ mod tests {
         let execution = RunSink::start(
             &Commands::new(table.clone()),
             root.clone(),
-            "flood".into(),
+            toolbox::background::Invocation::shell("flood"),
             CancellationToken::new(),
         );
         for n in 0..MAX_WAITING + 3 {
@@ -2145,7 +2216,7 @@ mod tests {
         let execution = RunSink::start(
             &Commands::new(table.clone()),
             root.clone(),
-            "quiet".into(),
+            toolbox::background::Invocation::shell("quiet"),
             Default::default(),
         );
         execution.end();
@@ -2156,8 +2227,16 @@ mod tests {
     #[tokio::test]
     async fn a_removed_checkout_stops_its_commands() {
         let table = Arc::new(Table::default());
-        let (a, _) = table.add("/repo.worktrees/a".into(), "a".into(), Default::default());
-        table.add("/repo".into(), "main".into(), Default::default());
+        let (a, _) = table.add(
+            "/repo.worktrees/a".into(),
+            toolbox::background::Invocation::shell("a"),
+            Default::default(),
+        );
+        table.add(
+            "/repo".into(),
+            toolbox::background::Invocation::shell("main"),
+            Default::default(),
+        );
         let stop = match &table.lock().items[0].phase {
             Phase::Running { stop } => stop.clone(),
             Phase::Over { .. } => panic!("it runs"),
@@ -2195,7 +2274,11 @@ mod tests {
         finished.channel().result("done".into());
         finished.end();
         let stop = CancellationToken::new();
-        let plain = Commands::new(table.clone()).start(root.into(), "plain".into(), stop.clone());
+        let plain = Commands::new(table.clone()).start(
+            root.into(),
+            toolbox::background::Invocation::shell("plain"),
+            stop.clone(),
+        );
         let elsewhere = start(&table, Path::new("/elsewhere"), "elsewhere");
 
         let stopped = table.stop_running(root, "process exiting");
@@ -2264,7 +2347,15 @@ mod tests {
         let old = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
         let (plain, _reruns) = rerunnable(&old, &root);
-        let execution = start(&old, &root, "serve");
+        let invocation = Invocation::Tool {
+            name: "serve".into(),
+            args: json!({"port":"8080", "prompt":"line one\nline two"}),
+        };
+        let execution = Commands::new(old.clone()).start(
+            root.clone(),
+            invocation.clone(),
+            CancellationToken::new(),
+        );
         let again = Again {
             command: "python3 serve.py".into(),
             cwd: root.clone(),
@@ -2281,6 +2372,7 @@ mod tests {
         assert_eq!((carried[0].id, carried[0].stopped), (execution.id(), true));
         assert_eq!((carried[1].id, carried[1].stopped), (running.id(), true));
         assert_eq!(carried[0].again, again);
+        assert_eq!(carried[0].invocation, invocation);
         assert!(old.carried(Path::new("/elsewhere")).is_empty());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("background.json");
@@ -2302,6 +2394,9 @@ mod tests {
         }
         let listed = new.background(&root);
         assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].invocation.as_ref(), &invocation);
+        let launch = listed[0].launch.as_ref().unwrap();
+        assert_eq!((&launch.command, &launch.cwd), (&again.command, &again.cwd));
         assert_eq!(
             (listed[0].id, listed[0].state),
             (execution.id(), State::Stopped)

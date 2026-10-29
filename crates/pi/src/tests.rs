@@ -102,8 +102,11 @@ fn carry_command(stopped: bool) {
         };
         let rerun = toolbox::bash::rerun(again.clone(), &ctx);
         let stop = CancellationToken::new();
-        let execution =
-            Commands::new(table.clone()).start(root.to_path_buf(), "serve".into(), stop.clone());
+        let execution = Commands::new(table.clone()).start(
+            root.to_path_buf(),
+            toolbox::background::Invocation::shell("serve"),
+            stop.clone(),
+        );
         let id = execution.id();
         execution.rerun(rerun.clone(), Some(again));
         rerun(execution, stop).unwrap();
