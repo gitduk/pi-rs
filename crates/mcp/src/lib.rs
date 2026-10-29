@@ -260,7 +260,7 @@ impl tool::Source for Servers {
                     name: tool_name(&server.name, "unavailable"),
                     description: format!(
                         "MCP server `{}` is not running: {why}. Its tools come back once \
-                         it starts; calling this only says so.",
+                         it starts. Calling this only says so.",
                         server.name
                     ),
                 })),
@@ -525,7 +525,7 @@ fn with_description(mut schema: serde_json::Map<String, Value>) -> (Value, bool)
                 DESCRIPTION.into(),
                 serde_json::json!({
                     "type": "string",
-                    "description": "A few words on what this call is for. Not sent to the tool.",
+                    "description": "Describe the purpose of this call in a few words. The remote tool does not receive this description.",
                 }),
             );
             true
@@ -570,7 +570,7 @@ impl Tool for Remote {
                 Ok(r) => r,
                 Err(_) => {
                     return Err(ToolError::Invalid(format!(
-                        "{}: no answer in {}s; the call was given up",
+                        "{}: no answer in {}s. The call was given up",
                         self.name,
                         WAIT.as_secs()
                     )));

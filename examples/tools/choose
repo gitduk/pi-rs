@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # ---
-# description = "Put a question to the user with a few options to pick from, when the decision is theirs: which approach, whether to go on, what to do next. Ask only what the request, the code and sensible defaults leave open, and only when the answer changes what you do next; otherwise pick the plain choice, say which in a line, and go on. Two rules the user stated that both apply at one point, with nothing saying which wins, are theirs to decide. Write each option as the exact message the user would send to pick it: words addressed to you, or a pi command such as `/compact <focus>` or `/model <name>`, which runs as if they typed it. Put the one you recommend first. They may pick one, or several, which reach you together as one message, a line each; a command can only be picked alone. The call returns at once; end your turn after it. The user's pick, or whatever they write instead, arrives as their next message."
+# description = "Ask the user a question with options when the decision belongs to them.\nExamples include choosing an approach, deciding whether to proceed, or selecting the next action.\nAsk only when the request, code, and reasonable defaults do not answer the question.\nThe answer must change your next action.\nOtherwise, choose the ordinary option, state it briefly, and continue.\nIf two applicable user rules conflict without stated precedence, ask the user to decide.\n\nWrite each option as the exact message the user would send to select it.\nUse words addressed to you or an available pi command.\nA selected command executes as if the user typed it.\nPut your recommended option first.\nThe user can select several text options, delivered together as one message with one option per line.\nA command must be selected alone.\n\nThe call returns immediately. End your turn after the call.\nThe selection, or text the user writes instead, arrives as their next message."
 # [args]
-# question = "One short sentence."
-# options = "Up to 9 options, one per line, each the one-line message that picks it."
+# question = "Write one short sentence."
+# options = "Supply up to 9 options, one per line. Each option must be the exact one-line message that selects it."
 # ---
 # The question goes to pi on fd 3 and the call ends: pi answers each `choose`
 # with one line, `{"asked": true}` once it is up, or an `error` saying why not.

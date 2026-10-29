@@ -32,7 +32,7 @@ fn image(rel: &str, media_type: &str, bytes: &[u8]) -> ToolOutput {
         Ok(image) => image,
         Err(why) => {
             return ToolOutput::text(format!(
-                "{rel} is {why}; shrink it with bash and read the smaller copy"
+                "{rel} is {why}. Shrink it with bash and read the smaller copy"
             ));
         }
     };
@@ -189,12 +189,11 @@ impl Tool for Read {
     }
 
     fn description(&self) -> &str {
-        "Read a file as numbered lines, list a directory, or look at an image \
-         (PNG, JPEG, GIF, WebP). Output is headed by \
-         [path]; later edits anchor on the content itself, so re-read after the \
-         file changes. A long file comes back as a skeleton of its declarations \
-         instead — read a range with offset and limit, or hand one whole block \
-         to edit as `old_string` with `whole_block: true`."
+        "Read a file as numbered lines, list a directory, or view a PNG, JPEG, GIF, or WebP image. \
+         Output starts with `[path]`. Edits use the content as anchors. Read the file again after it changes.\n\n\
+         A long file returns an outline of its declarations. \
+         Use `offset` and `limit` to read a line range. \
+         To edit a complete block, give its outline entry to `edit` as `old_string` with `whole_block: true`."
     }
 
     fn schema(&self) -> Value {
@@ -207,8 +206,7 @@ impl Tool for Read {
                 "outline": {
                     "type": "boolean",
                     "description": "Return the file's declarations instead of its lines. \
-                                    Applied automatically to long files unless offset or \
-                                    limit is given.",
+                                    Long files use this mode automatically unless you specify `offset` or `limit`.",
                 },
             },
             "required": ["path"],
@@ -279,7 +277,7 @@ impl Tool for Read {
         // coming: opening it to read blocks, and /dev/zero reads forever.
         if !meta.is_file() {
             return Err(ToolError::Invalid(format!(
-                "{rel} is not a regular file; read reads regular files only — FIFOs, devices and sockets are not read"
+                "{rel} is not a regular file. Read reads regular files only — FIFOs, devices and sockets are not read"
             )));
         }
 
@@ -294,7 +292,7 @@ impl Tool for Read {
         }
         if looks_binary(&bytes) {
             return Ok(ToolOutput::text(format!(
-                "{rel} is binary ({} bytes); read is for text",
+                "{rel} is binary ({} bytes). Read is for text",
                 meta.len()
             )));
         }
@@ -394,7 +392,7 @@ impl Tool for Read {
         let left = all.len() - end;
         let note = if left > 0 {
             let unit = if left == 1 { "line" } else { "lines" };
-            format!("… {left} more {unit}; re-read from {}\n", end + 1)
+            format!("… {left} more {unit}. Re-read from {}\n", end + 1)
         } else {
             String::new()
         };

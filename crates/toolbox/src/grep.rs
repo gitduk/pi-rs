@@ -13,7 +13,7 @@ use tool::{Ctx, Tier, Tool, ToolError, ToolOutput, output, spill};
 
 const DEFAULT_LIMIT: usize = 200;
 const PER_FILE_LIMIT: usize = 50;
-const BUDGET_NOTE: &str = "the sweep stopped at its size budget; narrow the pattern";
+const BUDGET_NOTE: &str = "the sweep stopped at its size budget. Narrow the pattern";
 
 /// One search target or several: a directory is walked, a file is searched alone.
 #[derive(Deserialize)]
@@ -72,11 +72,11 @@ impl Tool for Grep {
     }
 
     fn description(&self) -> &str {
-        "Search file contents by regular expression. Respects .gitignore and skips \
-         binaries. `path` takes one target or many — directories or files. Results \
-         come back as `[path]` sections with numbered lines, the same shape read \
-         returns — so a match can be edited without reading the file first. Reach \
-         for this before running rg or find in bash: it already knows what to ignore."
+        "Search file contents by regular expression. This tool respects .gitignore and skips binary files. \
+         Use `path` for one or more files or directories. \
+         Results contain `[path]` sections with numbered lines, in the same format as `read`. \
+         You can edit a matching line without reading the file first. \
+         Prefer this tool to `rg` or `find` through bash because it applies the ignore rules."
     }
 
     fn schema(&self) -> Value {
@@ -87,7 +87,7 @@ impl Tool for Grep {
                 "path": {
                     "type": ["string", "array"],
                     "items": { "type": "string" },
-                    "description": "One target or several, up to 64 — directories or files; an absolute path may leave the workspace. Default the workspace root.",
+                    "description": "Search up to 64 files or directories. An absolute path may access files outside the workspace. If omitted, search the workspace root.",
                 },
                 "glob": {
                     "type": "array",
@@ -101,7 +101,7 @@ impl Tool for Grep {
                 },
                 "insensitive": { "type": "boolean" },
                 "files_only": { "type": "boolean", "description": "List paths instead of matching lines." },
-                "limit": { "type": "integer", "description": "Max matching lines, or files under files_only. Default 200." },
+                "limit": { "type": "integer", "description": "Limit the number of matching lines, or matching files when `files_only=true`. The default is 200." },
             },
             "required": ["pattern"],
             "additionalProperties": false,
@@ -260,7 +260,7 @@ impl Tool for Grep {
             let mut note = String::new();
             if left > 0 {
                 note.push_str(&format!(
-                    "… {left} more {}; narrow the pattern or raise limit\n",
+                    "… {left} more {}. Narrow the pattern or raise limit\n",
                     plural(left, unit)
                 ));
             }

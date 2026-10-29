@@ -50,11 +50,11 @@ impl Standing {
 
     fn workspace(&self, out: &mut String) {
         out.push_str(&format!(
-            "\n\n<workspace path=\"{}\"/>\n\nThe workspace is the directory you work in. \
-Every path you name is relative to it, and commands start in it. What you make along the way \
-— scripts, downloads, state files — goes in the workspace too, even when it feels throwaway: \
-the user looks for it there. Reading may go further — an absolute path reaches the rest of \
-this machine, a URL the rest of the world.",
+            "\n\n<workspace path=\"{}\"/>\n\nWork in this directory. \
+Relative paths resolve from the workspace. Commands start in the workspace. \
+Keep scripts, downloads, and state files in the workspace, including temporary files. \
+The user expects to find them there.\n\n\
+Reading may access files outside the workspace through absolute paths. URLs can access sources outside this machine.",
             escaped(self.workspace.display())
         ));
         if !tool::Tier::Write.under(self.tier) {
@@ -62,12 +62,12 @@ this machine, a URL the rest of the world.",
         }
         out.push_str(match self.fenced {
             true => {
-                " write and edit stay inside the workspace, and pi's home when a `<pi_home>` \
-block names it."
+                "\n\nThe tools write and edit stay inside the workspace. \
+They can also access pi's home when a `<pi_home>` block specifies it."
             }
             false => {
-                " write and edit reach anywhere, but a file outside the workspace is changed \
-only when the user asks for it."
+                "\n\nThe tools write and edit reach anywhere. \
+Change a file outside the workspace only when the user requests it."
             }
         });
     }
@@ -77,9 +77,9 @@ only when the user asks for it."
             return;
         };
         out.push_str(&format!(
-            "\n\n<pi_home path=\"{}\">\npi's own home, read live: what you add here is offered \
-from your next turn, with no restart. The `pi-extend` skill says what can be added and \
-how.\n</pi_home>",
+            "\n\n<pi_home path=\"{}\">\nThis is pi's home. \
+Tools and skills added here become available on your next turn. No restart is needed. \
+Read the `pi-extend` skill for supported additions and instructions.\n</pi_home>",
             escaped(home.display())
         ));
     }
@@ -91,10 +91,10 @@ how.\n</pi_home>",
             return;
         }
         out.push_str(
-            "\n\nThe `<instructions>` blocks below are the user's standing instructions, for \
-this machine and this project, most general first. Follow them; where two disagree, the later \
-one, nearer the workspace, wins. They say how to work here; the user's message says what to do \
-now.",
+            "\n\nThe `<instructions>` blocks below contain the user's standing instructions for this machine and project. \
+The most general instructions appear first. Follow these instructions. \
+If two instructions conflict, the later instruction, nearer the workspace, takes precedence. \
+These instructions specify how to work here. The user's message specifies the current task.",
         );
         for (path, body) in &self.instructions {
             out.push_str(&format!(
@@ -112,10 +112,9 @@ now.",
             return;
         }
         out.push_str(&format!(
-            "\n\n<memory>\nWhat you have come to know in earlier sessions. Let it shape what \
-you do the way a colleague's experience does: act on it without announcing it or saying you \
-remember. Say where something came from only if asked. It can be out of date; what the user \
-says now wins.\n{}\n</memory>",
+            "\n\n<memory>\nThese facts come from earlier sessions. \
+Use them without announcing that you remember them. State their source only if asked. \
+Memory may be outdated. The user's current instructions take precedence.\n{}\n</memory>",
             files(&self.memory)
         ));
     }

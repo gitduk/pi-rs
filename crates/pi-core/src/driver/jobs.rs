@@ -334,7 +334,7 @@ impl Item {
             line: format!("Background job #{id} ({name}) reports:\n\n{text}"),
             note: format!(
                 "This turn is a result of background job #{id} ({name}), which you \
-                 started; the user did not just type it."
+                 started. The user did not just type it."
             ),
             label: format!("{} {first}", self.name()),
             text: text.to_string(),
@@ -574,9 +574,9 @@ impl Table {
         match item.state() {
             State::Running => return Ok(None),
             State::Back => {}
-            State::Stopped => return Err(format!("#{id} was stopped; it has nothing to say")),
+            State::Stopped => return Err(format!("#{id} was stopped. It has nothing to say")),
             State::Exited => {
-                return Err(format!("#{id} already ended; its results were delivered"));
+                return Err(format!("#{id} already ended. Its results were delivered"));
             }
         }
         let mut said = Vec::new();
@@ -649,8 +649,8 @@ impl Table {
         if jobs.len() > 1 {
             due.label = format!("{} background job results", jobs.len());
             due.note = format!(
-                "This turn combines {} queued results from background jobs you started; \
-                 the user did not just type them. Handle these results together in this turn.",
+                "This turn combines {} queued results from background jobs you started. \
+                 The user did not type these messages. Handle these results together in this turn.",
                 jobs.len()
             );
         }
@@ -835,7 +835,7 @@ impl Table {
                 .find(|i| i.id == id && i.root == root)
                 .ok_or_else(|| format!("no job #{id} here"))?;
             item.output.clone().ok_or_else(|| {
-                format!("#{id} keeps no output to show; what it says comes back as turns")
+                format!("#{id} keeps no output to show. What it says comes back as turns")
             })?
         };
         let printed = peek();
@@ -1391,19 +1391,21 @@ impl JobHandle for Handle {
 impl JobControls for Jobs {
     fn description(&self) -> &str {
         if self.scoped {
-            "List this run's commands, show their latest `output`, or `stop` them by id \
-             (`stop_all` stops all). `restart` runs a command again under its id. \
-             `join` takes one id or an array and waits for all under one timeout, \
-             returning results in request order. Wait for unfinished commands or stop \
-             them before finishing this run; they end with it. Never sleep in a shell \
-             or rerun a command just because its shell call returned a running job id."
+            "List this run's commands. Use `output` to read a command's latest output. \
+             Use `stop` to stop commands by id, or `stop_all` to stop all commands. \
+             Use `restart` to run a command again under its existing id.\n\n\
+             Use `join` with one id or an array of ids to wait for commands. \
+             It waits for all specified commands under one timeout and returns results in request order. \
+             Wait for unfinished commands or stop them before finishing this run. They end when this run ends. \
+             Never use shell sleep or rerun a command merely because its shell call returned a running job id."
         } else {
-            "With no command, list background jobs. Show their latest `output`, \
-             `stop` them by id, or `stop_all`. `restart` runs a command again under \
-             its id, stopping its earlier run first. Results arrive automatically \
-             before the next model request, or open a new turn if the run has ended; \
-             continue independent work, or report progress and end \
-             this turn. Do not poll or wait for background work."
+            "Call without a command to list background jobs. Use `output` to read a job's latest output. \
+             Use `stop` to stop jobs by id, or `stop_all` to stop all jobs. \
+             Use `restart` to run a command again under its existing id. It stops the previous run first.\n\n\
+             Results arrive automatically before the next model request. \
+             If the run ended, results open a new turn. \
+             Continue independent work, or report progress and end this turn. \
+             Do not poll or wait for background work."
         }
     }
 
@@ -1414,26 +1416,26 @@ impl JobControls for Jobs {
                 json!({
                     "type": "array",
                     "items": { "type": "integer" },
-                    "description": "The ids of those to stop.",
+                    "description": "Specify the job ids to stop.",
                 }),
             ),
             (
                 "stop_all".into(),
-                json!({ "type": "boolean", "description": "Stop every one still running." }),
+                json!({ "type": "boolean", "description": "Stop every running job." }),
             ),
             (
                 "restart".into(),
                 json!({
                     "type": "array",
                     "items": { "type": "integer" },
-                    "description": "The ids of those to start over.",
+                    "description": "Specify the job ids to restart.",
                 }),
             ),
             (
                 "output".into(),
                 json!({
                     "type": "integer",
-                    "description": "The id of one whose latest output to show, as it runs.",
+                    "description": "Specify one job id to read its latest output while it runs.",
                 }),
             ),
         ]);
@@ -1442,11 +1444,11 @@ impl JobControls for Jobs {
                 "type": ["integer", "array"],
                 "items": { "type": "integer" },
                 "minItems": 1,
-                "description": "One job id or an array of ids to join until all end. Duplicates are ignored. One shared timeout_ms; on timeout, completed jobs return their results and running jobs show their latest output. Results stay in request order, including errors for invalid ids.",
+                "description": "Specify one job id or an array of ids to wait for. Duplicate ids have no effect. All jobs share one `timeout_ms`. On timeout, completed jobs return results and running jobs return their latest output. Results follow request order, including errors for invalid ids.",
             }));
             parameters.insert("timeout_ms".into(), json!({
                 "type": "integer",
-                "description": format!("How long `join` waits. Default and max {}.", MAX_CALL.as_millis()),
+                "description": format!("Set how long `join` waits, in milliseconds. The default and maximum are {}.", MAX_CALL.as_millis()),
             }));
         }
         parameters
@@ -1541,7 +1543,7 @@ impl JobControls for Jobs {
                     Ok(None) => {
                         let latest = self.table.output(root, *id).unwrap_or_else(|why| why);
                         let elapsed = llm::figures::elapsed(within);
-                        format!("#{id} still running after {elapsed}; latest output:\n{latest}")
+                        format!("#{id} still running after {elapsed}. Latest output:\n{latest}")
                     }
                     Err(why) => why,
                 })

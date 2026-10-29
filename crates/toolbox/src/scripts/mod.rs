@@ -265,8 +265,8 @@ impl Broken {
         Some(Self {
             name,
             description: format!(
-                "Not usable yet. {skip}. Fix the file and it is offered as the tool it \
-                 declares from the next turn; until then a call only says this."
+                "Not usable yet. {skip}. Fix the file to make its declared tool available on the next turn. \
+                 Until then, a call only reports this problem."
             ),
         })
     }
@@ -364,7 +364,7 @@ fn header(text: &str) -> Result<Interface, String> {
         let body = line
             .strip_prefix(prefix)
             .or_else(|| line.strip_prefix(bare))
-            .ok_or("a header line is not a comment; close it with the same `---` line")?;
+            .ok_or("a header line is not a comment. Close it with the same `---` line.")?;
         toml.push_str(body);
         toml.push('\n');
     }

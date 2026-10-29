@@ -18,9 +18,10 @@ pub(super) fn broke_syntax(
     let row = nearest_row(&rows, landed)?;
     let text = crate::parses::row_text(after, row);
     let mut why = format!(
-        "{path} would not parse: it did before this edit, and line {row} of what this one \
-         produces is `{text}`. An anchor that covers a line too few or too many does exactly \
-         this. Re-read and check where the block actually ends. Nothing was written."
+        "{path} would not parse after this edit. It parsed before the edit. \
+         The proposed line {row} is `{text}`. \
+         Check the anchor for missing or extra lines. Read the file again and check where the block ends. \
+         Nothing was written."
     );
     why.push('\n');
     why.push_str(&hunk_help(before, after, landed));
@@ -89,13 +90,13 @@ fn hunk_help(before: &str, after: &str, landed: &[Landed]) -> String {
             if let Some(e) = balanced_end(&old, at) {
                 if e > at {
                     line.push_str(&format!(
-                        "; it opens at {at} and balances at line {e} — cover to {e}"
+                        ". The block opens at {at} and balances at line {e}. Extend the anchor through line {e}."
                     ));
                 } else {
                     // The displaced lines never opened a brace the body fails
                     // to close: the hunk is the problem, not the extent.
                     line.push_str(&format!(
-                        "; the imbalance sits at line {e} — replace or cut it"
+                        ". The imbalance is at line {e}. Replace or delete that line."
                     ));
                 }
             }
@@ -163,11 +164,11 @@ pub(super) fn notes(path: &str, before: &str, applied: &Applied) -> String {
 pub(super) fn blank_note(edits: &[usize]) -> String {
     let named: Vec<String> = edits.iter().map(|i| format!("edits[{i}]")).collect();
     let said = if edits.len() == 1 {
-        "emptied a line but left the line break, so a blank row stands where it was. \
-         Include the trailing newline in the anchor to take the row with it."
+        "emptied a line but kept its line break, leaving a blank row. \
+         Include the trailing newline in the anchor to delete the complete line."
     } else {
-        "emptied the lines but left the line breaks, so blank rows stand where they \
-         were. Include the trailing newline in the anchor to take the rows with them."
+        "emptied the lines but kept their line breaks, leaving blank rows. \
+         Include trailing newlines in the anchors to delete the complete lines."
     };
     format!("\n{} {said}\n", named.join(", "))
 }

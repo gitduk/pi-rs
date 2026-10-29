@@ -244,34 +244,21 @@ impl Tool for Subagent {
     }
 
     fn description(&self) -> &str {
-        "Hand a self-contained job to a subagent and get back its conclusion.\n\
-         \n\
-         The subagent works in this same checkout with the same tools, but in a \
-         window of its own: everything it reads and runs stays there, and you \
-         see only what it concludes. That is what it is for — a search that \
-         would take twenty turns of yours costs you one paragraph.\n\
-         \n\
-         Send it work that is worth that trade: locating something across many \
-         files, running a test suite and reporting what failed, reading a large \
-         unfamiliar area and summarising it. Several at once is normal and they \
-         run in parallel.\n\
-         \n\
-         Do not send it work you could do in a call or two — the round trip \
-         costs more than the answer. Do not send it anything that needs you to \
-         answer a question halfway through: it cannot reach you, and it will \
-         guess. Say exactly what you want back, including the shape, because the \
-         last thing it says is all you get.\n\
-         \n\
-         It cannot call this tool, so it cannot delegate further. Give it work \
-         it can finish itself.\n\
-         \n\
-         The result ends with every path it changed through `write` or `edit`, \
-         and the exit status of `verify` if you gave one. A change it made by \
-         running a command is not in that list, which is what `verify` covers. \
-         Send one whenever the job has something checkable behind it: a test suite, a \
-         build, a linter. What the subagent says about its own work is the only \
-         part of the answer nothing else checks, and it cannot reach you to be \
-         asked again."
+        "Assign a self-contained job to a subagent and receive its conclusion. \
+         The subagent uses the same checkout and tools, with a separate context. \
+         You receive only its final message, not the files it reads or commands it runs.\n\n\
+         Use it for searches across many files, test suites, or summaries of large unfamiliar areas. \
+         Several calls can run in parallel. \
+         Do not delegate work you can finish in one or two calls. The extra call costs more than it saves.\n\n\
+         Do not assign work that requires answers from you during execution. \
+         The subagent cannot ask you questions and will guess missing details. \
+         Specify the required result and its format. \
+         The subagent cannot call this tool or delegate further. Assign work it can finish itself.\n\n\
+         The result ends with paths changed through `write` or `edit`. \
+         This list excludes changes made through shell commands. \
+         Supply `verify` whenever the job has a check, such as tests, a build, or a linter. \
+         Its exit status accompanies the result and can check changes made through commands. \
+         The subagent's own report has no independent check. You cannot ask it follow-up questions."
     }
 
     fn schema(&self) -> Value {
@@ -280,15 +267,15 @@ impl Tool for Subagent {
             "properties": {
                 "description": {
                     "type": "string",
-                    "description": "Three to six words naming the job, shown to the user while it runs — \"find every caller of spans\", \"run the test suite\". Not sent to the subagent.",
+                    "description": "Name the job in three to six words, such as \"find every caller of spans\" or \"run the test suite\". The user sees this label while the job runs. The subagent does not receive it.",
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "The whole job, self-contained: what to do, where to look, and what to report back. The subagent sees none of this conversation.",
+                    "description": "Describe the complete job: what to do, where to look, and what to report. The subagent does not receive this conversation.",
                 },
                 "verify": {
                     "type": "string",
-                    "description": "Shell command run in the workspace root after the subagent stops — a test suite, a build, a linter. Its exit status comes back with the result. Omit when nothing about the job is checkable.",
+                    "description": "A shell command to check the job, such as tests, a build, or a linter. It runs in the workspace root after the subagent stops. Its exit status accompanies the result. Omit it when the job has no check.",
                 },
             },
             "required": ["description", "prompt"],
@@ -297,7 +284,7 @@ impl Tool for Subagent {
         if self.background.is_some() {
             schema["properties"]["background"] = json!({
                 "type": "boolean",
-                "description": "Run it apart from this turn: the call returns at once with an id, and the answer comes back later in a turn with other queued job results. For a long job you need not wait on — keep working, or end the turn. It shares this checkout, so give it work that touches no file you are editing.",
+                "description": "Run the subagent independently of this turn. The call returns an id immediately. Its answer arrives later in a turn with other queued job results. Use this for long jobs whose results you do not need immediately. Continue independent work or end the turn.\n\nThe subagent shares this checkout. Assign work that does not change files you are editing.",
             });
         }
         schema
@@ -359,7 +346,7 @@ impl Subagent {
         });
         let preview = format!("{} [background #{id}]", description.trim());
         Ok(ToolOutput::text(format!(
-            "started in the background as #{id}; its answer comes back on its own later."
+            "started in the background as #{id}. Its answer arrives automatically later."
         ))
         .with_preview(preview))
     }

@@ -34,9 +34,9 @@ pub struct Load {
 impl Load {
     pub fn new(skills: Vec<Skill>) -> Self {
         let mut description = String::from(
-            "Load a skill's instructions and follow them. Use one whenever its \
-             description matches what you are about to do — the description is a \
-             summary, not the instructions.\n\nAvailable:\n",
+            "Load a skill's instructions. Follow the instructions after loading them. \
+             Use a skill whenever its description matches the work you are about to do. \
+             The description only summarizes the skill. It does not replace the instructions.\n\nAvailable:\n",
         );
         for s in &skills {
             description.push_str(&format!("- {}: {}\n", s.name, s.description));
@@ -54,7 +54,7 @@ impl Load {
     fn find(&self, name: &str) -> Result<&Skill, ToolError> {
         self.skills.iter().find(|s| s.name == name).ok_or_else(|| {
             ToolError::Invalid(format!(
-                "no skill named `{name}`; available: {}",
+                "no skill named `{name}`. Available: {}",
                 self.skills
                     .iter()
                     .map(|s| s.name.as_str())
@@ -115,7 +115,7 @@ pub fn instructions(skill: &Skill, text: &str) -> String {
     let siblings = sibling_files(&skill.dir);
     if !siblings.is_empty() {
         out.push_str(&format!(
-            "\n---\nFiles in this skill: {}\nFetch one with \
+            "\n---\nFiles in this skill: {}\nRead a file with \
              `skill(name: \"{}\", file: \"<path>\")`.\n",
             siblings.join(", "),
             skill.name
@@ -141,8 +141,7 @@ impl Tool for Load {
                 "name": { "type": "string", "description": "One of the names listed above." },
                 "file": {
                     "type": "string",
-                    "description": "A path inside the skill's directory, when its \
-                                    instructions point at one.",
+                    "description": "Read a file referenced by the skill's instructions. Specify its path within the skill's directory.",
                 },
             },
             "required": ["name"],

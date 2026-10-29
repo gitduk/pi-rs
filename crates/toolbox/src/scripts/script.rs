@@ -193,8 +193,7 @@ impl Tool for Script {
             super::job::Ran::Exited(exited) => exited,
             super::job::Ran::Detached { said, id } => {
                 return Ok(ToolOutput::text(format!(
-                    "{said}\n\nRunning in the background as job #{id}; its results come \
-                     back on their own later."
+                    "{said}\n\nRunning in the background as job #{id}. Its results arrive automatically later."
                 ))
                 .with_preview(format!("{} [background #{id}]", self.name)));
             }

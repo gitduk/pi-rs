@@ -25,12 +25,15 @@ fn workspace_root() -> String {
 
 const ARGS_HINT: &str = "bash takes `command`, plus `cwd` to run anywhere but the workspace root";
 
-const DESCRIPTION: &str = "Run a shell command where cwd says, in a fresh shell each call: cd and \
-    environment changes do not carry over. Prefer read and write over cat \
-    and heredocs, and edit over sed when the lines are picked by what they \
-    say: those report failures you can act on. A substitution picked by \
-    pattern or position belongs here (sed, perl, awk), and so do moves and \
-    deletions (mv, rm).";
+const DESCRIPTION: &str = "Each call runs a shell command in a new shell. \
+    Use `cwd` to set the working directory instead of a leading `cd`. \
+    If you omit `cwd`, the command runs in the workspace root. \
+    Directory changes and environment changes do not persist between calls.\n\n\
+    Prefer `read` and `write` to `cat` and heredocs. \
+    Prefer `edit` to `sed` when line content determines which lines to change. \
+    These tools report failures you can use to correct errors. \
+    Use bash for substitutions by pattern or position (`sed`, `perl`, `awk`). \
+    Use bash for moves (`mv`) and deletions (`rm`).";
 
 /// Run a command to completion under the workspace's checks and rewrite.
 pub async fn foreground(command: &str, cwd: &str, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
@@ -88,9 +91,9 @@ impl Bash {
             background: true,
             foreground_wait: Some(FOREGROUND_WAIT),
             description: format!(
-                "{} After at most {} seconds, return a running job id and its latest output; \
-                 the command keeps running until it exits or you stop the job. For long-running \
-                 commands, leave progress output unredirected instead of piping it through head or tail.",
+                "{}\n\nIf the command is still running after {} seconds, the call returns a job id. \
+                 It also returns the latest output. The command continues until it exits or you stop the job. \
+                 For long-running commands, leave progress output unredirected. Do not pipe it through `head` or `tail`.",
                 DESCRIPTION,
                 FOREGROUND_WAIT.as_secs()
             ),
@@ -111,8 +114,8 @@ impl Bash {
     pub fn until_exit(mut self) -> Self {
         self.foreground_wait = None;
         self.description = format!(
-            "{DESCRIPTION} Wait for the command to exit and return its exit status and output. \
-             No automatic timeout applies; stop the run to cancel an unfinished command."
+            "{DESCRIPTION}\n\nWait for the command to exit and return its exit status and output. \
+             No automatic timeout applies. Stop the run to cancel an unfinished command."
         );
         self
     }
@@ -177,7 +180,7 @@ async fn schedule(
     };
     Ok(ToolOutput::text(format!(
         "scheduled as background job #{id}, starting {when}. Its exit status and output \
-         come back automatically later. Continue independent work, or report progress and end this turn."
+         arrive automatically later. Continue independent work, or report progress and end this turn."
     )).with_preview(format!("{preview} [background #{id}]")))
 }
 
@@ -196,7 +199,7 @@ impl Tool for Bash {
             "type": "object",
             "properties": {
                 "command": { "type": "string" },
-                "cwd": { "type": "string", "description": "Where the command runs, as a workspace-relative or absolute directory; omit it for the workspace root." },
+                "cwd": { "type": "string", "description": "Set the working directory for this call. Use a path relative to the workspace root or an absolute path. If you omit `cwd`, the command runs in the workspace root." },
             },
             "required": ["command"],
             "additionalProperties": false,
@@ -213,17 +216,20 @@ impl Tool for Bash {
         }
         schema["properties"]["background"] = json!({
             "type": "boolean",
-            "description": "Run it apart from this turn — a build, a deploy, a dev server, a \
-                watcher: the call returns at once with a job id, and once it exits its status \
-                and output are reported automatically with other queued job results. No timeout applies, and it ends with \
-                this process. What it prints stays readable while it runs, so leave it \
-                unredirected; use this, not nohup or `&`, for anything meant to keep running.",
+            "description": "Run the command independently of this turn, such as a build, deployment, development server, or watcher. \
+                The call returns immediately with a job id. \
+                When the command exits, its exit status and output arrive automatically with other queued job results. \
+                No timeout applies. The command stops when this process exits.\n\n\
+                Output remains readable while the command runs. Leave output unredirected. \
+                Use `background=true` instead of `nohup` or `&` for commands that must continue after this turn.",
         });
         schema["properties"]["wait"] = json!({
             "type": "integer",
             "minimum": 0,
             "default": 0,
-            "description": "Seconds to delay before starting command. Requires command and background=true. The call returns a job id immediately; the delay happens in the background. Omit or use 0 to start immediately. Completion reports automatically.",
+            "description": "Delay the command start by this many seconds. This parameter requires `command` and `background=true`. \
+                The call returns a job id immediately. The delay occurs in the background. \
+                Omit `wait` or use 0 to start immediately. The job reports completion automatically.",
         });
         schema
     }
@@ -333,7 +339,7 @@ impl Tool for Bash {
         supervise(running, job);
         let said = if background {
             format!(
-                "running in the background as job #{id}; its exit status and output come back on their own later. \
+                "running in the background as job #{id}. Its exit status and output arrive automatically later. \
                  Continue independent work, or report progress and end this turn. Do not poll or wait for it."
             )
         } else {
@@ -349,12 +355,12 @@ impl Tool for Bash {
             };
             let lifetime = if self.background {
                 "Continue independent work, or report progress and end this turn. Its exit status and \
-                 output come back on their own later. Do not poll or wait for it."
+                 output arrive automatically later. Do not poll or wait for it."
             } else {
-                "This run owns the job; wait for it or stop it before finishing your task."
+                "The job belongs to this run. Wait for it or stop it before finishing your task."
             };
             format!(
-                "still running after {elapsed} as job #{id}; the soft timeout did not stop \
+                "still running after {elapsed} as job #{id}. The soft timeout did not stop \
                 the command. Do not rerun the command. {lifetime} Latest output:\n{output}"
             )
         };

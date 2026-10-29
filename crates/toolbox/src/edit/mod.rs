@@ -36,38 +36,41 @@ pub(crate) fn rewrite_sketch(path: &str, old: &str, new: &str, changed_run: usiz
 
 // What a call that gets the arguments wrong is told, so it resends the call
 // instead of staring at a bare serde error for a field it never named.
-const ARGS_HINT: &str = "`edit` takes `path` and `edits`: a list of replacements, each \
-    naming what to find (`old_string`, or `insert_after`/`insert_before`) and what to put \
-    there (`new_string`). Send the whole call again.";
+const ARGS_HINT: &str = "`edit` requires `path` and `edits`. \
+    Set `edits` to a list of replacements. \
+    Each replacement requires exactly one anchor: `old_string`, `insert_after`, or `insert_before`. \
+    Use `new_string` for the new content. Send the complete call again.";
 
-const SHAPE: &str = r#"Replace text in one file, by naming the text to find.
+const SHAPE: &str = r#"Replace text in one file by specifying its existing text.
 
-`path` names the file. `edits` is a list, and every entry is matched against the
-file as it is now — not against what an earlier entry left. Nothing is written
-unless all of them land, and a refusal leaves the file untouched.
+Use `path` to name the file. Use `edits` for the list of changes.
+Each change matches against the file before this call, independently of other changes in the list.
+The tool writes only if every change succeeds. A refusal leaves the file unchanged.
 
-An entry names its anchor in exactly one of three ways:
+Specify exactly one anchor per change:
 
-- `old_string`: the text to replace — the literal text, not a regex.
-- `insert_after`: new content goes immediately after this text.
-- `insert_before`: new content goes immediately before it.
+- `old_string`: literal text to replace, not a regex.
+- `insert_after`: literal text after which to insert new content.
+- `insert_before`: literal text before which to insert new content.
 
-`new_string` is what goes there: the replacement, or, for the two inserts, just
-the new content — do not repeat the anchor in it. An empty `new_string` deletes
-what `old_string` matched; to delete whole lines, include their newlines, or the
-rows are emptied and left blank.
+Use `new_string` for the replacement or inserted content.
+For an insertion, include only the new content. Do not repeat the anchor.
+An empty `new_string` deletes the text matched by `old_string`.
+To delete complete lines, include their newlines in `old_string`.
+Otherwise, the line breaks remain as blank lines.
 
-The anchor must match once. Matching twice is refused with every place named,
-unless `replace_all` — when a line is not unique, widen the anchor with the
-lines around it. An anchor that ends with a newline lands the insert on the next
-line; one that does not, lands it inside the line.
+The anchor must match exactly once unless `replace_all` is true.
+The tool refuses multiple matches and lists their locations.
+If an anchor is not unique, include surrounding lines to identify it.
+If an anchor ends with a newline, the insertion starts on the next line.
+Otherwise, the insertion stays within the line.
 
-`whole_block: true` reads the anchor as the first line of a block — a function,
-a class, a markdown section — and takes the whole block, so its body need not be
-quoted. The report names the lines that covered.
+Set `whole_block: true` to select a complete block by its first line.
+Supported blocks include functions, classes, and Markdown sections.
+You do not need to quote the block's body. The result reports the selected line range.
 
-Reach for bash (sed, perl) when a pattern alone defines the change, and for
-write when the file does not exist yet.
+Use bash (`sed`, `perl`) when a pattern alone defines the change.
+Use `write` when the file does not exist.
 "#;
 
 #[derive(Deserialize)]
@@ -203,44 +206,33 @@ impl Tool for Edit {
                 "edits": {
                     "type": "array",
                     "minItems": 1,
-                    "description": "One or more replacements. Each is matched against \
-                                    the file as it is now, not against what an earlier \
-                                    one left.",
+                    "description": "Specify one or more replacements. Each matches against the file before this call, independently of other replacements.",
                     "items": {
                         "type": "object",
                         "properties": {
                             "old_string": {
                                 "type": "string",
-                                "description": "Literal text to replace. Give exactly one \
-                                                of old_string, insert_after, insert_before.",
+                                "description": "Specify literal text to replace. Supply exactly one of `old_string`, `insert_after`, or `insert_before`.",
                             },
                             "insert_after": {
                                 "type": "string",
-                                "description": "Literal text to put new_string immediately \
-                                                after.",
+                                "description": "Specify literal text after which to insert `new_string`.",
                             },
                             "insert_before": {
                                 "type": "string",
-                                "description": "Literal text to put new_string immediately \
-                                                before.",
+                                "description": "Specify literal text before which to insert `new_string`.",
                             },
                             "new_string": {
                                 "type": "string",
-                                "description": "The replacement, or for an insert the new \
-                                                content alone — do not repeat the anchor. \
-                                                Empty deletes what old_string matched.",
+                                "description": "Specify the replacement or inserted content. For an insertion, do not repeat the anchor. An empty string deletes the text matched by `old_string`.",
                             },
                             "replace_all": {
                                 "type": "boolean",
-                                "description": "Take every match instead of refusing an \
-                                                anchor that names several. Default false.",
+                                "description": "Apply the change to every match. If false, the anchor must match exactly once. The default is false.",
                             },
                             "whole_block": {
                                 "type": "boolean",
-                                "description": "Read the anchor as the first line of a \
-                                                block (a function, a class, a markdown \
-                                                section) and take the whole block. Default \
-                                                false.",
+                                "description": "Select a complete block by using its first line as the anchor. Blocks include functions, classes, and Markdown sections. The default is false.",
                             },
                         },
                         "required": ["new_string"],
@@ -277,10 +269,10 @@ impl Tool for Edit {
                 // Only the file that is not there earns the pointer to write.
                 // One that is not text is never rewritten as text.
                 std::io::ErrorKind::NotFound => {
-                    ". edit changes existing files; use write to create one"
+                    ". edit changes existing files. Use write to create one"
                 }
                 std::io::ErrorKind::InvalidData => {
-                    ". edit is for text; convert it first, or leave it alone"
+                    ". edit is for text. Convert it first, or leave it alone"
                 }
                 _ => "",
             };

@@ -30,10 +30,10 @@ impl Tool for Glob {
     }
 
     fn description(&self) -> &str {
-        "Find files by path pattern, newest first. Respects .gitignore. A pattern \
-         with no `/` matches at any depth, so `*.rs` finds every Rust file. Use \
-         grep when you need to match file contents, and either of them before \
-         running find in bash: they already know what to ignore."
+        "Find files by path pattern, newest first. This tool respects .gitignore. \
+         A pattern without `/` matches at any depth. For example, `*.rs` finds Rust files at every depth. \
+         Use `grep` to search file contents. \
+         Prefer `glob` or `grep` to `find` through bash because these tools apply the ignore rules."
     }
 
     fn schema(&self) -> Value {
@@ -41,7 +41,7 @@ impl Tool for Glob {
             "type": "object",
             "properties": {
                 "pattern": { "type": "string", "description": "e.g. `*.rs`, `src/**/mod.rs`" },
-                "path": { "type": "string", "description": "Subdirectory to search; an absolute path may leave the workspace. Default the workspace root." },
+                "path": { "type": "string", "description": "Set the directory to search. An absolute path may access files outside the workspace. If omitted, search the workspace root." },
                 "limit": { "type": "integer", "description": "Max paths. Default 200." },
             },
             "required": ["pattern"],
@@ -120,7 +120,7 @@ impl Tool for Glob {
                 format!("no file matches `{}`", args.pattern)
             } else {
                 format!(
-                    "no file matches `{}`; {} entries could not be read, first: {}",
+                    "no file matches `{}`. Could not read {} entries. First error: {}",
                     args.pattern,
                     unreadable.len(),
                     unreadable[0]
@@ -135,10 +135,10 @@ impl Tool for Glob {
             .map(|(_, path)| format!("{path}\n"))
             .collect();
         let mut notice = if clipped {
-            format!("… stopped at {total} paths; narrow the pattern\n")
+            format!("… stopped at {total} paths. Narrow the pattern\n")
         } else if total > rows.len() {
             format!(
-                "… {} more; narrow the pattern or raise limit\n",
+                "… {} more. Narrow the pattern or raise limit\n",
                 total - rows.len()
             )
         } else {

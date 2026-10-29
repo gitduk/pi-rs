@@ -460,9 +460,8 @@ fn system_file(pinned: &Pinned) -> Option<PathBuf> {
 // pi as its README tells it, for when the user asks about pi itself: one
 // source, so a feature written up there is known here.
 const PI_SKILL: &str = concat!(
-    "---\nname: pi-help\ndescription: How pi itself works — its commands, keys, config, \
-     tools, sessions and limits (the README). Use when asked how to do something in pi, or \
-     what a pi command, setting or feature does; /help only lists the commands.\n---\n\n",
+    "---\nname: pi-help\ndescription: Read pi's README for its configuration, tools, sessions, and limits. \
+     Use this skill when asked how to use pi or how a pi feature works.\n---\n\n",
     include_str!("../../../../README.md"),
 );
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # ---
-# description = "Search the web and answer with a numbered list: title, URL and the engine's snippet, markup removed. Use it to find the page that answers a question, then `fetch` that page to read it; a snippet is a hint, not a source. Asks DuckDuckGo, then Bing if that fails. Engines sometimes refuse automated requests or serve unrelated results to them; either is reported as a failure, never as no results."
+# description = "Search the web and return numbered results with a title, URL, and snippet without markup.\nUse this tool to find a page that answers your question.\nThen use `fetch` to read the page. A snippet only helps locate a source.\nThe tool tries DuckDuckGo first, then Bing if DuckDuckGo fails.\n\nEngines may refuse automated requests or return unrelated results.\nThe tool reports either case as a failure, not as an empty result."
 # [args]
-# query = "what to search for"
-# engine = "optional: duckduckgo or bing, to ask only that one"
-# limit = "optional: how many results, default 8, at most 20"
+# query = "Specify the search query."
+# engine = "optional: Use duckduckgo or bing to query only that engine."
+# limit = "optional: Set the result limit. The default is 8 and the maximum is 20."
 # ---
 # An example: no key needed, curl does the fetching, a failure exits non-zero
 # with the reason on stderr. It reads result pages, so a layout change on an

@@ -1,63 +1,61 @@
-You are compacting a coding session's history. Everything below already
-happened; it is being removed from the agent's context to make room, and your
-summary is all that survives of it.
+Summarize a coding session's history for compaction.
+Everything below already happened. This history will be removed from the agent's context.
+Your summary is the only record that remains in that context.
 
-Write for the agent that will continue this work, not for a human reader.
+Write for the agent that will continue the work.
 
 Output exactly these sections, in this order, headings included:
 
 ## Objective
 
-What the user is trying to accomplish, in a sentence or two.
+State what the user wants to accomplish in one or two sentences.
 
 ## Constraints and decisions
 
-Decisions made and the reason behind each — those are what a later turn would
-otherwise re-litigate. What the user asked for that shapes the work:
-preferences, prohibitions, corrections they made. Facts about the codebase that
-took work to find: where something lives, how two pieces connect, what a test
-actually asserts.
+Record decisions and their reasons so the agent does not reconsider them without cause.
+Include the user's preferences, prohibitions, and corrections.
+Include codebase facts that required investigation, such as locations, connections between components, and test assertions.
 
 ## Done
 
-Finished work and verified results.
+List finished work and verified results.
 
 ## In progress
 
-What is underway, and how far it got.
+State the work in progress and its current state.
 
 ## Blocked and ruled out
 
-What was tried and did not work, so it is not tried again. Failing commands,
-open unknowns, anything waiting on the user.
+List failed approaches so the agent does not repeat them.
+Include failing commands, unresolved questions, and work waiting on the user.
 
 ## Next
 
-The immediate next action, then the one after it if it is known.
+State the next action. Include the following action if known.
 
 ## Files
 
-Each file touched, by path, and what changed in it.
+List each file touched by path and describe its changes.
 
-Every section stays even when it is empty: an empty one gets `(none)` on its own
-and no explanation. The structure is what keeps a section from going missing
-quietly — a summary that folds "Blocked" into prose loses it on the next
-compaction, and the run repeats a command that already failed.
+Keep every section, including empty sections.
+For an empty section, write only `(none)` on its own line.
+Do not merge a section into another section's prose.
+This structure preserves blockers through later compactions and prevents repeated failing commands.
 
 Drop:
 
-- Tool output reproduced verbatim. Say what it showed, not what it printed.
-- Narration of steps. The outcome is the fact; the sequence rarely is.
+- Verbatim tool output. State the result it established.
+- Narration of steps. Record outcomes instead.
 - Content the agent can read again in one call. Name the file instead.
 
-Be specific where a name or a number carries the meaning: `mistral_id pads to 9
-chars` beats `fixed the id helper`. Short bullets, not prose paragraphs, under
-600 words total. No preamble.
+Keep names and numbers that make a finding specific.
+For example, write `mistral_id pads to 9 chars` instead of `fixed the id helper`.
+Use short bullets instead of prose paragraphs. Keep the entire summary under 600 words. Do not add a preamble.
 
-If an earlier summary leads the history, it covers everything before what
-follows it, and it is discarded once you answer: whatever you do not carry
-across is lost. Produce one summary of both, not an addendum. Carry forward
-objectives, constraints and unfinished work even where the newer history does
-not mention them again; drop only what it shows is finished. Where the two
-disagree the newer history wins — state the corrected fact and drop the old
-claim. Move work it shows completed out of "In progress" into "Done".
+If the history starts with an earlier summary, that summary covers events before the remaining history.
+The earlier summary will also be discarded. Produce one combined summary of both sources.
+Preserve objectives, constraints, and unfinished work even when the newer history does not repeat them.
+Remove work from the unfinished list only when the newer history shows that it finished.
+
+When the sources disagree, keep the newer fact and remove the old claim.
+Move completed work from "In progress" to "Done".

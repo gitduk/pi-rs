@@ -3,7 +3,7 @@
 # Bump this script's version whenever it changes.
 version = "0.1.0"
 edition = "2024"
-description = "Bridge this session to Telegram: what the user sends to their bot arrives here as turns, and each answer goes back to the chat. Use when the user asks to connect Telegram. It needs TELEGRAM_BOT_TOKEN, a bot token from @BotFather, in the tools' .env. It runs in the background until `jobs` stops it; the first time, a link and a QR show in its job for the user to pair their account, and the pairing is kept for next time."
+description = "Connect this session to Telegram when the user requests it.\nMessages sent to the user's bot arrive here as turns. Each answer returns to the chat.\nSet TELEGRAM_BOT_TOKEN in the tools' .env file to a bot token from @BotFather.\n\nThe tool runs in the background until you stop the job.\nOn first use, the job provides a link and QR code for the user to pair their account.\nThe pairing persists for later use."
 
 [dependencies]
 pulldown-cmark = { version = "0.13", default-features = false }

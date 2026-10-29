@@ -181,16 +181,15 @@ impl Tool for Fetch {
     }
 
     fn description(&self) -> &str {
-        "Fetch an http(s) URL and return it as text. HTML comes back as what a \
-         reader would see — markup, scripts and styles removed — so the answer \
-         is the page's prose, not its source; JSON, plain text and other \
-         text types come back verbatim. Use it to read documentation, an \
-         issue, a changelog or an API's own answer rather than working from \
-         memory of it. It reads what is served at that address and follows \
-         redirects; it is not a search engine, so a question needs a page that \
-         answers it. Only public addresses are fetched: loopback, LAN and \
-         link-local targets are refused, redirects included. Binary responses \
-         are refused with their type named."
+        "Fetch an HTTP or HTTPS URL and return text. \
+         For HTML, return readable text without markup, scripts, or styles. \
+         Return JSON, plain text, and other text formats verbatim.\n\n\
+         Use this tool to read documentation, issues, changelogs, or API responses instead of relying on memory. \
+         It reads the specified URL and follows redirects. \
+         It does not search for pages. Supply a URL that can answer your question.\n\n\
+         Only public addresses are allowed. \
+         The tool refuses loopback, LAN, and link-local targets, including redirect targets. \
+         It refuses binary responses and reports their content type."
     }
 
     fn schema(&self) -> Value {
@@ -217,8 +216,8 @@ impl Tool for Fetch {
         // make this a second way to read a path, one nothing else audits.
         if !matches!(url.scheme(), "http" | "https") {
             return Err(ToolError::Invalid(format!(
-                "`fetch` speaks http and https; `{}:` is neither. A file on \
-                 this machine is `read`'s job.",
+                "`fetch` supports only HTTP and HTTPS. The scheme `{}:` is not supported. \
+                 Use `read` for a file on this machine.",
                 url.scheme()
             )));
         }
@@ -258,7 +257,7 @@ impl Tool for Fetch {
             None => {
                 return Err(ToolError::Invalid(format!(
                     "{url} answered with `{}`, which is not text. Nothing here \
-                     can read it; fetch a text representation if the host \
+                     can read it. Fetch a text representation if the host \
                      offers one.",
                     got.ctype
                 )));
@@ -291,14 +290,13 @@ impl Tool for Fetch {
         }
         if mangled {
             body.push_str(
-                "note: the response was not valid UTF-8 and only UTF-8 is decoded here; \
-                 what did not fit was replaced. Look for a UTF-8 form of this page \
-                 before trusting the characters above.\n",
+                "note: the response was not valid UTF-8. This tool decodes only UTF-8 and replaces invalid sequences. \
+                 Find a UTF-8 version of this page before trusting the text above.\n",
             );
         }
         if got.clipped {
             body.push_str(&format!(
-                "note: stopped reading at {MAX_BYTES} bytes; the rest of the response was not fetched\n"
+                "note: stopped reading at {MAX_BYTES} bytes. The rest of the response was not fetched\n"
             ));
         }
         if let Some(s) = spilled {
