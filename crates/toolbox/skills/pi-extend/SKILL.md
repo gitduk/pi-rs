@@ -1,6 +1,6 @@
 ---
 name: pi-extend
-description: Add a missing capability to pi through a script tool, an MCP server, or a skill in pi's home. Use when the task needs a missing tool, server, or skill, or asks to add, write, or fix one.
+description: Add or fix reusable tools, MCP servers, and skills for pi. Use when the model needs a new tool interface or reusable instructions. Task scripts do not need this skill.
 ---
 
 # Extending pi
@@ -10,9 +10,49 @@ The path is `$PI_HOME` when set, or `~/.pi` otherwise.
 pi reads this directory live. A new tool or skill becomes available on your next turn without a restart.
 Use the tools currently offered to determine which capabilities are available.
 
-## A tool
+## Choose what to create
 
-Create one file in `tools/`. Its file stem becomes the tool name.
+A script is a code file that an interpreter or runtime executes.
+A tool is a named interface that the model can call directly.
+A tool can use a script as its implementation.
+A skill provides instructions and can include helper scripts.
+
+- For code that completes the current task, write a script in the workspace.
+  Run the script through `bash` with its interpreter or runtime.
+  Follow the project's directory conventions.
+  Running a script repeatedly does not require a new tool.
+- For a reusable interface that the model must call directly, add a tool.
+  Define its purpose, inputs, and output before writing its implementation.
+  Pass the current task's data as arguments.
+  Do not hardcode that data in the tool.
+- For reusable instructions, add a skill.
+  Keep its helper scripts inside the skill's directory.
+  Describe how to run them in `SKILL.md`.
+
+For example, a script that converts the current CSV file belongs in the workspace.
+A conversion tool accepts a file path as an argument and declares its output format.
+Both can use Python. The callable interface determines whether pi treats the script as a tool.
+
+## Implement a tool with a script
+
+Choose the tool directory before creating the file.
+
+- Use the project tool directory specified in the system instructions by default.
+  This includes tools that depend on the project's code, data, paths, or configuration.
+  Create the directory if it does not exist.
+- Use `tools/` inside pi's home only when the user requests a tool shared across projects.
+
+The run's write boundary still applies.
+If that boundary blocks the project tool directory, report the limit.
+Do not use pi's home as a fallback.
+In the examples below, `<tools-dir>` means the directory selected above.
+
+The home and project `tools/` directories register tools for subsequent model calls.
+pi scans supported files here for tool interfaces.
+An invalid interface can produce an unusable tool entry.
+Keep task scripts, helper files, generated data, and temporary files outside these directories.
+
+Create one file in the selected directory. Its file stem becomes the tool name.
 Use only a-z, A-Z, 0-9, `-`, and `_` in the name.
 
 Choose one of these formats:
@@ -27,9 +67,7 @@ Choose one of these formats:
 
 pi silently skips files in `tools/` that use neither format.
 
-For a tool specific to this checkout, use `.pi/tools/` at the repository root.
-Outside a repository, use `.pi/tools/` in the workspace.
-pi reads this directory live too. It has its own `.env`.
+pi reads the project tool directory live too. It has its own `.env`.
 If both directories contain the same tool name, pi offers the checkout's tool.
 It skips the home tool and reports the conflict.
 
@@ -114,7 +152,7 @@ For Rust scripts, put crates under `[dependencies]` in the frontmatter.
 2. Write the file.
 3. Run a successful case manually, using the same input and environment pi provides.
    Then run a failing case and check its error message.
-   Example: `echo '{"file":"Cargo.toml"}' | file=Cargo.toml bash <home>/tools/count.sh`.
+   Example: `echo '{"file":"Cargo.toml"}' | file=Cargo.toml bash <tools-dir>/count.sh`.
    For Rust, replace `bash` with `cargo +nightly -Zscript --quiet`.
 4. Call the tool on your next turn.
 
@@ -197,7 +235,7 @@ Only runs that support jobs allow detaching.
 Other runs, including one-shot invocations and subagents, refuse detach and stop the script.
 
 To check the event protocol manually, redirect fd 3 to the terminal:
-`echo '{"url":"https://example.com"}' | PI_EVENTS_FD=3 python3 <home>/tools/watch 3>&1`.
+`echo '{"url":"https://example.com"}' | PI_EVENTS_FD=3 python3 <tools-dir>/watch 3>&1`.
 
 ## An MCP server
 

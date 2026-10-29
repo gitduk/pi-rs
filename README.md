@@ -260,7 +260,19 @@ also continues when messages are waiting. Generation is never interrupted.
   shows its output. The task-list keys and bash controls stop or restart jobs;
   user actions are reported to the model before it next speaks. Jobs last while
   pi runs; past that, use cron.
-- One tool per script in `~/.pi/tools/`: any file whose first line is a `#!`,
+- A script is executable code. A tool is a named interface the model can call
+  directly. A tool can use a script as its implementation.
+  Keep task scripts in the workspace. Run these scripts through `bash`.
+  Running a script repeatedly does not require a new tool.
+  Reserve the home and project `tools/` directories for registered tools.
+  New project tools belong in the project's `.pi/tools/` by default.
+  This includes tools that depend on project code, data, paths, or configuration.
+  The model receives the resolved project tool path in `<project_tools>`.
+  Use the global tool directory only when the user requests a tool shared
+  across projects. A write boundary that blocks the project directory does
+  not make the global directory a fallback.
+  Keep a skill's helper scripts inside that skill's directory.
+  One tool per script in `~/.pi/tools/`: any file whose first line is a `#!`,
   its `description` and `[args]` written as TOML in a `# ---` comment block
   under that line; or a cargo script `*.rs`, described by its
   `[package] description` and `[package.metadata.pi.args]`, which needs

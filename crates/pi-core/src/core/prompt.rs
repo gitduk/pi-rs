@@ -22,6 +22,8 @@ pub const REPLACEABLE: [(&str, &str); 2] = [
 pub struct Standing {
     /// The directory the run works in.
     pub workspace: PathBuf,
+    /// The project tool directory read by the tool registry, even before it exists.
+    pub project_tools: Option<PathBuf>,
     /// Whether write and edit are held to the workspace and pi's home.
     pub fenced: bool,
     /// pi's home, set only when the run may add tools and skills to it.
@@ -41,6 +43,7 @@ impl Standing {
     pub fn render(&self) -> String {
         let mut out = String::new();
         self.workspace(&mut out);
+        self.project_tools(&mut out);
         self.pi_home(&mut out);
         self.instructions(&mut out);
         self.memory(&mut out);
@@ -54,6 +57,11 @@ impl Standing {
 Relative paths resolve from the workspace. Commands start in the workspace. \
 Keep scripts, downloads, and state files in the workspace, including temporary files. \
 The user expects to find them there.\n\n\
+A script is a code file that an interpreter or runtime executes. \
+A tool is a named interface that the model can call directly. \
+A tool can use a script as its implementation. Writing a script does not require registering a tool. \
+Keep task scripts in the workspace. Run these scripts through bash. \
+Running a script repeatedly does not require a new tool.\n\n\
 Reading may access files outside the workspace through absolute paths. URLs can access sources outside this machine.",
             escaped(self.workspace.display())
         ));
@@ -72,13 +80,30 @@ Change a file outside the workspace only when the user requests it."
         });
     }
 
+    fn project_tools(&self, out: &mut String) {
+        let Some(dir) = &self.project_tools else {
+            return;
+        };
+        out.push_str(&format!(
+            "\n\n<project_tools path=\"{}\">\nUse this directory for project tools by default. \
+This includes tools that depend on this project's code, data, paths, or configuration. \
+Create the directory if it does not exist. The run's write boundary still applies. \
+If that boundary blocks this directory, report the limit. Do not use pi's home as a fallback.\n</project_tools>",
+            escaped(dir.display())
+        ));
+    }
+
     fn pi_home(&self, out: &mut String) {
         let Some(home) = &self.pi_home else {
             return;
         };
         out.push_str(&format!(
             "\n\n<pi_home path=\"{}\">\nThis is pi's home. \
+Tools here are available across projects. \
+Add a tool here only when the user requests a tool shared across projects. \
+Keep project tools in the project's tool directory.\n\n\
 Tools and skills added here become available on your next turn. No restart is needed. \
+pi registers tools from scripts in `tools/`. Do not store task scripts or helper files in this directory. \
 Read the `pi-extend` skill for supported additions and instructions.\n</pi_home>",
             escaped(home.display())
         ));
@@ -158,6 +183,7 @@ mod tests {
     fn standing(tier: tool::Tier) -> Standing {
         Standing {
             workspace: "/w".into(),
+            project_tools: Some("/w/.pi/tools".into()),
             fenced: true,
             pi_home: Some("/h/.pi".into()),
             instructions: vec![("/w/AGENTS.md".into(), "be terse\n".into())],
@@ -189,13 +215,27 @@ mod tests {
         let text = standing(tool::Tier::Exec).render();
         let at = |tag: &str| text.find(tag).unwrap_or_else(|| panic!("{tag}: {text}"));
         let order = [
-            "<workspace",
-            "<pi_home",
+            "<workspace path=",
+            "<project_tools path=",
+            "<pi_home path=",
             "<instructions path",
             "<memory>",
             "<env",
         ];
         assert!(order.windows(2).all(|w| at(w[0]) < at(w[1])), "{text}");
         assert!(text.trim_end().ends_with("tier=\"exec\"/>"), "{text}");
+    }
+
+    #[test]
+    fn the_project_tool_path_is_escaped_and_does_not_require_a_global_home() {
+        let mut standing = standing(tool::Tier::Exec);
+        standing.project_tools = Some("/repo/a&b/\"tools\"".into());
+        standing.pi_home = None;
+        let text = standing.render();
+        assert!(text.contains("<project_tools path=\"/repo/a&amp;b/&quot;tools&quot;\">"));
+        assert!(!text.contains("<pi_home path="));
+
+        standing.project_tools = None;
+        assert!(!standing.render().contains("<project_tools path="));
     }
 }

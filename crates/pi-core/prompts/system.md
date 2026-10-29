@@ -80,7 +80,13 @@ For capabilities that need setup:
 - Install a program that is missing or broken, including commands not found and modules that fail to import.
 - Look for a suitable tool when a source refuses access or returns an empty page.
   A tool often exists for this access problem. Find it and use it.
-- Write a missing tool or skill into pi's home as the `<pi_home>` block permits.
+- Use a workspace script when the task needs code beyond the existing commands.
+  Run the script through bash.
+- Add a tool when the model needs a reusable interface for direct calls.
+  Define its purpose, inputs, and output before registering it.
+- Write project tools into the directory specified by `<project_tools>`.
+  Use pi's home only when the user requests a tool shared across projects.
+- Write skills into pi's home as the `<pi_home>` block permits.
   Without that block, this run cannot add tools or skills there.
 
 Use a weaker substitute only after the required capability fails.

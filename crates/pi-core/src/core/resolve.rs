@@ -387,6 +387,7 @@ pub fn resolve(
     // change within a run, and the system prompt is what a provider caches.
     let standing = crate::core::prompt::Standing {
         workspace: root.to_path_buf(),
+        project_tools,
         fenced: workspace.fenced(),
         pi_home,
         instructions: prompt_files.instructions.clone(),
@@ -655,6 +656,60 @@ fn endpoint(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+
+    #[test]
+    fn the_prompt_names_the_project_directory_used_for_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let root_tools = repo.join(".pi/tools");
+        let nested = repo.join("packages/app");
+        let near_tools = nested.join(".pi/tools");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        let workspace = tool::Workspace::new(&nested).unwrap().unfenced();
+        let pinned = crate::args::Pinned {
+            no_skills: true,
+            no_context_files: true,
+            tier: Some(pi_store::args::TierArg::Exec),
+            ..Default::default()
+        };
+        let settings = pi_store::settings::Settings::new(toml::Table::new().into(), None);
+        let files = std::sync::Arc::new(super::PromptFiles {
+            system: "A custom system prompt.".into(),
+            ..Default::default()
+        });
+        for (dir, create) in [
+            (&root_tools, false),
+            (&root_tools, true),
+            (&near_tools, true),
+        ] {
+            if create {
+                std::fs::create_dir_all(dir).unwrap();
+                std::fs::write(
+                    dir.join("project_tool.sh"),
+                    "#!/bin/sh\n# ---\n# description = 'A project tool.'\n# ---\necho ok\n",
+                )
+                .unwrap();
+            }
+            let resolved = super::resolve(
+                &pinned,
+                &workspace,
+                &Default::default(),
+                &settings,
+                Some(files.clone()),
+                &[],
+            )
+            .unwrap();
+            let block = format!("<project_tools path=\"{}\">", dir.display());
+            assert!(resolved.standing.contains(&block), "{}", resolved.standing);
+            assert!(resolved.brief.system.contains(&block));
+            assert_eq!(
+                resolved.brief.registry.get("project_tool").is_some(),
+                create
+            );
+            assert_eq!(dir.exists(), create);
+        }
+    }
 
     // A checkout's skill or script of a name an already-known one holds must
     // be the one offered: the reason to put one in the project is that it
