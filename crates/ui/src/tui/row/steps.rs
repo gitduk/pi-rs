@@ -28,8 +28,16 @@ impl FoldedTool {
     /// `asked` is the call's whole leading argument, `output` what it
     /// printed; both are what opening the step shows.
     pub fn new(name: &str, preview: &str, asked: &str, output: &str) -> Self {
-        // Only a head that reads the first line already can leave it out:
-        // a script's head is its name alone.
+        let recovered;
+        let preview = if preview.trim() == name {
+            recovered = serde_json::from_str(asked)
+                .map(|args| tool::summary(&args).into_owned())
+                .unwrap_or_else(|_| asked.to_string());
+            &recovered
+        } else {
+            preview
+        };
+        // Keep an argument line unless the head already shows it.
         let first = asked.lines().next().unwrap_or_default().trim();
         let read = preview.lines().next().is_some_and(|h| h.contains(first));
         let skip = usize::from(read);

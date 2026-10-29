@@ -231,7 +231,7 @@ fn tell(caller: &Ctx, heard: &Heard, said: &mut String) {
 // `read src/lib.rs`: the call's name and the one argument worth showing,
 // cut to its first line since the row is drawn one line at a time.
 fn call_line(name: &str, args: &Value) -> String {
-    match tool::asked(args).lines().next().map(str::trim) {
+    match tool::summary(args).lines().next().map(str::trim) {
         Some(asked) if !asked.is_empty() => format!("{name} {asked}"),
         _ => name.to_string(),
     }

@@ -178,6 +178,7 @@ impl Tool for Script {
             .envs(shared.iter().map(|(k, v)| (k, v)))
             .envs(self.env(&args, &shared));
         let input = serde_json::to_vec(&args).unwrap_or_default();
+        let preview = tool::summary(&args).into_owned();
         let before = crate::drift::before(ctx);
         let ran = super::job::run(
             &self.name,
@@ -196,7 +197,7 @@ impl Tool for Script {
                 return Ok(ToolOutput::text(format!(
                     "{said}\n\nRunning in the background as job #{id}. Its results arrive automatically later."
                 ))
-                .with_preview(format!("{} [background #{id}]", self.name)));
+                .with_preview(format!("{preview} [background #{id}]")));
             }
         };
         let (status, errs) = (exited.status, exited.stderr);
@@ -210,8 +211,9 @@ impl Tool for Script {
         let captured = exited.stdout;
         let out = match captured.text.trim().is_empty() {
             true => ToolOutput::text(format!("{}: no output", self.name)),
-            false => ToolOutput::text(captured.noted()).with_preview(self.name.clone()),
-        };
+            false => ToolOutput::text(captured.noted()),
+        }
+        .with_preview(preview);
         Ok(crate::drift::tell(out, &moved))
     }
 }

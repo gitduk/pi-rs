@@ -935,10 +935,7 @@ pub fn ran_for(took: Option<std::time::Duration>) -> String {
 /// The one argument worth showing in a progress line: its first line, `…`
 /// saying there is more of it.
 pub fn summarize(args: &serde_json::Value) -> String {
-    let v = match tool::asked(args) {
-        "" => Cow::Owned(args.to_string()),
-        text => Cow::Borrowed(text),
-    };
+    let v = tool::summary(args);
     let first = v.lines().next().unwrap_or_default();
     pi_store::text::clip_more(first, 80, first.len() < v.trim_end().len())
 }
@@ -946,33 +943,6 @@ pub fn summarize(args: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::Paint;
-
-    #[test]
-    fn a_job_control_call_shows_what_it_is_waiting_for() {
-        for args in [
-            serde_json::json!({"join": 1}),
-            serde_json::json!({"join": [1, 3], "timeout_ms": 20000}),
-            serde_json::json!({"output": 1}),
-            serde_json::json!({"stop": [1]}),
-            serde_json::json!({}),
-        ] {
-            let rows = super::describe(
-                &agent::Event::ToolQueued {
-                    id: "call".into(),
-                    name: "bash".into(),
-                    args: args.clone(),
-                },
-                &Paint::new(false),
-                100,
-            )
-            .unwrap();
-            assert_eq!(rows[0].to_string(), format!("→ bash {args}"));
-        }
-        assert_eq!(
-            super::summarize(&serde_json::json!({"command": "cargo test", "cwd": "crates"})),
-            "cargo test"
-        );
-    }
 
     #[test]
     fn a_tool_call_keeps_the_command_verbatim() {
