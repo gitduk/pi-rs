@@ -301,6 +301,48 @@ fn a_configured_band_outlives_the_terminals() {
     assert_ne!(mixed.prompt.panel.input, theme.prompt.panel.input);
 }
 
+#[test]
+fn the_editor_and_submitted_text_paint_the_same_background() {
+    use ratatui::style::Color as RColor;
+    use std::sync::Arc;
+
+    let (_dir, lane) = a_running_lane();
+    for bg in [
+        None,
+        Some((0, 0, 0)),
+        Some((13, 17, 23)),
+        Some((255, 255, 255)),
+    ] {
+        let mut ui = test_ui(24, 16);
+        let mut view = View::default();
+        let theme = following_terminal(&Theme::default(), bg);
+        let expected = ui.paint.band(&theme.prompt.panel.said).unwrap().bg.unwrap();
+        if bg.is_none() {
+            assert_eq!(expected, RColor::Rgb(30, 30, 30));
+        }
+        let text = "same text wraps across several rows\nsecond line";
+        ui.editor.insert_str(text);
+        view.surface.scrollback = Row::prompt(text, &ui.paint).into();
+        ui.flush(&lane, &mut view);
+        ui.set_theme(&mut view, lane.resolved(), Arc::new(theme));
+        ui.flush(&lane, &mut view);
+
+        let buffer = ui.screen.test_buffer();
+        for y in ui.regions.history.y..ui.regions.history.bottom() {
+            if !ui.drawn[y as usize].is_empty() {
+                for x in 0..ui.regions.history.width {
+                    assert_eq!(buffer[(x, y)].bg, expected, "history {bg:?} at {x},{y}");
+                }
+            }
+        }
+        for y in ui.regions.editor.y..ui.regions.editor.bottom() {
+            for x in 0..ui.regions.editor.width {
+                assert_eq!(buffer[(x, y)].bg, expected, "editor {bg:?} at {x},{y}");
+            }
+        }
+    }
+}
+
 // A row with no lines costs nothing; both walks must agree on where the
 // others are — the back walk especially, which starts inside the last row.
 #[test]

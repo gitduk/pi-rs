@@ -431,7 +431,7 @@ pub struct Prompt {
     /// The alternate prompt prefix. Both prefixes are blank by default.
     #[serde(default = "default_normal_icon")]
     pub normal: String,
-    /// The bands for editable and submitted text, the editable one brighter.
+    /// The backgrounds for editable and submitted text, matching by default.
     #[serde(default)]
     pub panel: Bands,
 }
@@ -439,17 +439,17 @@ pub struct Prompt {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bands {
-    #[serde(default = "default_panel_input")]
+    #[serde(default = "default_panel")]
     pub input: Color,
-    #[serde(default = "default_panel_said")]
+    #[serde(default = "default_panel")]
     pub said: Color,
 }
 
 impl Default for Bands {
     fn default() -> Self {
         Self {
-            input: default_panel_input(),
-            said: default_panel_said(),
+            input: default_panel(),
+            said: default_panel(),
         }
     }
 }
@@ -521,13 +521,9 @@ fn default_prompt_color() -> Style {
     Style::color(ACCENT_BLUE)
 }
 
-// Neutral dark bands when the background is unknown.
-fn default_panel_input() -> Color {
+// A neutral dark band when the background is unknown.
+fn default_panel() -> Color {
     Color::Rgb(30, 30, 30)
-}
-
-fn default_panel_said() -> Color {
-    Color::Rgb(20, 20, 20)
 }
 
 // The input body: the terminal's own foreground until a config colours it.
@@ -654,8 +650,8 @@ pub fn bands_for(bg: (u8, u8, u8)) -> Bands {
     let (r, g, b) = (f64::from(bg.0), f64::from(bg.1), f64::from(bg.2));
     let lum = 0.299 * r + 0.587 * g + 0.114 * b;
     let dark = lum <= 127.5;
-    let step = |twelfths: f64| {
-        let factor = twelfths / 12.0;
+    let band = {
+        let factor = 3.0 / 12.0;
         let scaled = if dark && lum >= 10.0 {
             let ratio = (lum + (255.0 - lum) * factor * 0.4) / lum;
             (r * ratio, g * ratio, b * ratio)
@@ -675,8 +671,8 @@ pub fn bands_for(bg: (u8, u8, u8)) -> Bands {
         Color::Rgb(byte(scaled.0), byte(scaled.1), byte(scaled.2))
     };
     Bands {
-        input: step(3.0),
-        said: step(2.0),
+        input: band.clone(),
+        said: band,
     }
 }
 

@@ -87,12 +87,11 @@ impl Height {
 
 enum Kind {
     // One logical line of a said prompt: border and body kept apart so
-    // a wrap can repeat the border. `band` is the whole row's background.
+    // a wrap can repeat the border.
     Said {
         border: Line<'static>,
         // The line's text, in the input style, without the border.
         body: Line<'static>,
-        band: Option<RStyle>,
     },
     // What the model answered, one row per markdown line, with what in it
     // reads as one. Its own kind, not a notice: it is half the conversation.
@@ -588,14 +587,12 @@ impl Row {
         Self::notice(Line::from(spans))
     }
 
-    fn said(border: Line<'static>, body: Line<'static>, band: Option<RStyle>) -> Self {
-        Self::new(Kind::Said { border, body, band })
+    fn said(border: Line<'static>, body: Line<'static>) -> Self {
+        Self::new(Kind::Said { border, body })
     }
 
-    /// A prompt's lines as the stream echoed them, on a band one step off
-    /// where it was typed, with the same alignment.
+    /// A prompt's lines as the stream echoed them, with the input's alignment.
     pub fn prompt(text: &str, paint: &Paint) -> Vec<Self> {
-        let band = paint.band(&paint.theme.prompt.panel.said);
         if text.starts_with('!') {
             let bang = paint.span(&paint.theme.prompt.color, icons::bar(icons::BANG_SIGIL));
             let indent = Span::raw(" ".repeat(bang.width()));
@@ -609,7 +606,6 @@ impl Row {
                 rows.push(Self::said(
                     Line::from(prefix),
                     Line::from(paint.span(&paint.theme.input, body)),
-                    band,
                 ));
             }
             return rows;
@@ -621,7 +617,6 @@ impl Row {
                 Self::said(
                     border.clone(),
                     Line::from(paint.span(&paint.theme.input, line)),
-                    band,
                 )
             })
             .collect()
@@ -731,9 +726,9 @@ impl Row {
 
     /// The panel this row's screen rows sit in, if it sits in one: the colour
     /// goes behind the row whole, past the text's own end.
-    pub fn band(&self) -> Option<RStyle> {
+    pub fn band(&self, paint: &Paint) -> Option<RStyle> {
         match &self.0 {
-            Kind::Said { band, .. } => *band,
+            Kind::Said { .. } => paint.band(&paint.theme.prompt.panel.said),
             _ => None,
         }
     }

@@ -337,7 +337,7 @@ impl screen::Piece for Piece<'_> {
                 }
                 // After the wrap, so every screen row a said line spans gets
                 // the band whole and the padding never wraps a row of its own.
-                let mut pieces = match row.band() {
+                let mut pieces = match row.band(paint) {
                     Some(band) => pieces
                         .into_iter()
                         .map(|piece| screen::banded(piece, band, width))
