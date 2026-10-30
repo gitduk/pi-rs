@@ -146,13 +146,28 @@ pub enum ToolError {
     Json(#[from] serde_json::Error),
 
     #[error(
-        "timed out after {}; the command and everything it spawned were killed",
-        llm::figures::elapsed(std::time::Duration::from_millis(*.ms))
+        "timed out after {}; the command and everything it spawned were killed{}",
+        llm::figures::elapsed(std::time::Duration::from_millis(*.ms)),
+        already(.printed)
     )]
-    Timeout { ms: u64 },
+    Timeout {
+        ms: u64,
+        /// What the call had produced before the deadline, so being cut off
+        /// costs the caller the rest rather than all of it. Empty when the
+        /// call produced nothing, or nothing that survived.
+        printed: String,
+    },
 
     #[error("could not spill oversized output: {0}")]
     Spill(String),
+}
+
+// What a cut-off call had already said, when it said anything at all.
+fn already(printed: &str) -> String {
+    match printed.trim().is_empty() {
+        true => String::new(),
+        false => format!(". It had printed:\n\n{printed}"),
+    }
 }
 
 impl ToolError {

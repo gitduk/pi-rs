@@ -133,7 +133,10 @@ pub async fn foreground(
             }
             () = &mut deadline, if waiting.is_none() => {
                 reap(group).await;
-                return Err(ToolError::Timeout { ms: limit.as_millis() as u64 });
+                return Err(ToolError::Timeout {
+                    ms: limit.as_millis() as u64,
+                    printed: String::new(),
+                });
             }
             said = fd3.next() => match said {
                 Said::Status(text) => ctx.progress(text),

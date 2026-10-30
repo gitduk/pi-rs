@@ -499,7 +499,7 @@ impl Subagent {
                     // A stop ends the caller's turn as elsewhere; anything else is an
                     // outcome, not a reason to drop the work the child already did.
                     Err(ToolError::Cancelled) => return Err(ToolError::Cancelled),
-                    Err(ToolError::Timeout { ms }) => Outcome::CutOff { ms },
+                    Err(ToolError::Timeout { ms, .. }) => Outcome::CutOff { ms },
                     Err(why) => Outcome::NoVerdict(why.to_string()),
                 };
                 Some(Checked {

@@ -89,8 +89,23 @@ async fn a_bounded_command_times_out_without_hanging_the_caller() {
     .await
     .err()
     .expect("the command times out");
-    assert!(matches!(err, ToolError::Timeout { ms: 150 }), "{err}");
+    assert!(matches!(err, ToolError::Timeout { ms: 150, .. }), "{err}");
     assert_eq!(err.code(), Some("TOOL_TIMEOUT"));
+}
+
+#[tokio::test]
+async fn a_command_cut_off_still_reports_what_it_printed() {
+    let (_d, c) = ctx();
+    let err = toolbox::bash::run(
+        "echo half the work; sleep 5",
+        c.workspace.root(),
+        Some(std::time::Duration::from_millis(300)),
+        &c,
+    )
+    .await
+    .err()
+    .expect("the command times out");
+    assert!(err.to_string().contains("half the work"), "{err}");
 }
 
 #[tokio::test]

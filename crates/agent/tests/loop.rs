@@ -1509,7 +1509,10 @@ impl Tool for Timeouter {
     }
 
     async fn execute(&self, _args: Value, _ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        Err(ToolError::Timeout { ms: self.0 })
+        Err(ToolError::Timeout {
+            ms: self.0,
+            printed: String::new(),
+        })
     }
 }
 

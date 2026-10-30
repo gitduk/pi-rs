@@ -501,7 +501,7 @@ pub async fn run(
     let exited = crate::process::run(cmd, None, timeout, ctx)
         .await
         .inspect_err(|e| {
-            if let ToolError::Timeout { ms } = e {
+            if let ToolError::Timeout { ms, .. } = e {
                 tracing::warn!(target: "pi::bash", command = %command, timeout_ms = ms, "timed out");
             }
         })?;

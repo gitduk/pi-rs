@@ -103,10 +103,11 @@ pub(crate) async fn settle(launched: Launched, ends: Ends) -> Result<Exited, Too
         guard: _guard,
     } = launched;
     let deadline = ends.deadline.map(|d| d.min(MAX_RUN));
-    let timed_out = || ToolError::Timeout {
+    let timed_out = |printed: String| ToolError::Timeout {
         ms: deadline
             .expect("only the deadline arm reports a timeout")
             .as_millis() as u64,
+        printed,
     };
     // One future across both phases: the deadline is on the command, not on
     // each thing waited for in turn.
@@ -121,7 +122,10 @@ pub(crate) async fn settle(launched: Launched, ends: Ends) -> Result<Exited, Too
         }
         () = &mut over => {
             put_down(&mut child, group).await;
-            return Err(timed_out());
+            // The group is down, so the pipes close and what it printed
+            // before the deadline is still there to read.
+            let (stdout, stderr) = streams.after_exit(group).await;
+            return Err(timed_out(crate::bash::body(&stdout, &stderr)));
         }
     };
     let (stdout, stderr) = tokio::select! {
@@ -132,7 +136,7 @@ pub(crate) async fn settle(launched: Launched, ends: Ends) -> Result<Exited, Too
         }
         () = &mut over => {
             reap(group).await;
-            return Err(timed_out());
+            return Err(timed_out(String::new()));
         }
     };
     Ok(Exited {
