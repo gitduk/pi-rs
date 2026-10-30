@@ -40,7 +40,10 @@ impl Palette {
             .expect("embedded syntax theme must be valid");
         let highlighter = Highlighter::new(&tokens);
         let headings = std::array::from_fn(|i| {
-            let scope = Scope::new(&format!("markup.heading.{}.markdown", i + 1))
+            // The scope the embedded themes name their heading colours by.
+            // `markup.heading.N.markdown` matches only the first two levels,
+            // leaving the rest to the terminal's own foreground.
+            let scope = Scope::new(&format!("heading.{}.markdown", i + 1))
                 .expect("fixed heading scope must be valid");
             let style = highlighter
                 .style_mod_for_stack(&[scope])
@@ -197,4 +200,42 @@ pub(super) fn inline(style: Style, theme: &Theme) -> Style {
         base = base.patch(style_to_ratatui(&theme.strong));
     }
     base.patch(style)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Every level reads as its own, and a light terminal's recoloured generic
+    // heading does not read as a config that named one: that would collapse
+    // all six onto the single colour the fit chose.
+    #[test]
+    fn each_heading_level_keeps_a_colour_of_its_own() {
+        for bg in [(255, 255, 255), (13, 17, 23)] {
+            let theme = crate::theme::following_terminal(&Theme::default(), Some(bg));
+            let format = options(Arc::new(theme));
+            let mut seen: Vec<_> = (1..=6).map(|l| format.sheet.heading(l).fg).collect();
+            let found = seen.len();
+            seen.sort_by_key(|c| format!("{c:?}"));
+            seen.dedup();
+            assert_eq!(seen.len(), found, "{bg:?} shares a colour across levels");
+            assert!(
+                seen.iter().all(Option::is_some),
+                "{bg:?} left a level plain"
+            );
+        }
+    }
+
+    // A heading the config did name still labels every level.
+    #[test]
+    fn a_named_heading_labels_every_level() {
+        let named = pi_store::theme::Color::Rgb(1, 2, 3);
+        let mut theme = Theme::default();
+        theme.heading = pi_store::theme::Style::color(named.clone());
+        let theme = crate::theme::following_terminal(&theme, Some((255, 255, 255)));
+        let format = options(Arc::new(theme));
+        for level in 1..=6 {
+            assert_eq!(format.sheet.heading(level).fg, Some(Color::Rgb(1, 2, 3)));
+        }
+    }
 }
