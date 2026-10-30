@@ -2,7 +2,6 @@
 //! `/rewind`, a question's options: what they offer and how they read.
 //! `keys` drives them.
 use super::Ui;
-use super::mouse::at_row_name;
 use super::search::{Place, Spot};
 use super::view::View;
 use pi_core::core;
@@ -70,12 +69,11 @@ impl Ui {
                 .map(|f| MenuEntry::File {
                     start,
                     end,
-                    show: if kind == Path::Directory {
+                    show: if f.dir {
                         format!("{}/", f.path)
                     } else {
-                        at_row_name(&f.path, f.dir)
+                        f.path.clone()
                     },
-                    kind,
                     lead,
                     path: f.path.clone(),
                     dir: f.dir,
@@ -414,10 +412,7 @@ pub(super) enum MenuEntry {
     File {
         start: usize,
         end: usize,
-        // Directory navigation shows the whole path; other paths use a name
-        // with the full path alongside it.
         show: String,
-        kind: Path,
         lead: &'static str,
         path: String,
         dir: bool,
@@ -459,12 +454,7 @@ impl MenuEntry {
     pub(super) fn help(&self) -> &str {
         match self {
             MenuEntry::Completion(c) => &c.help,
-            MenuEntry::File {
-                kind: Path::Directory,
-                ..
-            } => "",
-            MenuEntry::File { path, .. } => path,
-            MenuEntry::Hit { .. } | MenuEntry::Pick { .. } => "",
+            MenuEntry::File { .. } | MenuEntry::Hit { .. } | MenuEntry::Pick { .. } => "",
         }
     }
 }

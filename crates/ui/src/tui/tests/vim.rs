@@ -117,6 +117,42 @@ fn an_at_token_completes_by_tab_and_stays_on_enter() {
     assert_eq!(ui.editor.text(), "look at @at_probe.rs ");
 }
 
+#[test]
+fn path_completions_show_each_full_path_once() {
+    use ratatui::widgets::Widget;
+
+    let (dir, _lane) = a_running_lane();
+    std::fs::create_dir(dir.path().join("tests")).unwrap();
+    std::fs::write(dir.path().join("tests/test.rs"), "").unwrap();
+    std::fs::write(dir.path().join("tag.json"), "").unwrap();
+    let mut ui = test_ui(80, 24);
+    ui.at_root = dir.path().to_path_buf();
+
+    ui.editor.set_line("@t");
+    let menu = ui.menu();
+    assert_eq!(menu.len(), 2);
+    assert!(menu.iter().all(|entry| entry.help().is_empty()));
+    let area = ratatui::layout::Rect::new(0, 0, 80, 2);
+    let mut buffer = ratatui::buffer::Buffer::empty(area);
+    ratatui::widgets::List::new(ui.menu_items(&menu, 1, 80)).render(area, &mut buffer);
+    let rows: Vec<String> = (0..2)
+        .map(|y| {
+            (0..80)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(rows, ["tag.json", "tests/"]);
+
+    ui.editor.set_line("@tests/t");
+    let menu = ui.menu();
+    assert_eq!(menu.len(), 1);
+    assert_eq!(menu[0].show(), "tests/test.rs");
+    assert!(menu[0].help().is_empty());
+}
+
 // The @ walk follows the checkout in front: a lane on another worktree
 // completes its own files, not the first lane's.
 #[test]

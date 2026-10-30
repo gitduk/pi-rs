@@ -550,15 +550,6 @@ fn copy_out(code: &str) -> String {
     }
 }
 
-pub(super) fn at_row_name(path: &str, dir: bool) -> String {
-    let name = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path);
-    if dir {
-        format!("{name}/")
-    } else {
-        name.to_string()
-    }
-}
-
 /// The blank rows between the transcript and whatever is pinned under it —
 /// a panel or the bar — so its last line never reads as part of them.
 pub(super) const HISTORY_GAP: u16 = 1;
