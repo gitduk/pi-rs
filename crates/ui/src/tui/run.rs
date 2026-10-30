@@ -774,14 +774,14 @@ impl Tui {
                 let mut parts = parts;
                 parts.insert(0, "stopped".to_string());
                 let line = crate::status::settled(&parts);
-                self.ui.say_kept(on, view, &line);
+                self.ui.say_tally(on, view, &line);
             }
             Err(e) => {
                 let mark = self.ui.paint.span(&self.ui.paint.theme.status.err, "error");
                 let rest = Span::from(format!(" {e}"));
                 self.ui.say(view, Line::from(vec![mark, rest]));
                 if !parts.is_empty() {
-                    self.ui.say_kept(on, view, &crate::status::settled(&parts));
+                    self.ui.say_tally(on, view, &crate::status::settled(&parts));
                 }
             }
         }

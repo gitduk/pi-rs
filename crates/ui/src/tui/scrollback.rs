@@ -71,6 +71,13 @@ impl std::ops::DerefMut for Scrollback {
     }
 }
 
+impl Scrollback {
+    // The opening banner back at the top of rows rebuilt without it.
+    pub(super) fn push_front(&mut self, row: Row) {
+        self.0.insert(0, row);
+    }
+}
+
 impl Extend<Row> for Scrollback {
     fn extend<I: IntoIterator<Item = Row>>(&mut self, rows: I) {
         self.0.extend(rows);
@@ -663,7 +670,10 @@ pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
         LogEntry::Note { note, .. } => Some(Row::note_lines(note)),
         // Screen-only rows — a tally line, a turn warning — as plain notices,
         // so the rebuild reuses the text the surface already worded.
-        LogEntry::Screen { text, .. } => Some(Row::notice_lines(text, paint)),
+        LogEntry::Screen { text, tally, .. } => Some(match tally {
+            true => Row::tally_lines(text, paint),
+            false => Row::notice_lines(text, paint),
+        }),
         LogEntry::Tool {
             result: r,
             preview,

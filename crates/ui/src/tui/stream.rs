@@ -153,7 +153,7 @@ impl Ui {
                     // Kept, not just said: nothing else holds these numbers,
                     // so a rebuild could not draw an aside.
                     let line = status::settled(&parts);
-                    self.say_kept(lane, view, &line);
+                    self.say_tally(lane, view, &line);
                 }
             }
             // What the endpoint left out of the reply just streamed: filed under
@@ -272,6 +272,12 @@ impl Ui {
     pub(super) fn say_kept(&self, lane: &mut Lane, view: &mut View, line: &str) {
         let kept = lane.push_screen(line);
         self.draw_kept(view, Row::notice_lines(line, &self.paint), kept);
+    }
+
+    // `say_kept` for a run's own figures, which are drawn as figures.
+    pub(super) fn say_tally(&self, lane: &mut Lane, view: &mut View, line: &str) {
+        let kept = lane.push_tally(line);
+        self.draw_kept(view, Row::tally_lines(line, &self.paint), kept);
     }
 
     // `say_kept` as a note, which the model reads before it next speaks.

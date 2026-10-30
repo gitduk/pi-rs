@@ -276,6 +276,16 @@ impl Row {
     /// stream (which also files it) and a rebuild (from the archived text).
     pub fn notice_lines(text: &str, paint: &Paint) -> Vec<Self> {
         text.lines()
+            .map(|line| Line::from(paint.span(&paint.theme.muted, line)))
+            .map(Self::notice)
+            .collect()
+    }
+
+    /// `notice_lines` for a run's tally, whose figures carry their own
+    /// colours. Only a line written as a tally is read as one: prose that
+    /// happens to end in a figure keeps its muted appearance.
+    pub fn tally_lines(text: &str, paint: &Paint) -> Vec<Self> {
+        text.lines()
             .map(|line| crate::status::painted(line, paint))
             .map(Self::notice)
             .collect()

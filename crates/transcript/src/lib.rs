@@ -261,6 +261,11 @@ pub enum Entry {
         id: EntryId,
         at: u64,
         text: String,
+        /// The run's own tally rather than prose about it. Recorded by
+        /// whoever wrote the line, because only the writer knows which it
+        /// is; a reader left to guess from the text gets prose wrong.
+        #[serde(default)]
+        tally: bool,
     },
 }
 
@@ -624,11 +629,22 @@ impl Session {
     /// prose it can act on, and a status line is not that. Kept so the rebuild
     /// draws the same screen the live path drew.
     pub fn push_screen(&mut self, text: impl Into<String>) -> EntryId {
+        self.screen(text, false)
+    }
+
+    /// A run's own figures, kept as `push_screen` keeps a warning, and marked
+    /// as the tally it is.
+    pub fn push_tally(&mut self, text: impl Into<String>) -> EntryId {
+        self.screen(text, true)
+    }
+
+    fn screen(&mut self, text: impl Into<String>, tally: bool) -> EntryId {
         let (id, at) = self.mint();
         self.entries.push(Entry::Screen {
             id,
             at,
             text: text.into(),
+            tally,
         });
         id
     }

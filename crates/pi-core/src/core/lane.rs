@@ -130,7 +130,7 @@ impl Transcript {
 }
 
 enum Held {
-    Screen(String),
+    Screen { text: String, tally: bool },
     Note(String),
 }
 
@@ -616,7 +616,8 @@ impl Lane {
         for held in std::mem::take(held) {
             self.talk.filed = true;
             match held {
-                Held::Screen(text) => session.push_screen(text),
+                Held::Screen { text, tally: true } => session.push_tally(text),
+                Held::Screen { text, tally: false } => session.push_screen(text),
                 Held::Note(text) => session.push_note(text),
             };
         }
@@ -653,13 +654,29 @@ impl Lane {
     /// Returns the id so a surface can tell it from what it has yet to show;
     /// `None` for a held row, filed later.
     pub fn push_screen(&mut self, text: &str) -> Option<EntryId> {
+        self.screen(text, false)
+    }
+
+    /// `push_screen` for a run's own figures, which are drawn as figures
+    /// rather than as the prose a warning is.
+    pub fn push_tally(&mut self, text: &str) -> Option<EntryId> {
+        self.screen(text, true)
+    }
+
+    fn screen(&mut self, text: &str, tally: bool) -> Option<EntryId> {
         match &mut self.talk.transcript {
             Transcript::Home(session) => {
                 self.talk.filed = true;
-                Some(session.push_screen(text))
+                Some(match tally {
+                    true => session.push_tally(text),
+                    false => session.push_screen(text),
+                })
             }
             Transcript::Lent(held) => {
-                held.push(Held::Screen(text.to_string()));
+                held.push(Held::Screen {
+                    text: text.to_string(),
+                    tally,
+                });
                 None
             }
         }
@@ -1278,29 +1295,29 @@ mod tests {
         lane.return_session(agent::session::Session::default());
         let held = lane.take_session().expect("the run has it");
 
-        lane.push_screen("3s · 1.2k/340 · $0.01");
+        lane.push_tally("3s · 1.2k/340 · $0.01");
         lane.push_screen("! the reply came back short");
         lane.push_screen("! settled");
         lane.return_session(held);
 
-        let filed: Vec<&str> = lane
+        let filed: Vec<(&str, bool)> = lane
             .session()
             .expect("the run gave it back")
             .entries()
             .iter()
             .filter_map(|e| match e {
-                agent::session::Entry::Screen { text, .. } => Some(text.as_str()),
+                agent::session::Entry::Screen { text, tally, .. } => Some((text.as_str(), *tally)),
                 _ => None,
             })
             .collect();
         assert_eq!(
             filed,
             [
-                "3s · 1.2k/340 · $0.01",
-                "! the reply came back short",
-                "! settled"
+                ("3s · 1.2k/340 · $0.01", true),
+                ("! the reply came back short", false),
+                ("! settled", false)
             ],
-            "in the order they were drawn"
+            "in the order they were drawn, each still knowing what it is"
         );
     }
 
