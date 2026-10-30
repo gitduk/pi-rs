@@ -111,7 +111,7 @@ pub struct Reasoning {
     pub id: Option<String>,
     pub content: Vec<ReasoningContent>,
     /// Which model produced it, as the endpoint names it. Absent means locally
-    /// synthesized. Only an exact match against the target replays, so a
+    /// synthesized or cut off before the wire closed it. Only an exact match against the target replays, so a
     /// different model does not inherit the previous model's scratch work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,

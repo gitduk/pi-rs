@@ -5,6 +5,22 @@ use pi_store::keys::Mode;
 use super::harness::*;
 use crate::tui::{Asked, Deed, TermEvent, View};
 
+// What the lane is handed once the checkout's command has ended. Polled,
+// since nothing in a run waits on one command to finish.
+async fn said_by(table: &pi_core::driver::background::Table, root: &std::path::Path) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(due) = table.take_ready_results(root) {
+            return due.line;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the command said nothing in time"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 fn background(ids: &[u64]) -> Vec<BackgroundCommand> {
     ids.iter()
         .map(|&id| background_command(id, Invocation::shell(format!("command {id}"))))
@@ -113,7 +129,6 @@ async fn named_scripts_use_bash_background_with_original_input_and_environment()
 #[tokio::test]
 async fn script_restarts_reload_private_environment_and_reuse_original_arguments() {
     use std::sync::Arc;
-    use std::time::Duration;
     use tool::{Source, Tool};
 
     let dir = tempfile::tempdir().unwrap();
@@ -146,13 +161,9 @@ printf '%s\n' 'private stderr' >&2
         .execute(args.clone(), &ctx)
         .await
         .unwrap();
-    let first = table
-        .wait(dir.path(), 1, Duration::from_secs(5))
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(first[0].contains("from-file"), "{first:?}");
-    assert!(!first[0].contains("private stderr"));
+    let first = said_by(&table, dir.path()).await;
+    assert!(first.contains("from-file"), "{first}");
+    assert!(!first.contains("private stderr"));
     assert!(
         table
             .output(dir.path(), 1)
@@ -188,12 +199,8 @@ printf '%s\n' 'private stderr' >&2
     assert!(table.listing(dir.path())[0].contains(invocation.title().as_ref()));
     std::fs::write(&env, "PI_BACKGROUND_TEST_VALUE=updated-file\n").unwrap();
     table.restart(dir.path(), 1).unwrap();
-    let second = table
-        .wait(dir.path(), 1, Duration::from_secs(5))
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(second[0].contains("updated-file"), "{second:?}");
+    let second = said_by(&table, dir.path()).await;
+    assert!(second.contains("updated-file"), "{second}");
     assert_eq!(
         table.background(dir.path())[0].invocation.as_ref(),
         &invocation
@@ -201,15 +208,8 @@ printf '%s\n' 'private stderr' >&2
 
     std::fs::remove_file(&env).unwrap();
     table.restart(dir.path(), 1).unwrap();
-    let third = table
-        .wait(dir.path(), 1, Duration::from_secs(5))
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        third[0].contains("original argument\nwith newline"),
-        "{third:?}"
-    );
+    let third = said_by(&table, dir.path()).await;
+    assert!(third.contains("original argument\nwith newline"), "{third}");
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(
             &std::fs::read(dir.path().join("received")).unwrap()
@@ -522,7 +522,7 @@ async fn focused_controls_use_the_existing_driver_and_preserve_restartability() 
             let _ = tx.send(execution);
             Ok(())
         }),
-        None,
+        Default::default(),
     );
     tui.ui.sync_background(table.background(&root));
     tui.ui.vim = Some(Mode::Normal);

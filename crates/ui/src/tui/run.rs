@@ -99,23 +99,13 @@ impl Tui {
         done: &UnboundedSender<Done>,
     ) -> bool {
         if self.core.lane().is_running() {
-            if origin == Origin::Typed
-                && front_view(&mut self.views, self.core.lane())
-                    .queued
-                    .is_empty()
-                && let Some(input) = self.core.lane().input()
-            {
-                input.push(ask);
-                self.ui.flash("message queued for after this reply");
-            } else {
-                front_view(&mut self.views, self.core.lane())
-                    .queued
-                    .push(super::view::Queued {
-                        input: super::view::Pending::Prompt(ask),
-                        origin,
-                        line,
-                    });
-            }
+            front_view(&mut self.views, self.core.lane())
+                .queued
+                .push(super::view::Queued {
+                    input: super::view::Pending::Prompt(ask),
+                    origin,
+                    line,
+                });
             return false;
         }
         if let Some(line) = line {
@@ -168,11 +158,14 @@ impl Tui {
         // Read where the run starts, not carried on the agent: a reload
         // between two turns reaches the next one this way.
         let retry = pi_core::core::retry(&self.core.config);
-        let input = self.core.lane_mut().listen(self.drivers.background());
+        let queued = front_view(&mut self.views, self.core.lane()).queued.clone();
+        let input = pi_core::driver::input::Input::new(
+            self.core.lane().root().to_path_buf(),
+            self.drivers.background(),
+            move || queued.take_prompt(),
+        );
         tokio::spawn(async move {
-            let out =
-                guard(agent.run_with_input(&mut carried, &ctx, &sent, &retry, input.as_ref()))
-                    .await;
+            let out = guard(agent.run_with_input(&mut carried, &ctx, &sent, &retry, &input)).await;
             let _ = done.send(Done {
                 token,
                 kind: Kind::Turn,
@@ -533,20 +526,6 @@ impl Tui {
         let Some(lane) = self.core.position_of(done.token) else {
             return;
         };
-        let pending = self.core.lanes[lane]
-            .take_pending_input()
-            .into_iter()
-            .map(|ask| {
-                let line = Some(ask.shown_text().to_string());
-                super::view::Queued {
-                    input: super::view::Pending::Prompt(ask),
-                    origin: Origin::Typed,
-                    line,
-                }
-            });
-        view_at(&mut self.views, done.token)
-            .queued
-            .splice(..0, pending);
         let unsend = self.core.lanes[lane].finish();
 
         match done.kind {

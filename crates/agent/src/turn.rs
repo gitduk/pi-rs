@@ -104,7 +104,7 @@ impl Agent {
             let next = tokio::select! {
                 biased;
                 _ = ctx.cancel.cancelled() => {
-                    return Err((AgentError::Cancelled, Some(acc.finish())));
+                    return Err((AgentError::Cancelled, Some(acc.cut_short())));
                 }
                 n = leashed(idle, stream.next()) => match n {
                     Ok(n) => n,

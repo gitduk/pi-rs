@@ -12,14 +12,6 @@ pub trait Source: Send + Sync {
     fn tools(&self) -> Vec<Arc<dyn Tool>>;
 }
 
-struct Fixed(Arc<dyn Tool>);
-
-impl Source for Fixed {
-    fn tools(&self) -> Vec<Arc<dyn Tool>> {
-        vec![self.0.clone()]
-    }
-}
-
 /// The active tool set. Ordering is stable so the tool block stays
 /// prompt-cacheable across turns.
 #[derive(Default, Clone)]
@@ -53,10 +45,15 @@ impl Registry {
         self
     }
 
-    /// Add `tool` unless its name is taken, and say whether it went in. The
-    /// first to claim a name keeps it, whichever source offered it.
+    /// Add `tool` unless its name is taken or cut, and say whether it went
+    /// in. The first to claim a name keeps it, ahead of every source, so a
+    /// tool added after the sources still holds its name against them.
     pub fn offer(&mut self, tool: Arc<dyn Tool>) -> bool {
-        match self.tools.entry(tool.name().to_string()) {
+        let name = tool.name();
+        if self.hidden.contains(name) || !self.ceilings.iter().all(|&c| tool.tier().under(c)) {
+            return false;
+        }
+        match self.tools.entry(name.to_string()) {
             std::collections::btree_map::Entry::Vacant(slot) => {
                 slot.insert(tool);
                 true
@@ -69,12 +66,6 @@ impl Registry {
     /// offered one, so none of them can take an offered tool's name.
     pub fn read(&mut self, source: Arc<dyn Source>) {
         self.sources.push(source);
-    }
-
-    /// Offer a fixed tool after the sources already read. It yields to them
-    /// as they change, returning when its name is free, under the same cuts.
-    pub fn fallback(&mut self, tool: Arc<dyn Tool>) {
-        self.read(Arc::new(Fixed(tool)));
     }
 
     /// Whether a source offers `name` now. Offering a tool of that name would
@@ -228,53 +219,28 @@ mod tests {
         }
     }
 
+    // A tool added after the sources are read still holds its name: a script
+    // can add a tool, never stand in for one already trusted.
     #[test]
-    fn a_fallback_returns_when_a_live_source_releases_its_name() {
+    fn a_tool_offered_after_a_source_keeps_its_name_under_the_cuts() {
         let shelf = Arc::new(Shelf(Default::default()));
-        let mut r = Registry::new().with(Named("read", "built in", Tier::Read));
-        r.read(shelf.clone());
-        r.fallback(Arc::new(Named("memory", "built in", Tier::Write)));
-        r.fallback(Arc::new(Named("read", "fallback", Tier::Read)));
-        assert_eq!(r.get("memory").unwrap().description(), "built in");
-        assert_eq!(r.get("read").unwrap().description(), "built in");
-
         shelf
             .0
             .lock()
             .unwrap()
             .push(Arc::new(Named("memory", "script", Tier::Exec)));
-        assert_eq!(r.get("memory").unwrap().description(), "script");
-        assert_eq!(
-            r.defs()
-                .iter()
-                .find(|t| t.name == "memory")
-                .unwrap()
-                .description,
-            "script"
-        );
-        assert_eq!(
-            r.clone()
-                .within(Tier::Write)
-                .get("memory")
-                .unwrap()
-                .description(),
-            "built in"
-        );
-        assert!(r.clone().within(Tier::Read).get("memory").is_none());
-        let hidden = r.clone().without("memory");
-        assert!(!hidden.sourced_holds("memory"));
-        assert!(hidden.get("memory").is_none());
-
-        shelf.0.lock().unwrap().clear();
+        let mut r = Registry::new();
+        r.read(shelf.clone());
+        assert!(r.sourced_holds("memory"));
+        assert!(r.offer(Arc::new(Named("memory", "built in", Tier::Write))));
         assert_eq!(r.get("memory").unwrap().description(), "built in");
-        assert_eq!(
-            r.defs()
-                .iter()
-                .find(|t| t.name == "memory")
-                .unwrap()
-                .description,
-            "built in"
-        );
+        assert_eq!(r.defs().len(), 1);
+
+        let mut capped = Registry::new().within(Tier::Read);
+        assert!(!capped.offer(Arc::new(Named("memory", "built in", Tier::Write))));
+        let mut cut = Registry::new().without("memory");
+        assert!(!cut.offer(Arc::new(Named("memory", "built in", Tier::Write))));
+        assert!(cut.get("memory").is_none());
     }
 
     // A tool that shows up mid-run is offered from then on, but never over a

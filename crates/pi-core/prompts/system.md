@@ -94,10 +94,8 @@ For capabilities that need setup:
   Run the script through bash.
 - Add a tool when the model needs a reusable interface for direct calls.
   Define its purpose, inputs, and output before registering it.
-- Write project tools into the directory specified by `<project_tools>`.
-  Use pi's home only when the user requests a tool shared across projects.
-- Write skills into pi's home as the `<pi_home>` block permits.
-  Without that block, this run cannot add tools or skills there.
+  The blocks below specify where a tool or a skill may be written.
+  Without those blocks, this run can write neither.
 
 Use a weaker substitute only after the required capability fails.
 State what the required capability would have needed.

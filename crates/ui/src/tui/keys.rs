@@ -537,9 +537,10 @@ impl Ui {
     // Up from the bottom of recall takes back the typed lines still queued,
     // oldest first and the draft after them, before reaching history.
     fn history_older(&mut self, view: &mut View) {
-        if self.editor.recalls_next() && view.queued.iter().any(|q| q.line.is_some()) {
+        let mut queued = view.queued.lock();
+        if self.editor.recalls_next() && queued.iter().any(|q| q.line.is_some()) {
             let mut lines = Vec::new();
-            view.queued.retain_mut(|q| match q.line.take() {
+            queued.retain_mut(|q| match q.line.take() {
                 Some(line) => {
                     lines.push(line);
                     false

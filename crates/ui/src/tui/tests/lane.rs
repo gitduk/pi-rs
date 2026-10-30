@@ -1091,6 +1091,7 @@ async fn a_queued_line_remembers_the_command_it_came_from() {
 
     let from: Vec<_> = view_at(&mut tui.views, token)
         .queued
+        .lock()
         .iter()
         .map(|q| q.origin)
         .collect();
@@ -1098,11 +1099,10 @@ async fn a_queued_line_remembers_the_command_it_came_from() {
 }
 
 #[tokio::test]
-async fn a_typed_followup_reaches_the_running_agent_and_survives_cancellation() {
+async fn a_typed_followup_waits_for_the_run_and_survives_cancellation() {
     let dir = tempfile::tempdir().unwrap();
     let mut tui = surface(dir.path());
     let token = tui.core.lane().token();
-    let input = tui.core.lane_mut().listen(tui.drivers.background());
     let wake = tui.admit(
         Asked::Core(Intent::Prompt("new direction".into())),
         Origin::Typed,
@@ -1127,14 +1127,8 @@ async fn a_typed_followup_reaches_the_running_agent_and_survives_cancellation() 
         Some("new direction".into()),
         &done
     ));
-    assert!(tui.core.lane().is_running());
     assert!(ended.try_recv().is_err(), "no second run was started");
-    assert!(view_at(&mut tui.views, token).queued.is_empty());
     assert!(tui.core.lane_mut().stop(false));
-    assert!(
-        tui.core.lane().input().is_none(),
-        "stopped runs no longer accept input"
-    );
     tui.settle(crate::tui::run::Done {
         token,
         kind: crate::tui::run::Kind::Turn,
@@ -1144,16 +1138,15 @@ async fn a_typed_followup_reaches_the_running_agent_and_survives_cancellation() 
         )),
     })
     .await;
-    assert!(input.pending().is_empty());
-    let queue = &view_at(&mut tui.views, token).queued;
-    assert_eq!(queue.len(), 1);
-    assert!(matches!(&queue[0].input, crate::tui::view::Pending::Prompt(p) if p == &ask));
-    assert_eq!(queue[0].line.as_deref(), Some("new direction"));
-    assert!(tui.core.lane().input().is_none());
 
-    let queued = view_at(&mut tui.views, token).queued.remove(0);
-    let (_, prepared) = queued.input.into_intent();
-    assert!(tui.deliver_prompt(prepared.unwrap(), queued.origin, queued.line, &done));
+    let queued = view_at(&mut tui.views, token).queued.pop_front().unwrap();
+    assert!(view_at(&mut tui.views, token).queued.is_empty());
+    assert_eq!(queued.line.as_deref(), Some("new direction"));
+    let crate::tui::view::Pending::Prompt(waited) = queued.input else {
+        panic!("the prompt waits as it was read");
+    };
+    assert_eq!(waited, ask);
+    assert!(tui.deliver_prompt(waited, queued.origin, queued.line, &done));
     let completed = tokio::time::timeout(std::time::Duration::from_secs(2), ended.recv())
         .await
         .unwrap()
@@ -1162,11 +1155,14 @@ async fn a_typed_followup_reaches_the_running_agent_and_survives_cancellation() 
     assert_eq!(tui.core.lane().session().unwrap().last_prompt(), Some(&ask));
 }
 
+// One queue per screen, shared with its run: a typed follow-up is drawn and
+// can be taken back while it waits, the run reads it only from the front, and
+// another lane's queue is not this run's.
 #[test]
 fn a_followup_does_not_pass_an_earlier_queued_command_or_enter_another_lane() {
     let dir = tempfile::tempdir().unwrap();
     let mut tui = surface(dir.path());
-    let input = tui.core.lane_mut().listen(tui.drivers.background());
+    let queue = front_view(&mut tui.views, tui.core.lane()).queued.clone();
     let (done, _) = tokio::sync::mpsc::unbounded_channel();
     tui.admit(
         Asked::Core(Intent::Bash("echo first".into())),
@@ -1179,8 +1175,9 @@ fn a_followup_does_not_pass_an_earlier_queued_command_or_enter_another_lane() {
         Some("after bash".into()),
         &done,
     );
-    assert_eq!(front_view(&mut tui.views, tui.core.lane()).queued.len(), 2);
-    assert!(input.pending().is_empty());
+    assert_eq!(queue.lock().len(), 2);
+    assert!(queue.take_prompt().is_none(), "the command came first");
+
     switch_to(&mut tui, running_lane(dir.path()));
     tui.deliver_prompt(
         crate::tui::clipboard::prompt("another lane".into(), None, &[]),
@@ -1188,8 +1185,17 @@ fn a_followup_does_not_pass_an_earlier_queued_command_or_enter_another_lane() {
         Some("another lane".into()),
         &done,
     );
-    assert_eq!(front_view(&mut tui.views, tui.core.lane()).queued.len(), 1);
-    assert!(input.pending().is_empty());
+    assert_eq!(
+        front_view(&mut tui.views, tui.core.lane())
+            .queued
+            .lock()
+            .len(),
+        1
+    );
+
+    queue.pop_front();
+    assert_eq!(queue.take_prompt().unwrap().text, "after bash");
+    assert!(queue.is_empty());
 }
 
 // Queued results open one turn under their batch label, even output that
@@ -1305,11 +1311,11 @@ async fn leaving_with_a_command_preserves_its_stop_cause_on_resume() {
         );
         execution.rerun(
             std::sync::Arc::new(|_, _| Ok(())),
-            Some(Again {
+            Again {
                 command: "sleep 30; echo done".into(),
                 cwd: dir.path().into(),
                 ..Again::default()
-            }),
+            },
         );
         let path = tui.core.store.path_of(dir.path(), tui.core.lane().id());
 

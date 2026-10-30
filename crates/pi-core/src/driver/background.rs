@@ -30,6 +30,8 @@ use crate::core::question::{Asker, Question};
 const LET_GO: std::time::Duration = std::time::Duration::from_secs(10);
 // Bound queued messages even when a command outruns its checkout.
 const MAX_WAITING: usize = 100;
+// Ended commands a checkout keeps to be started over; past it the oldest go.
+const MAX_ENDED: usize = 100;
 pub(super) const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Every execution of this process.
@@ -37,8 +39,6 @@ pub(super) const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from
 pub struct Table {
     inner: Mutex<Inner>,
     changed: Notify,
-    // Every call waiting on an execution, woken together: `changed` wakes one.
-    moved: Notify,
 }
 
 #[derive(Default)]
@@ -121,6 +121,21 @@ impl Inner {
         }
     }
 
+    // Keep only the latest `MAX_ENDED` of `root`'s that ended with nothing left
+    // to deliver, oldest started going first.
+    fn forget_ended(&mut self, root: &Path) {
+        let ended: Vec<u64> = (self.items.iter())
+            .filter(|i| i.root == root && !i.state().busy())
+            .map(|i| i.id)
+            .collect();
+        let over = ended.len().saturating_sub(MAX_ENDED);
+        for id in &ended[..over] {
+            self.items.retain(|i| i.id != *id || i.root != root);
+            tracing::info!(target: "pi::background", execution = id, "forgotten, past the ended cap");
+            self.withdraw(*id, "its execution was forgotten");
+        }
+    }
+
     // The running executions on `root` told of every turn there.
     fn followers<'a>(&'a self, root: &'a Path) -> impl Iterator<Item = &'a Item> {
         (self.items.iter()).filter(move |i| i.root == root && i.running() && i.listens.follows())
@@ -184,7 +199,7 @@ impl Inner {
             (Phase::Over { .. }, true) => return Err(format!("#{id} ({what}) is not running")),
             (Phase::Running { stop }, true) => {
                 stop.cancel();
-                item.phase = Phase::Over { stopped: true };
+                item.over(true);
                 // What the stopped run still says is no one's to hear.
                 item.run += 1;
                 item.clear_run();
@@ -224,13 +239,23 @@ struct Item {
     // Reads the latest of what it printed; None for one that keeps none.
     output: Option<Peek>,
     last_output: String,
-    // How it runs again, and the same as data for a restart to carry. One
-    // that has it is kept once it ends, to be started over; one without leaves.
-    rerun: Option<(Rerun, Option<Again>)>,
+    // The last line of `output` as it ended, so an ended one is not read again.
+    ended_last: Option<String>,
+    // How it runs again. One that has it is kept once it ends, to be started
+    // over, among the latest `MAX_ENDED` of its checkout; one without leaves.
+    rerun: Option<Restart>,
     // Which run of it this is: a handle from an earlier one is not heard.
     run: u64,
     // Cancelled once this run's task has let go of what it held.
     gone: CancellationToken,
+}
+
+/// How an ended execution runs again: the closure this pi starts it with, and
+/// the same as data for the pi that takes the checkout over.
+#[derive(Clone)]
+struct Restart {
+    how: Rerun,
+    again: Again,
 }
 
 // What an execution is told of, and where.
@@ -281,6 +306,7 @@ impl Item {
             interrupt: false,
             output: None,
             last_output: String::new(),
+            ended_last: None,
             rerun: None,
             run: 0,
             gone: CancellationToken::new(),
@@ -289,6 +315,14 @@ impl Item {
 
     fn running(&self) -> bool {
         matches!(self.phase, Phase::Running { .. })
+    }
+
+    // The run is over: let go of what only a running one needs, so the
+    // channel it listened on closes, and keep the last line it printed.
+    fn over(&mut self, stopped: bool) {
+        self.phase = Phase::Over { stopped };
+        self.listens = Listens::Never;
+        self.ended_last = (self.output.as_ref()).map(|peek| pi_store::text::last_line(&peek()));
     }
 
     // Stopped, with nothing left for the lane, and no way to start over:
@@ -517,81 +551,6 @@ impl Table {
 
     fn wake(&self) {
         self.changed.notify_one();
-        self.moved.notify_waiters();
-    }
-
-    /// Wait, up to `within`, for execution `id` of `root`'s to stop: what it said,
-    /// taken so it does not come back as a turn too; None while it runs.
-    pub async fn wait(
-        &self,
-        root: &Path,
-        id: u64,
-        within: std::time::Duration,
-    ) -> Result<Option<Vec<String>>, String> {
-        self.wait_each(root, &[id], within)
-            .await
-            .pop()
-            .expect("one execution was waited for")
-    }
-
-    /// Wait for all named executions under one deadline, returning each result in
-    /// order. Keep results queued until the wait ends so cancellation loses none.
-    pub async fn wait_each(
-        &self,
-        root: &Path,
-        ids: &[u64],
-        within: std::time::Duration,
-    ) -> Vec<Result<Option<Vec<String>>, String>> {
-        let deadline = Instant::now() + within;
-        loop {
-            // Enabled before looking, so an end between the two still wakes it.
-            let moved = self.moved.notified();
-            tokio::pin!(moved);
-            moved.as_mut().enable();
-            let running = self
-                .lock()
-                .items
-                .iter()
-                .any(|i| i.root == root && ids.contains(&i.id) && i.running());
-            if !running {
-                break;
-            }
-            if tokio::time::timeout_at(deadline, moved).await.is_err() {
-                break;
-            }
-        }
-        ids.iter().map(|&id| self.take_results(root, id)).collect()
-    }
-
-    // What execution `id` of `root`'s said, taken, once it no longer runs; a
-    // person's words through it stay in line for the lane.
-    fn take_results(&self, root: &Path, id: u64) -> Result<Option<Vec<String>>, String> {
-        let mut inner = self.lock();
-        let at = (inner.items.iter())
-            .position(|i| i.id == id && i.root == root)
-            .ok_or_else(|| format!("no command #{id} here"))?;
-        let item = &mut inner.items[at];
-        match item.state() {
-            State::Running => return Ok(None),
-            State::Back => {}
-            State::Stopped => return Err(format!("#{id} was stopped. It has nothing to say")),
-            State::Exited => {
-                return Err(format!("#{id} already ended. Its results were delivered"));
-            }
-        }
-        let mut said = Vec::new();
-        item.waiting.retain(|back| match back {
-            Back::Result(_) => {
-                said.push(back.text().to_string());
-                false
-            }
-            Back::Input { .. } => true,
-        });
-        tracing::info!(target: "pi::background", execution = id, results = said.len(), "results collected");
-        settle(&mut inner.items, at);
-        drop(inner);
-        self.wake();
-        Ok(Some(said))
     }
 
     /// Now, if an execution for `root` has something waiting.
@@ -782,17 +741,13 @@ impl Table {
 
     /// The executions for `root`, oldest first.
     pub fn background(&self, root: &Path) -> Vec<BackgroundCommand> {
-        let held: Vec<(BackgroundCommand, Peek)> = (self.lock().items.iter())
+        let held: Vec<(BackgroundCommand, Result<String, Peek>)> = (self.lock().items.iter())
             .filter(|i| i.root == root)
             .map(|i| {
-                let launch = i
-                    .rerun
-                    .as_ref()
-                    .and_then(|(_, again)| again.as_ref())
-                    .map(|again| Launch {
-                        command: again.command.clone(),
-                        cwd: again.cwd.clone(),
-                    });
+                let launch = i.rerun.as_ref().map(|restart| Launch {
+                    command: restart.again.command.clone(),
+                    cwd: restart.again.cwd.clone(),
+                });
                 let execution = BackgroundCommand {
                     id: i.id,
                     invocation: i.invocation.clone(),
@@ -803,12 +758,16 @@ impl Table {
                     state: i.state(),
                     last: String::new(),
                 };
-                (execution, i.said())
+                let last = match &i.ended_last {
+                    Some(last) => Ok(last.clone()),
+                    None => Err(i.said()),
+                };
+                (execution, last)
             })
             .collect();
         (held.into_iter())
-            .map(|(execution, said)| BackgroundCommand {
-                last: pi_store::text::last_line(&said()),
+            .map(|(execution, last)| BackgroundCommand {
+                last: last.unwrap_or_else(|said| pi_store::text::last_line(&said())),
                 ..execution
             })
             .collect()
@@ -883,8 +842,8 @@ impl Table {
     }
 
     /// Stop `id` of `root`'s, waiting results and all: what it was. One
-    /// that can be started over is kept, to be until this process ends; any
-    /// other is forgotten.
+    /// that can be started over is kept among the latest ended; any other is
+    /// forgotten.
     pub fn stop(&self, root: &Path, id: u64) -> Result<String, String> {
         let mut inner = self.lock();
         let at = inner
@@ -926,7 +885,7 @@ impl Table {
         let item = (inner.items.iter_mut())
             .find(|i| i.id == id && i.root == root)
             .ok_or_else(|| format!("no command #{id} here"))?;
-        let Some((rerun, _)) = item.rerun.clone() else {
+        let Some(Restart { how: rerun, .. }) = item.rerun.clone() else {
             return Err(format!(
                 "#{id} ({}) cannot be started over",
                 item.invocation.title()
@@ -941,6 +900,8 @@ impl Table {
         item.run += 1;
         item.clear_run();
         item.output = None;
+        item.ended_last = None;
+        item.listens = Listens::Never;
         item.started = Instant::now();
         item.started_at = SystemTime::now();
         let handle: Arc<dyn RunHandle> = Arc::new(Handle {
@@ -992,7 +953,7 @@ impl Table {
         (self.lock().items.iter())
             .filter(|i| i.root == root)
             .filter_map(|i| {
-                let Some((_, Some(again))) = &i.rerun else {
+                let Some(restart) = &i.rerun else {
                     return None;
                 };
                 let stopped = match i.phase {
@@ -1005,7 +966,7 @@ impl Table {
                     invocation: i.invocation.as_ref().clone(),
                     stopped,
                     started_at: i.started_at,
-                    again: again.clone(),
+                    again: restart.again.clone(),
                 })
             })
             .collect()
@@ -1032,12 +993,17 @@ impl Table {
         let item = Item {
             started: Instant::now().checked_sub(ago).unwrap_or_else(Instant::now),
             started_at: execution.started_at,
-            rerun: Some((rerun, Some(execution.again))),
+            rerun: Some(Restart {
+                how: rerun,
+                again: execution.again,
+            }),
             ..Item::blank(execution.id, execution.root, execution.invocation, phase)
         };
         // No last run here to let go of.
         item.gone.cancel();
+        let root = item.root.clone();
         inner.items.push(item);
+        inner.forget_ended(&root);
         drop(inner);
         self.wake();
     }
@@ -1082,6 +1048,7 @@ impl Table {
         for (at, _) in inner.standing.iter_mut().filter(|(at, _)| at == from) {
             *at = to.to_path_buf();
         }
+        inner.forget_ended(to);
         drop(inner);
         self.wake();
     }
@@ -1128,9 +1095,10 @@ impl Table {
         tracing::info!(
             target: "pi::background", execution = id, invocation = ?invocation, root = %root.display(), "started"
         );
-        let item = Item::blank(id, root, invocation, Phase::Running { stop });
+        let item = Item::blank(id, root.clone(), invocation, Phase::Running { stop });
         let gone = item.gone.clone();
         inner.items.push(item);
+        inner.forget_ended(&root);
         drop(inner);
         self.wake();
         (id, gone)
@@ -1220,7 +1188,7 @@ impl Drop for Handle {
         self.table.update(self.id, self.run, |i| {
             if i.running() {
                 tracing::warn!(target: "pi::background", execution = i.id, "its task went without ending");
-                i.phase = Phase::Over { stopped: false };
+                i.over(false);
             }
         });
         self.gone.cancel();
@@ -1241,12 +1209,13 @@ impl RunHandle for Handle {
             .update(self.id, self.run, |i| i.output = Some(output));
     }
 
-    fn rerun(&self, how: Rerun, again: Option<Again>) {
+    fn rerun(&self, how: Rerun, again: Again) {
         self.table.update(self.id, self.run, |i| {
-            if let Some(again) = &again {
-                tracing::info!(target: "pi::background", execution = self.id, command = %again.command, cwd = %again.cwd.display(), "prepared");
-            }
-            i.rerun = Some((how, again));
+            tracing::info!(target: "pi::background", execution = self.id, command = %again.command, cwd = %again.cwd.display(), "prepared");
+            i.rerun = Some(Restart {
+                how,
+                again: again.clone(),
+            });
         });
     }
 
@@ -1254,7 +1223,7 @@ impl RunHandle for Handle {
         self.table.update(self.id, self.run, |i| {
             if i.running() {
                 tracing::info!(target: "pi::background", execution = self.id, "ended");
-                i.phase = Phase::Over { stopped: false };
+                i.over(false);
             }
         });
     }
@@ -1568,12 +1537,8 @@ mod tests {
             .execute(json!({"restart": [1]}), &ctx)
             .await
             .unwrap();
-        let result = table
-            .wait(ctx.workspace.root(), 1, std::time::Duration::from_secs(5))
-            .await
-            .unwrap()
-            .expect("the command can still be restarted");
-        assert!(result[0].contains("exited 0"));
+        let result = said_by(&table, ctx.workspace.root()).await;
+        assert!(result.contains("exited 0"), "{result}");
         assert_eq!(
             std::fs::read_to_string(dir.path().join("starts")).unwrap(),
             "started\n"
@@ -1593,14 +1558,10 @@ mod tests {
                 args["wait"] = json!(wait);
             }
             executions.execute(args, &ctx).await.unwrap();
-            let result = table
-                .wait(ctx.workspace.root(), 1, std::time::Duration::from_secs(5))
-                .await
-                .unwrap()
-                .expect("a zero delay starts immediately");
+            let result = said_by(&table, ctx.workspace.root()).await;
             assert!(
-                result[0].contains("exited 3") && result[0].contains("failed"),
-                "{result:?}"
+                result.contains("exited 3") && result.contains("failed"),
+                "{result}"
             );
             assert_eq!(
                 std::fs::read_to_string(dir.path().join("subdir/result")).unwrap(),
@@ -1656,12 +1617,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let result = table
-            .wait(ctx.workspace.root(), 1, std::time::Duration::from_secs(5))
-            .await
-            .unwrap()
-            .expect("a failed launch must end the execution");
-        assert!(result[0].contains("could not start:"), "{result:?}");
+        let result = said_by(&table, ctx.workspace.root()).await;
+        assert!(result.contains("could not start:"), "{result}");
         assert_eq!(
             table.background(ctx.workspace.root())[0].state,
             State::Exited
@@ -1730,6 +1687,44 @@ mod tests {
         )
     }
 
+    fn kept(table: &Arc<Table>, root: &Path, name: &str) -> Arc<dyn RunHandle> {
+        let execution = start(table, root, name);
+        execution.rerun(Arc::new(|_, _| Ok(())), Again::default());
+        execution
+    }
+
+    // What a command listened on closes when it ends, though it stays listed.
+    #[test]
+    fn an_ended_command_lets_go_of_its_channel() {
+        let table = Arc::new(Table::default());
+        let root = Path::new("/checkout");
+        let execution = kept(&table, root, "serve");
+        let (to, mut heard) = tokio::sync::mpsc::unbounded_channel();
+        execution.channel().listen(to);
+        execution.end();
+        assert_eq!(table.background(root).len(), 1);
+        assert_eq!(
+            heard.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn only_the_latest_ended_commands_are_kept() {
+        let table = Arc::new(Table::default());
+        let root = Path::new("/checkout");
+        let first = kept(&table, root, "first");
+        first.end();
+        for _ in 0..MAX_ENDED {
+            kept(&table, root, "again").end();
+        }
+        let running = kept(&table, root, "running");
+        let listed = table.background(root);
+        assert_eq!(listed.len(), MAX_ENDED + 1);
+        assert!(listed.iter().all(|j| j.id != first.id()));
+        assert!(listed.iter().any(|j| j.id == running.id()));
+    }
+
     fn result_of(table: &Table, root: &Path) -> Option<Due> {
         match table.take_back(root)?.1 {
             Back::Result(due) => Some(due),
@@ -1752,11 +1747,11 @@ mod tests {
         );
         execution.rerun(
             Arc::new(|_, _| Ok(())),
-            Some(Again {
+            Again {
                 command: "cargo +nightly -Zscript /actual/bridge.rs".into(),
                 cwd: root.into(),
                 ..Again::default()
-            }),
+            },
         );
         execution.channel().result("delivered".into());
         execution.end();
@@ -1778,45 +1773,20 @@ mod tests {
         );
     }
 
-    // A wait wakes when its execution ends, and takes the result from the lane.
-    #[tokio::test]
-    async fn a_wait_takes_the_result_its_command_ends_with() {
-        let table = Arc::new(Table::default());
-        let root = PathBuf::from("/checkout");
-        let execution = start(&table, &root, "build");
-        let id = execution.id();
-        let waiting = {
-            let (table, root) = (table.clone(), root.clone());
-            tokio::spawn(async move {
-                table
-                    .wait(&root, id, std::time::Duration::from_secs(5))
-                    .await
-            })
-        };
-        tokio::task::yield_now().await;
-        assert!(!waiting.is_finished(), "it waits while the execution runs");
-        execution.channel().input("a person's line".into());
-        execution.channel().result("exited 0".into());
-        execution.end();
-        let said = waiting.await.expect("the wait ran");
-        assert_eq!(said, Ok(Some(vec!["exited 0".to_string()])));
-        assert!(
-            matches!(table.take_back(&root), Some((_, Back::Input { .. }))),
-            "a person's line still goes to the lane"
-        );
-        assert!(table.take_back(&root).is_none(), "the result went once");
-    }
-
-    #[tokio::test]
-    async fn a_wait_gives_up_on_a_command_still_running() {
-        let table = Arc::new(Table::default());
-        let root = PathBuf::from("/checkout");
-        let execution = start(&table, &root, "server");
-        let waited = table
-            .wait(&root, execution.id(), std::time::Duration::from_millis(20))
-            .await;
-        assert_eq!(waited, Ok(None));
-        assert!(table.wait(&root, 99, Default::default()).await.is_err());
+    // What the lane is handed once the checkout's command has ended. Polled,
+    // since nothing in a run waits on one command to finish.
+    async fn said_by(table: &Table, root: &Path) -> String {
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(due) = table.take_ready_results(root) {
+                return due.line;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the command said nothing in time"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     fn context() -> (tempfile::TempDir, Ctx) {
@@ -2259,7 +2229,7 @@ mod tests {
                 let _ = tx.send((execution, stop));
                 Ok(())
             }),
-            None,
+            Again::default(),
         );
         (execution, rx)
     }
@@ -2341,12 +2311,12 @@ mod tests {
     // A command that says as data how it runs again crosses to the next pi
     // through its file: listed there under its id, stopped even if it was
     // running, and it starts over; ids given out later pass it. One that
-    // cannot say it is left behind, and the file is read once.
+    // cannot run again is left behind, and the file is read once.
     #[tokio::test]
     async fn a_command_is_carried_to_the_next_pi() {
         let old = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
-        let (plain, _reruns) = rerunnable(&old, &root);
+        let plain = start(&old, &root, "plain");
         let invocation = Invocation::Tool {
             name: "serve".into(),
             args: json!({"port":"8080", "prompt":"line one\nline two"}),
@@ -2361,9 +2331,9 @@ mod tests {
             cwd: root.clone(),
             ..Again::default()
         };
-        execution.rerun(Arc::new(|_, _| Ok(())), Some(again.clone()));
+        execution.rerun(Arc::new(|_, _| Ok(())), again.clone());
         let running = start(&old, &root, "watch");
-        running.rerun(Arc::new(|_, _| Ok(())), Some(again.clone()));
+        running.rerun(Arc::new(|_, _| Ok(())), again.clone());
         old.stop(&root, plain.id()).unwrap();
         old.stop(&root, execution.id()).unwrap();
 

@@ -26,10 +26,11 @@ pub struct Resolved {
     /// The config's hooks, which the brief carries once armed: before then
     /// its hooks can ask no one.
     pub hooks: crate::core::hooks::Declared,
-    /// The tail of the prompt that belongs to the run rather than to the
-    /// assistant: the workspace anchor, what the run is, and the
-    /// instructions files. Kept apart because the subagent has its own prompt but the same
-    /// tree, the same machine and the same tier.
+    /// The tail of the prompt a child run stands on: the workspace anchor,
+    /// what the run is, and the instructions files. Rendered apart from the
+    /// lane's own because the subagent has its own prompt and the same tree,
+    /// machine and tier, but is addressed by neither of the tool-authoring
+    /// blocks.
     pub standing: std::sync::Arc<str>,
     /// How long a subagent may run silent before it is read as wedged; `None`
     /// leaves the subagent's own default.
@@ -322,8 +323,8 @@ pub fn resolve(
         );
         let whose = if *project { "project" } else { "user" };
         // Offered tools win a name; between directories, the one read earlier.
-        // A tool hung on after this (`bash`, `subagent`, `memory`) asks the
-        // same question later and stands down instead of taking the name.
+        // A tool offered after this (`bash`, `subagent`, `memory`) still keeps
+        // its name, and says so where it is offered.
         for script in tool::Source::tools(&**scripts) {
             let name = script.name();
             let earlier = !named.insert(name.to_string());
@@ -385,18 +386,27 @@ pub fn resolve(
     notes.extend(prompt_files.left_out(root));
     // Appended rather than sent as a message: standing instructions don't
     // change within a run, and the system prompt is what a provider caches.
-    let standing = crate::core::prompt::Standing {
+    let facts = crate::core::prompt::Standing {
         workspace: root.to_path_buf(),
-        project_tools,
+        // Only a run that may write is told to put tools there.
+        project_tools: project_tools.filter(|_| tool::Tier::Write.under(tier)),
         fenced: workspace.fenced(),
         pi_home,
         instructions: prompt_files.instructions.clone(),
         memory: prompt_files.memory.clone(),
         day: prompt_files.day.clone(),
         tier,
+    };
+    system.push_str(&facts.render());
+    // A child stands on the same tree, machine and tier, but not on the blocks
+    // that address a run serving a user: nobody can ask it for a tool, and it
+    // has no next turn for one to appear in.
+    let for_child = crate::core::prompt::Standing {
+        project_tools: None,
+        pi_home: None,
+        ..facts
     }
     .render();
-    system.push_str(&standing);
 
     let hooks = crate::core::hooks::Declared::new(&config.hooks, workspace);
     Ok(Resolved {
@@ -412,7 +422,7 @@ pub fn resolve(
         subagent_deadline: config
             .subagent_deadline
             .map(|s| std::time::Duration::from_secs(s.max(1))),
-        standing: standing.into(),
+        standing: for_child.into(),
         ceiling: tier,
         commands: std::sync::Arc::new(commands),
         watched: read_from,
@@ -705,14 +715,34 @@ mod tests {
             )
             .unwrap();
             let block = format!("<project_tools path=\"{}\">", dir.display());
-            assert!(resolved.standing.contains(&block), "{}", resolved.standing);
-            assert!(resolved.brief.system.contains(&block));
+            assert!(
+                resolved.brief.system.contains(&block),
+                "{}",
+                resolved.brief.system
+            );
+            // Nobody can ask a child for a tool, so it is not told where to put one.
+            assert!(!resolved.standing.contains("<project_tools"));
+            assert!(!resolved.standing.contains("<pi_home"));
             assert_eq!(
                 resolved.brief.registry.get("project_tool").is_some(),
                 create
             );
             assert_eq!(dir.exists(), create);
         }
+        let read_only = crate::args::Pinned {
+            tier: Some(pi_store::args::TierArg::Read),
+            ..pinned
+        };
+        let resolved = super::resolve(
+            &read_only,
+            &workspace,
+            &Default::default(),
+            &settings,
+            Some(files),
+            &[],
+        )
+        .unwrap();
+        assert!(!resolved.brief.system.contains("<project_tools"));
     }
 
     // A checkout's skill or script of a name an already-known one holds must

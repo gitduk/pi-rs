@@ -171,8 +171,7 @@ impl Format {
 pub(super) fn options(theme: Arc<Theme>) -> Format {
     let palette = Palette::get(theme.syntax);
     // The generic heading style also labels content outside Markdown headings.
-    let override_heading =
-        (theme.heading != Theme::default().heading).then(|| style_to_ratatui(&theme.heading));
+    let override_heading = crate::theme::configured_heading(&theme).map(style_to_ratatui);
     let headings = palette
         .headings
         .map(|style| override_heading.map_or(style, |custom| style.patch(custom)));

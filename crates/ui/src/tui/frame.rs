@@ -633,6 +633,7 @@ impl Ui {
         };
         rows.extend(
             view.queued
+                .lock()
                 .iter()
                 .filter_map(|q| q.line.as_deref())
                 .flat_map(|line| waiting(icons::SAID_RULE, line)),

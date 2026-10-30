@@ -22,7 +22,8 @@ pub const REPLACEABLE: [(&str, &str); 2] = [
 pub struct Standing {
     /// The directory the run works in.
     pub workspace: PathBuf,
-    /// The project tool directory read by the tool registry, even before it exists.
+    /// The project tool directory read by the tool registry, even before it
+    /// exists; set only when the run may write tools to it.
     pub project_tools: Option<PathBuf>,
     /// Whether write and edit are held to the workspace and pi's home.
     pub fenced: bool,
@@ -103,9 +104,9 @@ If that boundary blocks this directory, report the limit. Do not use pi's home a
             "\n\n<pi_home path=\"{}\">\nThis is pi's home. \
 Tools here are available across projects. \
 Add a tool here only when the user requests a tool shared across projects. \
-Keep project tools in the project's tool directory.\n\n\
+A tool that depends on this project belongs with the project, not here.\n\n\
 Tools and skills added here become available on your next turn. No restart is needed. \
-pi registers tools from scripts in `tools/`. Do not store task scripts or helper files in this directory. \
+pi registers tools from scripts in `tools/`. Do not store the current task's scripts or files here. \
 Read `tool-creator` to create tools, `skill-creator` to create skills, and `mcp-setup` to connect MCP servers.\n</pi_home>",
             escaped(home.display())
         ));

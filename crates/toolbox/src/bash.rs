@@ -40,7 +40,7 @@ const DESCRIPTION: &str = "Each call runs a shell command in a new shell. \
     Use bash for substitutions by pattern or position (`sed`, `perl`, `awk`). \
     Use bash for moves (`mv`) and deletions (`rm`).";
 
-/// Run a command to completion under the workspace's checks and rewrite.
+/// Run a written command to completion under the workspace's checks and rewrite.
 pub async fn foreground(command: &str, cwd: &str, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
     let preview = first_line(command).to_string();
     let args = Args {
@@ -48,7 +48,7 @@ pub async fn foreground(command: &str, cwd: &str, ctx: &Ctx) -> Result<ToolOutpu
         cwd: cwd.to_string(),
         stdin: None,
     };
-    let prepared = prepare(args, Tier::Exec, ctx).await?;
+    let prepared = prepare(args, Tier::Exec, ctx, true).await?;
     let before = crate::drift::before(ctx);
     let ran = run(&prepared.command, &prepared.cwd, DEFAULT_TIMEOUT, ctx).await?;
     let moved = crate::drift::absorb(ctx, before);
@@ -61,13 +61,18 @@ fn first_line(command: &str) -> &str {
     command.split('\n').next().unwrap_or_default()
 }
 
-// The command as it will run, and where: rtk rewrites it in its own
-// vocabulary, from `cwd` for project filters, racing a stop so it isn't delayed.
-async fn prepare(args: Args, tier: Tier, ctx: &Ctx) -> Result<Again, ToolError> {
+// The command as it will run, and where. `written` says the model wrote the
+// command: only then does rtk rewrite it, in its own vocabulary, from `cwd`
+// for project filters, racing a stop so it isn't delayed. A command pi built
+// for a caller runs as built — rtk's table answers for what a model types.
+async fn prepare(args: Args, tier: Tier, ctx: &Ctx, written: bool) -> Result<Again, ToolError> {
     let cwd = ctx.workspace.resolve(&args.cwd, tier)?;
-    let rewritten = tokio::select! {
-        r = crate::rtk::rewrite(&args.command, &cwd) => r,
-        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+    let rewritten = match written {
+        false => None,
+        true => tokio::select! {
+            r = crate::rtk::rewrite(&args.command, &cwd) => r,
+            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+        },
     };
     Ok(Again {
         command: rewritten.unwrap_or(args.command),
@@ -122,6 +127,15 @@ impl Bash {
     }
 }
 
+/// How a shell call reached the tool, apart from the command itself.
+struct Call {
+    environment: Environment,
+    output: OutputMode,
+    /// The command is words someone wrote rather than a line pi built for a
+    /// caller, so it is rtk's to rewrite.
+    written: bool,
+}
+
 /// Queue a command independently of the calling turn, starting it after
 /// `after`. The execution is registered now, so it can be stopped before launch.
 async fn schedule(
@@ -129,14 +143,13 @@ async fn schedule(
     after: std::time::Duration,
     ctx: &Ctx,
     executions: &dyn RunSink,
-    environment: Environment,
-    output: OutputMode,
+    call: Call,
     invocation: Invocation,
 ) -> Result<ToolOutput, ToolError> {
     let preview = invocation.title().into_owned();
-    let mut again = prepare(args, Tier::Exec, ctx).await?;
-    again.environment = environment;
-    again.output = output;
+    let mut again = prepare(args, Tier::Exec, ctx, call.written).await?;
+    again.environment = call.environment;
+    again.output = call.output;
     let at = tokio::time::Instant::now()
         .checked_add(after)
         .ok_or_else(|| ToolError::Invalid("the start delay is too large".into()))?;
@@ -145,7 +158,7 @@ async fn schedule(
     let id = execution.id();
     execution.watch(Arc::new(String::new));
     let launch = rerun(again.clone(), ctx);
-    execution.rerun(launch.clone(), Some(again));
+    execution.rerun(launch.clone(), again);
     if !after.is_zero() {
         execution.channel().status(format!(
             "waiting {} before starting",
@@ -222,7 +235,7 @@ impl Tool for Bash {
             "description": "Run the command independently of this turn, such as a build, deployment, development server, or watcher. \
                 The call returns immediately with an command id. \
                 When the command exits, its exit status and output arrive automatically with other queued command results. \
-                No timeout applies. The command stops when this process exits.\n\n\
+                The command stops when this process exits.\n\n\
                 Output remains readable while the command runs. Leave output unredirected. \
                 Use `background=true` instead of `nohup` or `&` for commands that must continue after this turn.",
         });
@@ -314,6 +327,13 @@ impl Bash {
                 "command must be a nonempty string".into(),
             ));
         }
+        // No invocation of its own means the model called the shell directly,
+        // so the command is the model's own words.
+        let call = Call {
+            environment,
+            output,
+            written: invocation.is_none(),
+        };
         if background {
             let invocation = invocation.unwrap_or_else(|| Invocation::shell(args.command.clone()));
             return schedule(
@@ -321,16 +341,15 @@ impl Bash {
                 std::time::Duration::from_secs(after.unwrap_or(0)),
                 ctx,
                 self.executions.as_deref().expect("background mode checked"),
-                environment,
-                output,
+                call,
                 invocation,
             )
             .await;
         }
         let preview = first_line(&args.command).to_string();
-        let mut prepared = prepare(args, self.tier(), ctx).await?;
-        prepared.environment = environment;
-        prepared.output = output;
+        let mut prepared = prepare(args, self.tier(), ctx, call.written).await?;
+        prepared.environment = call.environment;
+        prepared.output = call.output;
         let before = crate::drift::before(ctx);
         let launched = launch(&prepared, ctx)?;
         let stop = tokio_util::sync::CancellationToken::new();
@@ -354,7 +373,7 @@ impl Bash {
 /// How the background command `again` runs again under `ctx`: the first
 /// run's way, or a restarted pi's.
 pub fn rerun(again: Again, ctx: &Ctx) -> Rerun {
-    let ctx = spills_only(ctx);
+    let ctx = crate::process::spills_only(ctx);
     Arc::new(move |execution, stop| {
         #[cfg(unix)]
         {
@@ -379,21 +398,8 @@ pub fn rerun(again: Again, ctx: &Ctx) -> Rerun {
 
 // What a rerun keeps of the call's context: where output spills, not the
 // turn's locks or progress.
-fn spills_only(ctx: &Ctx) -> Ctx {
-    let fresh = Ctx::new(ctx.workspace.clone());
-    match ctx.session() {
-        Some(id) => fresh.with_session(id, ctx.spill_root()),
-        None => fresh.with_spill_root(ctx.spill_root()),
-    }
-}
-
 // A shell command just spawned, not yet anyone's execution.
-struct Launched {
-    child: tokio::process::Child,
-    group: Option<u32>,
-    streams: crate::process::Streams,
-    guard: Option<crate::process::Group>,
-}
+type Launched = crate::process::Launched;
 
 fn command(again: &Again) -> Command {
     let mut cmd = Command::new("sh");
@@ -422,68 +428,27 @@ fn command(again: &Again) -> Command {
 }
 
 fn launch(again: &Again, ctx: &Ctx) -> Result<Launched, ToolError> {
-    let mut cmd = command(again);
-    cmd.stdin(if again.stdin.is_some() {
-        std::process::Stdio::piped()
-    } else {
-        std::process::Stdio::null()
-    })
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped())
-    .kill_on_drop(true);
-    #[cfg(unix)]
-    crate::process::detach(&mut cmd);
-    let mut child = crate::process::spawn(&mut cmd)?;
-    let group = child.id();
-    let guard = group.map(crate::process::Group);
-    tracing::info!(target: "pi::bash", command = %again.command, cwd = %again.cwd.display(), ?group, "spawned");
-    if let Some(input) = again.stdin.clone() {
-        use tokio::io::AsyncWriteExt;
-        let mut stdin = child.stdin.take().expect("piped stdin");
-        tokio::spawn(async move {
-            let _ = stdin.write_all(input.as_bytes()).await;
-        });
-    }
-    // Pipe readers can outlive the call as an execution. Keep only what output
-    // capture needs, rather than holding the turn's locks and progress.
-    let streams = crate::process::Streams::of(&mut child, &spills_only(ctx));
-    Ok(Launched {
-        child,
-        group,
-        streams,
-        guard,
-    })
+    let stdin = again.stdin.as_ref().map(|s| s.as_bytes().to_vec());
+    let launched = crate::process::launch(command(again), stdin, ctx)?;
+    tracing::info!(target: "pi::bash", command = %again.command, cwd = %again.cwd.display(), group = ?launched.group, "spawned");
+    Ok(launched)
 }
 
 async fn wait(
     launched: Launched,
     stop: tokio_util::sync::CancellationToken,
 ) -> Result<Ran, ToolError> {
-    let Launched {
-        mut child,
-        group,
-        mut streams,
-        guard: _guard,
-    } = launched;
-    let status = tokio::select! {
-        status = child.wait() => status,
-        () = stop.cancelled() => {
-            crate::process::reap(group).await;
-            // Gone, not just signalled: a restart may want its port.
-            let _ = child.wait().await;
-            return Err(ToolError::Cancelled);
-        }
+    let group = launched.group;
+    let ends = crate::process::Ends {
+        stop,
+        deadline: None,
     };
-    let (out, err) = tokio::select! {
-        both = streams.checked(group) => both?,
-        () = stop.cancelled() => {
-            crate::process::reap(group).await;
-            return Err(ToolError::Cancelled);
-        }
-    };
-    tracing::info!(target: "pi::bash", ?group, code = ?status.as_ref().map(|s| s.code()), stdout_bytes = out.total, stderr_bytes = err.total, "exited");
+    let exited = crate::process::settle(launched, ends).await?;
+    let (out, err) = (exited.stdout, exited.stderr);
+    let code = exited.status.code().unwrap_or(-1);
+    tracing::info!(target: "pi::bash", ?group, code, stdout_bytes = out.total, stderr_bytes = err.total, "exited");
     Ok(Ran {
-        code: status?.code().unwrap_or(-1),
+        code,
         body: body(&out, &err),
     })
 }
@@ -531,9 +496,9 @@ impl Ran {
     }
 }
 
-/// Run `command` under the workspace's clamps — its own process group, a
-/// SIGTERM-then-SIGKILL timeout capped at ten minutes, and the
-/// context's cancellation.
+/// Run `command` to completion under the workspace's clamps — its own process
+/// group, the context's cancellation, and `timeout`, past which the group is
+/// taken down with SIGTERM then SIGKILL.
 pub async fn run(
     command: &str,
     cwd: &std::path::Path,

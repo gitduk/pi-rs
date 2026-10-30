@@ -5,9 +5,6 @@ description: Create or fix reusable tools for pi, including their script interfa
 
 # Creating a tool
 
-A tool is a named interface that the model can call directly.
-A script can implement a tool, but ordinary task scripts belong in the workspace and run through `bash`.
-Running a script repeatedly does not require a new tool.
 For a reusable interface, define its purpose, inputs, and output before writing its implementation.
 Pass the current task's data as arguments instead of hardcoding it.
 
@@ -18,21 +15,14 @@ Use the tools currently offered to determine which capabilities are available.
 ## Implement a tool with a script
 
 Choose the tool directory before creating the file.
+The `<project_tools>` and `<pi_home>` blocks in the system instructions name the
+directories and state which one a tool belongs in.
+In the examples below, `<tools-dir>` means the directory you chose.
 
-- Use the project tool directory specified in the system instructions by default.
-  This includes tools that depend on the project's code, data, paths, or configuration.
-  Create the directory if it does not exist.
-- Use `tools/` inside pi's home only when the user requests a tool shared across projects.
-
-The run's write boundary still applies.
-If that boundary blocks the project tool directory, report the limit.
-Do not use pi's home as a fallback.
-In the examples below, `<tools-dir>` means the directory selected above.
-
-The home and project `tools/` directories register tools for subsequent model calls.
-pi scans supported files here for tool interfaces.
+pi scans supported files in a tool directory for tool interfaces and registers
+what it finds for subsequent model calls.
 An invalid interface can produce an unusable tool entry.
-Keep task scripts, helper files, generated data, and temporary files outside these directories.
+Keep task scripts, helper files, generated data, and temporary files out of both directories.
 
 Create one file in the selected directory. Its file stem becomes the tool name.
 Use only a-z, A-Z, 0-9, `-`, and `_` in the name.

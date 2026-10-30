@@ -60,7 +60,7 @@ impl Paint {
             return vec![self.span_hovered(hovered, &self.theme.prompt.color, text)];
         };
         let mut spans = vec![self.span_hovered(hovered, &self.theme.prompt.color, name)];
-        let args = if name == "bash" {
+        let args = if name == toolbox::bash::Bash::NAME {
             self.shell(args, hovered)
         } else {
             vec![self.span_hovered(hovered, &self.theme.code, args)]

@@ -46,7 +46,8 @@ pub type Rerun =
     Arc<dyn Fn(Arc<dyn RunHandle>, CancellationToken) -> Result<(), tool::ToolError> + Send + Sync>;
 
 /// A `Rerun` as data, for a pi started in this one's place, which has none
-/// of this one's closures: a shell command and where it ran.
+/// of this one's closures: a shell command and where it ran. Every execution
+/// that can run again can say so both ways.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Again {
     pub command: String,
@@ -93,7 +94,7 @@ pub trait RunHandle: Send + Sync {
     fn id(&self) -> u64;
     fn channel(&self) -> &dyn crate::channel::Channel;
     fn watch(&self, output: Peek);
-    fn rerun(&self, _how: Rerun, _again: Option<Again>) {}
+    fn rerun(&self, _how: Rerun, _again: Again) {}
     fn end(&self);
 }
 

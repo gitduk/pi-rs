@@ -1,53 +1,38 @@
 //! What reaches a running conversation at its next request boundary.
 
-use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use agent::session::Prompt;
 
 use super::background::Table;
 
+/// The user's messages first, then what the checkout's background commands
+/// have ready. Who holds the user's messages, and in what order they may go,
+/// is the caller's: `prompts` is asked each time and gives none it must keep.
 pub struct Input {
     root: PathBuf,
     executions: Arc<Table>,
-    prompts: Mutex<VecDeque<Prompt>>,
+    prompts: Box<dyn agent::seams::Input>,
 }
 
 impl Input {
-    pub fn new(root: PathBuf, executions: Arc<Table>) -> Self {
+    pub fn new(
+        root: PathBuf,
+        executions: Arc<Table>,
+        prompts: impl agent::seams::Input + 'static,
+    ) -> Self {
         Self {
             root,
             executions,
-            prompts: Mutex::default(),
+            prompts: Box::new(prompts),
         }
-    }
-
-    pub fn push(&self, prompt: Prompt) {
-        self.prompts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push_back(prompt);
-    }
-
-    /// User messages that the run did not consume, for its caller to keep.
-    pub fn pending(&self) -> Vec<Prompt> {
-        self.prompts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .drain(..)
-            .collect()
     }
 }
 
 impl agent::seams::Input for Input {
     fn take(&self) -> Option<Prompt> {
-        if let Some(prompt) = self
-            .prompts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .pop_front()
-        {
+        if let Some(prompt) = self.prompts.take() {
             return Some(prompt);
         }
         let due = self.executions.take_ready_results(&self.root)?;
@@ -110,8 +95,10 @@ mod tests {
         elsewhere.channel().result("unrelated".into());
         elsewhere.end();
 
-        let input = Input::new(root.clone(), executions.clone());
-        input.push(prompt("typed direction"));
+        let typed = std::sync::Mutex::new(Some(prompt("typed direction")));
+        let input = Input::new(root.clone(), executions.clone(), move || {
+            typed.lock().unwrap().take()
+        });
         assert_eq!(input.take().unwrap().text, "typed direction");
         let results = input.take().unwrap();
         assert!(results.text.contains("phone result"));
@@ -132,31 +119,9 @@ mod tests {
         };
         assert_eq!(text, "a remote question");
         assert!(executions.take_back(&root).is_none());
-        assert!(
-            executions
-                .wait(&root, first.id(), std::time::Duration::ZERO)
-                .await
-                .is_err()
-        );
         assert!(executions.take_back(&other).is_some());
         phone.channel().result("later".into());
         assert!(input.take().unwrap().text.contains("later"));
         assert!(input.take().is_none());
-    }
-
-    #[test]
-    fn unconsumed_prompts_can_be_returned_in_order() {
-        let input = Input::new("/checkout".into(), Arc::default());
-        input.push(prompt("first"));
-        input.push(prompt("second"));
-        assert_eq!(
-            input
-                .pending()
-                .iter()
-                .map(|p| p.text.as_str())
-                .collect::<Vec<_>>(),
-            ["first", "second"]
-        );
-        assert!(input.pending().is_empty());
     }
 }

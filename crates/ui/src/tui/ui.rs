@@ -24,7 +24,6 @@ use pi_store::icons;
 use pi_store::keys::Keys;
 use pi_store::status::{Segment, default_parts};
 use pi_store::theme::Style as ThemeStyle;
-use pi_store::theme::Theme;
 
 pub(super) struct Ui {
     pub(super) screen: Screen,
@@ -366,7 +365,7 @@ impl Ui {
         self.choices = core.choices();
         // The theme takes the view it was painted into — the opening block is
         // painted in it — and every copy takes the terminal's band.
-        let theme = following_terminal(&core.config.theme, self.tty_bg);
+        let theme = crate::theme::following_terminal(&core.config.theme, self.tty_bg);
         if self.paint.theme.as_ref() != &theme {
             self.set_theme(view, core.lane().resolved(), Arc::new(theme));
         }
@@ -377,11 +376,6 @@ impl Ui {
         // And the segment lists, copied in at startup.
         self.status = core.config.status.to_vec();
     }
-}
-
-// Resolve automatic colours once, including after a config reload.
-pub(super) fn following_terminal(theme: &Theme, bg: Option<(u8, u8, u8)>) -> Theme {
-    bg.map_or_else(|| theme.clone(), |bg| theme.for_background(bg))
 }
 
 /// A left press in the transcript, kept to tell a click from a drag and a

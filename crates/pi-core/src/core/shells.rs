@@ -7,7 +7,7 @@ use tool::Registry;
 /// Give a run a shell that waits for each command to exit. There are no
 /// detached commands to control; cancellation releases the active process.
 pub fn foreground(mut registry: Registry) -> Registry {
-    registry.fallback(Arc::new(toolbox::bash::Bash::foreground()));
+    registry.offer(Arc::new(toolbox::bash::Bash::foreground()));
     registry
 }
 
@@ -22,7 +22,7 @@ mod tests {
     use serde_json::{Value, json};
 
     #[tokio::test]
-    async fn foreground_shell_registration_respects_tool_cuts_and_live_sources() {
+    async fn foreground_shell_respects_tool_cuts_and_keeps_its_name_over_scripts() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
         let _stop = ctx.cancel.clone().drop_guard();
@@ -44,19 +44,9 @@ mod tests {
         let mut registry = toolbox::builtin();
         registry.read(Arc::new(toolbox::scripts::Dir::new(dir.path())));
         let registry = foreground(registry);
-        let custom = registry.get(toolbox::bash::Bash::NAME).unwrap();
+        let shell = registry.get(toolbox::bash::Bash::NAME).unwrap();
         assert!(
-            custom
-                .execute(json!({}), &ctx)
-                .await
-                .unwrap()
-                .flatten()
-                .contains("custom")
-        );
-        std::fs::remove_file(script).unwrap();
-        let builtin = registry.get(toolbox::bash::Bash::NAME).unwrap();
-        assert!(
-            builtin
+            shell
                 .execute(json!({"command": "echo builtin"}), &ctx)
                 .await
                 .unwrap()

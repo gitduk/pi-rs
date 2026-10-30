@@ -210,6 +210,15 @@ impl Style {
         }
     }
 
+    /// This style in another colour, its attributes kept.
+    pub fn recolored(&self, color: Color) -> Self {
+        Self {
+            color: Some(color),
+            sgr: self.sgr.clone(),
+            rendered: OnceLock::new(),
+        }
+    }
+
     /// This style under the pointer: bold added, nothing else — dim stays,
     /// so hover never brightens the row.
     pub fn lit(&self) -> Self {
@@ -349,8 +358,7 @@ pub struct Theme {
     pub table: Vec<Style>,
 }
 
-// Catppuccin Mocha's semantic colours; the light counterparts live together
-// in `for_background`, so explicitly configured styles stay untouched.
+// Catppuccin Mocha's semantic colours: the defaults are for a dark terminal.
 const GREEN: Color = Color::Rgb(166, 227, 161);
 const RED: Color = Color::Rgb(243, 139, 168);
 const BLUE: Color = Color::Rgb(137, 180, 250);
@@ -558,79 +566,6 @@ impl Default for Theme {
     }
 }
 
-impl Theme {
-    /// Resolve automatic colours against a background. Only defaults follow
-    /// it: a style supplied by the config keeps its colour and attributes.
-    pub fn for_background(&self, bg: (u8, u8, u8)) -> Self {
-        let mut theme = self.clone();
-        let defaults = Self::default();
-        let light = is_light(bg);
-        if theme.syntax == Syntax::Auto {
-            theme.syntax = if light {
-                Syntax::CatppuccinLatte
-            } else {
-                Syntax::CatppuccinMocha
-            };
-        }
-        if light {
-            for (style, default, color) in [
-                (&mut theme.heading, &defaults.heading, (30, 102, 245)),
-                (&mut theme.emphasis, &defaults.emphasis, (23, 146, 153)),
-                (&mut theme.strong, &defaults.strong, (64, 160, 43)),
-                (&mut theme.code, &defaults.code, (30, 102, 245)),
-                (&mut theme.link, &defaults.link, (30, 102, 245)),
-                (
-                    &mut theme.menu.selected,
-                    &defaults.menu.selected,
-                    (30, 102, 245),
-                ),
-                (&mut theme.quote, &defaults.quote, (23, 146, 153)),
-                (
-                    &mut theme.prompt.color,
-                    &defaults.prompt.color,
-                    (28, 100, 200),
-                ),
-                (&mut theme.diff.add, &defaults.diff.add, (64, 160, 43)),
-                (&mut theme.diff.del, &defaults.diff.del, (210, 15, 57)),
-                (
-                    &mut theme.match_current,
-                    &defaults.match_current,
-                    (30, 102, 245),
-                ),
-            ] {
-                if style == default {
-                    *style = Style {
-                        color: Some(Color::Rgb(color.0, color.1, color.2)),
-                        sgr: style.sgr.clone(),
-                        rendered: OnceLock::new(),
-                    };
-                }
-            }
-            if theme.table == defaults.table {
-                theme.table = [(30, 102, 245), (64, 160, 43)]
-                    .into_iter()
-                    .map(|(r, g, b)| Style::color(Color::Rgb(r, g, b)))
-                    .collect();
-            }
-        }
-        if !light && theme.status.warn == defaults.status.warn {
-            theme.status.warn = Style::color(Color::Basic(33)).adding(Attr::Bold);
-        }
-        let bands = bands_for(bg);
-        if theme.prompt.panel.input == defaults.prompt.panel.input {
-            theme.prompt.panel.input = bands.input;
-        }
-        if theme.prompt.panel.said == defaults.prompt.panel.said {
-            theme.prompt.panel.said = bands.said;
-        }
-        theme
-    }
-}
-
-fn is_light((r, g, b): (u8, u8, u8)) -> bool {
-    0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b) > 127.5
-}
-
 fn byte(v: &str) -> Result<u8> {
     v.parse()
         .map_err(|_| anyhow::anyhow!("`{v}` is not a byte (0-255)"))
@@ -641,39 +576,6 @@ fn hex_digit(b: u8) -> Result<u8> {
         .to_digit(16)
         .map(|n| n as u8)
         .ok_or_else(|| anyhow::anyhow!("`{}` is not a hex digit", b as char))
-}
-
-/// The two bands for a terminal whose background is `bg`: opencode's own
-/// lift, scaling every channel by one factor so a band keeps the
-/// background's hue instead of greying it out.
-pub fn bands_for(bg: (u8, u8, u8)) -> Bands {
-    let (r, g, b) = (f64::from(bg.0), f64::from(bg.1), f64::from(bg.2));
-    let lum = 0.299 * r + 0.587 * g + 0.114 * b;
-    let dark = lum <= 127.5;
-    let band = {
-        let factor = 3.0 / 12.0;
-        let scaled = if dark && lum >= 10.0 {
-            let ratio = (lum + (255.0 - lum) * factor * 0.4) / lum;
-            (r * ratio, g * ratio, b * ratio)
-        } else if dark {
-            // So close to black that scaling it would leave it black: the
-            // band is the lift alone, with no hue of its own to keep.
-            let v = factor * 0.4 * 255.0;
-            (v, v, v)
-        } else if lum > 245.0 {
-            let v = 255.0 - factor * 0.4 * 255.0;
-            (v, v, v)
-        } else {
-            let ratio = 1.0 - factor * 0.4;
-            (r * ratio, g * ratio, b * ratio)
-        };
-        let byte = |v: f64| v.clamp(0.0, 255.0).floor() as u8;
-        Color::Rgb(byte(scaled.0), byte(scaled.1), byte(scaled.2))
-    };
-    Bands {
-        input: band.clone(),
-        said: band,
-    }
 }
 
 #[cfg(test)]
@@ -692,10 +594,9 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_syntax_palette_survives_background_detection_and_roundtrips() {
+    fn an_explicit_syntax_palette_roundtrips() {
         let theme: Theme = toml::from_str("syntax = 'catppuccin-mocha'").unwrap();
-        let light = theme.for_background((255, 255, 255));
-        assert_eq!(light.syntax, Syntax::CatppuccinMocha);
+        assert_eq!(theme.syntax, Syntax::CatppuccinMocha);
         let saved = toml::to_string(&theme).unwrap();
         assert_eq!(toml::from_str::<Theme>(&saved).unwrap(), theme);
         assert!(toml::from_str::<Theme>("syntax = 'missing'").is_err());

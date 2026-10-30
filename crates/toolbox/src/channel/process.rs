@@ -1,7 +1,7 @@
 //! The duplex JSON protocol shared by scripts and bash background commands.
 use crate::background::{OutputMode, RunHandle};
 use crate::channel::{Answer, Ask, Asked, Told};
-use crate::process::{Exited, Group, MAX_RUN, Streams, reap, spawn};
+use crate::process::{Exited, Group, MAX_RUN, Streams, put_down, reap, spawn};
 use serde_json::Value;
 use std::os::fd::AsRawFd;
 use std::process::Stdio;
@@ -199,7 +199,7 @@ pub(crate) fn background(
         let status = loop {
             tokio::select! {
                 biased;
-                () = stop.cancelled() => { reap(group).await; return; }
+                () = stop.cancelled() => { put_down(&mut child, group).await; return; }
                 event = fd3.next() => match event {
                     Said::Status(text) => execution.channel().status(text),
                     Said::Result(text) => execution.channel().result(text),

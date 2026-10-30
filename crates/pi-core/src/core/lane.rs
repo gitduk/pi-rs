@@ -21,7 +21,7 @@ use subagent::Subagent;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
 
-use tool::{Ctx, Tool};
+use tool::Ctx;
 
 use super::Core;
 use crate::core::meter::{Snapshot, Tally};
@@ -163,7 +163,6 @@ impl Conversation {
 // What is running on the lane, and the channel its events arrive on.
 struct Runner {
     run: Run,
-    input: Option<Arc<crate::driver::input::Input>>,
     // Where this lane's runs post what they are doing. One channel per lane,
     // so an event needs no label to say which screen it belongs on.
     events: UnboundedSender<Event>,
@@ -212,13 +211,11 @@ pub fn arm(
     }
     // Changed from here on a fresh `Arc`, since the child holds this one: it
     // runs on the registry it came from, and only the lane's copy carries the tool.
-    if subagent.tier().under(resolved.ceiling) {
-        offer_fallback(Arc::make_mut(&mut brief), Arc::new(subagent), &mut said);
-    }
+    offer_builtin(Arc::make_mut(&mut brief), Arc::new(subagent), &mut said);
     // The lane's copy only: a child never hears the user, whose words are
     // the only ones memory keeps.
-    if resolved.remembers && tool::Tier::Write.under(resolved.ceiling) {
-        offer_fallback(
+    if resolved.remembers {
+        offer_builtin(
             Arc::make_mut(&mut brief),
             Arc::new(crate::core::memory::Remember::new(
                 pi_store::memory::Memory::default(),
@@ -235,7 +232,7 @@ pub fn arm(
         let shell = Arc::new(
             toolbox::bash::Bash::new(executions.clone()).with_controls(executions.clone()),
         );
-        offer_fallback(patch, shell.clone(), &mut said);
+        offer_builtin(patch, shell.clone(), &mut said);
         for dir in &resolved.scripts {
             let held: Arc<dyn tool::Source> = dir.clone();
             let swapped = (patch.registry)
@@ -244,8 +241,8 @@ pub fn arm(
         }
     }
     agent.apply(brief);
-    // Re-armed as often as the config or the execution table moves; the same tool
-    // stands down every time, so the note is kept once.
+    // Re-armed as often as the config or the execution table moves; the same
+    // script is skipped every time, so the note is kept once.
     for line in said {
         if !resolved.notes.contains(&line) {
             Arc::make_mut(&mut resolved).notes.push(line);
@@ -254,16 +251,16 @@ pub fn arm(
     resolved
 }
 
-// Keep the built-in after the live sources, so renaming a script frees its
-// name without re-arming. Say when it is already standing down at startup.
-fn offer_fallback(brief: &mut agent::Briefing, tool: Arc<dyn tool::Tool>, said: &mut Vec<String>) {
+// Offered after the scripts are read, yet it keeps its name over them. Say
+// so here, where the name is known, rather than in resolve.
+fn offer_builtin(brief: &mut agent::Briefing, tool: Arc<dyn tool::Tool>, said: &mut Vec<String>) {
     let name = tool.name().to_string();
-    if brief.registry.sourced_holds(&name) {
+    let shadows = brief.registry.sourced_holds(&name);
+    if brief.registry.offer(tool) && shadows {
         said.push(format!(
-            "tool skipped — {name}: a script already offers that name; rename one of them"
+            "tool skipped — script {name}: the name is taken by the built-in"
         ));
     }
-    brief.registry.fallback(tool);
 }
 
 /// The half of a lane the config decides, for tests that build one directly —
@@ -347,7 +344,6 @@ impl Lane {
             talk: Conversation::new(parts.id, parts.created, None, parts.name, parts.claim),
             runner: Runner {
                 run: Run::Idle,
-                input: None,
                 events,
                 inbox,
             },
@@ -396,35 +392,6 @@ impl Lane {
             cancel,
             unsend: false,
         };
-    }
-
-    /// Supply messages to this run between requests. Only model runs listen.
-    pub fn listen(
-        &mut self,
-        executions: Arc<crate::driver::background::Table>,
-    ) -> Arc<crate::driver::input::Input> {
-        let input = Arc::new(crate::driver::input::Input::new(
-            self.root().to_path_buf(),
-            executions,
-        ));
-        self.runner.input = Some(input.clone());
-        input
-    }
-
-    pub fn input(&self) -> Option<&Arc<crate::driver::input::Input>> {
-        match &self.runner.run {
-            Run::Running { cancel, .. } if !cancel.is_cancelled() => self.runner.input.as_ref(),
-            _ => None,
-        }
-    }
-
-    /// Detach the settled run's input and return its unconsumed messages.
-    pub fn take_pending_input(&mut self) -> Vec<agent::session::Prompt> {
-        self.runner
-            .input
-            .take()
-            .map(|input| input.pending())
-            .unwrap_or_default()
     }
 
     /// Ask the run under way to stop, and say whether there was one. `unsend`
@@ -1205,16 +1172,17 @@ mod tests {
         );
     }
 
-    // A script already holding a name the lane hands a tool keeps it: the
-    // built-in stands down and says so, rather than taking the name over
-    // and leaving the script silently gone.
+    // A script cannot stand in for a tool the lane hands out: the built-in
+    // keeps the name and says the script was skipped, rather than leaving
+    // it silently gone.
     #[test]
-    fn a_script_keeps_its_name_and_the_built_in_returns_after_a_rename() {
+    fn a_built_in_keeps_its_name_over_a_script() {
         use std::sync::Arc;
 
         for name in [
             subagent::Subagent::NAME,
             crate::core::memory::Remember::NAME,
+            toolbox::bash::Bash::NAME,
         ] {
             let dir = tempfile::tempdir().unwrap();
             let tools = dir.path().join("tools");
@@ -1244,37 +1212,16 @@ mod tests {
             );
 
             let kept = agent.brief.registry.get(name).unwrap();
-            assert_eq!(
-                kept.description(),
-                "my own tool",
-                "the script was taken over"
-            );
+            assert_ne!(kept.description(), "my own tool", "a script took {name}");
             assert!(
                 resolved.notes.iter().any(|n| n.contains(name)),
-                "the built-in stood down without saying so: {:?}",
+                "the script was skipped without saying so: {:?}",
                 resolved.notes
             );
-
-            std::fs::rename(tools.join(name), tools.join("custom")).unwrap();
-            let built_in = agent
-                .brief
-                .registry
-                .get(name)
-                .expect("the built-in returns");
-            assert_ne!(built_in.description(), "my own tool");
-            assert_eq!(
-                agent.brief.registry.get("custom").unwrap().description(),
-                "my own tool"
-            );
             assert!(
-                resolved.brief.registry.get(name).is_none(),
+                (resolved.brief.registry.get(name))
+                    .is_none_or(|t| t.description() == "my own tool"),
                 "the child gained a lane's tool"
-            );
-
-            std::fs::rename(tools.join("custom"), tools.join(name)).unwrap();
-            assert_eq!(
-                agent.brief.registry.get(name).unwrap().description(),
-                "my own tool"
             );
         }
     }

@@ -294,7 +294,11 @@ fn interface(text: &str) -> Result<Interface, String> {
     let declared = package
         .and_then(|p| p.get("metadata"))
         .and_then(|m| m.get("pi"));
-    let args = declared_args(declared, "package.metadata.pi.")?;
+    const PREFIX: &str = "package.metadata.pi.";
+    if let Some(declared) = declared {
+        known(declared, &["required", "optional", "background"], PREFIX)?;
+    }
+    let args = declared_args(declared, PREFIX)?;
     Ok((description.to_string(), args, background_mode(declared)?))
 }
 
@@ -304,6 +308,20 @@ fn background_mode(table: Option<&toml::Value>) -> Result<bool, String> {
         Some(value) => value
             .as_bool()
             .ok_or_else(|| "background must be true or false".to_string()),
+    }
+}
+
+// A key nothing reads would drop what it declares without a word.
+fn known(table: &toml::Value, keys: &[&str], prefix: &str) -> Result<(), String> {
+    let Some(table) = table.as_table() else {
+        return Ok(());
+    };
+    match table.keys().find(|key| !keys.contains(&key.as_str())) {
+        None => Ok(()),
+        Some(key) => Err(format!(
+            "unknown key `{prefix}{key}`: expected one of {}",
+            keys.join(", ")
+        )),
     }
 }
 
@@ -379,6 +397,11 @@ fn header(text: &str) -> Result<Interface, String> {
         .map(str::trim)
         .filter(|d| !d.is_empty())
         .ok_or("no description in the header")?;
+    known(
+        &table,
+        &["description", "required", "optional", "background"],
+        "",
+    )?;
     let args = declared_args(Some(&table), "")?;
     Ok((
         description.to_string(),
@@ -709,5 +732,8 @@ mod tests {
         assert!(header(open).unwrap_err().contains("not closed"));
         let stray = "#!/bin/sh\n# ---\ndescription = \"Hi\"\n# ---\n";
         assert!(header(stray).unwrap_err().contains("not a comment"));
+        let typo =
+            "#!/bin/sh\n# ---\n# description = \"Hi\"\n# [requried]\n# who = \"whom\"\n# ---\n";
+        assert!(header(typo).unwrap_err().contains("unknown key `requried`"));
     }
 }

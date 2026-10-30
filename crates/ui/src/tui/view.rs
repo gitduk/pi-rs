@@ -28,7 +28,7 @@ pub struct View {
     pub(super) state: State,
     // What arrived while the run worked, kept as intents (not lines): their
     // fate was settled at the door, so re-reading them wouldn't be right.
-    pub(super) queued: Vec<Queued>,
+    pub(super) queued: Queue,
     // Whether the opening banner has been drawn; drawing it twice would
     // stack two banners on one lane.
     pub(super) drawn: bool,
@@ -148,14 +148,49 @@ pub(super) struct Queued {
 
 pub(super) enum Pending {
     Intent(Intent),
+    // Already read and logged at the door: only its turn is left.
     Prompt(agent::session::Prompt),
 }
 
-impl Pending {
-    pub(super) fn into_intent(self) -> (Intent, Option<agent::session::Prompt>) {
-        match self {
-            Self::Intent(intent) => (intent, None),
-            Self::Prompt(ask) => (Intent::Prompt(ask.text.clone()), Some(ask)),
+/// The one queue of a lane's screen. Its model run shares it, and takes the
+/// typed prompts at its front between requests; whatever stands first that
+/// it can't take waits for the run to end, and so does everything behind it.
+#[derive(Clone, Default)]
+pub(super) struct Queue(std::sync::Arc<std::sync::Mutex<Vec<Queued>>>);
+
+impl Queue {
+    pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Queued>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(super) fn push(&self, queued: Queued) {
+        self.lock().push(queued);
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.lock().is_empty()
+    }
+
+    pub(super) fn pop_front(&self) -> Option<Queued> {
+        let mut queue = self.lock();
+        (!queue.is_empty()).then(|| queue.remove(0))
+    }
+
+    // The front, if a running model may read it.
+    pub(super) fn take_prompt(&self) -> Option<agent::session::Prompt> {
+        let mut queue = self.lock();
+        match queue.first() {
+            Some(Queued {
+                input: Pending::Prompt(_),
+                origin: Origin::Typed,
+                ..
+            }) => match queue.remove(0).input {
+                Pending::Prompt(ask) => Some(ask),
+                Pending::Intent(_) => unreachable!("the front was a prompt"),
+            },
+            _ => None,
         }
     }
 }
@@ -175,7 +210,11 @@ pub(super) fn snapshot(lane: &Lane, view: &View) -> Snapshot {
     lane.snapshot(
         &view.model,
         view.state.work.as_ref().map(|w| w.since.elapsed()),
-        view.queued.iter().filter(|q| q.line.is_none()).count(),
+        view.queued
+            .lock()
+            .iter()
+            .filter(|q| q.line.is_none())
+            .count(),
     )
 }
 

@@ -238,6 +238,8 @@ While a model reply is generating, completed background results and additional
 messages you type wait for that reply to finish. After its tool calls complete,
 they enter the next model request in the same run. A reply with no tool calls
 also continues when messages are waiting. Generation is never interrupted.
+Waiting messages show under the status line, and `up` takes them back. A
+command queued ahead of them holds them until the run ends.
 
 ## Tools
 
@@ -295,8 +297,7 @@ also continues when messages are waiting. Generation is never interrupted.
   repository root (outside a repository, the workspace's own), with its own
   `.env`; of a name both use, the checkout's is the one offered, and the
   other is reported as skipped. A built-in tool's name is not free either:
-  a script that takes one keeps it, and the built-in stands down with a note
-  saying to rename one of them.
+  a script that takes one is skipped with a note, and the built-in keeps it.
   Set `background = true` at the top of a shebang tool's comment block, or
   under `[package.metadata.pi]` for a Rust tool, to make its named entry
   launch through bash background. `/telegram` and similar manual calls keep

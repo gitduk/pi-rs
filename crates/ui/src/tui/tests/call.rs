@@ -72,6 +72,54 @@ fn rebuilt_empty_reasoning_blocks_are_ignored() {
     assert!(!rows.iter().any(Row::is_steps));
 }
 
+// Esc unsends the prompt that opened the run. Once a prompt typed mid-run
+// joins it, one unsend would hand back that prompt and leave the first sent
+// with nothing to answer it, so the chance is spent.
+#[test]
+fn a_prompt_joining_the_run_spends_the_unsend() {
+    use agent::session::{Entry, EntryId};
+
+    let mut ui = test_ui(80, 24);
+    let (_dir, mut lane) = a_running_lane();
+    let mut view = View::default();
+    let committed = |view: &View| {
+        matches!(
+            view.state.work.as_ref().map(|w| &w.doing),
+            Some(crate::tui::view::Doing::Turn { committed: true })
+        )
+    };
+    let commit = |entries| agent::Event::Committed { entries };
+
+    view.state.work = a_turn(false);
+    // A note filed mid-run is not the user asking again.
+    ui.on_event(
+        &mut lane,
+        &mut view,
+        commit(vec![Entry::Note {
+            id: EntryId(1),
+            at: 0,
+            note: "a note".into(),
+        }]),
+    );
+    assert!(!committed(&view), "a note leaves the prompt unsendable");
+
+    ui.on_event(
+        &mut lane,
+        &mut view,
+        commit(vec![Entry::Ask {
+            id: EntryId(2),
+            at: 0,
+            ask: agent::session::Prompt {
+                text: "and now this".into(),
+                images: Vec::new(),
+                shown: None,
+                relayed: None,
+            },
+        }]),
+    );
+    assert!(committed(&view));
+}
+
 // The pending live line and the committed entry must carry the same body:
 // adoption's equality check compares rows born from one source.
 #[test]

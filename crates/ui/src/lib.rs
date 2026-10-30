@@ -10,6 +10,7 @@ mod markdown;
 pub mod render;
 pub mod sgr;
 pub mod status;
+pub mod theme;
 pub mod tty;
 pub mod tui;
 pub mod unit;

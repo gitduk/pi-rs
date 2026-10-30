@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWriteExt as _, ReadBuf};
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 use tool::output::{Capture, Captured};
 use tool::{Ctx, ToolError};
 
@@ -23,15 +24,37 @@ pub struct Exited {
     pub stderr: Captured,
 }
 
-/// Run `cmd`, feeding it `stdin` when there is some. Past `timeout` (at most
-/// [`MAX_RUN`]), or on the context's cancellation, the process group is reaped.
-pub async fn run(
+/// A child already running, its pipes already draining. Spawning and waiting
+/// are apart because a background command hands this out before it ends:
+/// whoever holds it says, in [`Ends`], what finishes it besides its own exit.
+pub(crate) struct Launched {
+    pub(crate) child: tokio::process::Child,
+    pub(crate) group: Option<u32>,
+    pub(crate) streams: Streams,
+    pub(crate) guard: Option<Group>,
+}
+
+/// What ends a launched command short of its own exit. Every command answers
+/// to a stop; only some are given a deadline, and that is the caller's word,
+/// not a property of how it was started.
+pub(crate) struct Ends {
+    pub(crate) stop: CancellationToken,
+    /// At most [`MAX_RUN`]. `None` leaves the command to run until it exits
+    /// or `stop` fires.
+    pub(crate) deadline: Option<Duration>,
+}
+
+/// Start `cmd` under the workspace's clamps, feeding it `stdin` when there is
+/// some: its own process group, so taking it down takes the whole tree, and
+/// both pipes draining into bounded captures.
+///
+/// wait_with_output buffers all output in memory — a runaway `yes` would take
+/// the process with it — so the captures are bounded and spill instead.
+pub(crate) fn launch(
     mut cmd: Command,
     stdin: Option<Vec<u8>>,
-    timeout: Duration,
     ctx: &Ctx,
-) -> Result<Exited, ToolError> {
-    let timeout = timeout.min(MAX_RUN);
+) -> Result<Launched, ToolError> {
     let input = if stdin.is_some() {
         Stdio::piped()
     } else {
@@ -41,57 +64,117 @@ pub async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    // Its own group, so a timeout takes the whole tree. Killing the child
+    // Its own group, so a deadline takes the whole tree. Killing the child
     // alone leaves everything it started running.
     #[cfg(unix)]
     detach(&mut cmd);
 
     let mut child = spawn(&mut cmd)?;
     let group = child.id();
+    let guard = group.map(Group);
 
     if let Some(input) = stdin {
         let mut pipe = child.stdin.take().expect("stdin is piped");
         // Fed from a detached task: EOF must reach the child when the write
-        // ends, not when try_join! drops its finished arms.
+        // ends, not when this call does.
         drop(tokio::spawn(async move {
             let _ = pipe.write_all(&input).await;
         }));
     }
-    // wait_with_output buffers all output in memory — a runaway `yes` would
-    // take the process with it. Both pipes stream into bounded captures instead.
-    let mut out_pipe = child.stdout.take().expect("stdout is piped");
-    let mut err_pipe = child.stderr.take().expect("stderr is piped");
-    let mut out = Capture::new();
-    let mut err = Capture::new();
+    // Pipe readers can outlive the call as an execution. Keep only what output
+    // capture needs, rather than holding the turn's locks and progress.
+    let streams = Streams::of(&mut child, &spills_only(ctx));
+    Ok(Launched {
+        child,
+        group,
+        streams,
+        guard,
+    })
+}
 
-    let waited = tokio::select! {
-        r = async {
-            let drained =
-                tokio::try_join!(out.drain(&mut out_pipe, ctx), err.drain(&mut err_pipe, ctx));
-            // A pipe nobody reads any more would hold the child, and this wait, forever.
-            if drained.is_err() {
-                reap(group).await;
-            }
-            let status = child.wait().await?;
-            drained.map(|_| status)
-        } => Some(r?),
-        _ = tokio::time::sleep(timeout) => None,
-        _ = ctx.cancel.cancelled() => {
+/// Wait for `launched` to exit, or take it down when `ends` says to. The one
+/// place a command's end is decided, so a deadline is something a caller asked
+/// for rather than a difference between two ways of running the same thing.
+pub(crate) async fn settle(launched: Launched, ends: Ends) -> Result<Exited, ToolError> {
+    let Launched {
+        mut child,
+        group,
+        mut streams,
+        guard: _guard,
+    } = launched;
+    let deadline = ends.deadline.map(|d| d.min(MAX_RUN));
+    let timed_out = || ToolError::Timeout {
+        ms: deadline
+            .expect("only the deadline arm reports a timeout")
+            .as_millis() as u64,
+    };
+    // One future across both phases: the deadline is on the command, not on
+    // each thing waited for in turn.
+    let over = past(deadline);
+    tokio::pin!(over);
+
+    let status = tokio::select! {
+        status = child.wait() => status?,
+        () = ends.stop.cancelled() => {
+            put_down(&mut child, group).await;
+            return Err(ToolError::Cancelled);
+        }
+        () = &mut over => {
+            put_down(&mut child, group).await;
+            return Err(timed_out());
+        }
+    };
+    let (stdout, stderr) = tokio::select! {
+        both = streams.checked(group) => both?,
+        () = ends.stop.cancelled() => {
             reap(group).await;
             return Err(ToolError::Cancelled);
         }
-    };
-    let Some(status) = waited else {
-        reap(group).await;
-        return Err(ToolError::Timeout {
-            ms: timeout.as_millis() as u64,
-        });
+        () = &mut over => {
+            reap(group).await;
+            return Err(timed_out());
+        }
     };
     Ok(Exited {
         status,
-        stdout: out.finish(),
-        stderr: err.finish(),
+        stdout,
+        stderr,
     })
+}
+
+// No deadline is a future that never fires, so every caller has the same arm.
+async fn past(deadline: Option<Duration>) {
+    match deadline {
+        Some(d) => tokio::time::sleep(d).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// What a command keeps of the call's context: where output spills, not the
+/// turn's cancellation or progress, which a background command would outlive.
+pub(crate) fn spills_only(ctx: &Ctx) -> Ctx {
+    let fresh = Ctx::new(ctx.workspace.clone());
+    match ctx.session() {
+        Some(id) => fresh.with_session(id, ctx.spill_root()),
+        None => fresh.with_spill_root(ctx.spill_root()),
+    }
+}
+
+/// Run `cmd` to completion, feeding it `stdin` when there is some. Past
+/// `timeout` (at most [`MAX_RUN`]), or on the context's cancellation, the
+/// process group is taken down.
+pub async fn run(
+    cmd: Command,
+    stdin: Option<Vec<u8>>,
+    timeout: Duration,
+    ctx: &Ctx,
+) -> Result<Exited, ToolError> {
+    let launched = launch(cmd, stdin, ctx)?;
+    let ends = Ends {
+        stop: ctx.cancel.clone(),
+        deadline: Some(timeout),
+    };
+    settle(launched, ends).await
 }
 
 /// A session of its own: its own group, and no terminal to open, so a
@@ -142,6 +225,14 @@ pub(crate) async fn reap(group: Option<u32>) {
 // `kill_on_drop`, but its descendants outlive a timeout.
 #[cfg(not(unix))]
 pub(crate) async fn reap(_group: Option<u32>) {}
+
+/// Take down `child` and its group, and return once the child has exited:
+/// signalled is not gone, and what it held, a port say, goes only with it.
+pub(crate) async fn put_down(child: &mut tokio::process::Child, group: Option<u32>) {
+    reap(group).await;
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+}
 
 // How long a command's pipes may stay open after its process exits: past it,
 // what the process left running is taken down so the execution can end.
@@ -335,5 +426,20 @@ mod tests {
         let seen = tail.read();
         assert!(!seen.is_empty() && seen.len() < 10000);
         assert!(seen.split_inclusive('\n').all(|l| l == line), "{seen}");
+    }
+
+    // A child left holding the pipes must not keep the call waiting.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_run_ends_soon_after_its_shell_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("sleep 30 & echo hi");
+        let started = std::time::Instant::now();
+        let exited = run(cmd, None, Duration::from_secs(20), &ctx).await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(exited.status.success());
+        assert_eq!(exited.stdout.text.trim(), "hi");
     }
 }

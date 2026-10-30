@@ -108,7 +108,7 @@ fn carry_command(stopped: bool) {
             stop.clone(),
         );
         let id = execution.id();
-        execution.rerun(rerun.clone(), Some(again));
+        execution.rerun(rerun.clone(), again);
         rerun(execution, stop).unwrap();
         old = Some(processes(&table, root, id).await);
         if stopped {

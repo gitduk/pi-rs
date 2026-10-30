@@ -44,10 +44,11 @@ use ratatui::text::Text;
 use screen::Screen;
 use std::sync::Arc;
 
+use crate::theme::following_terminal;
 use menu::Lists;
 use run::Done;
 use term::{HISTORY_KEEP, Hold, drop_shared_history, history_of, reader};
-use ui::{Mark, Tab, Ui, following_terminal, lane_name};
+use ui::{Mark, Tab, Ui, lane_name};
 use view::{Pending, Queued, View, Views, front_view, prune_views, view_at};
 
 // What a folded run shows instead of what it is thinking.
@@ -166,6 +167,9 @@ enum Wake {
     // Something to carry out, once the select's borrows are gone, with the
     // line it was read from: echoed if the answer lands under it.
     Do(Asked, Option<String>),
+    // A typed prompt that waited for the lane: read at the door, so it is
+    // not read again, only sent.
+    Prompt(agent::session::Prompt, Option<String>),
     // A line pi relays for the model: always a turn, never a command.
     Relay(agent::session::Prompt),
     // A turn ended and has to be settled, whichever lane it belongs to.
@@ -744,7 +748,6 @@ impl Tui {
             let waiting = !view.queued.is_empty();
             // Who sent what is carried out this pass.
             let mut origin = Origin::Typed;
-            let mut prepared = None;
             // A driver's line goes only when the lane is free and nothing typed
             // is waiting: what the user says comes first.
             let free = !running && !waiting;
@@ -826,11 +829,13 @@ impl Tui {
                 // Joined as lines, a command+prompt would lose its first word.
                 let queued = front_view(&mut self.views, self.core.lane())
                     .queued
-                    .remove(0);
+                    .pop_front()
+                    .expect("something is waiting");
                 origin = queued.origin;
-                let (intent, ask) = queued.input.into_intent();
-                prepared = ask;
-                Wake::Do(Asked::Core(intent), queued.line)
+                match queued.input {
+                    Pending::Intent(intent) => Wake::Do(Asked::Core(intent), queued.line),
+                    Pending::Prompt(ask) => Wake::Prompt(ask, queued.line),
+                }
             };
             // Out here, where all of `self` is free again.
             let (asked, mut line) = match woke {
@@ -843,6 +848,10 @@ impl Tui {
                 // Its driver hears nothing of the turn, so nothing follows.
                 Wake::Relay(ask) => {
                     self.start_turn(ask, &done_tx);
+                    continue;
+                }
+                Wake::Prompt(ask, line) => {
+                    self.deliver_prompt(ask, origin, line, &done_tx);
                     continue;
                 }
                 Wake::Do(asked, line) => (asked, line),
@@ -922,8 +931,7 @@ impl Tui {
                 // Queued-during-run entries are taken one at a time at the
                 // loop's top; draining here would merge them into one prompt.
                 Step::Prompt { send, typed } => {
-                    let ask =
-                        prepared.unwrap_or_else(|| clipboard::prompt(send, typed, &self.ui.images));
+                    let ask = clipboard::prompt(send, typed, &self.ui.images);
                     if !self.deliver_prompt(ask, origin, line, &done_tx) {
                         continue;
                     }

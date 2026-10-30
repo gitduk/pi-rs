@@ -148,6 +148,8 @@ struct Block {
     kind: Option<BlockKind>,
     text: String,
     signature: Option<String>,
+    // The wire closed it, so nothing more of it was coming.
+    ended: bool,
 }
 
 /// Folds normalized events into one assistant message. Shared by every
@@ -204,7 +206,11 @@ impl Accumulator {
             StreamEvent::ReasoningSignature { index, signature } => {
                 self.blocks.entry(index).or_default().signature = Some(signature);
             }
-            StreamEvent::BlockEnd { .. } => {}
+            StreamEvent::BlockEnd { index } => {
+                if let Some(b) = self.blocks.get_mut(&index) {
+                    b.ended = true;
+                }
+            }
             StreamEvent::Complete { content, invalid } => {
                 self.complete = Some((content, invalid));
             }
@@ -225,10 +231,21 @@ impl Accumulator {
         })
     }
 
-    pub fn finish(mut self) -> Completion {
+    pub fn finish(self) -> Completion {
+        self.close(true)
+    }
+
+    /// What arrived before the stream was stopped. Reasoning the wire never
+    /// closed is kept to read but not attributed, so it never replays: its
+    /// signature, which comes last, is missing.
+    pub fn cut_short(self) -> Completion {
+        self.close(false)
+    }
+
+    fn close(mut self, whole: bool) -> Completion {
         let (mut content, mut invalid) = match self.complete.take() {
             Some(stated) => stated,
-            None => self.fold(),
+            None => self.fold(whole),
         };
 
         // A result is addressed by its call's id, so a repeated id can't be
@@ -274,7 +291,7 @@ impl Accumulator {
 
     // The turn rebuilt from the deltas, for a wire whose terminal frame does
     // not state it.
-    fn fold(&mut self) -> (Vec<AssistantContent>, Vec<InvalidToolArgs>) {
+    fn fold(&mut self, whole: bool) -> (Vec<AssistantContent>, Vec<InvalidToolArgs>) {
         let mut content = Vec::new();
         let mut invalid = Vec::new();
         for (_, b) in std::mem::take(&mut self.blocks) {
@@ -308,7 +325,7 @@ impl Accumulator {
                                 text: b.text,
                                 signature: b.signature,
                             }],
-                            by: Some(self.by.clone()),
+                            by: (whole || b.ended).then(|| self.by.clone()),
                         }));
                     }
                 }
@@ -519,6 +536,41 @@ mod tests {
                 cache_read: 40,
                 cache_write: 0
             }
+        );
+    }
+
+    // Stopped mid-thought: the open block is kept to read but never replays,
+    // while one the wire closed before the stop still does.
+    #[test]
+    fn reasoning_cut_off_before_its_end_is_not_attributed() {
+        let mut a = acc();
+        for index in [0, 1] {
+            a.push(StreamEvent::BlockStart {
+                index,
+                kind: BlockKind::Reasoning,
+            });
+            a.push(StreamEvent::ReasoningDelta {
+                index,
+                delta: "step".into(),
+            });
+        }
+        a.push(StreamEvent::BlockEnd { index: 0 });
+
+        let Message::Assistant { content, .. } = a.cut_short().message else {
+            panic!()
+        };
+        let by: Vec<_> = (content.iter())
+            .map(|c| match c {
+                AssistantContent::Reasoning(r) => (r.text(), r.by.clone()),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            by,
+            [
+                ("step".into(), Some("test-model".into())),
+                ("step".into(), None)
+            ]
         );
     }
 

@@ -113,13 +113,18 @@ impl Ui {
 
     pub(super) fn on_event(&mut self, lane: &mut Lane, view: &mut View, event: Event) {
         // Anything the model produces spends the chance to unsend: past this
-        // the prompt has been answered, not merely sent.
+        // the prompt has been answered, not merely sent. A prompt that joined
+        // the run spends it too — one unsend would hand back that prompt and
+        // leave the one before it sent, with nothing to answer it.
         if let Some(work) = &mut view.state.work {
-            if matches!(
-                event,
-                Event::TextDelta(_) | Event::ReasoningDelta(_) | Event::ToolQueued { .. }
-            ) && let Doing::Turn { committed } = &mut work.doing
-            {
+            let spent = match &event {
+                Event::TextDelta(_) | Event::ReasoningDelta(_) | Event::ToolQueued { .. } => true,
+                Event::Committed { entries } => {
+                    entries.iter().any(|e| matches!(e, LogEntry::Ask { .. }))
+                }
+                _ => false,
+            };
+            if spent && let Doing::Turn { committed } = &mut work.doing {
                 *committed = true;
             }
             if !matches!(event, Event::Retrying { .. }) {
