@@ -210,32 +210,81 @@ pub(crate) fn spawn(cmd: &mut Command) -> Result<tokio::process::Child, ToolErro
     })
 }
 
+// How long the group has to end on the polite signal before it is killed.
+const GRACE: Duration = Duration::from_millis(200);
+
+// How long the group is given to leave after the kill. Past it the wait ends
+// anyway: what refuses to die would otherwise hold up the stop itself.
+const GONE: Duration = Duration::from_secs(2);
+
+// How often the group is asked whether anything is left in it.
+const SWEEP: Duration = Duration::from_millis(20);
+
 // SIGTERM the group, then SIGKILL whatever ignored it. A build killed outright
 // can leave a corrupt output tree, so the polite signal goes first.
 #[cfg(unix)]
-pub(crate) async fn reap(group: Option<u32>) {
-    // A freshly spawned pid can never equal our own group's id, and the filter
-    // rejects 0 — `killpg(0, …)` would signal the agent itself.
-    let Some(pid) = group.filter(|p| *p > 1) else {
+async fn take_down(group: Option<u32>) {
+    let Some(pid) = alive(group) else {
         return;
     };
-    let pid = pid as i32;
     unsafe { libc::killpg(pid, libc::SIGTERM) };
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(GRACE).await;
     unsafe { libc::killpg(pid, libc::SIGKILL) };
+}
+
+/// Wait until nothing is left in the group. A signal only asks: a port is
+/// let go when the process that bound it is gone, which is later, and a
+/// restart that starts before then finds the port still taken.
+///
+/// Call it only once the group's direct child has been waited for — until
+/// then it is a zombie, and a zombie still answers for its group.
+#[cfg(unix)]
+async fn emptied(group: Option<u32>) {
+    let Some(pid) = alive(group) else {
+        return;
+    };
+    let until = tokio::time::Instant::now() + GONE;
+    // Signal 0 asks after the group without touching it: ESRCH is nothing left.
+    while unsafe { libc::killpg(pid, 0) } == 0 {
+        if tokio::time::Instant::now() >= until {
+            tracing::warn!(target: "pi::bash", group = pid, "still there after the kill");
+            return;
+        }
+        tokio::time::sleep(SWEEP).await;
+    }
+}
+
+// A freshly spawned pid can never equal our own group's id, and this rejects
+// 0 — `killpg(0, …)` would signal the agent itself.
+#[cfg(unix)]
+fn alive(group: Option<u32>) -> Option<libc::pid_t> {
+    group.filter(|p| *p > 1).map(|p| p as libc::pid_t)
 }
 
 // Windows has no process group to signal: the direct child still dies with
 // `kill_on_drop`, but its descendants outlive a timeout.
 #[cfg(not(unix))]
-pub(crate) async fn reap(_group: Option<u32>) {}
+async fn take_down(_group: Option<u32>) {}
 
-/// Take down `child` and its group, and return once the child has exited:
+#[cfg(not(unix))]
+async fn emptied(_group: Option<u32>) {}
+
+/// Take down `child`'s group and return once it is empty. For a child already
+/// waited for; [`put_down`] is the one that still holds a running child.
+pub(crate) async fn reap(group: Option<u32>) {
+    take_down(group).await;
+    emptied(group).await;
+}
+
+/// Take down `child` and its group, and return once the group is empty:
 /// signalled is not gone, and what it held, a port say, goes only with it.
 pub(crate) async fn put_down(child: &mut tokio::process::Child, group: Option<u32>) {
-    reap(group).await;
+    take_down(group).await;
     let _ = child.start_kill();
+    // Its own wait first: until the child is reaped it is a zombie, and a
+    // zombie would answer for the group forever.
     let _ = child.wait().await;
+    emptied(group).await;
 }
 
 // How long a command's pipes may stay open after its process exits: past it,
@@ -447,5 +496,29 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(10));
         assert!(exited.status.success());
         assert_eq!(exited.stdout.text.trim(), "hi");
+    }
+
+    // A stop returns once the whole tree is gone, so a restart finds what
+    // the last run held — a port say — let go. The direct child is waited
+    // for first: a zombie answers for its group, and waiting on the group
+    // before reaping it would sit out the whole of `GONE`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stopped_tree_is_gone_before_the_stop_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("sleep 30 & sleep 30");
+        let mut launched = launch(cmd, None, &ctx).unwrap();
+        let group = launched.group.expect("a group of its own");
+
+        let started = std::time::Instant::now();
+        put_down(&mut launched.child, launched.group).await;
+        assert!(started.elapsed() < GONE, "{:?}", started.elapsed());
+        assert_ne!(
+            unsafe { libc::killpg(group as libc::pid_t, 0) },
+            0,
+            "the group outlived the stop"
+        );
     }
 }

@@ -220,7 +220,9 @@ pub(crate) fn background(
         };
         let captures = tokio::select! {
             biased;
-            () = stop.cancelled() => return,
+            // The child is gone, but what it started may still be draining
+            // the pipes — and holding what a restart needs.
+            () = stop.cancelled() => { reap(group).await; return; }
             captures = streams.checked(group) => captures,
         };
         let result = match (status, captures) {
