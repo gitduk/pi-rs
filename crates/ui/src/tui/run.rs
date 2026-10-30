@@ -22,6 +22,8 @@ use pi_core::driver::{Ended, Origin};
 pub(super) struct Started {
     token: u64,
     name: String,
+    // The call as it was asked for: a result alone does not say what ran.
+    call: String,
     // What it said or why it failed; None once it was stopped.
     said: Option<Result<String, String>>,
 }
@@ -230,11 +232,17 @@ impl Tui {
         self.ui.flash(format!("starting {name}…"));
         let ctx = self.core.lane().ctx_for(CancellationToken::new());
         let (token, started) = (self.core.lane().token(), started.clone());
+        let call = tool::summary(&args).into_owned();
         tokio::spawn(async move {
             let said = guard(core::tools::run_named(tool, args, &ctx))
                 .await
                 .unwrap_or_else(|| Some(Err("it panicked".into())));
-            let _ = started.send(Started { token, name, said });
+            let _ = started.send(Started {
+                token,
+                name,
+                call,
+                said,
+            });
         });
     }
 
@@ -242,10 +250,17 @@ impl Tui {
     // knows of it too; a failure is only the user's to read, and a stop was
     // already answered by whoever stopped it.
     pub(super) fn land_started(&mut self, started: Started) {
-        let Started { token, name, said } = started;
+        let Started {
+            token,
+            name,
+            call,
+            said,
+        } = started;
         let note = match said {
             None => return,
-            Some(Ok(text)) => format!("The user ran `{name}` directly, and it answered:\n\n{text}"),
+            Some(Ok(text)) => {
+                format!("The user ran `{name}` directly, as `{call}`, and it answered:\n\n{text}")
+            }
             // The bar holds a line; the rest is in the journal.
             Some(Err(why)) => {
                 let first = why.lines().find(|l| !l.trim().is_empty()).unwrap_or("");

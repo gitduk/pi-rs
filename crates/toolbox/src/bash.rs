@@ -100,7 +100,8 @@ impl Bash {
                 "{DESCRIPTION}\n\nWait for the command to exit or stop the run to cancel it. \
                  A command still running after {} is cut off, so start one expected to take \
                  longer with background=true instead. \
-                 Use background=true to start a command independently and return its id immediately. \
+                 Use background=true to start a command independently and return its id immediately; \
+                 its result opens a later turn, so carry on or end this one rather than wait. \
                  Leave output unredirected so it can be read while the command runs.",
                 llm::figures::elapsed(tool::limit::MAX_CALL)
             ),
@@ -198,8 +199,9 @@ async fn schedule(
     };
     Ok(ToolOutput::text(format!(
         "scheduled as background command #{id}, starting {when}. Its exit status and output \
-         arrive automatically later. Continue independent work, or report progress and end this turn."
-    )).with_preview(format!("{preview} [background #{id}]")))
+         arrive automatically later."
+    ))
+    .with_preview(format!("{preview} [background #{id}]")))
 }
 
 #[async_trait]
