@@ -83,7 +83,7 @@ async fn a_bounded_command_times_out_without_hanging_the_caller() {
     let err = toolbox::bash::run(
         "sleep 5",
         c.workspace.root(),
-        std::time::Duration::from_millis(150),
+        Some(std::time::Duration::from_millis(150)),
         &c,
     )
     .await

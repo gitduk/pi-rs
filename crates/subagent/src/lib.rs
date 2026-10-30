@@ -485,12 +485,13 @@ impl Subagent {
         {
             None => None,
             Some(command) => {
-                // No deadline of our own: `run` already clamps to the workspace's
-                // shell cap, and a subagent's leash isn't a request for a shorter suite.
-                let room = Duration::MAX;
+                // The workspace's own cap, not a shorter one: a subagent's
+                // leash isn't a request for a shorter suite.
+                let room = tool::limit::MAX_CALL;
                 // The caller's context, not the child's: a child stopped by
                 // its own cap leaves that token tripped, and this cancelled.
-                let outcome = match bash::run(command, ctx.workspace.root(), room, ctx).await {
+                let outcome = match bash::run(command, ctx.workspace.root(), Some(room), ctx).await
+                {
                     Ok(ran) => Outcome::Ran {
                         code: ran.code,
                         body: ran.body,

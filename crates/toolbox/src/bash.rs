@@ -10,8 +10,6 @@ use crate::background::{Again, Controls, Environment, Invocation, OutputMode, Re
 
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput, output};
 
-const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Args {
@@ -50,7 +48,7 @@ pub async fn foreground(command: &str, cwd: &str, ctx: &Ctx) -> Result<ToolOutpu
     };
     let prepared = prepare(args, Tier::Exec, ctx, true).await?;
     let before = crate::drift::before(ctx);
-    let ran = run(&prepared.command, &prepared.cwd, DEFAULT_TIMEOUT, ctx).await?;
+    let ran = run(&prepared.command, &prepared.cwd, None, ctx).await?;
     let moved = crate::drift::absorb(ctx, before);
     Ok(crate::drift::tell(ran.output(preview), &moved))
 }
@@ -100,8 +98,11 @@ impl Bash {
             controls: None,
             description: format!(
                 "{DESCRIPTION}\n\nWait for the command to exit or stop the run to cancel it. \
+                 A command still running after {} is cut off, so start one expected to take \
+                 longer with background=true instead. \
                  Use background=true to start a command independently and return its id immediately. \
-                 Leave output unredirected so it can be read while the command runs."
+                 Leave output unredirected so it can be read while the command runs.",
+                llm::figures::elapsed(tool::limit::MAX_CALL)
             ),
         }
     }
@@ -112,7 +113,9 @@ impl Bash {
             executions: None,
             controls: None,
             description: format!(
-                "{DESCRIPTION}\n\nWait for the command to exit or stop the run to cancel it."
+                "{DESCRIPTION}\n\nWait for the command to exit or stop the run to cancel it. \
+                 A command still running after {} is cut off.",
+                llm::figures::elapsed(tool::limit::MAX_CALL)
             ),
         }
     }
@@ -352,21 +355,11 @@ impl Bash {
         prepared.output = call.output;
         let before = crate::drift::before(ctx);
         let launched = launch(&prepared, ctx)?;
-        let stop = tokio_util::sync::CancellationToken::new();
-        let mut running = Box::pin(wait(launched, stop.clone()));
-        tokio::select! {
-            biased;
-            () = ctx.cancel.cancelled() => {
-                stop.cancel();
-                let _ = running.await;
-                Err(ToolError::Cancelled)
-            }
-            ran = &mut running => {
-                let ran = ran?;
-                let moved = crate::drift::absorb(ctx, before);
-                Ok(crate::drift::tell(ran.output(preview), &moved))
-            }
-        }
+        // A command the model waits for holds the turn, and in a run with
+        // nobody at the keyboard nothing else would ever end it.
+        let ran = wait(launched, ctx.cancel.clone(), Some(tool::limit::MAX_CALL)).await?;
+        let moved = crate::drift::absorb(ctx, before);
+        Ok(crate::drift::tell(ran.output(preview), &moved))
     }
 }
 
@@ -390,7 +383,7 @@ pub fn rerun(again: Again, ctx: &Ctx) -> Rerun {
         {
             let launched = launch(&again, &ctx)?;
             execution.watch(launched.streams.peek());
-            supervise(Box::pin(wait(launched, stop)), execution);
+            supervise(Box::pin(wait(launched, stop, None)), execution);
             Ok(())
         }
     })
@@ -437,12 +430,10 @@ fn launch(again: &Again, ctx: &Ctx) -> Result<Launched, ToolError> {
 async fn wait(
     launched: Launched,
     stop: tokio_util::sync::CancellationToken,
+    deadline: Option<std::time::Duration>,
 ) -> Result<Ran, ToolError> {
     let group = launched.group;
-    let ends = crate::process::Ends {
-        stop,
-        deadline: None,
-    };
+    let ends = crate::process::Ends { stop, deadline };
     let exited = crate::process::settle(launched, ends).await?;
     let (out, err) = (exited.stdout, exited.stderr);
     let code = exited.status.code().unwrap_or(-1);
@@ -497,12 +488,12 @@ impl Ran {
 }
 
 /// Run `command` to completion under the workspace's clamps — its own process
-/// group, the context's cancellation, and `timeout`, past which the group is
-/// taken down with SIGTERM then SIGKILL.
+/// group, the context's cancellation, and `timeout` when there is one, past
+/// which the group is taken down with SIGTERM then SIGKILL.
 pub async fn run(
     command: &str,
     cwd: &std::path::Path,
-    timeout: std::time::Duration,
+    timeout: Option<std::time::Duration>,
     ctx: &Ctx,
 ) -> Result<Ran, ToolError> {
     let mut cmd = Command::new("sh");

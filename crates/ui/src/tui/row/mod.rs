@@ -593,13 +593,18 @@ impl Row {
 
     /// A prompt's lines as the stream echoed them, with the input's alignment.
     pub fn prompt(text: &str, paint: &Paint) -> Vec<Self> {
-        if text.starts_with('!') {
-            let bang = paint.span(&paint.theme.prompt.color, icons::bar(icons::BANG_SIGIL));
+        let bangs = pi_core::input::bangs(text);
+        if bangs > 0 {
+            let sigil = match bangs {
+                1 => icons::BANG_SIGIL,
+                _ => icons::BESIDE_SIGIL,
+            };
+            let bang = paint.span(&paint.theme.prompt.color, icons::bar(sigil));
             let indent = Span::raw(" ".repeat(bang.width()));
             let mut rows = Vec::new();
             for (i, line) in text.lines().enumerate() {
                 let (prefix, body) = if i == 0 {
-                    (bang.clone(), line.strip_prefix('!').unwrap_or(line))
+                    (bang.clone(), &line[bangs..])
                 } else {
                     (indent.clone(), line)
                 };

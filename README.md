@@ -216,6 +216,7 @@ refused, and resuming one from another directory moves it here.
 | `/content`                         | everything the model is given before you type |
 | `/<skill> [args]`                  | run a skill (also one-shot: `pi "/commit"`)   |
 | `!<command>`                       | run a shell command and record its output     |
+| `!!<command>`                      | start one in the background and keep typing   |
 | `@path`                            | complete a workspace file                     |
 | click a code block's label         | copy it; a diagram or table, its source       |
 | drag, double or triple click       | copy the text, a word, or a line              |
@@ -241,6 +242,12 @@ also continues when messages are waiting. Generation is never interrupted.
 Waiting messages show under the status line, and `up` takes them back. A
 command queued ahead of them holds them until the run ends.
 
+A `!` command waits for the run to let go of the transcript, then runs to
+completion with nothing cutting it short. A `!!` command does not wait for
+either: it goes to the same place the model's background commands do,
+returning an id at once, so it can be started while a reply is generating.
+Its output reaches the model when it ends, with the other results waiting.
+
 ## Tools
 
 `read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `subagent` `memory`, plus:
@@ -265,7 +272,8 @@ command queued ahead of them holds them until the run ends.
   a command shows the actual launch command, working directory, and output.
   The original call and launch specification both survive restart and session
   recovery. User stop and restart actions reach the model before it next speaks.
-  Foreground commands have no automatic timeout or background promotion.
+  A foreground command is cut off after ten minutes, and never promoted to the
+  background on its own.
   Interrupting their run stops their process group. One-shot runs and
   subagents offer foreground commands only; a subagent call also waits for
   completion. Background commands stop when pi exits; use cron for work

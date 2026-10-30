@@ -20,13 +20,14 @@ pub struct Editor {
     draft: String,
     // The styled first-row sigil, so the theme can restyle it.
     prompt: Span<'static>,
-    prompt_bang: Span<'static>,
+    // One sigil per bang count: `!` then `!!`.
+    prompt_bangs: [Span<'static>; 2],
 }
 
 impl Editor {
-    pub fn set_prompts(&mut self, prompt: Span<'static>, bang: Span<'static>) {
+    pub fn set_prompts(&mut self, prompt: Span<'static>, bangs: [Span<'static>; 2]) {
         self.prompt = prompt;
-        self.prompt_bang = bang;
+        self.prompt_bangs = bangs;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -403,22 +404,13 @@ impl Editor {
     /// The rows to paint and the caret's position among them. Wrapped here
     /// (not by the terminal) so the live region's row-counting repaint works.
     pub fn view(&self, paint: &Paint, width: usize) -> (Vec<Line<'static>>, (u16, u16)) {
-        // `!` at the start is a shell command; the bang line uses `prompt_bang`.
-        let bang = self.text.starts_with('!');
-        let body = if bang {
-            &self.text[1..]
-        } else {
-            self.text.as_str()
-        };
-        let cursor = if bang {
-            self.cursor.saturating_sub(1)
-        } else {
-            self.cursor
-        };
-        let prompt = if bang {
-            self.prompt_bang.clone()
-        } else {
-            self.prompt.clone()
+        // Leading bangs are the sigil a shell line wears, not its text.
+        let bangs = pi_core::input::bangs(&self.text);
+        let body = &self.text[bangs..];
+        let cursor = self.cursor.saturating_sub(bangs);
+        let prompt = match bangs {
+            0 => self.prompt.clone(),
+            n => self.prompt_bangs[n - 1].clone(),
         };
         // The prompt is painted with the body, so its width is measured the
         // same way the body's is: never assumed, always what is on screen.
@@ -567,7 +559,7 @@ mod tests {
         let paint = paint();
         e.set_prompts(
             crate::tui::Ui::paint_prompt(&paint, pi_store::icons::INPUT_SIGIL),
-            crate::tui::Ui::paint_prompt(&paint, pi_store::icons::BANG_SIGIL),
+            crate::tui::Ui::bang_prompts(&paint),
         );
         e.insert_str(s);
         e
@@ -825,6 +817,15 @@ mod tests {
         let (rows, caret) = e.view(&paint(), 6);
         assert_eq!(rows.len(), 2);
         assert_eq!(caret, (1, 4));
+    }
+
+    #[test]
+    fn both_bangs_sit_in_the_sigil_of_a_line_run_beside_the_turn() {
+        let e = typed("!!cargo build");
+        let (rows, caret) = e.view(&paint(), 40);
+        assert_eq!(rows[0].spans[0].content, "!!");
+        assert_eq!(rows[0].spans[1].content, "cargo build");
+        assert_eq!(caret, (0, 13));
     }
 
     #[test]

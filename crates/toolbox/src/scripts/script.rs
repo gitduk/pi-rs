@@ -118,7 +118,7 @@ pub async fn run_script(
 ) -> Result<String, String> {
     let mut command = cargo_script(path);
     command.current_dir(ctx.workspace.root());
-    let exited = crate::process::run(command, Some(input), timeout, ctx)
+    let exited = crate::process::run(command, Some(input), Some(timeout), ctx)
         .await
         .map_err(|e| e.to_string())?;
     if !exited.status.success() {

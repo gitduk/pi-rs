@@ -762,4 +762,21 @@ mod tests {
         );
         assert_eq!(gist("Version 2.4 is out"), "Version 2.4 is out");
     }
+
+    // A second bang names the same command, so one reading must answer both.
+    #[test]
+    fn a_second_bang_runs_the_command_beside_the_turn() {
+        use crate::input::Fate;
+        let read = |line| crate::input::read(line, BUILTIN, None);
+        assert!(matches!(read("!ls -l"), Intent::Bash(c) if c == "ls -l"));
+        assert!(matches!(read("!!cargo build"), Intent::Background(c) if c == "cargo build"));
+        assert!(matches!(read("!! cargo build"), Intent::Background(c) if c == "cargo build"));
+        // Neither names a command, so both are prose.
+        assert!(matches!(read("!"), Intent::Prompt(_)));
+        assert!(matches!(read("!!"), Intent::Prompt(_)));
+        // The run holds the transcript a `!` files into; a `!!` files nothing
+        // until it ends.
+        assert!(matches!(read("!ls").fate(), Fate::Queued));
+        assert!(matches!(read("!!ls").fate(), Fate::Now));
+    }
 }

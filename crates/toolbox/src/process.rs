@@ -162,17 +162,17 @@ pub(crate) fn spills_only(ctx: &Ctx) -> Ctx {
 
 /// Run `cmd` to completion, feeding it `stdin` when there is some. Past
 /// `timeout` (at most [`MAX_RUN`]), or on the context's cancellation, the
-/// process group is taken down.
+/// process group is taken down. No `timeout` leaves it to the cancellation.
 pub async fn run(
     cmd: Command,
     stdin: Option<Vec<u8>>,
-    timeout: Duration,
+    timeout: Option<Duration>,
     ctx: &Ctx,
 ) -> Result<Exited, ToolError> {
     let launched = launch(cmd, stdin, ctx)?;
     let ends = Ends {
         stop: ctx.cancel.clone(),
-        deadline: Some(timeout),
+        deadline: timeout,
     };
     settle(launched, ends).await
 }
@@ -437,7 +437,9 @@ mod tests {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg("sleep 30 & echo hi");
         let started = std::time::Instant::now();
-        let exited = run(cmd, None, Duration::from_secs(20), &ctx).await.unwrap();
+        let exited = run(cmd, None, Some(Duration::from_secs(20)), &ctx)
+            .await
+            .unwrap();
         assert!(started.elapsed() < Duration::from_secs(10));
         assert!(exited.status.success());
         assert_eq!(exited.stdout.text.trim(), "hi");

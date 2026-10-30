@@ -39,7 +39,8 @@ pub(super) struct Ui {
     // bands are a lift of it, and a terminal that will not say leaves both be.
     pub(super) tty_bg: Option<(u8, u8, u8)>,
     // The same sigil for a `!` line, where the bang takes the icon's place.
-    pub(super) bang_prompt: Span<'static>,
+    // One sigil per bang count: `!` then `!!`.
+    pub(super) bang_prompts: [Span<'static>; 2],
     // The bar's separator, painted once beside the two above it: the bar
     // is rebuilt every frame and this depends only on the theme.
     pub(super) tab_sep: Span<'static>,
@@ -220,10 +221,10 @@ impl Ui {
         paint: Paint,
     ) -> Self {
         let prompt = Self::paint_prompt(&paint, &paint.theme.prompt.icon);
-        let bang_prompt = Self::paint_prompt(&paint, icons::BANG_SIGIL);
+        let bang_prompts = Self::bang_prompts(&paint);
         let band = paint.band(&paint.theme.prompt.panel.input);
         let mut editor = Editor::default();
-        editor.set_prompts(prompt.clone(), bang_prompt.clone());
+        editor.set_prompts(prompt.clone(), bang_prompts.clone());
         Self {
             screen,
             keys,
@@ -238,7 +239,7 @@ impl Ui {
             prompt,
             band,
             tty_bg: None,
-            bang_prompt,
+            bang_prompts,
             list: List::default(),
             questions: Vec::new(),
             said: Vec::new(),
@@ -288,6 +289,14 @@ impl Ui {
     }
 
     // The prompt sigil as the terminal shows it, colour and all.
+    // The sigil a line of each bang count wears, in count order.
+    pub(super) fn bang_prompts(paint: &Paint) -> [Span<'static>; 2] {
+        [
+            Self::paint_prompt(paint, icons::BANG_SIGIL),
+            Self::paint_prompt(paint, icons::BESIDE_SIGIL),
+        ]
+    }
+
     pub(super) fn paint_prompt(paint: &Paint, icon: &str) -> Span<'static> {
         paint.span(&paint.theme.prompt.color, icons::bar(icon))
     }
@@ -341,7 +350,7 @@ impl Ui {
         theme: Arc<pi_store::theme::Theme>,
     ) {
         self.paint = Paint::with_theme(self.paint.color, theme);
-        self.bang_prompt = Self::paint_prompt(&self.paint, icons::BANG_SIGIL);
+        self.bang_prompts = Self::bang_prompts(&self.paint);
         self.tab_sep = Self::paint_sep(&self.paint);
         self.band = self.paint.band(&self.paint.theme.prompt.panel.input);
         self.show_mode();

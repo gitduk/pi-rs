@@ -53,7 +53,7 @@ impl Ui {
         };
         self.prompt = Self::paint_prompt(&self.paint, icon);
         self.editor
-            .set_prompts(self.prompt.clone(), self.bang_prompt.clone());
+            .set_prompts(self.prompt.clone(), self.bang_prompts.clone());
         self.screen.cursor_shape(cursor);
     }
 

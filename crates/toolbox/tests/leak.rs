@@ -15,7 +15,7 @@ async fn a_timeout_takes_the_whole_process_group() {
     let err = match toolbox::bash::run(
         &format!("sleep 30 & echo $! > {}; sleep 30", pidfile.display()),
         c.workspace.root(),
-        std::time::Duration::from_millis(400),
+        Some(std::time::Duration::from_millis(400)),
         &c,
     )
     .await

@@ -11,7 +11,7 @@ pub const PROMPT_BAR: &str = "";
 /// as put their first character in the same place. Empty icons and the command
 /// prefix add no space.
 pub fn bar(icon: &str) -> String {
-    if icon.is_empty() || icon == BANG_SIGIL {
+    if icon.is_empty() || icon == BANG_SIGIL || icon == BESIDE_SIGIL {
         icon.to_string()
     } else {
         format!("{icon} ")
@@ -53,6 +53,7 @@ pub const CURRENT_ITEM: &str = "●"; // the current row in `/model` and `/resum
 pub const INPUT_SIGIL: &str = PROMPT_BAR; // `theme.prompt.icon` default
 pub const INPUT_SIGIL_NORMAL: &str = PROMPT_BAR; // `theme.prompt.normal` default
 pub const BANG_SIGIL: &str = "!"; // the `!command` input prompt
+pub const BESIDE_SIGIL: &str = "!!"; // the `!!command` input prompt
 
 pub const ELLIPSIS: &str = "…"; // a folded or clipped run
 pub const PART_SEP: &str = " · ";

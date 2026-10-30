@@ -22,7 +22,7 @@ pub async fn run_asking(
     ctx: &tool::Ctx,
     _asks: &dyn crate::channel::Ask,
 ) -> Result<crate::process::Exited, tool::ToolError> {
-    crate::process::run(cmd, Some(input), timeout, ctx).await
+    crate::process::run(cmd, Some(input), Some(timeout), ctx).await
 }
 mod script;
 

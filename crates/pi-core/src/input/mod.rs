@@ -16,6 +16,8 @@ pub enum Intent {
     Prompt(String),
     // What `!` named.
     Bash(String),
+    // What `!!` named: run beside the turn rather than waited for.
+    Background(String),
     // A word from the table.
     Builtin(Builtin),
     // A word the surface put in the table, for the surface to answer.
@@ -136,6 +138,9 @@ impl Intent {
             Intent::Tool { .. } => Fate::Now,
             // A `!` files its result in the transcript, which the run has.
             Intent::Bash(_) => Fate::Queued,
+            // A `!!` returns as soon as the command starts, with nothing to
+            // file until it ends, by which time the run has let go.
+            Intent::Background(_) => Fate::Now,
             // Both reach for the transcript, and the run is holding it.
             // Leaving is never refused: a hung run must not trap the user.
             Intent::Builtin(Builtin::Quit) => Fate::Now,
@@ -257,14 +262,29 @@ pub fn expand(commands: &[Command], line: &str) -> Option<Result<String, String>
 
 /// Whether `line` reaches the model as written, naming no command to run.
 pub fn plain(line: &str) -> bool {
-    command_word(line).is_none() && bash_command(line).is_none()
+    command_word(line).is_none() && bang(line).is_none()
 }
 
-// `!` alone is prose; `!cmd` runs `cmd`. `!!cmd` keeps its second bang:
-// shell grammar reads `! cmd` as negating the exit code.
-fn bash_command(line: &str) -> Option<&str> {
-    let cmd = line.strip_prefix('!')?.trim();
-    (!cmd.is_empty()).then_some(cmd)
+/// How many bangs `line` opens with: one for a shell command, two for one run
+/// beside the turn. Counted here, so where the command starts is answered once
+/// for the line that is read, the line that is drawn, and the one being typed.
+pub fn bangs(line: &str) -> usize {
+    match line.strip_prefix('!') {
+        Some(rest) => 1 + usize::from(rest.starts_with('!')),
+        None => 0,
+    }
+}
+
+/// The shell command `line` names, and whether a second bang asked for it to
+/// run beside the turn. Both bangs are read here, so `!!` naming nothing
+/// cannot fall through to `!`'s reading and run a bare bang as a command.
+fn bang(line: &str) -> Option<(&str, bool)> {
+    let bangs = bangs(line);
+    if bangs == 0 {
+        return None;
+    }
+    let command = line[bangs..].trim();
+    (!command.is_empty()).then_some((command, bangs == 2))
 }
 
 /// What a submitted line is asking for. Total on purpose: every line means
@@ -272,8 +292,11 @@ fn bash_command(line: &str) -> Option<&str> {
 ///
 /// `!` is read before the slash words, because a shell command is not one.
 pub fn read(line: &str, commands: &[Command], tools: Option<&tool::Registry>) -> Intent {
-    if let Some(command) = bash_command(line) {
-        return Intent::Bash(command.to_string());
+    if let Some((command, beside)) = bang(line) {
+        return match beside {
+            true => Intent::Background(command.to_string()),
+            false => Intent::Bash(command.to_string()),
+        };
     }
     let Some(word) = command_word(line) else {
         return Intent::Prompt(line.to_string());

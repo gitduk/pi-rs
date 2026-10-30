@@ -337,7 +337,10 @@ impl Core {
         ) {
             Intent::Prompt(_) | Intent::Bash(_) => true,
             Intent::Other { word, .. } => crate::input::starts_turn(&self.commands, &word),
-            Intent::Builtin(_) | Intent::Surface { .. } | Intent::Tool { .. } => false,
+            Intent::Builtin(_)
+            | Intent::Surface { .. }
+            | Intent::Tool { .. }
+            | Intent::Background(_) => false,
         }
     }
 
@@ -349,6 +352,12 @@ impl Core {
     pub fn dispatch(&mut self, intent: Intent) -> Step {
         match intent {
             Intent::Bash(command) => Step::Bash(command),
+            // The shell already runs commands beside the turn, reports them
+            // and carries them over; a `!!` is that, asked for by hand.
+            Intent::Background(command) => Step::Tool {
+                name: toolbox::bash::Bash::NAME.to_string(),
+                args: serde_json::json!({ "command": command, "background": true }),
+            },
             Intent::Prompt(send) => Step::Prompt { send, typed: None },
             Intent::Surface { word, args } => Step::Surface { word, args },
             Intent::Tool { name, args } => {
