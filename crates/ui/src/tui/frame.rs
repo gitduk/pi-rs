@@ -338,7 +338,7 @@ impl Ui {
             .flatten();
         let (was, top_was) = self.window_mut(view);
         (*was, *top_was) = (scroll, top);
-        let picked = self.list.highlighted(menu.len().max(1));
+        let picked = self.list.highlighted(&menu);
         let items = self.menu_items(&menu, picked, regions.menu.width as usize);
         // The picked row on the input's band, the menu's width: a bar the eye
         // finds at once, where a mark in its text alone was not enough. Only

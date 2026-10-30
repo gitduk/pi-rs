@@ -84,7 +84,6 @@ impl Ui {
         }
         let picks = self.picks(text);
         if !picks.is_empty() {
-            self.list.picked.get_or_insert(0);
             return Assistance::new(picks, None);
         }
         self.lists.catch_up();
@@ -179,7 +178,7 @@ impl Ui {
         if menu.is_empty() {
             return None;
         }
-        let at = self.list.highlighted(menu.len());
+        let at = self.list.highlighted(&menu);
         Some(menu.swap_remove(at))
     }
 
@@ -269,8 +268,8 @@ impl Ui {
     }
 
     pub(super) fn step_menu(&mut self, action: Action) {
-        let len = self.menu().len();
-        self.list.step(action == Action::MenuNext, len);
+        let menu = self.menu();
+        self.list.step(action == Action::MenuNext, &menu);
         // A search's list moves the view with it.
         self.search_follow();
     }
@@ -278,7 +277,7 @@ impl Ui {
     // Follow the selected prompt once per change, leaving subsequent
     // scrolling free to read its surroundings.
     pub(super) fn rewind_follow(&mut self, view: &View, menu: &[MenuEntry]) -> Option<Place> {
-        let picked = self.list.highlighted(menu.len().max(1));
+        let picked = self.list.highlighted(menu);
         let id = match menu.get(picked) {
             Some(MenuEntry::Completion(c)) => c
                 .line
@@ -379,15 +378,25 @@ impl List {
         }
     }
 
-    // The highlighted row of `len`, clamped: a list can change under the
-    // same line. `len` is never zero.
-    pub(super) fn highlighted(&self, len: usize) -> usize {
-        self.picked.unwrap_or(len - 1).min(len - 1)
+    // The highlighted row of `menu`, clamped: a list can change under the
+    // same line. Nobody having moved, it is the row the list reads from:
+    // the bottom, nearest the line, for one that grows away from it; the
+    // top for a question, whose options read downward from the first.
+    pub(super) fn highlighted(&self, menu: &[MenuEntry]) -> usize {
+        let last = menu.len().saturating_sub(1);
+        let fresh = match menu.first() {
+            Some(MenuEntry::Pick { .. }) => 0,
+            _ => last,
+        };
+        self.picked.unwrap_or(fresh).min(last)
     }
 
-    fn step(&mut self, down: bool, len: usize) {
-        let n = len.saturating_sub(1);
-        let at = self.picked.unwrap_or(n).min(n);
+    // From where the list reads now, so the first move off a fresh one
+    // goes from the row `highlighted` shows rather than from an end of
+    // its own choosing.
+    fn step(&mut self, down: bool, menu: &[MenuEntry]) {
+        let n = menu.len().saturating_sub(1);
+        let at = self.highlighted(menu);
         self.picked = Some(match down {
             true => at.saturating_add(1).min(n),
             false => at.saturating_sub(1),
