@@ -44,6 +44,9 @@ pub(super) struct Ui {
     // The bar's separator, painted once beside the two above it: the bar
     // is rebuilt every frame and this depends only on the theme.
     pub(super) tab_sep: Span<'static>,
+    // Which theme is in force, counted up on every change. A screen whose
+    // rows carry an earlier count is made again before it is drawn.
+    pub(super) painted: u64,
     // Where the list over the line stands; the list itself is derived from
     // what's typed.
     pub(super) list: List,
@@ -235,6 +238,7 @@ impl Ui {
             lists,
             editor,
             tab_sep: Self::paint_sep(&paint),
+            painted: 0,
             paint,
             prompt,
             band,
@@ -354,11 +358,37 @@ impl Ui {
         self.tab_sep = Self::paint_sep(&self.paint);
         self.band = self.paint.band(&self.paint.theme.prompt.panel.input);
         self.show_mode();
+        // Every screen's rows were made in the old theme. Which of them is
+        // drawn next is not known here, so each repaints when it is.
+        self.painted += 1;
         // The opening block is painted once at construction; rebuild it so a
         // reload lands on the new theme instead of the old.
         if view.surface.opened {
             view.surface.scrollback[0] = Row::banner(resolved, &self.paint);
         }
+    }
+
+    // The rows a theme change left behind, made again in the new one. A
+    // stream still writing is left alone: it would be thrown away with the
+    // rows it has not finished. The scroll stays — a recolour moves nothing.
+    pub(super) fn repaint(&mut self, view: &mut View, lane: &Lane) {
+        if view.painted == self.painted || !view.surface.stream.text.is_empty() {
+            return;
+        }
+        view.painted = self.painted;
+        // Not `is_empty`, which asks after the conversation: a screen row
+        // is not one, and a lane holding only those still has rows to make.
+        let Some(session) = lane.session().filter(|s| !s.entries().is_empty()) else {
+            return;
+        };
+        let (scroll, top, opened) = (view.surface.scroll, view.surface.top, view.surface.opened);
+        let banner = opened.then(|| Row::banner(lane.resolved(), &self.paint));
+        self.rebuild(view, session, lane.root());
+        if let Some(banner) = banner {
+            view.surface.opened = true;
+            view.surface.scrollback.push_front(banner);
+        }
+        (view.surface.scroll, view.surface.top) = (scroll, top);
     }
 
     // Every copy of the config the surface keeps, brought up to date — the one

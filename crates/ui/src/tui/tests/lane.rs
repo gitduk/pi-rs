@@ -1349,3 +1349,43 @@ async fn leaving_with_a_command_preserves_its_stop_cause_on_resume() {
         );
     }
 }
+
+// A row holds the colours it was made with, so a theme change has to make
+// it again: a screen half in the old theme and half in the new is the bug
+// patching the banner alone left behind.
+#[tokio::test]
+async fn a_new_theme_reaches_the_rows_already_on_the_screen() {
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let token = tui.core.lanes[0].token();
+    let mut session = agent::session::Session::default();
+    session.push_tally("3s · 1234 in · 567 out");
+    tui.core.lane_mut().return_session(session);
+    tui.core.lane_mut().finish();
+    tui.rebuild_front();
+    // The test screen paints without colour; this asks for the colours back.
+    tui.ui.paint = crate::render::Paint::new(true);
+
+    let fit = |bg| crate::tui::following_terminal(&pi_store::theme::Theme::default(), Some(bg));
+    let wear =
+        |tui: &mut crate::tui::Tui, theme: pi_store::theme::Theme| -> Vec<ratatui::style::Style> {
+            let resolved = tui.core.lane().resolved().clone();
+            tui.ui
+                .set_theme(view_at(&mut tui.views, token), &resolved, Arc::new(theme));
+            let lane = tui.core.lane();
+            tui.ui.flush(lane, view_at(&mut tui.views, token));
+            let paint = crate::render::Paint::new(true);
+            let view = view_at(&mut tui.views, token);
+            (view.surface.scrollback.iter())
+                .map(|row| row.line(0, &paint, 80).0)
+                .flat_map(|line| line.spans)
+                .map(|span| span.style)
+                .collect()
+        };
+
+    let dark = wear(&mut tui, fit((0, 0, 0)));
+    assert!(!dark.is_empty(), "the row wears the theme it was made in");
+    let light = wear(&mut tui, fit((255, 255, 255)));
+    assert_ne!(dark, light, "the old rows kept the old theme");
+}

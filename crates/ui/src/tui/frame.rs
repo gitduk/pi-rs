@@ -28,6 +28,7 @@ const MENU_PADDING: usize = 2;
 
 impl Ui {
     pub(super) fn flush(&mut self, lane: &Lane, view: &mut View) {
+        self.repaint(view, lane);
         if self.background_focus.is_some() && (self.reading() || !self.menu().is_empty()) {
             self.leave_background();
         }

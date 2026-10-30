@@ -38,6 +38,9 @@ pub struct View {
     // The half-typed line parked when the surface last left this lane,
     // waiting in the view to come back to the editor with it.
     pub(super) draft: String,
+    // Which theme these rows were painted in. A row holds the colours it
+    // was made with, so a new theme reaches it only by being made again.
+    pub(super) painted: u64,
 }
 
 // What the screen shows: the settled rows, the stream still completing them,
