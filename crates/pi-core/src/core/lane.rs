@@ -1178,10 +1178,10 @@ mod tests {
         assert!(agent.brief.registry.get("job").is_none());
         let shell = agent.brief.registry.get(toolbox::bash::Bash::NAME).unwrap();
         let schema = shell.schema();
-        for control in ["stop", "stop_all", "restart", "output", "wait"] {
+        for control in ["stop", "restart", "output"] {
             assert!(schema["properties"].get(control).is_some(), "{control}");
         }
-        assert_eq!(schema["properties"]["wait"]["type"], "integer");
+        assert!(schema["properties"].get("stop_all").is_none());
         assert!(schema["properties"].get("join").is_none());
         assert!(
             schema.get("required").is_none(),

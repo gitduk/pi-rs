@@ -140,11 +140,10 @@ struct Call {
     written: bool,
 }
 
-/// Queue a command independently of the calling turn, starting it after
-/// `after`. The execution is registered now, so it can be stopped before launch.
+/// Queue a command independently of the calling turn. The execution is
+/// registered before it starts, so it can be stopped from the moment it exists.
 async fn schedule(
     args: Args,
-    after: std::time::Duration,
     ctx: &Ctx,
     executions: &dyn RunSink,
     call: Call,
@@ -154,52 +153,20 @@ async fn schedule(
     let mut again = prepare(args, Tier::Exec, ctx, call.written).await?;
     again.environment = call.environment;
     again.output = call.output;
-    let at = tokio::time::Instant::now()
-        .checked_add(after)
-        .ok_or_else(|| ToolError::Invalid("the start delay is too large".into()))?;
     let stop = tokio_util::sync::CancellationToken::new();
     let execution = executions.start(ctx.workspace.root().to_path_buf(), invocation, stop.clone());
     let id = execution.id();
     execution.watch(Arc::new(String::new));
     let launch = rerun(again.clone(), ctx);
     execution.rerun(launch.clone(), again);
-    if !after.is_zero() {
-        execution.channel().status(format!(
-            "waiting {} before starting",
-            llm::figures::elapsed(after)
-        ));
+    if let Err(error) = launch(execution.clone(), stop) {
+        execution
+            .channel()
+            .result(format!("could not start: {error}"));
+        execution.end();
     }
-    if after.is_zero() {
-        if let Err(error) = launch(execution.clone(), stop) {
-            execution
-                .channel()
-                .result(format!("could not start: {error}"));
-            execution.end();
-        }
-    } else {
-        tokio::spawn(async move {
-            tokio::select! {
-                biased;
-                () = stop.cancelled() => return,
-                () = tokio::time::sleep_until(at) => {}
-            }
-            execution.channel().status("starting".into());
-            if let Err(error) = launch(execution.clone(), stop) {
-                execution
-                    .channel()
-                    .result(format!("could not start: {error}"));
-                execution.end();
-            }
-        });
-    }
-    let when = if after.is_zero() {
-        "now".to_string()
-    } else {
-        format!("in {}", llm::figures::elapsed(after))
-    };
     Ok(ToolOutput::text(format!(
-        "scheduled as background command #{id}, starting {when}. Its exit status and output \
-         arrive automatically later."
+        "started as background command #{id}. Its exit status and output arrive automatically later."
     ))
     .with_preview(format!("{preview} [background #{id}]")))
 }
@@ -244,14 +211,6 @@ impl Tool for Bash {
                 Output remains readable while the command runs. Leave output unredirected. \
                 Use `background=true` instead of `nohup` or `&` for commands that must continue after this turn.",
         });
-        schema["properties"]["wait"] = json!({
-            "type": "integer",
-            "minimum": 0,
-            "default": 0,
-            "description": "Delay the command start by this many seconds. This parameter requires `command` and `background=true`. \
-                The call returns an command id immediately. The delay occurs in the background. \
-                Omit `wait` or use 0 to start immediately. The command reports completion automatically.",
-        });
         schema
     }
 
@@ -276,33 +235,27 @@ impl Bash {
     ) -> Result<ToolOutput, ToolError> {
         let present = |key: &str| args.get(key).is_some_and(|v| !v.is_null());
         if !present("command") {
-            if ["cwd", "stdin", "background", "wait"]
+            if ["cwd", "stdin", "background"]
                 .iter()
                 .any(|key| present(key))
             {
                 return Err(ToolError::Invalid(
-                    "command is required for cwd, stdin, background, or a start delay".into(),
+                    "command is required for cwd, stdin, or background".into(),
                 ));
             }
             if let Some(controls) = &self.controls {
                 return controls.execute(args, ctx).await;
             }
         } else if let Some(controls) = &self.controls
-            && controls.parameters().keys().any(|key| present(key))
+            && let Some(key) = controls.parameters().keys().find(|key| present(key))
         {
-            return Err(ToolError::Invalid(
-                "run a command or control existing background commands in one call, not both"
-                    .into(),
-            ));
+            // Named: "one or the other" leaves the caller guessing which half
+            // of its call to drop.
+            return Err(ToolError::Invalid(format!(
+                "`{key}` controls existing background commands; one call runs a command or \
+                 controls them, not both"
+            )));
         }
-        let after = match args.get("wait").filter(|v| !v.is_null()) {
-            Some(v) => Some(v.as_u64().ok_or_else(|| {
-                ToolError::Invalid(
-                    "wait must be a nonnegative number of seconds before starting command".into(),
-                )
-            })?),
-            None => None,
-        };
         let background = match args.as_object_mut().and_then(|a| a.remove("background")) {
             Some(Value::Bool(value)) => value,
             Some(Value::Null) | None => false,
@@ -317,13 +270,7 @@ impl Bash {
                 "this run only keeps commands while it is active".into(),
             ));
         }
-        if after.is_some() && !background {
-            return Err(ToolError::Invalid(
-                "a start delay requires background=true".into(),
-            ));
-        }
         if let Some(object) = args.as_object_mut() {
-            object.remove("wait");
             object.retain(|_, value| !value.is_null());
         }
         let args: Args = tool::parse_args_hinted(args, ARGS_HINT)?;
@@ -343,7 +290,6 @@ impl Bash {
             let invocation = invocation.unwrap_or_else(|| Invocation::shell(args.command.clone()));
             return schedule(
                 args,
-                std::time::Duration::from_secs(after.unwrap_or(0)),
                 ctx,
                 self.executions.as_deref().expect("background mode checked"),
                 call,

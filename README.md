@@ -259,13 +259,13 @@ Its output reaches the model when it ends, with the other results waiting.
   shows each server and its tools, and `/mcp restart` reconnects them. A call
   with no answer in 10 minutes is given up.
 - `bash` waits for a regular command to exit. In interactive mode,
-  `background: true` returns a command id immediately. Add `wait` to delay
-  the start **in seconds**, for example:
-  `{"command":"python3 report.py","background":true,"wait":30}`.
+  `background: true` returns a command id immediately, for example:
+  `{"command":"python3 report.py","background":true}`.
   With no command, `{}` lists background commands; `{"output":3}` reads output,
-  `{"stop":[3]}` stops a command, `{"stop_all":true}` stops all, and
-  `{"restart":[3]}` starts one again under its id. Stopping during a delay
-  prevents launch. Background results open later turns once the checkout is
+  `{"stop":[3]}` stops commands, and `{"restart":[3]}` starts them again under
+  their ids. Each of those three names one id, a list of ids, or `"all"`; none
+  of them takes an empty list, so no stray value can reach every command at
+  once. Background results open later turns once the checkout is
   idle. Commands appear above the input; clicking one opens its output.
   Shell calls show the original command with shell highlighting. Named wrappers
   show the tool name and supplied arguments with tool-call colours. Expanding

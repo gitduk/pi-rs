@@ -1374,8 +1374,9 @@ impl toolbox::channel::Channel for Handle {
 impl Controls for Commands {
     fn description(&self) -> &str {
         "Call without a command to list background commands. Use `output` to read a command's latest output. \
-             Use `stop` to stop commands by id, or `stop_all` to stop all commands. \
-             Use `restart` to run a command again under its existing id. It stops the previous run first.\n\n\
+             Use `stop` to stop commands. \
+             Use `restart` to run a command again under its existing id. It stops the previous run first. \
+             Each of these names one command id, a list of ids, or \"all\".\n\n\
              Results arrive automatically before the next model request. \
              If the run ended, results open a new turn. \
              Continue independent work, or report progress and end this turn. \
@@ -1383,43 +1384,29 @@ impl Controls for Commands {
     }
 
     fn parameters(&self) -> serde_json::Map<String, Value> {
-        serde_json::Map::from_iter([
-            (
-                "stop".into(),
-                json!({
-                    "type": "array",
-                    "items": { "type": "integer" },
-                    "description": "Specify the command ids to stop.",
-                }),
-            ),
-            (
-                "stop_all".into(),
-                json!({ "type": "boolean", "description": "Stop every running background command." }),
-            ),
-            (
-                "restart".into(),
-                json!({
-                    "type": "array",
-                    "items": { "type": "integer" },
-                    "description": "Specify the command ids to restart.",
-                }),
-            ),
-            (
-                "output".into(),
-                json!({
-                    "type": "integer",
-                    "description": "Specify one command id to read its latest output while it runs.",
-                }),
-            ),
-        ])
+        let which = |control: &Control| {
+            json!({
+                "description": format!(
+                    "Name the command to {}: one id, a list of ids, or \"all\".",
+                    control.what(),
+                ),
+                "oneOf": [
+                    { "type": "integer" },
+                    { "type": "array", "items": { "type": "integer" }, "minItems": 1 },
+                    { "const": "all" },
+                ],
+            })
+        };
+        (Control::EVERY.iter())
+            .map(|control| (control.key().to_string(), which(control)))
+            .collect()
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let root = ctx.workspace.root();
-        let parameters = self.parameters();
         if let Some(fields) = args.as_object() {
             for (key, value) in fields {
-                if !value.is_null() && !parameters.contains_key(key) {
+                if !value.is_null() && !Control::EVERY.iter().any(|c| c.key() == key) {
                     return Err(ToolError::Invalid(format!(
                         "unknown background control `{key}`"
                     )));
@@ -1430,66 +1417,135 @@ impl Controls for Commands {
         let id = |v: &Value| {
             v.as_u64()
                 .or_else(|| parse_id(v.as_str()?))
-                .ok_or_else(|| ToolError::Invalid(format!("`{v}` is not a command id")))
+                .ok_or_else(|| ToolError::Invalid(format!("`{v}` is not a command id or \"all\"")))
         };
-        let ids_of = |key: &str| -> Result<Vec<u64>, ToolError> {
+        // No spelling means "nothing", so a filled-in control is always a real
+        // request — never a stray value quietly reaching every command.
+        let named = |control: &Control| -> Result<Option<Named>, ToolError> {
+            let key = control.key();
             match args.get(key) {
-                Some(Value::Array(ids)) => ids.iter().map(id).collect(),
-                Some(Value::Null) | None => Ok(Vec::new()),
-                Some(v) => Ok(vec![id(v)?]),
+                Some(Value::Null) | None => Ok(None),
+                Some(Value::Array(ids)) if ids.is_empty() => Err(ToolError::Invalid(format!(
+                    "`{key}` needs a command id, a list of ids, or \"all\""
+                ))),
+                Some(Value::Array(ids)) => Ok(Some(Named::Ids(
+                    ids.iter().map(id).collect::<Result<_, _>>()?,
+                ))),
+                Some(Value::String(word)) if word.eq_ignore_ascii_case("all") => {
+                    Ok(Some(Named::All))
+                }
+                Some(v) => Ok(Some(Named::Ids(vec![id(v)?]))),
             }
         };
-        let ids = ids_of("stop")?;
-        let restart = ids_of("restart")?;
-        let all = args.get("stop_all").and_then(Value::as_bool) == Some(true);
-        if !restart.is_empty() && (all || !ids.is_empty()) {
-            return Err(ToolError::Invalid(
-                "stop or restart in one call, not both".into(),
-            ));
+        let mut asked = Vec::new();
+        for control in Control::EVERY {
+            if let Some(which) = named(&control)? {
+                asked.push((control, which));
+            }
         }
-        let named = |verb: &str, ids: &[u64]| {
-            let ids: Vec<String> = ids.iter().map(|id| format!("#{id}")).collect();
-            format!("{verb} {}", ids.join(", "))
+        if asked.len() > 1 {
+            let keys: Vec<String> = (asked.iter())
+                .map(|(control, _)| format!("`{}`", control.key()))
+                .collect();
+            return Err(ToolError::Invalid(format!(
+                "one call does one thing: drop all but one of {}",
+                keys.join(", ")
+            )));
+        }
+        let Some((control, which)) = asked.pop() else {
+            let executions = self.table.listing(root);
+            let out = match executions.is_empty() {
+                true => "nothing in the background".to_string(),
+                false => executions.join("\n"),
+            };
+            return Ok(ToolOutput::text(out).with_preview("list"));
+        };
+        let preview = match &which {
+            Named::All => format!("{} all", control.key()),
+            Named::Ids(ids) => {
+                let ids: Vec<String> = ids.iter().map(|id| format!("#{id}")).collect();
+                format!("{} {}", control.key(), ids.join(", "))
+            }
         };
         // What was done, then each that was not; an error when none was.
-        let reply = |asked: String, verb: &str, (failed, done): (Vec<String>, Vec<String>)| {
+        let reply = |verb: &str, (failed, done): (Vec<String>, Vec<String>)| {
             if done.is_empty() {
                 return Err(ToolError::Invalid(failed.join("\n")));
             }
             let said = std::iter::once(format!("{verb} {}", done.join(", ")));
             Ok(
                 ToolOutput::text(said.chain(failed).collect::<Vec<_>>().join("\n"))
-                    .with_preview(asked),
+                    .with_preview(preview.clone()),
             )
         };
-        if !restart.is_empty() {
-            let asked = named("restart", &restart);
-            return reply(asked, "restarted", self.table.restart_each(root, &restart));
-        }
-        if all || !ids.is_empty() {
-            let asked = match all {
-                true => "stop all".to_string(),
-                false => named("stop", &ids),
-            };
-            return reply(
-                asked,
-                "stopped",
-                self.table.stop_each(root, if all { &[] } else { &ids }),
-            );
-        }
-        if let Some(v) = args.get("output").filter(|v| !v.is_null()) {
-            let id = id(v)?;
-            return (self.table.output(root, id))
-                .map(|out| ToolOutput::text(out).with_preview(named("output", &[id])))
-                .map_err(ToolError::Invalid);
-        }
-        let executions = self.table.listing(root);
-        let out = match executions.is_empty() {
-            true => "nothing in the background".to_string(),
-            false => executions.join("\n"),
+        // Stopping passes none along instead: the table knows which of its own
+        // are still worth stopping.
+        let every = || -> Vec<u64> {
+            (self.table.background(root).iter())
+                .map(|command| command.id)
+                .collect()
         };
-        Ok(ToolOutput::text(out).with_preview("list"))
+        let ids = match (&control, which) {
+            (Control::Stop, Named::All) => Vec::new(),
+            (_, Named::All) => every(),
+            (_, Named::Ids(ids)) => ids,
+        };
+        match control {
+            Control::Stop => reply("stopped", self.table.stop_each(root, &ids)),
+            Control::Restart if ids.is_empty() => Err(ToolError::Invalid(
+                "nothing in the background to restart".into(),
+            )),
+            Control::Restart => reply("restarted", self.table.restart_each(root, &ids)),
+            Control::Output if ids.is_empty() => {
+                Ok(ToolOutput::text("nothing in the background").with_preview(preview))
+            }
+            Control::Output => {
+                // One command answers for itself; several need telling apart.
+                let read = |id: &u64| match self.table.output(root, *id) {
+                    Ok(out) if ids.len() == 1 => out,
+                    Ok(out) => format!("#{id}:\n{out}"),
+                    Err(why) => why,
+                };
+                let out = ids.iter().map(read).collect::<Vec<_>>().join("\n\n");
+                Ok(ToolOutput::text(out).with_preview(preview))
+            }
+        }
     }
+}
+
+/// What a control call asks of the commands it names.
+enum Control {
+    Stop,
+    Restart,
+    Output,
+}
+
+impl Control {
+    const EVERY: [Control; 3] = [Control::Stop, Control::Restart, Control::Output];
+
+    /// The parameter a caller fills in to ask for this.
+    fn key(&self) -> &'static str {
+        match self {
+            Control::Stop => "stop",
+            Control::Restart => "restart",
+            Control::Output => "output",
+        }
+    }
+
+    /// What it does, to finish "name the command to ...".
+    fn what(&self) -> &'static str {
+        match self {
+            Control::Stop => "stop",
+            Control::Restart => "restart",
+            Control::Output => "read output from",
+        }
+    }
+}
+
+/// Which commands a control names.
+enum Named {
+    Ids(Vec<u64>),
+    All,
 }
 
 #[cfg(test)]
@@ -1498,21 +1554,21 @@ mod tests {
     use tool::Tool;
 
     #[tokio::test]
-    async fn stopping_a_delayed_command_prevents_the_command_from_starting() {
+    async fn a_stopped_command_never_runs_and_can_be_started_over() {
         let (dir, ctx) = context();
         let table = Arc::new(Table::default());
         let control = Arc::new(Commands::new(table.clone()));
         let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
         executions
             .execute(
-                json!({"background": true, "command": "echo started >> starts", "wait": 1}),
+                json!({"background": true, "command": "sleep 0.3; echo started >> starts"}),
                 &ctx,
             )
             .await
             .unwrap();
         let listed = executions.execute(json!({}), &ctx).await.unwrap().flatten();
         assert!(
-            listed.contains("waiting") && listed.contains("#1"),
+            listed.contains("running") && listed.contains("#1"),
             "{listed}"
         );
         let output = executions
@@ -1525,7 +1581,7 @@ mod tests {
             .execute(json!({"stop": [1]}), &ctx)
             .await
             .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         assert!(!dir.path().join("starts").exists());
         assert_eq!(
             table.background(ctx.workspace.root())[0].state,
@@ -1546,32 +1602,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_command_without_a_start_delay_runs_immediately_in_its_cwd() {
-        for wait in [None, Some(0)] {
-            let (dir, ctx) = context();
-            let table = Arc::new(Table::default());
-            let control = Arc::new(Commands::new(table.clone()));
-            let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
-            std::fs::create_dir(dir.path().join("subdir")).unwrap();
-            let mut args = json!({"background": true, "command": "echo made > result; echo failed >&2; exit 3", "cwd": "subdir"});
-            if let Some(wait) = wait {
-                args["wait"] = json!(wait);
-            }
-            executions.execute(args, &ctx).await.unwrap();
-            let result = said_by(&table, ctx.workspace.root()).await;
-            assert!(
-                result.contains("exited 3") && result.contains("failed"),
-                "{result}"
-            );
-            assert_eq!(
-                std::fs::read_to_string(dir.path().join("subdir/result")).unwrap(),
-                "made\n"
-            );
-            assert!(
-                table.take_back(ctx.workspace.root()).is_none(),
-                "delivered once"
-            );
+    async fn a_background_command_runs_in_its_cwd() {
+        let (dir, ctx) = context();
+        let table = Arc::new(Table::default());
+        let control = Arc::new(Commands::new(table.clone()));
+        let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        let args = json!({"background": true, "command": "echo made > result; echo failed >&2; exit 3", "cwd": "subdir"});
+        executions.execute(args, &ctx).await.unwrap();
+        let result = said_by(&table, ctx.workspace.root()).await;
+        assert!(
+            result.contains("exited 3") && result.contains("failed"),
+            "{result}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("subdir/result")).unwrap(),
+            "made\n"
+        );
+        assert!(
+            table.take_back(ctx.workspace.root()).is_none(),
+            "delivered once"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_control_can_name_several_commands_or_all_of_them() {
+        let (_dir, ctx) = context();
+        let table = Arc::new(Table::default());
+        let control = Arc::new(Commands::new(table.clone()));
+        let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        let _stop = ctx.cancel.clone().drop_guard();
+        for _ in 0..2 {
+            executions
+                .execute(json!({"background": true, "command": "sleep 5"}), &ctx)
+                .await
+                .unwrap();
         }
+        let both = executions
+            .execute(json!({"output": [1, 2]}), &ctx)
+            .await
+            .unwrap()
+            .flatten();
+        assert!(both.contains("#1:") && both.contains("#2:"), "{both}");
+        // One command answers for itself, with no heading to tell it apart.
+        let one = executions
+            .execute(json!({"output": "#2"}), &ctx)
+            .await
+            .unwrap()
+            .flatten();
+        assert_eq!(one, "nothing printed yet");
+        let stopped = executions
+            .execute(json!({"stop": "all"}), &ctx)
+            .await
+            .unwrap()
+            .flatten();
+        assert!(
+            stopped.contains("#1") && stopped.contains("#2"),
+            "{stopped}"
+        );
+        for command in table.background(ctx.workspace.root()) {
+            assert_eq!(command.state, State::Stopped);
+        }
+        let again = executions
+            .execute(json!({"restart": "all"}), &ctx)
+            .await
+            .unwrap()
+            .flatten();
+        assert!(again.contains("#1") && again.contains("#2"), "{again}");
     }
 
     #[tokio::test]
@@ -1583,17 +1680,19 @@ mod tests {
         let marker = dir.path().join("starts");
         for args in [
             json!({"wait": [10], "timeout_ms": 420000}),
-            json!({"wait": 30}),
-            json!({"command": "echo started > starts", "wait": 30}),
             json!({"command": "echo started > starts", "timeout_ms": 420000}),
-            json!({"background": true, "command": "echo started > starts", "wait": -1}),
-            json!({"background": true, "command": "echo started > starts", "wait": 0.5}),
-            json!({"background": true, "command": "echo started > starts", "wait": [10]}),
-            json!({"background": true, "command": "echo started > starts", "wait": u64::MAX}),
-            json!({"background": true, "command": "echo started > starts", "stop_all": true}),
+            json!({"background": true, "command": "echo started > starts", "stop": "all"}),
+            json!({"background": true, "command": "echo started > starts", "stop": [1]}),
             json!({"background": true, "command": " "}),
             json!({"join": 10}),
             json!({"command":"echo started > starts", "background":"true"}),
+            // No control spells "nothing", so an empty list is a mistake.
+            json!({"stop": []}),
+            json!({"restart": []}),
+            json!({"output": []}),
+            json!({"stop": "everything"}),
+            json!({"stop": [1], "restart": [2]}),
+            json!({"stop": [1], "output": 2}),
         ] {
             assert!(
                 executions.execute(args.clone(), &ctx).await.is_err(),
@@ -1612,7 +1711,7 @@ mod tests {
         let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
         executions
             .execute(
-                json!({"background": true, "command": "echo started", "cwd": "missing", "wait": 0}),
+                json!({"background": true, "command": "echo started", "cwd": "missing"}),
                 &ctx,
             )
             .await

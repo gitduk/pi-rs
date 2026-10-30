@@ -324,10 +324,11 @@ mod tests {
     use tool::Tool as _;
     use toolbox::background::RunSink as _;
 
-    // The start delay belongs to the execution. Ending the scheduling turn does
-    // not cancel it; completion opens a later turn through the same driver.
+    // A background command belongs to the execution. Ending the turn that
+    // started it does not cancel it; completion opens a later turn through the
+    // same driver.
     #[tokio::test]
-    async fn a_delayed_command_returns_before_starting_and_reports_in_a_later_turn() {
+    async fn a_background_command_returns_before_it_ends_and_reports_in_a_later_turn() {
         use serde_json::json;
         use std::time::Duration;
 
@@ -342,24 +343,19 @@ mod tests {
         let out = tokio::time::timeout(
             Duration::from_millis(500),
             executions.execute(
-                json!({"command": "echo started > started; echo finished", "background": true, "wait": 1}),
+                json!({"command": "sleep 0.4; echo started > started; echo finished", "background": true}),
                 &ctx,
             ),
         )
         .await
-        .expect("scheduling must not wait for the start delay")
+        .expect("starting must not wait for the command")
         .unwrap();
         assert!(out.flatten().contains("command #1"));
-        assert!(!marker.exists(), "the command has not started");
-        assert!(
-            table.background(root)[0]
-                .progress
-                .contains("before starting")
-        );
+        assert!(!marker.exists(), "the command has not finished");
         assert!(drivers.next(1, root).is_none());
         ctx.cancel.cancel();
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(!marker.exists(), "the delay is still in the background");
+        assert!(!marker.exists(), "ending the turn does not stop it");
         let next = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let changed = table.changed().notified();

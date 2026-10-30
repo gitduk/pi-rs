@@ -28,8 +28,8 @@ mod tests {
         let _stop = ctx.cancel.clone().drop_guard();
         let full = foreground(toolbox::builtin());
         let shell = full.get(toolbox::bash::Bash::NAME).unwrap();
-        assert!(shell.schema()["properties"].get("wait").is_none());
         assert!(shell.schema()["properties"].get("background").is_none());
+        assert!(shell.schema()["properties"].get("stop").is_none());
         let read_only = foreground(toolbox::builtin().within(tool::Tier::Read));
         assert!(read_only.get(toolbox::bash::Bash::NAME).is_none());
         let hidden = foreground(toolbox::builtin().without(toolbox::bash::Bash::NAME));

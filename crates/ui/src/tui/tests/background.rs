@@ -304,7 +304,7 @@ async fn background_commands_share_shell_colours_and_keep_status_muted() {
     let command = "python3 .pi/tmp/monitor.py 600 --label 'watch'";
     toolbox::bash::Bash::new(sink.clone())
         .execute(
-            serde_json::json!({ "command": command, "background": true, "wait": 60 }),
+            serde_json::json!({ "command": command, "background": true }),
             &ctx,
         )
         .await
