@@ -161,13 +161,14 @@ Background mode is declared in metadata. It does not depend on fd 3 events.
 |---|---|
 | `{"status": "..."}` | Report progress. In foreground mode, this is call progress. In background mode, it is command status. Each new status replaces the previous status. |
 | `{"result": "..."}` | In background mode, deliver one result as a separate turn in the command's checkout. |
-| `{"input": "..."}` | Deliver a person's words to the model unchanged. Do not execute them as a command. |
+| `{"input": "..."}` | Submit a person's line through the session's input parser, including commands. A leading space sends slash-prefixed text as prose. |
 | `{"interrupt": true}` | Stop the active turn in the command's checkout, as a user stop would. |
 | `{"follow": true}` | Receive replies for all subsequent turns in the command's checkout, including turns opened by other inputs. |
 
-For each turn opened by `input`, pi writes `{"started": true}` back through the same fd.
-It then writes `{"reply": "..."}` with the complete answer.
-An incomplete answer ends with `(stopped)` or `(failed: …)`.
+When an input begins execution, pi writes `{"request": 17, "started": true}` back through the same fd.
+It then writes `{"request": 17, "reply": "..."}` with the answer or reason it could not complete.
+Progress messages carry the same `request` ID. Track each ID independently when operations overlap.
+An incomplete model answer ends with `(stopped)` or `(failed: …)`.
 Each input receives one reply.
 After `follow`, the script also receives one reply for every other turn in its checkout, without duplicates.
 

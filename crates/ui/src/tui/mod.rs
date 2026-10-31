@@ -7,6 +7,7 @@ mod browse;
 mod call;
 mod clipboard;
 mod editor;
+mod execute;
 mod frame;
 mod keys;
 pub use keys::WORDS;
@@ -38,7 +39,7 @@ use pi_core::core::lane::{Lane, Run};
 use pi_core::core::{self, Core};
 use pi_core::driver::{Drivers, Origin, Said};
 use pi_core::input::commands::Choice;
-use pi_core::input::{self, Fate, Intent, Rewound, Step};
+use pi_core::input::{self, Fate, Intent, Rewound};
 use pi_store::listing::Listing;
 use ratatui::text::Text;
 use screen::Screen;
@@ -338,13 +339,6 @@ impl Tui {
         }
     }
 
-    // The line that asked, kept on screen only if `step` answers under it.
-    fn echo_under(&mut self, step: &Step, line: Option<String>) {
-        if let Some(line) = line.filter(|_| step.lands_under()) {
-            self.echo(&line);
-        }
-    }
-
     // The line a turn or a `!` answers, onto the screen as it starts.
     fn echo(&mut self, line: &str) {
         let view = front_view(&mut self.views, self.core.lane());
@@ -394,16 +388,6 @@ impl Tui {
             notes.extend(said);
         }
         self.notice(pi_core::input::notice(notes));
-    }
-
-    fn land_swap(&mut self, said: String) {
-        // Carries its own transcript: the lane it moves to was opened
-        // with one, even if the lane being left has a run writing it.
-        self.rebuild_front();
-        // `at` forgets the lists: a swap that didn't move repeats the root,
-        // dropping them either way.
-        self.ui.lists.at(self.core.lane_mut().root());
-        self.notice(said);
     }
 
     // Take what every lane's run has posted since the last look into its own
@@ -617,7 +601,15 @@ impl Tui {
             }
             // A command refused because a run is in flight.
             Fate::Refused(why) => {
-                self.notice(why.to_string());
+                let request = pi_core::execution::Request::new(origin, self.core.lane().token());
+                tracing::info!(target: "pi::session", request = request.id, ?origin,
+                    lane = request.lane, ?intent, why, "dispatch refused");
+                self.drivers.started(request, false);
+                self.complete(
+                    request,
+                    pi_core::execution::Output::Notice(why.to_string()),
+                    pi_core::driver::Ended::Failed(why.to_string()),
+                );
                 Wake::Nothing
             }
         }
@@ -748,10 +740,10 @@ impl Tui {
             let waiting = !view.queued.is_empty();
             // Who sent what is carried out this pass.
             let mut origin = Origin::Typed;
-            // A driver's line goes only when the lane is free and nothing typed
-            // is waiting: what the user says comes first.
+            // Results and loops wait for a free lane. User submissions also
+            // reach admission during a run, so immediate commands can answer.
             let free = !running && !waiting;
-            let driven = free.then(|| self.driver_line()).flatten();
+            let driven = (free || running).then(|| self.driver_line()).flatten();
             if free
                 && driven.is_none()
                 && let Some(restart) = self.restart_into_update()
@@ -838,7 +830,7 @@ impl Tui {
                 }
             };
             // Out here, where all of `self` is free again.
-            let (asked, mut line) = match woke {
+            let (asked, line) = match woke {
                 Wake::Turn(done) => {
                     self.settle(done).await;
                     continue;
@@ -847,7 +839,7 @@ impl Tui {
                 Wake::Leave(why) => break why,
                 // Its driver hears nothing of the turn, so nothing follows.
                 Wake::Relay(ask) => {
-                    self.start_turn(ask, &done_tx);
+                    self.deliver_prompt(ask, Origin::Background, None, &done_tx);
                     continue;
                 }
                 Wake::Prompt(ask, line) => {
@@ -867,86 +859,16 @@ impl Tui {
                 // arrives already read.
                 Asked::Core(ready) => ready,
             };
-            let was = self.core.current;
-            let asked_on = self.core.lane().token();
-            tracing::info!(
-                target: "pi::session", origin = ?origin, lane = asked_on, intent = ?intent, "dispatch"
-            );
-            let step = self.core.dispatch(intent);
-            self.reconcile(was);
-            let prompt = matches!(step, Step::Prompt { .. });
-            if !prompt {
-                self.echo_under(&step, line.take());
-            }
-            // Its turn starts when the server answers; drivers hear then.
-            let deferred = matches!(step, Step::McpPrompt { .. });
-            match step {
-                Step::Quit => {
-                    break match origin {
-                        Origin::Typed => "The user exited pi.",
-                        Origin::Loop | Origin::Background | Origin::Input(_) => {
-                            "pi exited in response to a background command."
-                        }
-                    };
-                }
-                Step::Notice(line) => self.notice(line),
-                Step::Bash(command) => self.start_bash(command, &done_tx),
-                Step::McpPrompt {
-                    prompt,
-                    args,
-                    typed,
-                } => self.start_fetch(prompt, args, typed, origin, &fetched_tx),
-                Step::Swap(said) => self.land_swap(said),
-                Step::Rewound(rewound, unsaved) => self.land_rewound(rewound, unsaved),
-                Step::Moved(said) => {
-                    self.follow_root();
-                    self.land_notice(said);
-                }
-                Step::Worktrees(said) => {
-                    self.land_notice(said);
-                    // A checkout went; the cached list would go on offering it.
-                    self.ui.lists.forget();
-                }
-                Step::Edit(file) => {
-                    self.edit_file(file).await;
-                    // A file saved for the first time is listed as there now.
-                    self.ui.lists.forget();
-                }
-                Step::Handled(lines) => self.land_lines(lines),
-                Step::Surface { word, .. } if word == keys::KEYS => {
-                    let mut listing = self.ui.keys.listing();
-                    listing.rows.push(pi_store::listing::Row::new([
-                        "Normal, with no menu: ctrl+k focuses the last execution. In executions: ctrl+k/j move; x stops; r restarts; X stops all; enter opens output; q or esc returns to input."
-                    ]));
-                    self.land_lines(listing)
-                }
-                Step::Surface { word, .. } => self.notice(format!("unknown command {word}")),
-                Step::Compact(focus) => self.start_compact(focus, &done_tx),
-                Step::Tool { name, args } => self.start_tool(name, args, &started_tx),
-                Step::Drive(drive) => {
-                    let lane = self.core.lane();
-                    let said = self.drivers.command(drive, lane.token(), lane.ctx());
-                    self.land_driven(said);
-                }
-                // Queued-during-run entries are taken one at a time at the
-                // loop's top; draining here would merge them into one prompt.
-                Step::Prompt { send, typed } => {
-                    let ask = clipboard::prompt(send, typed, &self.ui.images);
-                    if !self.deliver_prompt(ask, origin, line, &done_tx) {
-                        continue;
-                    }
-                }
-            }
-            // The driver that sent this line hears the end of the turn it began.
-            // By token: the step may have moved the surface to another lane.
-            if origin != Origin::Typed
-                && !deferred
-                && let Some(at) = self.core.position_of(asked_on)
+            if self
+                .execute(intent, origin, line, &done_tx, &fetched_tx, &started_tx)
+                .await
             {
-                let started = self.core.lanes[at].is_running();
-                if let Some(said) = self.drivers.dispatched(origin, asked_on, started, prompt) {
-                    self.say_of(at, by_pi(&said));
-                }
+                break match origin {
+                    Origin::Typed => "The user exited pi.",
+                    Origin::Loop | Origin::Background | Origin::Input(_) => {
+                        "pi exited in response to a background command."
+                    }
+                };
             }
         };
         self.save_history();
@@ -959,13 +881,15 @@ impl Tui {
     // a relay opens a turn, anything else is read.
     fn driver_line(&mut self) -> Option<(Origin, Wake)> {
         let lane = self.core.lane();
-        let next = self.drivers.next(lane.token(), lane.root())?;
+        let next = if lane.is_running() {
+            self.drivers.next_input(lane.root())?
+        } else {
+            self.drivers.next(lane.token(), lane.root())?
+        };
         let view = front_view(&mut self.views, self.core.lane());
         view.surface.follow();
-        // A command's result is relayed under its label; a loop's line is read as
-        // typed. A person's line through an execution is a prompt: what they send
-        // never runs here as a command, and every one is answered. Only their
-        // pick of offered options reads as typed, as it would picked here.
+        // Results remain model input; a person's submission uses the same
+        // parser and admission rules as a submitted local line.
         let wake = match next.label {
             Some(label) => {
                 tracing::info!(
@@ -980,18 +904,15 @@ impl Tui {
                 })
             }
             None => {
-                let intent = match next.as_typed {
-                    true => input::read(
-                        &next.line,
-                        &self.core.commands,
-                        Some(&self.core.lane().agent().brief.registry),
-                    ),
-                    false => Intent::Prompt(next.line.clone()),
-                };
+                let intent = input::read(
+                    &next.line,
+                    &self.core.commands,
+                    Some(&self.core.lane().agent().brief.registry),
+                );
                 if !next.note.is_empty() {
                     self.core.lane_mut().push_note(&next.note);
                 }
-                Wake::Do(Asked::Core(intent), Some(next.line))
+                self.admit(Asked::Core(intent), next.origin, Some(next.line))
             }
         };
         Some((next.origin, wake))

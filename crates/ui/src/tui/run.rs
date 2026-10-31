@@ -3,77 +3,19 @@
 //! Beside them, what is asked off the loop without lending the transcript:
 //! a tool named directly, and an MCP prompt's text.
 
+use agent::AgentError;
 use agent::session::{Entry as LogEntry, Prompt, Session};
-use agent::{AgentError, Event};
-use futures::FutureExt;
 use ratatui::text::{Line, Span};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
-use super::row::Row;
 use super::stream::by_pi;
 use super::term::{Deafened, EXIT_GRACE, external_editor, scratch_file};
 use super::view::{Doing, Work, front_view, tail_of, view_at};
 use super::{NO_TRANSCRIPT, Tui};
-use pi_core::core;
 use pi_core::driver::{Ended, Origin};
-
-// A tool the user started directly, back from its call.
-pub(super) struct Started {
-    token: u64,
-    name: String,
-    // The call as it was asked for: a result alone does not say what ran.
-    call: String,
-    // What it said or why it failed; None once it was stopped.
-    said: Option<Result<String, String>>,
-}
-
-// An MCP prompt's text, back from its server.
-pub(super) struct Fetched {
-    // The lane it was asked on, and who asked.
-    token: u64,
-    from: Origin,
-    // The line as typed, to show and to name it by.
-    typed: String,
-    text: Result<String, String>,
-}
-
-// What kind of run a finished `Done` was, carrying what only that kind
-// leaves behind — so no arm can be built holding another's.
-pub(super) enum Kind {
-    // A turn: the agent loop ran, and `ran` says how it went. Its output
-    // reached the view through the lane's event channel as it happened.
-    Turn,
-    // A `!` command and the lines it printed, home whole rather than as
-    // events — kept apart from Turn since a `!` answers no channel.
-    Bash {
-        // The output lines, derived by the same function the rebuild draws
-        // with — plus the flash for a command that never ran.
-        lines: Vec<String>,
-    },
-    // A `/compact`, and what it shrank. None means the transcript already
-    // fit — or, with a cancelled `ran`, that nobody ever looked.
-    Compact(Option<agent::Report>),
-}
-
-// A run off the loop, reporting back via one channel (not a
-// `JoinHandle`) so nothing polls a growing list of lanes.
-pub(super) struct Done {
-    pub(super) token: u64,
-    pub(super) kind: Kind,
-    // The transcript back, and how the run went. None only if it
-    // panicked — the two are never separately absent.
-    pub(super) ran: Option<(Session, Result<llm::stream::Usage, AgentError>)>,
-}
-
-// Runs `run` off the loop, turning a panic into `None` — without this
-// a run that never reports leaves its lane looking "working" forever.
-pub(super) async fn guard<F, T>(run: F) -> Option<T>
-where
-    F: std::future::Future<Output = T>,
-{
-    std::panic::AssertUnwindSafe(run).catch_unwind().await.ok()
-}
+use pi_core::execution::{self, Output, Request};
+pub(super) use pi_core::execution::{Done, Fetched, Kind, Started};
 
 impl Tui {
     // The front lane's transcript, for a run about to start on it.
@@ -100,12 +42,23 @@ impl Tui {
         line: Option<String>,
         done: &UnboundedSender<Done>,
     ) -> bool {
+        let request = Request::new(origin, self.core.lane().token());
+        self.deliver_prompt_for(ask, request, line, done)
+    }
+
+    pub(super) fn deliver_prompt_for(
+        &mut self,
+        ask: Prompt,
+        request: Request,
+        line: Option<String>,
+        done: &UnboundedSender<Done>,
+    ) -> bool {
         if self.core.lane().is_running() {
             front_view(&mut self.views, self.core.lane())
                 .queued
                 .push(super::view::Queued {
                     input: super::view::Pending::Prompt(ask),
-                    origin,
+                    origin: request.origin,
                     line,
                 });
             return false;
@@ -113,11 +66,21 @@ impl Tui {
         if let Some(line) = line {
             self.echo(&line);
         }
-        self.start_turn(ask, done);
-        true
+        self.start_turn_for(ask, request, done)
     }
 
+    #[cfg(test)]
     pub(super) fn start_turn(&mut self, ask: Prompt, done: &UnboundedSender<Done>) {
+        let request = Request::new(Origin::Typed, self.core.lane().token());
+        self.start_turn_for(ask, request, done);
+    }
+
+    fn start_turn_for(
+        &mut self,
+        ask: Prompt,
+        request: Request,
+        done: &UnboundedSender<Done>,
+    ) -> bool {
         if let Some(said) = self.core.refresh_prompt_files() {
             self.notice(pi_core::input::notice(said));
         }
@@ -129,7 +92,12 @@ impl Tui {
         // Lent to the run for the turn's length. Missing only when a panic
         // took the transcript and the archive won't read back.
         let Some(mut carried) = self.take_carried() else {
-            return;
+            self.complete(
+                request,
+                Output::Notice(super::NO_TRANSCRIPT.into()),
+                Ended::Failed("no transcript".into()),
+            );
+            return false;
         };
         let id = carried.send(ask);
         // The stop note the send filed is an entry now:
@@ -155,7 +123,6 @@ impl Tui {
 
         let agent = self.core.lane_mut().agent().clone();
         let sent = self.core.lane_mut().sender().clone();
-        let token = self.core.lane().token();
         let done = done.clone();
         // Read where the run starts, not carried on the agent: a reload
         // between two turns reaches the next one this way.
@@ -166,21 +133,37 @@ impl Tui {
             self.drivers.background(),
             move || queued.take_prompt(),
         );
+        self.drivers.started(request, true);
+        let turn = execution::Turn {
+            request,
+            session: carried,
+            agent,
+            ctx,
+            events: sent,
+            retry,
+            input,
+        };
         tokio::spawn(async move {
-            let out = guard(agent.run_with_input(&mut carried, &ctx, &sent, &retry, &input)).await;
-            let _ = done.send(Done {
-                token,
-                kind: Kind::Turn,
-                ran: out.map(|out| (carried, out)),
-            });
+            let _ = done.send(turn.run().await);
         });
         self.core.lane_mut().begin(cancel);
+        true
     }
 
     // Runs a `!` command off the loop, so the screen stays live. Borrows
     // the transcript like a turn — the result is filed in it meanwhile.
-    pub(super) fn start_bash(&mut self, command: String, done: &UnboundedSender<Done>) {
-        let Some(mut carried) = self.take_carried() else {
+    pub(super) fn start_bash(
+        &mut self,
+        command: String,
+        request: Request,
+        done: &UnboundedSender<Done>,
+    ) {
+        let Some(carried) = self.take_carried() else {
+            self.complete(
+                request,
+                Output::Notice(super::NO_TRANSCRIPT.into()),
+                Ended::Failed("no transcript".into()),
+            );
             return;
         };
         let cancel = CancellationToken::new();
@@ -189,32 +172,10 @@ impl Tui {
         // `Run::Running.unsend`, which it has no prompt to honour.
         self.arm_view(Doing::Bash);
 
-        let token = self.core.lane().token();
         let done = done.clone();
         tokio::spawn(async move {
-            let out = guard(async move {
-                let out = core::bash::run_bash(&ctx, &command).await;
-                // Esc that stopped the `!` is a cancelled run too; `ran` says
-                // so instead of a success that spent nothing.
-                let ran = if ctx.cancel.is_cancelled() {
-                    Err(AgentError::Cancelled)
-                } else {
-                    Ok(llm::stream::Usage::default())
-                };
-                core::bash::record_bash(&mut carried, &command, out.text.clone());
-                (carried, ran, out.screen())
-            })
-            .await;
-            // A panic printed nothing anyone can still show; the empty lines
-            // and the missing transcript say the same thing from both sides.
-            let (kind, ran) = match out {
-                Some((carried, ran, lines)) => (Kind::Bash { lines }, Some((carried, ran))),
-                None => (Kind::Bash { lines: Vec::new() }, None),
-            };
-            let _ = done.send(Done { token, kind, ran });
+            let _ = done.send(execution::bash(request, carried, ctx, command).await);
         });
-        // Not a turn: nothing here calls a model, so there is no boundary at
-        // which a line could be heard.
         self.core.lane_mut().begin(cancel);
     }
 
@@ -223,58 +184,27 @@ impl Tui {
         &mut self,
         name: String,
         args: serde_json::Value,
+        request: Request,
         started: &UnboundedSender<Started>,
     ) {
         let Some(tool) = self.core.lane().agent().brief.registry.get(&name) else {
-            self.ui.flash(format!("{name} cannot start here"));
+            self.complete(
+                request,
+                Output::Notice(format!("{name} cannot start here")),
+                Ended::Failed("tool unavailable".into()),
+            );
             return;
         };
         self.ui.flash(format!("starting {name}…"));
         let ctx = self.core.lane().ctx_for(CancellationToken::new());
-        let (token, started) = (self.core.lane().token(), started.clone());
-        let call = tool::summary(&args).into_owned();
+        let started = started.clone();
         tokio::spawn(async move {
-            let said = guard(core::tools::run_named(tool, args, &ctx))
-                .await
-                .unwrap_or_else(|| Some(Err("it panicked".into())));
-            let _ = started.send(Started {
-                token,
-                name,
-                call,
-                said,
-            });
+            let _ = started.send(execution::tool(request, tool, args, ctx).await);
         });
     }
 
-    // What a started tool said lands on its lane as a note, so the model
-    // knows of it too; a failure is only the user's to read, and a stop was
-    // already answered by whoever stopped it.
     pub(super) fn land_started(&mut self, started: Started) {
-        let Started {
-            token,
-            name,
-            call,
-            said,
-        } = started;
-        let note = match said {
-            None => return,
-            Some(Ok(text)) => {
-                format!("The user ran `{name}` directly, as `{call}`, and it answered:\n\n{text}")
-            }
-            // The bar holds a line; the rest is in the journal.
-            Some(Err(why)) => {
-                let first = why.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-                self.notice(format!("{name} failed: {}", first.trim()));
-                return;
-            }
-        };
-        let Some(at) = self.core.position_of(token) else {
-            self.ui.flash(format!("{name} started; its lane has gone"));
-            return;
-        };
-        let lane = &mut self.core.lanes[at];
-        let view = super::view::opened(&mut self.views, lane, &self.ui.paint);
-        self.ui.say_note(lane, view, &note);
+        self.present(started.completion());
     }
 
     // Asks an MCP server for a prompt's text off the loop: a slow server
@@ -284,22 +214,13 @@ impl Tui {
         prompt: mcp::Prompt,
         args: String,
         typed: String,
-        from: Origin,
+        request: Request,
         fetched: &UnboundedSender<Fetched>,
     ) {
         self.ui.flash(format!("asking {}…", prompt.word()));
-        let (tx, token) = (fetched.clone(), self.core.lane().token());
+        let fetched = fetched.clone();
         tokio::spawn(async move {
-            const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
-            let text = tokio::time::timeout(WAIT, prompt.text(&args))
-                .await
-                .unwrap_or_else(|_| Err(format!("{} did not answer", prompt.word())));
-            let _ = tx.send(Fetched {
-                token,
-                from,
-                typed,
-                text,
-            });
+            let _ = fetched.send(execution::fetch(request, prompt, args, typed).await);
         });
     }
 
@@ -307,42 +228,50 @@ impl Tui {
     // still in front and idle; otherwise it is dropped, and said so.
     pub(super) fn land_fetched(&mut self, fetched: Fetched, done: &UnboundedSender<Done>) {
         let Fetched {
-            token,
-            from,
+            request,
             typed,
             text,
         } = fetched;
+        let token = request.lane;
         let front = self.core.lane().token() == token;
         let started = match text {
             Err(why) => {
-                self.ui.flash(why);
+                self.complete(request, Output::Notice(why.clone()), Ended::Failed(why));
                 false
             }
             Ok(send) if front && !self.core.lane().is_running() => {
                 self.echo(&typed);
-                self.start_turn(
+                self.start_turn_for(
                     super::clipboard::prompt(send, Some(typed), &self.ui.images),
+                    request,
                     done,
-                );
-                true
+                )
             }
             Ok(_) if !front => {
-                self.ui.flash(format!(
-                    "{typed} came back after its lane left the front; run it again"
-                ));
+                self.complete(
+                    request,
+                    Output::Notice(format!(
+                        "{typed} came back after its lane left the front; run it again"
+                    )),
+                    Ended::Stopped,
+                );
                 false
             }
             Ok(_) => {
-                self.ui.flash(format!(
-                    "{typed} came back while another turn ran; run it again"
-                ));
+                self.complete(
+                    request,
+                    Output::Notice(format!(
+                        "{typed} came back while another turn ran; run it again"
+                    )),
+                    Ended::Stopped,
+                );
                 false
             }
         };
-        // A driver hears of the turn only now that it began.
-        if from != Origin::Typed
+        if !started
+            && request.origin == Origin::Loop
             && let Some(at) = self.core.position_of(token)
-            && let Some(said) = self.drivers.dispatched(from, token, started, true)
+            && let Some(said) = self.drivers.unstarted(request)
         {
             self.say_of(at, by_pi(&said));
         }
@@ -350,43 +279,28 @@ impl Tui {
 
     // Runs `/compact` off the loop — summarizing what it drops is a model
     // call — while the lane keeps drawing and serving the others.
-    pub(super) fn start_compact(&mut self, focus: Option<String>, done: &UnboundedSender<Done>) {
-        let Some(mut carried) = self.take_carried() else {
+    pub(super) fn start_compact(
+        &mut self,
+        focus: Option<String>,
+        request: Request,
+        done: &UnboundedSender<Done>,
+    ) {
+        let Some(carried) = self.take_carried() else {
+            self.complete(
+                request,
+                Output::Notice(super::NO_TRANSCRIPT.into()),
+                Ended::Failed("no transcript".into()),
+            );
             return;
         };
         let cancel = CancellationToken::new();
-        // Work under way like any turn's, and nothing anyone can take back.
         self.arm_view(Doing::Compact);
-
-        let agent = self.core.lane_mut().agent().clone();
-        let token = self.core.lane().token();
+        let agent = self.core.lane().agent().clone();
         let done = done.clone();
         let stop = cancel.clone();
         tokio::spawn(async move {
-            let out = guard(async move {
-                // Dropped mid-flight, not signalled: `compact_now` writes to
-                // the transcript only once every await is behind it.
-                let ran = tokio::select! {
-                    got = agent.compact_now(&mut carried, focus.as_deref()) => Ok(got),
-                    _ = stop.cancelled() => Err(AgentError::Cancelled),
-                };
-                (carried, ran)
-            })
-            .await;
-            // A report only exists where the pass ran to the end: `Ok(None)`
-            // is a transcript that already fit, `Err` one nobody looked at.
-            let (kind, ran) = match out {
-                Some((carried, Ok(got))) => (
-                    Kind::Compact(got),
-                    Some((carried, Ok(llm::stream::Usage::default()))),
-                ),
-                Some((carried, Err(e))) => (Kind::Compact(None), Some((carried, Err(e)))),
-                None => (Kind::Compact(None), None),
-            };
-            let _ = done.send(Done { token, kind, ran });
+            let _ = done.send(execution::compact(request, carried, agent, focus, stop).await);
         });
-        // Not a turn: nothing here calls a model, so there is no boundary at
-        // which a line could be heard.
         self.core.lane_mut().begin(cancel);
     }
 
@@ -435,7 +349,7 @@ impl Tui {
 
     // A config or prompt file in `$EDITOR`, then the reload that makes it
     // count. A non-zero exit (`:cq`) is "forget it": nothing is reloaded.
-    pub(super) async fn edit_file(&mut self, path: std::path::PathBuf) {
+    pub(super) async fn edit_file(&mut self, path: std::path::PathBuf) -> Output {
         let (ran, resumed) = self.in_editor(&path).await;
         let unchanged = pi_core::core::resolve::unseed(&path);
         if let Err(e) = resumed {
@@ -470,7 +384,7 @@ impl Tui {
                 Err(why) => vec![why],
             },
         };
-        self.land_notice(pi_core::input::notice(said));
+        Output::Notice(pi_core::input::notice(said))
     }
 
     // Hand the terminal to `$EDITOR` on a copy of the line, and take back what
@@ -538,7 +452,11 @@ impl Tui {
         // Events arrive before the end that follows them, so both race;
         // take what's waiting first, or a tool row freezes mid-abandon.
         self.serve_lanes().await;
-        let Some(lane) = self.core.position_of(done.token) else {
+        let completion = done.completion();
+        let Some(lane) = self.core.position_of(done.request.lane) else {
+            if let Some(completion) = completion {
+                self.present(completion);
+            }
             return;
         };
         let unsend = self.core.lanes[lane].finish();
@@ -546,6 +464,9 @@ impl Tui {
         match done.kind {
             Kind::Turn | Kind::Bash { .. } => self.settle_run(lane, done, unsend).await,
             Kind::Compact(_) => self.settle_compact(lane, done).await,
+        }
+        if let Some(completion) = completion {
+            self.present(completion);
         }
     }
 
@@ -556,12 +477,7 @@ impl Tui {
         // Only a turn is a request the model was working on, and only a turn's
         // ending is worth telling it about.
         let was_turn = matches!(kind, Kind::Turn);
-        // A `!` brings its lines home to be shown here; a turn's reached the
-        // view as events, and a compact never arrives at this function.
-        let (was_bash, said) = match kind {
-            Kind::Bash { lines } => (true, Some(lines)),
-            _ => (false, None),
-        };
+        let was_bash = matches!(kind, Kind::Bash { .. });
 
         // Only a run that came back says why it ended; the archive rebuild
         // below has the same transcript and knows nothing about the run.
@@ -615,16 +531,6 @@ impl Tui {
                 .surface
                 .tail = tail_of(session);
         }
-        // A `!` command's output comes home whole rather than as events, so
-        // this is the only place it can reach the view that asked for it.
-        if let Some(said) = said.filter(|lines| !lines.is_empty()) {
-            let rows = said.into_iter().map(Row::notice);
-            view_at(&mut self.views, self.core.lanes[lane].token())
-                .surface
-                .scrollback
-                .extend(rows);
-        }
-
         // Before the split, so an off-screen round still comes due. A run
         // that never came back is named the failure it stood in for.
         let how = if unsend {
@@ -653,7 +559,17 @@ impl Tui {
             .turn_ended(token, &how, self.core.lanes[lane].ctx(), cap);
 
         let ok = out.is_ok();
-        self.close_run(lane, out, was_turn);
+        // Non-model tasks have their ending in the operation output. The
+        // streamed model run still closes its own live rows and tally here.
+        self.close_run(
+            lane,
+            if was_turn {
+                out
+            } else {
+                Ok(Default::default())
+            },
+            was_turn,
+        );
         if lane == self.core.current {
             if unsend && let Some(id) = self.core.lane().last_ask() {
                 self.rewind_turn(id);
@@ -670,14 +586,11 @@ impl Tui {
         }
     }
 
-    // A `/compact` has finished: put the transcript back, and show what the
-    // pass did — or say there was nothing to shrink.
     async fn settle_compact(&mut self, lane: usize, done: Done) {
         let Done { ran, kind, .. } = done;
         let Kind::Compact(report) = kind else {
             unreachable!("only a compact settles here")
         };
-        let stopped = matches!(&ran, Some((_, Err(AgentError::Cancelled))));
         // The lane it was started on may not be the one on screen any more;
         // give it back its transcript either way.
         let back = match ran {
@@ -688,24 +601,8 @@ impl Tui {
             None => self.recover_session(lane, "compaction"),
         };
 
-        if let Some(report) = report {
-            let _ = self.core.lanes[lane]
-                .sender()
-                .send(Event::Compacted(report));
-            if back {
-                let _ = self.core.save_lane(lane);
-            }
-        } else if stopped {
-            // Nothing written, nothing to report or save — same word a
-            // stopped turn ends on.
-            self.say_of(
-                lane,
-                self.ui.paint.span(&self.ui.paint.theme.muted, "stopped"),
-            );
-        } else if back {
-            // `/compact` answered, and there was nothing to do: the answer to
-            // a command, not news about the lane.
-            self.notice("nothing to compact — all of it is the working context kept".to_string());
+        if report.is_some() && back {
+            let _ = self.core.save_lane(lane);
         }
         // The pass is over, so the clock stops. What it was driving — the
         // live region — already went with the turn.

@@ -38,7 +38,7 @@ async fn an_idle_lane_opens_the_rewind_selector() {
     tui.ui.flash = None;
     let token = tui.core.lanes[0].token();
     tui.settle(crate::tui::run::Done {
-        token,
+        request: pi_core::execution::Request::new(pi_core::driver::Origin::Typed, token),
         kind: crate::tui::run::Kind::Turn,
         ran: Some((session, Ok(llm::stream::Usage::default()))),
     })
@@ -91,7 +91,7 @@ async fn an_echoed_prompt_gets_its_rewind_position_when_sent() {
     let mut tui = surface(dir.path());
     let token = tui.core.lane().token();
     tui.settle(crate::tui::run::Done {
-        token,
+        request: pi_core::execution::Request::new(pi_core::driver::Origin::Typed, token),
         kind: crate::tui::run::Kind::Turn,
         ran: Some((
             agent::session::Session::new(),
@@ -137,7 +137,7 @@ async fn an_unsent_prompt_survives_a_failed_write() {
         session.prompt("the first question");
         let token = tui.core.lanes[0].token();
         tui.settle(crate::tui::run::Done {
-            token,
+            request: pi_core::execution::Request::new(pi_core::driver::Origin::Typed, token),
             kind: crate::tui::run::Kind::Turn,
             ran: Some((session, Ok(llm::stream::Usage::default()))),
         })
@@ -185,7 +185,10 @@ async fn the_rewind_of_a_lane_with_no_transcript_says_so() {
     // Nothing came home, and nothing was saved to read back: the session has
     // never been written.
     tui.settle(crate::tui::run::Done {
-        token: tui.core.lanes[0].token(),
+        request: pi_core::execution::Request::new(
+            pi_core::driver::Origin::Typed,
+            tui.core.lanes[0].token(),
+        ),
         kind: crate::tui::run::Kind::Turn,
         ran: None,
     })
@@ -242,6 +245,10 @@ async fn only_an_answer_under_the_line_echoes_it() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
+    tui.core.lane_mut().finish();
+    let (done, _done_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (fetched, _fetched_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (started, _started_rx) = tokio::sync::mpsc::unbounded_channel();
     // The real table, or `/keys` is a word the door does not know and the
     // line is read as a prompt — which is a different test.
     let table = std::sync::Arc::new(pi_core::input::commands::commands(
@@ -267,8 +274,15 @@ async fn only_an_answer_under_the_line_echoes_it() {
         };
         let line = tui.ui.took_submit();
         assert_eq!(line.as_deref(), Some(typed));
-        let step = tui.core.dispatch(intent);
-        tui.echo_under(&step, line);
+        tui.execute(
+            intent,
+            pi_core::driver::Origin::Typed,
+            line,
+            &done,
+            &fetched,
+            &started,
+        )
+        .await;
         assert_eq!(rows(&mut tui), before + echoed, "{typed}");
     }
 }

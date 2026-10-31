@@ -252,6 +252,17 @@ pub(crate) fn background(
 async fn tell(mut to: OwnedWriteHalf, mut hear: UnboundedReceiver<Told>) {
     while let Some(told) = hear.recv().await {
         let line = match told {
+            Told::Response { request, event } => match event {
+                crate::channel::Response::Started => {
+                    serde_json::json!({ "request": request, "started": true })
+                }
+                crate::channel::Response::Progress(text) => {
+                    serde_json::json!({ "request": request, "progress": text })
+                }
+                crate::channel::Response::Finished(text) => {
+                    serde_json::json!({ "request": request, "reply": text })
+                }
+            },
             Told::Started => serde_json::json!({ "started": true }),
             Told::Progress(text) => serde_json::json!({ "progress": text }),
             Told::Reply(text) => serde_json::json!({ "reply": text }),
@@ -525,6 +536,37 @@ printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" "$e" "$f" > heard"#,
                 serde_json::json!({ "refused": 3, "why": "it is no longer up" }),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn overlapping_operations_keep_their_identity_on_the_wire() {
+        let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
+        let (_, write) = ours.into_split();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let writer = tokio::spawn(tell(write, rx));
+        for (request, event) in [
+            (7, crate::channel::Response::Started),
+            (8, crate::channel::Response::Started),
+            (8, crate::channel::Response::Finished("status".into())),
+            (7, crate::channel::Response::Progress("working".into())),
+            (7, crate::channel::Response::Finished("done".into())),
+        ] {
+            tx.send(Told::Response { request, event }).unwrap();
+        }
+        drop(tx);
+        let mut lines = BufReader::new(theirs).lines();
+        for expected in [
+            serde_json::json!({"request": 7, "started": true}),
+            serde_json::json!({"request": 8, "started": true}),
+            serde_json::json!({"request": 8, "reply": "status"}),
+            serde_json::json!({"request": 7, "progress": "working"}),
+            serde_json::json!({"request": 7, "reply": "done"}),
+        ] {
+            let line = lines.next_line().await.unwrap().unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&line).unwrap(), expected);
+        }
+        writer.await.unwrap();
+        assert!(lines.next_line().await.unwrap().is_none());
     }
 
     #[tokio::test]

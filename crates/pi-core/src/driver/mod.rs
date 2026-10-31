@@ -9,8 +9,10 @@ pub mod looping;
 
 use std::sync::Arc;
 
+use crate::execution::Request;
 use agent::Event;
 use tool::Ctx;
+use toolbox::channel::Response;
 use toolbox::channel::Told;
 
 use crate::input::Drive;
@@ -22,11 +24,12 @@ pub enum Origin {
     Typed,
     Loop,
     Background,
-    /// A person speaking through execution `0`: the turn's answer goes back to it.
+    /// A person speaking through execution `0`: the operation's answer goes back to it.
     Input(u64),
 }
 
 /// How a turn ended, as every driver that began it is told.
+#[derive(Debug)]
 pub enum Ended {
     Done,
     // The user stopped it, or a stop was asked for another way.
@@ -56,8 +59,6 @@ pub struct Next {
     /// Set when the line is the model's own come back, not the user's: what
     /// the screen names it by. The note then rides with the ask.
     pub label: Option<String>,
-    /// Read as if typed, so a command runs; otherwise always a prompt.
-    pub as_typed: bool,
 }
 
 #[derive(Default)]
@@ -67,6 +68,7 @@ pub struct Drivers {
     // Runs an execution is told the end of — its input opened them, or it follows
     // its checkout — each with its answer so far.
     owed: Vec<Owed>,
+    running: std::collections::HashMap<u64, Request>,
 }
 
 struct Owed {
@@ -77,9 +79,53 @@ struct Owed {
     turn_from: usize,
     sent: usize,
     progress: Option<(String, tokio::time::Instant)>,
+    request: u64,
 }
 
 impl Drivers {
+    /// Take a submitted user line without consuming background results or loops.
+    pub fn next_input(&self, root: &std::path::Path) -> Option<Next> {
+        let (execution, background::Back::Input { text, note }) =
+            self.executions.take_input(root)?
+        else {
+            unreachable!("only user submissions were requested")
+        };
+        Some(Next {
+            line: text,
+            note,
+            origin: Origin::Input(execution),
+            label: None,
+        })
+    }
+
+    /// Start an operation independently of the other requests on this lane.
+    pub fn started(&mut self, request: Request, model: bool) {
+        if model {
+            self.running.insert(request.lane, request);
+            match request.origin {
+                Origin::Input(execution) => self.owe_request(execution, request.lane, request.id),
+                Origin::Loop => self.loops.ask(request.lane),
+                Origin::Typed | Origin::Background => {}
+            }
+        } else {
+            self.respond(request, Response::Started);
+        }
+    }
+
+    /// Route a rendered response to its submitting execution. Local rendering
+    /// is the caller's; this layer knows neither layouts nor terminal state.
+    pub fn respond(&self, request: Request, event: Response) {
+        if let Origin::Input(execution) = request.origin {
+            self.executions.tell(
+                execution,
+                Told::Response {
+                    request: request.id,
+                    event,
+                },
+            );
+        }
+    }
+
     /// What the shell controls and calls that outlive their turn write into: the
     /// lanes' tools and this driver share it.
     pub fn background(&self) -> Arc<background::Table> {
@@ -100,21 +146,12 @@ impl Drivers {
                 note: due.note,
                 origin: Origin::Background,
                 label: Some(due.label),
-                as_typed: false,
             },
-            Some((
-                execution,
-                background::Back::Input {
-                    text,
-                    note,
-                    as_typed,
-                },
-            )) => Next {
+            Some((execution, background::Back::Input { text, note })) => Next {
                 line: text,
                 note,
                 origin: Origin::Input(execution),
                 label: None,
-                as_typed,
             },
             None => {
                 let due = self.loops.due(lane)?;
@@ -123,7 +160,6 @@ impl Drivers {
                     note: due.note,
                     origin: Origin::Loop,
                     label: None,
-                    as_typed: true,
                 }
             }
         })
@@ -144,24 +180,12 @@ impl Drivers {
         }
     }
 
-    /// A line from `origin` was dispatched on `lane`, and `started` a run —
-    /// a model turn when `prompt`. What comes back is for the lane.
-    pub fn dispatched(
-        &mut self,
-        origin: Origin,
-        lane: u64,
-        started: bool,
-        prompt: bool,
-    ) -> Option<String> {
-        match origin {
-            // Only a model turn ends with an answer to send back: a `!` never
-            // reaches `Done`, so its answer would be owed forever.
-            Origin::Input(execution) if prompt && started => self.owe(execution, lane),
-            Origin::Loop if started => self.loops.ask(lane),
-            Origin::Loop => return self.loops.unstarted(lane),
-            Origin::Typed | Origin::Background | Origin::Input(_) => {}
+    /// A loop's line did not start a model run.
+    pub fn unstarted(&mut self, request: Request) -> Option<String> {
+        match request.origin {
+            Origin::Loop => self.loops.unstarted(request.lane),
+            Origin::Typed | Origin::Background | Origin::Input(_) => None,
         }
-        None
     }
 
     /// One event from any lane's run, on the checkout at `root`; each driver
@@ -170,8 +194,12 @@ impl Drivers {
         // Each request, not just the run's first: one that follows from
         // mid-run still hears how the run ends.
         if let Event::TurnStart { .. } = event {
+            let request = *self
+                .running
+                .entry(lane)
+                .or_insert_with(|| Request::new(Origin::Background, lane));
             for execution in self.executions.followers(root) {
-                self.owe(execution, lane);
+                self.owe_request(execution, lane, request.id);
             }
         }
         for owed in self.owed.iter_mut().filter(|o| o.lane == lane) {
@@ -182,8 +210,10 @@ impl Drivers {
                 Event::ToolQueued { .. } => {
                     let text = &owed.said[owed.sent..];
                     if !text.trim().is_empty() {
-                        self.executions
-                            .tell(owed.execution, Told::Progress(text.to_string()));
+                        self.executions.tell(
+                            owed.execution,
+                            owed.response(Response::Progress(text.to_string())),
+                        );
                         owed.sent = owed.said.len();
                     }
                 }
@@ -192,8 +222,10 @@ impl Drivers {
                     if owed.progress.as_ref().is_none_or(|(last, at)| {
                         last != text && now.duration_since(*at) >= background::PROGRESS_EVERY
                     }) {
-                        self.executions
-                            .tell(owed.execution, Told::Progress(text.clone()));
+                        self.executions.tell(
+                            owed.execution,
+                            owed.response(Response::Progress(text.clone())),
+                        );
                         owed.progress = Some((text.clone(), now));
                     }
                 }
@@ -211,10 +243,14 @@ impl Drivers {
         ctx: &Ctx,
         cap: Option<usize>,
     ) -> Option<String> {
+        self.running.remove(&lane);
         for owed in self.owed.extract_if(.., |o| o.lane == lane) {
             self.executions.tell(
                 owed.execution,
-                Told::Reply(reply(owed.said[owed.sent..].into(), ended)),
+                owed.response(Response::Finished(reply(
+                    owed.said[owed.sent..].into(),
+                    ended,
+                ))),
             );
         }
         self.loops
@@ -229,11 +265,15 @@ impl Drivers {
 
     /// End the loops of lanes that are gone, saying which ended.
     pub fn retain(&mut self, live: impl Fn(u64) -> bool) -> Vec<String> {
+        self.running.retain(|lane, _| live(*lane));
         // A command left waiting on a reply would wait for good.
         for owed in self.owed.extract_if(.., |o| !live(o.lane)) {
             self.executions.tell(
                 owed.execution,
-                Told::Reply(reply(owed.said[owed.sent..].into(), &Ended::Stopped)),
+                owed.response(Response::Finished(reply(
+                    owed.said[owed.sent..].into(),
+                    &Ended::Stopped,
+                ))),
             );
         }
         self.loops.retain(live)
@@ -242,7 +282,7 @@ impl Drivers {
 
 impl Drivers {
     // A command is owed a run's answer once, however many reasons it has.
-    fn owe(&mut self, execution: u64, lane: u64) {
+    fn owe_request(&mut self, execution: u64, lane: u64, request: u64) {
         if self
             .owed
             .iter()
@@ -257,8 +297,24 @@ impl Drivers {
             turn_from: 0,
             sent: 0,
             progress: None,
+            request,
         });
-        self.executions.tell(execution, Told::Started);
+        self.executions.tell(
+            execution,
+            Told::Response {
+                request,
+                event: Response::Started,
+            },
+        );
+    }
+}
+
+impl Owed {
+    fn response(&self, event: Response) -> Told {
+        Told::Response {
+            request: self.request,
+            event,
+        }
     }
 }
 
@@ -411,7 +467,6 @@ mod tests {
             "Background command #1 (build) reports:\n\nbuilt\n\nBackground command #3 (test) reports:\n\ntests passed"
         );
         assert!(next.note.contains("2 queued results"));
-        assert!(!next.as_typed);
         assert!(
             drivers.next(1, root).is_none(),
             "one turn drains the backlog"
@@ -486,8 +541,15 @@ mod tests {
             Default::default(),
         );
         execution.channel().listen(tx);
-        drivers.dispatched(Origin::Input(execution.id()), 1, true, true);
-        assert_eq!(rx.try_recv(), Ok(Told::Started));
+        let request = Request::new(Origin::Input(execution.id()), 1);
+        drivers.started(request, true);
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Told::Response {
+                request: request.id,
+                event: Response::Started
+            })
+        );
         drivers.observe(1, &root, &Event::TurnStart { turn: 1 });
         drivers.observe(1, &root, &Event::TextDelta("checking now".into()));
         for _ in 0..2 {
@@ -501,7 +563,13 @@ mod tests {
                 },
             );
         }
-        assert_eq!(rx.try_recv(), Ok(Told::Progress("checking now".into())));
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Told::Response {
+                request: request.id,
+                event: Response::Progress("checking now".into())
+            })
+        );
         assert!(
             rx.try_recv().is_err(),
             "one progress message per completed text"
@@ -514,7 +582,13 @@ mod tests {
                 text: "1/3".into(),
             },
         );
-        assert_eq!(rx.try_recv(), Ok(Told::Progress("1/3".into())));
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Told::Response {
+                request: request.id,
+                event: Response::Progress("1/3".into())
+            })
+        );
         drivers.observe(
             1,
             &root,
@@ -537,7 +611,13 @@ mod tests {
         );
         drivers.observe(1, &root, &Event::TextDelta("done".into()));
         drivers.turn_ended(1, &Ended::Done, &ctx, None);
-        assert_eq!(rx.try_recv(), Ok(Told::Reply("done".into())));
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Told::Response {
+                request: request.id,
+                event: Response::Finished("done".into())
+            })
+        );
         assert!(rx.try_recv().is_err());
     }
 
@@ -563,14 +643,24 @@ mod tests {
         assert_eq!(next.origin, Origin::Input(execution.id()));
         assert!(next.label.is_none(), "read as typed, not relayed");
 
-        drivers.dispatched(next.origin, 1, true, true);
-        assert_eq!(rx.try_recv(), Ok(Told::Started));
+        let request = Request::new(next.origin, 1);
+        drivers.started(request, true);
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Told::Response {
+                request: request.id,
+                event: Response::Started
+            })
+        );
         drivers.observe(1, &root, &Event::TextDelta("parse.rs".into()));
         drivers.observe(2, &root, &Event::TextDelta("another lane".into()));
         drivers.turn_ended(1, &Ended::Stopped, &ctx, None);
         assert_eq!(
             rx.try_recv(),
-            Ok(Told::Reply("parse.rs\n\n(stopped)".into()))
+            Ok(Told::Response {
+                request: request.id,
+                event: Response::Finished("parse.rs\n\n(stopped)".into())
+            })
         );
         drivers.turn_ended(1, &Ended::Done, &ctx, None);
         assert!(rx.try_recv().is_err(), "told once");
@@ -618,8 +708,15 @@ mod tests {
         execution.channel().listen(tx);
         execution.channel().input("btc".into());
         let next = drivers.next(1, &root).expect("the input is due");
-        drivers.dispatched(next.origin, 1, true, true);
-        assert_eq!(rx.try_recv(), Ok(Told::Started));
+        let request = Request::new(next.origin, 1);
+        drivers.started(request, true);
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Told::Response {
+                request: request.id,
+                event: Response::Started
+            })
+        );
 
         let retrying = Event::Retrying {
             attempt: 1,
@@ -637,7 +734,13 @@ mod tests {
             drivers.observe(1, &root, &ev);
         }
         drivers.turn_ended(1, &Ended::Done, &ctx, None);
-        assert_eq!(rx.try_recv(), Ok(Told::Reply("checking. 83057.6".into())));
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Told::Response {
+                request: request.id,
+                event: Response::Finished("checking. 83057.6".into())
+            })
+        );
     }
 
     // A command that follows hears every run on its checkout from its next
@@ -668,10 +771,22 @@ mod tests {
         drivers.observe(1, &root, &Event::TextDelta("before".into()));
         execution.channel().follow();
         drivers.observe(1, &root, &Event::TurnStart { turn: 2 });
-        assert_eq!(rx.try_recv(), Ok(Told::Started));
+        let Told::Response {
+            request: first,
+            event: Response::Started,
+        } = rx.try_recv().unwrap()
+        else {
+            panic!("a followed run begins")
+        };
         drivers.observe(1, &root, &Event::TextDelta("connected".into()));
         drivers.turn_ended(1, &Ended::Done, &ctx, None);
-        assert_eq!(rx.try_recv(), Ok(Told::Reply("connected".into())));
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Told::Response {
+                request: first,
+                event: Response::Finished("connected".into())
+            })
+        );
         assert!(
             quiet.try_recv().is_err(),
             "one that does not follow hears nothing"
@@ -679,12 +794,25 @@ mod tests {
 
         execution.channel().input("btc".into());
         let next = drivers.next(1, &root).expect("the input is due");
-        drivers.dispatched(next.origin, 1, true, true);
+        let request = Request::new(next.origin, 1);
+        drivers.started(request, true);
         drivers.observe(1, &root, &Event::TurnStart { turn: 1 });
         drivers.observe(1, &root, &Event::TextDelta("83057.6".into()));
         drivers.turn_ended(1, &Ended::Done, &ctx, None);
-        assert_eq!(rx.try_recv(), Ok(Told::Started));
-        assert_eq!(rx.try_recv(), Ok(Told::Reply("83057.6".into())));
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Told::Response {
+                request: request.id,
+                event: Response::Started
+            })
+        );
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Told::Response {
+                request: request.id,
+                event: Response::Finished("83057.6".into())
+            })
+        );
         assert!(rx.try_recv().is_err(), "told once");
     }
 }

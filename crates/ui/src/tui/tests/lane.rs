@@ -216,7 +216,10 @@ async fn every_kind_of_command_leaves_its_lane_idle() {
     for (what, kind) in kinds() {
         let mut tui = surface(dir.path());
         tui.settle(crate::tui::run::Done {
-            token: tui.core.lanes[0].token(),
+            request: pi_core::execution::Request::new(
+                pi_core::driver::Origin::Typed,
+                tui.core.lanes[0].token(),
+            ),
             kind,
             ran: Some((
                 agent::session::Session::default(),
@@ -233,7 +236,10 @@ async fn every_kind_of_command_leaves_its_lane_idle() {
     for (what, kind) in kinds() {
         let mut tui = surface(dir.path());
         tui.settle(crate::tui::run::Done {
-            token: tui.core.lanes[0].token(),
+            request: pi_core::execution::Request::new(
+                pi_core::driver::Origin::Typed,
+                tui.core.lanes[0].token(),
+            ),
             kind,
             ran: None,
         })
@@ -278,7 +284,7 @@ async fn a_panicked_bang_does_not_lay_its_transcript_down_again() {
 
     // The execution panicked: no lines, and no transcript came home.
     tui.settle(crate::tui::run::Done {
-        token,
+        request: pi_core::execution::Request::new(pi_core::driver::Origin::Typed, token),
         kind: crate::tui::run::Kind::Bash { lines: Vec::new() },
         ran: None,
     })
@@ -308,7 +314,10 @@ async fn a_stopped_run_does_not_tell_the_model_a_request_was_cancelled() {
             let mut session = agent::session::Session::new();
             session.prompt("the task the user actually asked for");
             tui.settle(crate::tui::run::Done {
-                token: tui.core.lanes[0].token(),
+                request: pi_core::execution::Request::new(
+                    pi_core::driver::Origin::Typed,
+                    tui.core.lanes[0].token(),
+                ),
                 kind,
                 ran: Some((session, Err(agent::AgentError::Cancelled))),
             })
@@ -350,7 +359,7 @@ async fn a_stopped_turn_keeps_its_status_line_and_a_stopped_bang_does_not() {
             let token = tui.core.lanes[0].token();
             view_at(&mut tui.views, token).state.work = a_turn(false);
             tui.settle(crate::tui::run::Done {
-                token,
+                request: pi_core::execution::Request::new(pi_core::driver::Origin::Typed, token),
                 kind,
                 ran: Some((
                     agent::session::Session::new(),
@@ -977,7 +986,7 @@ async fn leaving_with_a_run_in_flight_takes_the_transcript_back() {
     carried.prompt("go");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     tx.send(crate::tui::run::Done {
-        token,
+        request: pi_core::execution::Request::new(pi_core::driver::Origin::Typed, token),
         kind: crate::tui::run::Kind::Turn,
         ran: Some((carried, Ok(llm::stream::Usage::default()))),
     })
@@ -1130,7 +1139,7 @@ async fn a_typed_followup_waits_for_the_run_and_survives_cancellation() {
     assert!(ended.try_recv().is_err(), "no second run was started");
     assert!(tui.core.lane_mut().stop(false));
     tui.settle(crate::tui::run::Done {
-        token,
+        request: pi_core::execution::Request::new(pi_core::driver::Origin::Typed, token),
         kind: crate::tui::run::Kind::Turn,
         ran: Some((
             agent::session::Session::with_prompt("original"),
@@ -1204,6 +1213,7 @@ fn a_followup_does_not_pass_an_earlier_queued_command_or_enter_another_lane() {
 async fn queued_command_results_open_one_turn_under_their_label() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
+    tui.core.lane_mut().finish();
     let execution = toolbox::background::RunSink::start(
         &pi_core::driver::background::Commands::new(tui.drivers.background()),
         dir.path().to_path_buf(),
@@ -1229,24 +1239,33 @@ async fn queued_command_results_open_one_turn_under_their_label() {
     );
 }
 
-// A person's line through an execution is a prompt even when it looks like a
-// command: nothing they send runs here, and every line gets its answer.
+// Remote submissions share command parsing, including the leading-space
+// escape for prose that begins with a slash.
 #[tokio::test]
-async fn a_persons_line_through_a_command_is_always_a_prompt() {
+async fn remote_submissions_use_the_same_parser_as_local_lines() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
+    tui.core.lane_mut().finish();
     let execution = toolbox::background::RunSink::start(
         &pi_core::driver::background::Commands::new(tui.drivers.background()),
         dir.path().to_path_buf(),
         toolbox::background::Invocation::shell("wechat"),
         Default::default(),
     );
-    for line in ["/compact", "!rm -rf build"] {
+    for line in ["/compact", "!echo hello", " /compact"] {
         execution.channel().input(line.into());
-        let got = tui.driver_line();
-        assert!(
-            matches!(&got, Some((Origin::Input(_), crate::tui::Wake::Do(Asked::Core(Intent::Prompt(p)), _))) if p == line),
-            "{line} is a prompt"
+        let Some((Origin::Input(_), crate::tui::Wake::Do(Asked::Core(intent), _))) =
+            tui.driver_line()
+        else {
+            panic!("{line} is admitted");
+        };
+        assert_eq!(
+            intent,
+            pi_core::input::read(
+                line,
+                &tui.core.commands,
+                Some(&tui.core.lane().agent().brief.registry)
+            )
         );
     }
 }
@@ -1293,7 +1312,10 @@ async fn leaving_with_a_command_preserves_its_stop_cause_on_resume() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         if running {
             tx.send(crate::tui::run::Done {
-                token: tui.core.lane().token(),
+                request: pi_core::execution::Request::new(
+                    pi_core::driver::Origin::Typed,
+                    tui.core.lane().token(),
+                ),
                 kind: crate::tui::run::Kind::Turn,
                 ran: Some((carried, Err(agent::AgentError::Cancelled))),
             })

@@ -1,7 +1,7 @@
 //! Background shell commands, their session channels, and queued results.
 //!
-//! Results reach the owning checkout between model requests. Inputs open their
-//! own turns and receive replies through the command's channel. Commands stop
+//! Results reach the owning checkout between model requests. Inputs are user
+//! submissions and receive operation replies through the command's channel. Commands stop
 //! with this process; saved launch specifications allow restarting them later.
 //!
 //! The table also owns foreground questions and routes answers from the user
@@ -234,6 +234,9 @@ struct Item {
     // What arrived while `waiting` was full.
     dropped: usize,
     listens: Listens,
+    // An operation can pass through several tasks; its recipient sees one
+    // beginning and one ending for that identity.
+    requests: HashSet<u64>,
     // It asked to stop its checkout's running turn, not yet acted on.
     interrupt: bool,
     // Reads the latest of what it printed; None for one that keeps none.
@@ -303,6 +306,7 @@ impl Item {
             waiting: VecDeque::new(),
             dropped: 0,
             listens: Listens::Never,
+            requests: HashSet::new(),
             interrupt: false,
             output: None,
             last_output: String::new(),
@@ -322,6 +326,7 @@ impl Item {
     fn over(&mut self, stopped: bool) {
         self.phase = Phase::Over { stopped };
         self.listens = Listens::Never;
+        self.requests.clear();
         self.ended_last = (self.output.as_ref()).map(|peek| pi_store::text::last_line(&peek()));
     }
 
@@ -342,6 +347,7 @@ impl Item {
 
     // Nothing of the last run is left to show or deliver.
     fn clear_run(&mut self) {
+        self.requests.clear();
         self.last_output.clear();
         self.progress.clear();
         self.waiting.clear();
@@ -506,15 +512,11 @@ impl State {
 
 /// What comes back from an execution: a result, or a person speaking through it,
 /// their words untouched; `note` says only what the cap dropped, if anything.
-/// Their words are a prompt, unless `as_typed`: a pick of offered options,
-/// read as if typed, so one that is a command runs.
+/// Their words, including picks of offered options, are submitted through
+/// the host's ordinary input parser.
 pub enum Back {
     Result(Due),
-    Input {
-        text: String,
-        note: String,
-        as_typed: bool,
-    },
+    Input { text: String, note: String },
 }
 
 impl Back {
@@ -567,6 +569,26 @@ impl Table {
     /// The id names the first result's execution, or the input's sender.
     pub fn take_back(&self, root: &Path) -> Option<(u64, Back)> {
         self.take_next(root, false)
+    }
+
+    /// User submissions may be admitted while a run is working. Results stay
+    /// available to that run at its next request boundary.
+    pub fn take_input(&self, root: &Path) -> Option<(u64, Back)> {
+        let mut inner = self.lock();
+        let (at, back) = inner
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.root == root)
+            .find_map(|(at, item)| {
+                item.waiting
+                    .iter()
+                    .position(|back| matches!(back, Back::Input { .. }))
+                    .map(|back| (at, back))
+            })?;
+        let (id, input) = inner.take_back(at, back)?;
+        tracing::info!(target: "pi::background", execution = id, kind = "input", "delivered");
+        Some((id, input))
     }
 
     /// Results for an active run. Person-originated inputs keep their own
@@ -648,7 +670,34 @@ impl Table {
 
     /// Tell execution `id` about a turn its input opened, if it is still here.
     pub fn tell(&self, id: u64, told: Told) {
+        let to = {
+            let mut inner = self.lock();
+            let Some(item) = inner.items.iter_mut().find(|i| i.id == id) else {
+                return;
+            };
+            if let Told::Response { request, event } = &told {
+                use toolbox::channel::Response;
+                match event {
+                    Response::Started if !item.requests.insert(*request) => return,
+                    Response::Finished(_) if !item.requests.remove(request) => return,
+                    Response::Progress(_) if !item.requests.contains(request) => return,
+                    Response::Started | Response::Progress(_) | Response::Finished(_) => {}
+                }
+            }
+            item.listens.to().cloned()
+        };
         match &told {
+            Told::Response { request, event } => match event {
+                toolbox::channel::Response::Started => {
+                    tracing::info!(target: "pi::background", execution = id, request, "request started")
+                }
+                toolbox::channel::Response::Progress(text) => {
+                    tracing::info!(target: "pi::background", execution = id, request, chars = text.chars().count(), "request progress")
+                }
+                toolbox::channel::Response::Finished(text) => {
+                    tracing::info!(target: "pi::background", execution = id, request, chars = text.chars().count(), "request finished")
+                }
+            },
             Told::Started => {
                 tracing::info!(target: "pi::background", execution = id, "told started")
             }
@@ -665,13 +714,7 @@ impl Table {
             // Said where they happen: a question up or down, an answer refused.
             Told::Question { .. } | Told::Closed(_) | Told::Refused { .. } => {}
         }
-        if let Some(to) = self
-            .lock()
-            .items
-            .iter()
-            .find(|i| i.id == id)
-            .and_then(|i| i.listens.to())
-        {
+        if let Some(to) = to {
             let _ = to.send(told);
         }
     }
@@ -1271,7 +1314,6 @@ impl toolbox::channel::Channel for Handle {
         inner.items[at].wait(Back::Input {
             text,
             note: String::new(),
-            as_typed: false,
         });
         drop(inner);
         self.table.wake();
@@ -1332,7 +1374,6 @@ impl toolbox::channel::Channel for Handle {
             inner.items[at].wait(Back::Input {
                 text,
                 note: String::new(),
-                as_typed: true,
             });
         }
         drop(inner);
@@ -2119,10 +2160,10 @@ mod tests {
         assert_eq!(table.questions(&root).len(), 1, "no such answer, still up");
         bridge.channel().answer(first, vec![0]);
         assert_eq!(rx.try_recv(), Ok(Told::Closed(first)));
-        let Some((_, Back::Input { text, as_typed, .. })) = table.take_back(&root) else {
+        let Some((_, Back::Input { text, .. })) = table.take_back(&root) else {
             panic!("the pick went nowhere");
         };
-        assert_eq!((text.as_str(), as_typed), ("/compact", true));
+        assert_eq!(text, "/compact");
         bridge.channel().answer(first, vec![1]);
         assert!(table.take_back(&root).is_none(), "answered once");
         assert!(
@@ -2147,10 +2188,10 @@ mod tests {
         bridge.channel().answer(up[0].id, vec![1]);
         assert_eq!(waits.try_recv(), Ok(Some("no".into())));
         assert_eq!(rx.try_recv(), Ok(Told::Closed(up[0].id)));
-        let Some((_, Back::Input { text, as_typed, .. })) = table.take_back(&root) else {
+        let Some((_, Back::Input { text, .. })) = table.take_back(&root) else {
             panic!("their words went nowhere");
         };
-        assert_eq!((text.as_str(), as_typed), ("neither", false));
+        assert_eq!(text, "neither");
         assert!(
             table.take_back(&root).is_none(),
             "a pick that goes back is not typed"

@@ -393,34 +393,6 @@ pub enum Step {
     Quit,
 }
 
-impl Step {
-    /// Whether the answer lands under the line that asked, so the surface
-    /// keeps that line on screen. An answer set apart is dismissed rather
-    /// than kept, and a line left above nothing reads as a question unanswered.
-    ///
-    /// Asked of the step, not the intent: only the step knows whether a word
-    /// named a skill or nothing at all. No catch-all, so a new step decides.
-    pub fn lands_under(&self) -> bool {
-        match self {
-            Step::Prompt { .. } | Step::Bash(_) => true,
-            // Its turn starts only if the server answers; echoed then.
-            Step::McpPrompt { .. } => false,
-            Step::Notice(_)
-            | Step::Compact(_)
-            | Step::Tool { .. }
-            | Step::Drive(_)
-            | Step::Edit(_)
-            | Step::Handled(_)
-            | Step::Surface { .. }
-            | Step::Swap(_)
-            | Step::Moved(_)
-            | Step::Worktrees(_)
-            | Step::Rewound(..)
-            | Step::Quit => false,
-        }
-    }
-}
-
 /// A command for a driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Drive {

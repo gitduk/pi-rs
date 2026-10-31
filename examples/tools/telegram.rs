@@ -1,9 +1,9 @@
 ---
 [package]
 # Bump this script's version whenever it changes.
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
-description = "Connect this session to Telegram when the user requests it.\nMessages sent to the user's bot arrive here as turns. Each answer returns to the chat.\nSet TELEGRAM_BOT_TOKEN in the tools' .env file to a bot token from @BotFather.\n\nThe tool runs in the background until you stop the background command.\nOn first use, the background command provides a link and QR code for the user to pair their account.\nThe pairing persists for later use."
+description = "Connect this session to Telegram when the user requests it.\nMessages sent to the user's bot are submitted to this session, including commands. Each answer returns to the chat.\nSet TELEGRAM_BOT_TOKEN in the tools' .env file to a bot token from @BotFather.\n\nThe tool runs in the background until you stop the background command.\nOn first use, the background command provides a link and QR code for the user to pair their account.\nThe pairing persists for later use."
 
 [package.metadata.pi]
 background = true
@@ -386,7 +386,9 @@ mod bridge {
     // Pairing links and QR codes belong on stderr, outside the model result.
     fn show_pairing(pi: &Pi, bot: &str, code: &str) {
         let link = format!("https://t.me/{bot}?start={code}");
-        pi.status("pair Telegram with this session: the link and QR are in this background command");
+        pi.status(
+            "pair Telegram with this session: the link and QR are in this background command",
+        );
         eprintln!("open {link} and press Start, or send `/start {code}` to @{bot}");
         if let Some(qr) = render_qr(&link) {
             eprintln!("{qr}");
@@ -509,12 +511,12 @@ mod bridge {
                     if line.is_empty() {
                         continue;
                     }
-                    match command(line) {
+                    match command(&text) {
                         Some("stop" | "esc") => pi.say(json!({ "interrupt": true })),
                         Some("start") => {}
                         _ => match picks_of(asking, line) {
                             Some((id, picks)) => pi.say(json!({ "answer": id, "picks": picks })),
-                            None => pi.say(json!({ "input": text })),
+                            None => pi.say(json!({ "input": submitted(&text) })),
                         },
                     }
                 }
@@ -531,6 +533,38 @@ mod bridge {
     fn command(line: &str) -> Option<&str> {
         let word = line.strip_prefix('/')?.split_whitespace().next()?;
         Some(word.split('@').next().unwrap_or(word))
+    }
+
+    // The addressing suffix belongs to the transport. Preserve arguments and
+    // a leading space, which lets a slash-prefixed line be sent as prose.
+    fn submitted(text: &str) -> String {
+        if !text.starts_with('/') {
+            return text.to_string();
+        }
+        let end = text.find(char::is_whitespace).unwrap_or(text.len());
+        match text[..end].split_once('@') {
+            Some((word, _)) => format!("{word}{}", &text[end..]),
+            None => text.to_string(),
+        }
+    }
+
+    #[derive(Default)]
+    struct Activity(BTreeSet<Option<u64>>);
+
+    impl Activity {
+        fn hear(&mut self, told: &Value) {
+            // Older hosts have one unnumbered run.
+            let id = told.get("request").and_then(Value::as_u64);
+            if told.get("started").and_then(Value::as_bool) == Some(true) {
+                self.0.insert(id);
+            } else if told.get("reply").and_then(Value::as_str).is_some() {
+                self.0.remove(&id);
+            }
+        }
+
+        fn idle(&self) -> bool {
+            self.0.is_empty()
+        }
     }
 
     // 2s between ordinary retries, 30s once three have failed in a row; the
@@ -556,7 +590,7 @@ mod bridge {
     ) {
         let mut lines = BufReader::new(read).lines();
         let mut outbox = Outbox::default();
-        let mut typing: Option<i64> = None;
+        let mut activity = Activity::default();
         let mut tick = tokio::time::interval(TYPING_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -573,7 +607,7 @@ mod bridge {
                     let mut gone = None;
                     if let Some(up) = Up::of(&told) {
                         asking.lock().push(up);
-                        shows = typing.is_none();
+                        shows = activity.idle();
                     } else if let Some(id) = told.get("closed").and_then(Value::as_u64) {
                         let mut up = asking.lock();
                         let at = up.iter().position(|q| q.id == id);
@@ -595,12 +629,12 @@ mod bridge {
                         outbox.push(chat, &format!("not taken: {why}"));
                     }
                     if told.get("started").and_then(Value::as_bool) == Some(true) {
-                        typing = Some(chat);
+                        activity.hear(&told);
                         tick.reset_immediately();
                     } else if let Some(reply) = told.get("reply").and_then(Value::as_str) {
-                        typing = None;
+                        activity.hear(&told);
                         outbox.push(chat, reply);
-                        shows = true;
+                        shows = activity.idle();
                     } else if let Some(progress) = told.get("progress").and_then(Value::as_str) {
                         outbox.push(chat, progress);
                     }
@@ -612,14 +646,14 @@ mod bridge {
                         show_held(client, chat, asking, pi).await;
                     }
                 }
-                _ = tick.tick(), if typing.is_some() => {
-                    if let Some(chat) = typing {
+                _ = tick.tick(), if !activity.idle() => {
+                    if let Some(chat) = kept.chat() {
                         let _ = client.send_typing(chat).await;
                     }
                 }
                 _ = retry.notified() => {
                     outbox.flush(client, pi).await;
-                    if typing.is_none() && outbox.pending.is_empty()
+                    if activity.idle() && outbox.pending.is_empty()
                         && let Some(chat) = kept.chat() {
                         show_held(client, chat, asking, pi).await;
                     }
@@ -701,6 +735,63 @@ mod bridge {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn an_immediate_command_does_not_finish_another_requests_typing() {
+            let mut activity = Activity::default();
+            for id in [7, 8, 8] {
+                activity.hear(&json!({ "request": id, "started": true }));
+            }
+            activity.hear(&json!({ "request": 8, "reply": "status" }));
+            activity.hear(&json!({ "request": 99, "reply": "already finished" }));
+            assert!(!activity.idle());
+            activity.hear(&json!({ "request": 7, "reply": "done" }));
+            assert!(activity.idle());
+            activity.hear(&json!({ "started": true }));
+            assert!(!activity.idle());
+            activity.hear(&json!({ "reply": "older host" }));
+            assert!(activity.idle());
+        }
+
+        #[test]
+        fn command_addressing_preserves_arguments_and_the_prose_escape() {
+            assert_eq!(
+                submitted("/compact@pi_bot keep @references\nverbatim"),
+                "/compact keep @references\nverbatim"
+            );
+            assert_eq!(submitted(" /compact@pi_bot"), " /compact@pi_bot");
+            assert_eq!(submitted("/compact focus"), "/compact focus");
+            assert_eq!(submitted("hello @pi_bot"), "hello @pi_bot");
+        }
+
+        #[test]
+        fn paired_submissions_preserve_commands_arguments_and_literal_slashes() {
+            let (_dir, kept) = kept();
+            {
+                let mut state = kept.lock();
+                state.user = Some(7);
+                state.chat = Some(7);
+            }
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            heard(
+                &kept,
+                &Asking::default(),
+                &Pi(tx),
+                &mut None,
+                vec![
+                    update(1, 7, 7, "private", "/compact@pi_bot keep failures"),
+                    update(2, 7, 7, "private", " /stop"),
+                    update(3, 7, 7, "private", "/stop@pi_bot"),
+                ],
+            );
+            assert_eq!(
+                rx.try_recv().unwrap(),
+                json!({"input": "/compact keep failures"})
+            );
+            assert_eq!(rx.try_recv().unwrap(), json!({"input": " /stop"}));
+            assert_eq!(rx.try_recv().unwrap(), json!({"interrupt": true}));
+            assert!(rx.try_recv().is_err());
+        }
 
         #[tokio::test]
         async fn failed_pieces_resume_in_order_without_resending_successful_ones() {

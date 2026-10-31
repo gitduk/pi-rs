@@ -34,10 +34,12 @@ pub struct Asked {
 /// Where the answer to a question asked with `back` arrives.
 pub type Answer = oneshot::Receiver<Option<String>>;
 
-/// What the host tells an execution about the turns its `input` opened, or every
+/// What the host tells an execution about submitted operations, or every model
 /// turn once it follows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Told {
+    /// An operation's lifecycle, independent of other operations in the session.
+    Response { request: u64, event: Response },
     /// A turn one of its inputs opened has begun.
     Started,
     /// A completed part of the answer, or progress while work continues.
@@ -58,6 +60,13 @@ pub enum Told {
     /// Its answer to `question` was not taken, and why: the person, who
     /// gave it, is owed the reason.
     Refused { question: u64, why: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Response {
+    Started,
+    Progress(String),
+    Finished(String),
 }
 
 /// Messages from one running command into its session.

@@ -1,9 +1,9 @@
 ---
 [package]
 # Bump this script's version whenever it changes.
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
-description = "Connect this session to WeChat when the user requests it.\nMessages sent from the user's phone arrive here as turns. Each answer returns to the phone.\nThe tool runs in the background until you stop the background command.\nOn first use, the background command provides a QR code for the user to scan.\nThe login persists for later use."
+description = "Connect this session to WeChat when the user requests it.\nMessages sent from the user's phone are submitted to this session, including commands. Each answer returns to the phone.\nThe tool runs in the background until you stop the background command.\nOn first use, the background command provides a QR code for the user to scan.\nThe login persists for later use."
 
 [package.metadata.pi]
 background = true
@@ -423,7 +423,7 @@ mod bridge {
                 continue;
             }
             received = true;
-            if matches!(text.trim(), "/stop" | "/esc") {
+            if matches!(text.trim_end(), "/stop" | "/esc") {
                 pi.say(json!({ "interrupt": true }));
                 continue;
             }
@@ -469,7 +469,7 @@ mod bridge {
         let mut lines = BufReader::new(read).lines();
         let mut tickets = Tickets::default();
         let mut outbox = Outbox::default();
-        let mut running = false;
+        let mut running = std::collections::BTreeSet::new();
         let mut tick = tokio::time::interval(Duration::from_secs(4));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -480,13 +480,13 @@ mod bridge {
                 }
                 _ = retry.notified() => {
                     outbox.flush(client, kept, pi).await;
-                    if !running && outbox.pending.is_empty()
+                    if running.is_empty() && outbox.pending.is_empty()
                         && let Some(to) = kept.target() {
                         show_held(client, &to, asking, pi).await;
                     }
                     continue;
                 }
-                _ = tick.tick(), if running => {
+                _ = tick.tick(), if !running.is_empty() => {
                     if let Some(to) = kept.target() {
                         tickets.typing(client, &to, true).await;
                     }
@@ -500,7 +500,7 @@ mod bridge {
             let mut shows = false;
             if let Some(up) = Up::of(&told) {
                 asking.lock().push(up);
-                shows = !running;
+                shows = running.is_empty();
             } else if let Some(id) = told.get("closed").and_then(Value::as_u64) {
                 asking.lock().retain(|q| q.id != id);
             }
@@ -523,13 +523,15 @@ mod bridge {
                 outbox.push(&to, &format!("not taken: {why}"));
             }
             if told.get("started").and_then(Value::as_bool) == Some(true) {
-                running = true;
+                running.insert(told.get("request").and_then(Value::as_u64));
                 tickets.typing(client, &to, true).await;
             } else if let Some(reply) = told.get("reply").and_then(Value::as_str) {
-                running = false;
-                tickets.typing(client, &to, false).await;
+                running.remove(&told.get("request").and_then(Value::as_u64));
+                if running.is_empty() {
+                    tickets.typing(client, &to, false).await;
+                }
                 outbox.push(&to, reply);
-                shows = true;
+                shows = running.is_empty();
             } else if let Some(progress) = told.get("progress").and_then(Value::as_str) {
                 outbox.push(&to, progress);
             }
