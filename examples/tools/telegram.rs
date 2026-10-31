@@ -1,7 +1,7 @@
 ---
 [package]
 # Bump this script's version whenever it changes.
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "Connect this session to Telegram when the user requests it.\nMessages sent to the user's bot are submitted to this session, including commands. Each answer returns to the chat.\nSet TELEGRAM_BOT_TOKEN in the tools' .env file to a bot token from @BotFather.\n\nThe tool runs in the background until you stop the background command.\nOn first use, the background command provides a link and QR code for the user to pair their account.\nThe pairing persists for later use."
 
@@ -73,6 +73,8 @@ mod bridge {
     const PACE: Duration = Duration::from_secs(1);
     // The indicator lapses after 5 s unless renewed.
     const TYPING_EVERY: Duration = Duration::from_secs(4);
+    const CONNECTED_NOTICE: &str = "已连接到 pi。";
+    const STOPPED_NOTICE: &str = "已停止当前任务。";
 
     #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
     struct State {
@@ -349,10 +351,7 @@ mod bridge {
 
         let mut code = None;
         if state.user.is_some() {
-            pi.say(json!({ "status": format!(
-                "connected to Telegram as @{bot}; messages from the paired account will arrive here as turns"
-            )}));
-            pi.say(json!({ "status": "connected" }));
+            pi.status(&format!("Telegram 已连接到 @{bot}。"));
         } else {
             pi.say(json!({ "status": format!(
                 "waiting for the user to pair @{bot}: a link and a QR are in this background command; once they open it, messages from their account arrive here as turns"
@@ -428,8 +427,7 @@ mod bridge {
                         retry.notify_one();
                     }
                     if let Some(chat) = paired {
-                        let hello = "connected to pi: what you send here arrives as turns, and /stop stops one";
-                        let _ = client.send_message(chat, hello, &[]).await;
+                        let _ = client.send_message(chat, CONNECTED_NOTICE, &[]).await;
                         show_held(client, chat, asking, pi).await;
                     }
                     for click in clicks {
@@ -504,7 +502,7 @@ mod bridge {
                         let who = from
                             .username
                             .map_or(from.id.to_string(), |u| format!("@{u}"));
-                        pi.status(&format!("connected, paired with {who}"));
+                        pi.status(&format!("Telegram 已连接到 {who}。"));
                     }
                 }
                 Some(user) if user == from.id && s.chat == Some(msg.chat.id) => {
@@ -567,6 +565,24 @@ mod bridge {
         }
     }
 
+    fn reply_text(reply: &str) -> String {
+        let body = if matches!(reply, "stopped" | "(stopped)") {
+            ""
+        } else if let Some(body) = reply
+            .strip_suffix("\n\n(stopped)")
+            .or_else(|| reply.strip_suffix("\nstopped"))
+        {
+            body.trim_end()
+        } else {
+            return reply.to_string();
+        };
+        if body.is_empty() {
+            STOPPED_NOTICE.into()
+        } else {
+            format!("{body}\n\n{STOPPED_NOTICE}")
+        }
+    }
+
     // 2s between ordinary retries, 30s once three have failed in a row; the
     // counter resets on the 30s step.
     fn backoff(failures: &mut u32) -> Duration {
@@ -590,6 +606,10 @@ mod bridge {
     ) {
         let mut lines = BufReader::new(read).lines();
         let mut outbox = Outbox::default();
+        if let Some(chat) = kept.chat() {
+            outbox.push(chat, CONNECTED_NOTICE);
+            outbox.flush(client, pi).await;
+        }
         let mut activity = Activity::default();
         let mut tick = tokio::time::interval(TYPING_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -633,7 +653,7 @@ mod bridge {
                         tick.reset_immediately();
                     } else if let Some(reply) = told.get("reply").and_then(Value::as_str) {
                         activity.hear(&told);
-                        outbox.push(chat, reply);
+                        outbox.push(chat, &reply_text(reply));
                         shows = activity.idle();
                     } else if let Some(progress) = told.get("progress").and_then(Value::as_str) {
                         outbox.push(chat, progress);
@@ -765,6 +785,26 @@ mod bridge {
         }
 
         #[test]
+        fn stop_notices_preserve_partial_answers_and_leave_ordinary_replies_alone() {
+            for marker in ["stopped", "(stopped)"] {
+                assert_eq!(reply_text(marker), STOPPED_NOTICE);
+            }
+            for suffix in ["\n\n(stopped)", "\nstopped"] {
+                assert_eq!(
+                    reply_text(&format!("partial answer{suffix}")),
+                    format!("partial answer\n\n{STOPPED_NOTICE}")
+                );
+            }
+            for text in [
+                "the server stopped",
+                "(stopped) is a marker",
+                "normal reply",
+            ] {
+                assert_eq!(reply_text(text), text);
+            }
+        }
+
+        #[test]
         fn paired_submissions_preserve_commands_arguments_and_literal_slashes() {
             let (_dir, kept) = kept();
             {
@@ -791,6 +831,42 @@ mod bridge {
             assert_eq!(rx.try_recv().unwrap(), json!({"input": " /stop"}));
             assert_eq!(rx.try_recv().unwrap(), json!({"interrupt": true}));
             assert!(rx.try_recv().is_err());
+        }
+
+        #[tokio::test]
+        async fn a_saved_connection_is_announced_once_without_an_incoming_message() {
+            for chat in [None, Some(7)] {
+                let (_dir, kept) = kept();
+                kept.lock().chat = chat;
+                let replies = chat
+                    .map(|_| (200, json!({"ok": true, "result": {}})))
+                    .into_iter()
+                    .collect();
+                let (base, requests) = server(replies).await;
+                let client = Client::at(base);
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let (host, script) = tokio::net::UnixStream::pair().unwrap();
+                let (read, _write) = script.into_split();
+                drop(host);
+                tokio::time::timeout(
+                    Duration::from_secs(3),
+                    answer(
+                        &client,
+                        &kept,
+                        &Asking::default(),
+                        &Pi(tx),
+                        read,
+                        &Notify::new(),
+                    ),
+                )
+                .await
+                .unwrap();
+                let requests = requests.await.unwrap();
+                assert_eq!(requests.len(), usize::from(chat.is_some()));
+                if let Some(chat) = chat {
+                    assert_eq!(requests[0]["chat_id"], chat);
+                }
+            }
         }
 
         #[tokio::test]
