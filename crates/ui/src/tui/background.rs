@@ -10,8 +10,11 @@ pub(super) const HINT: &str =
     "ctrl+k/j move · x stop · r restart · X stop all · enter output · q/esc back";
 
 impl Ui {
-    // A stopped row must remain available for restart while focused.
+    // Keep stopped rows available for restart while other commands still run.
     pub(super) fn sync_background(&mut self, all: Vec<BackgroundCommand>) {
+        if !all.iter().any(|j| j.state == State::Running) {
+            self.leave_background();
+        }
         let at = self
             .background_focus
             .and_then(|id| self.executions.iter().position(|j| j.id == id));
