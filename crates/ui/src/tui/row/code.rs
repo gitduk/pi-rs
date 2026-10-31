@@ -1,5 +1,6 @@
 //! An answer's copyable rows: a code block's badge, and a mermaid block or
-//! table drawn whole. A click on either copies what it holds.
+//! table drawn whole. A click on a badge copies what it holds; a table's
+//! cells are selected individually.
 
 use std::cell::RefCell;
 use std::time::Instant;
@@ -98,13 +99,18 @@ impl Block {
         self.drawn(paint, width).badged
     }
 
-    // The cells of `line` that read as one: past the badge row as drawn
+    // The cells of `line` that read as one, past any badge row as drawn
     // now, whatever note stands beside it.
     pub(super) fn units(&self, paint: &Paint, width: usize) -> Units {
-        let line = crate::tui::screen::plain(&self.line(paint, width));
-        let head = pi_store::text::width(line.split('\n').next().unwrap_or_default());
-        let units = self.drawn(paint, width).units;
-        units
+        let painted = self.drawn(paint, width);
+        let head = if painted.badged {
+            let line = crate::tui::screen::plain(&self.line(paint, width));
+            pi_store::text::width(line.split('\n').next().unwrap_or_default())
+        } else {
+            0
+        };
+        painted
+            .units
             .into_iter()
             .map(|u| u.start + head..u.end + head)
             .collect()
@@ -184,16 +190,53 @@ fn block_at(form: Form, source: &str, paint: &Paint, width: usize) -> Painted {
             let lines = render::render_markdown(source, paint);
             let needs = lines.iter().map(Line::width).max().unwrap_or(0);
             if needs <= width {
+                let units = table_units(&lines);
                 return Painted {
                     line: joined(lines),
                     badged: false,
-                    units: Vec::new(),
+                    units,
                 };
             }
             let (body, units) = table_source(source, paint);
             under("table", &note(needs, width), body, units)
         }
     }
+}
+
+// Cell text may contain `│`, so column boundaries come from the top border.
+// Selection offsets omit newlines.
+fn table_units(lines: &[Line<'_>]) -> Units {
+    use crate::tui::screen::plain;
+    use crate::tui::select::cols;
+    use pi_store::text::width;
+
+    let borders: Vec<usize> = lines
+        .iter()
+        .map(plain)
+        .find(|line| line.starts_with('┌'))
+        .unwrap_or_default()
+        .chars()
+        .enumerate()
+        .filter_map(|(col, c)| matches!(c, '┌' | '┬' | '┐').then_some(col))
+        .collect();
+    let (mut units, mut offset) = (Units::new(), 0);
+    for line in lines {
+        let text = plain(line);
+        if text.starts_with('│') {
+            for pair in borders.windows(2) {
+                let start = pair[0] + 1;
+                let cell = cols(&text, start, pair[1]);
+                let content = cell.trim();
+                if !content.is_empty() {
+                    let lead = width(&cell[..cell.len() - cell.trim_start().len()]);
+                    let from = offset + start + lead;
+                    units.push(from..from + width(content));
+                }
+            }
+        }
+        offset += width(&text);
+    }
+    units
 }
 
 // A table as its source, read across a wrap: each column's text in a colour

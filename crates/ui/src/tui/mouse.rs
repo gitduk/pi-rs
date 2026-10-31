@@ -129,9 +129,13 @@ impl Ui {
         let width = self.screen.width();
         let clicked = line;
         let line = row.click_line(line, width)?;
+        let badged = row.badged(&self.paint, width);
+        // A drawn table has no copy badge: its cells are text to select.
+        if row.code().is_some() && !badged {
+            return None;
+        }
         // A labelled block answers on its label; the rest is text to select.
-        // One without a label has nowhere else, so all of it answers.
-        if (clicked != line || below_top > 0) && row.badged(&self.paint, width) {
+        if (clicked != line || below_top > 0) && badged {
             return None;
         }
         // Excludes the empty rest of the row past the text: the row pointed
