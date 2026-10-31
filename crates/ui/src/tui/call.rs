@@ -239,31 +239,6 @@ fn said(body: &str) -> Vec<String> {
         .collect()
 }
 
-fn launch_lines(execution: &BackgroundCommand, paint: &Paint) -> Vec<Line<'static>> {
-    let Some(launch) = &execution.launch else {
-        return Vec::new();
-    };
-    let mut lines = Vec::new();
-    for (index, line) in launch.command.lines().enumerate() {
-        let prefix = if index == 0 {
-            "  command: "
-        } else {
-            "           "
-        };
-        let mut spans = vec![paint.span(&paint.theme.muted, prefix)];
-        spans.extend(paint.shell(&pi_store::text::screen_line(line), false));
-        lines.push(Line::from(spans));
-    }
-    lines.push(Line::from(paint.span(
-        &paint.theme.muted,
-        format!(
-            "  cwd: {}",
-            pi_store::text::screen_line(&launch.cwd.display().to_string())
-        ),
-    )));
-    lines
-}
-
 // A page of all an open execution printed, headed by its row.
 pub(super) fn background_page(
     execution: &BackgroundCommand,
@@ -275,10 +250,7 @@ pub(super) fn background_page(
     spans.push(paint.span(&paint.theme.muted, tail));
     let head = Line::from(spans);
     let said = said(body).into_iter().map(|l| Line::from(l).into());
-    std::iter::once(head.into())
-        .chain(launch_lines(execution, paint).into_iter().map(Into::into))
-        .chain(said)
-        .collect()
+    std::iter::once(head.into()).chain(said).collect()
 }
 
 // Finished executions can accumulate while a turn holds their delivery.
@@ -385,13 +357,6 @@ pub(super) fn background_lines(
                 CommandRow::BackgroundCommand(execution.id),
                 rows.len(),
             ));
-            let details = launch_lines(execution, paint);
-            let details = details
-                .iter()
-                .flat_map(|line| super::screen::fit(line, room))
-                .collect::<Vec<_>>();
-            ids.extend(std::iter::repeat_n(CommandRow::Under, details.len()));
-            rows.extend(details);
             if from > 0 {
                 let more = format!("  {from} more");
                 let shine = hovered == Some(CommandRow::Earlier(execution.id));
@@ -453,5 +418,5 @@ fn within(s: &str, cols: usize) -> String {
 
 // Whether a click on a command's row shows more than the row does.
 pub(super) fn background_opens(execution: &BackgroundCommand, width: usize) -> bool {
-    execution.launch.is_some() || !execution.last.is_empty() || background_row(execution, width).1
+    !execution.last.is_empty() || background_row(execution, width).1
 }

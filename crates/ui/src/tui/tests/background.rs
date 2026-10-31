@@ -230,7 +230,7 @@ printf '%s\n' 'private stderr' >&2
 }
 
 #[test]
-fn expanded_launch_details_do_not_become_command_targets() {
+fn expanded_output_follows_the_heading_without_launch_details() {
     use crate::render::Paint;
     use crate::tui::{call, ui::OpenCommand};
     use pi_core::driver::background::Launch;
@@ -268,15 +268,7 @@ fn expanded_launch_details_do_not_become_command_targets() {
             .iter()
             .rposition(|target| *target == call::CommandRow::BackgroundCommand(1))
             .unwrap();
-        assert!(
-            earlier > last_head + 1,
-            "launch details remain between the heading and output"
-        );
-        assert!(
-            targets[last_head + 1..earlier]
-                .iter()
-                .all(|target| *target == call::CommandRow::Under)
-        );
+        assert_eq!(earlier, last_head + 1);
         assert!(
             targets[earlier + 1..]
                 .iter()
@@ -285,8 +277,8 @@ fn expanded_launch_details_do_not_become_command_targets() {
     }
     command.last.clear();
     assert!(
-        call::background_opens(&command, 80),
-        "a quiet command still has launch details"
+        !call::background_opens(&command, 80),
+        "launch details alone do not make a command expandable"
     );
 }
 
