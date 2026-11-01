@@ -1,13 +1,23 @@
 ---
 name: architecture
-description: Design or change the structure of code before you build it. Use when you add a feature that does not fit the current structure, define or change data types, split or merge modules, parse external input, share mutable state, persist data, or make an operation that can be retried.
+description: Review, design, or change the structure of code. Use when you review or evaluate a project's architecture, add a feature that does not fit the current structure, define or change data types, split or merge modules, parse external input, share mutable state, persist data, or make an operation that can be retried.
 ---
 
 # Architecture
 
-Design the structure first.
+To change code, design the structure first.
 Then build it in steps that you can verify.
 When the user asks only for a design, stop after the plan and report it.
+When the user asks for a review, follow Review and do not change files.
+
+## Review
+
+1. Map the current structure as in step 2 of Process.
+2. Compare the structure with each section of Principles.
+3. For each problem, report the principle that it breaks, the evidence as file paths and line numbers, the effect on later changes, and a recommended fix.
+4. Order the problems by their effect, the largest first.
+5. Report the parts that follow the principles in one short list.
+   Do not report a principle that you could not check as a pass.
 
 ## Process
 
