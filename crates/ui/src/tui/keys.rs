@@ -246,100 +246,18 @@ impl Ui {
         action: Option<Action>,
     ) -> Asked {
         if let Some(action) = action
-            && self.editor.edit(action)
+            && (self.editor.edit(action) || self.vim_edit(action) || self.move_view(view, action))
         {
             return Asked::Own(Deed::Nothing);
         }
         match action {
-            Some(Action::LineSubmit) => {
-                self.list.seeded = None;
-                // What is sent is answered on the transcript, not the page.
-                self.close_overlay(view);
-                // Resolve the highlighted completion before draining the
-                // editor: it may continue input rather than submit it.
-                let moved = self.list.picked.is_some();
-                return match self.highlighted().filter(|e| e.taken_by_enter(moved)) {
-                    // What was marked, or with nothing marked the highlighted one.
-                    Some(MenuEntry::Pick { at, .. }) => {
-                        let picks: Vec<usize> = match self.list.marked.is_empty() {
-                            true => vec![at],
-                            false => self.list.marked.iter().copied().collect(),
-                        };
-                        self.answer(&picks, None)
-                    }
-                    Some(MenuEntry::Completion(c)) => match c.accept {
-                        Acceptance::Continue => {
-                            self.apply_completion(c);
-                            Asked::Own(Deed::Nothing)
-                        }
-                        Acceptance::Run => {
-                            self.editor.take();
-                            self.run_line(c.line)
-                        }
-                    },
-                    Some(MenuEntry::File {
-                        start,
-                        end,
-                        lead,
-                        path,
-                        dir,
-                        ..
-                    }) => {
-                        // Enter on a path applies it and stays: the prompt
-                        // is not done until the user says so.
-                        self.apply_file(start, end, lead, &path, dir);
-                        Asked::Own(Deed::Nothing)
-                    }
-                    Some(MenuEntry::Hit { .. }) | None => {
-                        let typed = self.editor.take();
-                        // Words matching none of a question's options answer it.
-                        let own = !self.questions.is_empty()
-                            && !typed.trim().is_empty()
-                            && input::plain(&typed);
-                        match own {
-                            true => self.answer(&[], Some(typed)),
-                            false => self.run_line(typed),
-                        }
-                    }
-                };
-            }
+            Some(Action::LineSubmit) => return self.enter(view),
             Some(Action::EditExternally) => return Asked::Own(Deed::External),
-            Some(Action::PasteImage) => match super::clipboard::paste_image() {
-                Ok((path, about)) => {
-                    let n = match self.images.iter().position(|p| *p == path) {
-                        Some(at) => at + 1,
-                        None => {
-                            self.images.push(path);
-                            self.images.len()
-                        }
-                    };
-                    self.editor.insert_str(&format!("[Image #{n} {about}] "));
-                }
-                Err(why) => self.flash(why),
-            },
-            Some(Action::RunInterrupt) => {
-                // Esc before the model has moved means "I didn't mean to send
-                // that"; an empty editor, or unsending overwrites a line.
-                let unsendable = view
-                    .state
-                    .work
-                    .as_ref()
-                    .is_some_and(|w| matches!(w.doing, Doing::Turn { committed: false }));
-                if self.editor.is_empty() && lane.is_running() && unsendable {
-                    return Asked::Own(Deed::Unsend);
-                }
-                return Asked::Own(Deed::Interrupt);
-            }
+            Some(Action::PasteImage) => self.paste_image(),
+            Some(Action::RunInterrupt) => return self.interrupt(lane, view),
             Some(Action::Rewind) => return Asked::Own(Deed::Rewind),
             Some(action @ (Action::LaneNext | Action::LanePrev)) => {
-                let forward = action == Action::LaneNext;
-                return match self.step_checkout(lane, forward) {
-                    Some(name) => Asked::Core(Intent::Builtin(Builtin::Worktree(name))),
-                    None => {
-                        self.flash("the only checkout there is");
-                        Asked::Own(Deed::Nothing)
-                    }
-                };
+                return self.step_lane(lane, action == Action::LaneNext);
             }
             // The session is what a press would replace, so it takes two.
             Some(Action::SessionNew) => return Asked::Core(Intent::Builtin(Builtin::New)),
@@ -364,40 +282,6 @@ impl Ui {
                     self.disarm();
                 }
             }
-            Some(Action::InsertNewline) => self.editor.insert('\n'),
-            Some(Action::ModeNormal) => self.set_mode(Mode::Normal),
-            Some(Action::ModeInsert) => self.leave_normal(),
-            Some(Action::ModeInsertAfter) => {
-                self.editor.right();
-                self.leave_normal();
-            }
-            Some(Action::ModeInsertLineStart) => {
-                self.editor.home();
-                self.leave_normal();
-            }
-            Some(Action::ModeInsertLineEnd) => {
-                self.editor.end();
-                self.leave_normal();
-            }
-            Some(Action::ChangeChar) => {
-                self.editor.delete();
-                self.leave_normal();
-            }
-            Some(Action::ChangeToLineEnd) => {
-                self.editor.kill_to_end();
-                self.leave_normal();
-            }
-            Some(Action::ChangeLine) => self.change_line(),
-            Some(Action::OpenLineBelow) => {
-                self.editor.open_below();
-                self.leave_normal();
-            }
-            Some(Action::OpenLineAbove) => {
-                self.editor.open_above();
-                self.leave_normal();
-            }
-            Some(Action::MoveBufferStart) => self.buffer_ends(view, true),
-            Some(Action::MoveBufferEnd) => self.buffer_ends(view, false),
             Some(Action::HistoryOlder) => {
                 let cancelled = self.history_older(view);
                 if !cancelled.is_empty() {
@@ -405,53 +289,7 @@ impl Ui {
                 }
             }
             Some(Action::HistoryNewer) => self.editor.down(),
-            Some(Action::ScrollPageUp) => self.scroll_view(view, true, self.page_scroll_step()),
-            Some(Action::ScrollPageDown) => self.scroll_view(view, false, self.page_scroll_step()),
-            Some(Action::ScrollHalfUp) => self.scroll_view(view, true, self.half_scroll_step()),
-            Some(Action::ScrollHalfDown) => self.scroll_view(view, false, self.half_scroll_step()),
-            Some(Action::ScrollLineDown) => self.scroll_view(view, false, 1),
-            Some(Action::ScrollLineUp) => self.scroll_view(view, true, 1),
-            Some(Action::PageClose) => {
-                self.close_overlay(view);
-            }
-            Some(action @ (Action::PageSearchNext | Action::PageSearchPrev)) => {
-                self.search_step(action == Action::PageSearchNext);
-            }
-            Some(Action::Search) => self.search_open(view),
-            Some(Action::ThinkFold) => {
-                // The last group only. The switch is left alone, so the
-                // groups no one is touching keep what they had.
-                view.surface
-                    .folds
-                    .toggle_current(&mut view.surface.scrollback);
-            }
-            Some(Action::ThinkFoldAll) => {
-                // Every group in the scrollback, last one included, and
-                // the switch with them: one key resets the whole screen.
-                view.surface.folds.flip_all(&mut view.surface.scrollback);
-            }
-            Some(Action::MenuAccept) => match self.highlighted() {
-                Some(MenuEntry::Completion(c)) => {
-                    self.apply_completion(c);
-                }
-                Some(MenuEntry::File {
-                    start,
-                    end,
-                    lead,
-                    path,
-                    dir,
-                    ..
-                }) => self.apply_file(start, end, lead, &path, dir),
-                Some(MenuEntry::Hit { .. }) => self.search_enter(view),
-                // Onto the line, to send as it is or changed.
-                Some(MenuEntry::Pick { at, .. }) => {
-                    let option = self.questions.first().and_then(|q| q.options.get(at));
-                    if let Some(option) = option.cloned() {
-                        self.editor.set_line(&option);
-                    }
-                }
-                None => {}
-            },
+            Some(Action::MenuAccept) => self.menu_accept(view),
             Some(action @ (Action::MenuNext | Action::MenuPrevious)) => self.step_menu(action),
             // Only a question's options are sent together.
             Some(Action::MenuMark) => {
@@ -465,32 +303,227 @@ impl Ui {
             {
                 return self.answer(&[], None);
             }
-            Some(Action::MenuDismiss) => {
-                if self.list.seeded.take().as_deref() == Some(self.editor.text()) {
-                    self.editor.clear();
-                }
-                // Keyed to the text, so any edit brings the list back —
-                // "not that", not "never again".
-                self.list.dismissed_at = Some(self.editor.text().to_string());
-                self.disarm();
-            }
-            // Unbound and printable is the one thing no table has to say —
-            // except in Normal, where it is the table saying no.
-            None => {
-                if let Some(c) = bare_letter(&key)
-                    && self.vim.is_none_or(|m| m == Mode::Insert)
-                {
-                    self.editor.insert(c);
-                    if let Some(last) = &mut self.last_press {
-                        last.typed = true;
-                    }
-                }
-            }
+            Some(Action::MenuDismiss) => self.menu_dismiss(),
+            None => self.type_key(&key),
             // Another focus's, or a guard above that did not hold (`esc esc`
             // with text on the line): nothing here.
             Some(_) => {}
         }
         Asked::Own(Deed::Nothing)
+    }
+
+    // Enter: the highlighted completion first, since it may continue the
+    // input rather than submit it; else the line goes.
+    fn enter(&mut self, view: &mut View) -> Asked {
+        self.list.seeded = None;
+        // What is sent is answered on the transcript, not the page.
+        self.close_overlay(view);
+        let moved = self.list.picked.is_some();
+        match self.highlighted().filter(|e| e.taken_by_enter(moved)) {
+            // What was marked, or with nothing marked the highlighted one.
+            Some(MenuEntry::Pick { at, .. }) => {
+                let picks: Vec<usize> = match self.list.marked.is_empty() {
+                    true => vec![at],
+                    false => self.list.marked.iter().copied().collect(),
+                };
+                self.answer(&picks, None)
+            }
+            Some(MenuEntry::Completion(c)) => match c.accept {
+                Acceptance::Continue => {
+                    self.apply_completion(c);
+                    Asked::Own(Deed::Nothing)
+                }
+                Acceptance::Run => {
+                    self.editor.take();
+                    self.run_line(c.line)
+                }
+            },
+            Some(MenuEntry::File {
+                start,
+                end,
+                lead,
+                path,
+                dir,
+                ..
+            }) => {
+                // Enter on a path applies it and stays: the prompt
+                // is not done until the user says so.
+                self.apply_file(start, end, lead, &path, dir);
+                Asked::Own(Deed::Nothing)
+            }
+            Some(MenuEntry::Hit { .. }) | None => {
+                let typed = self.editor.take();
+                // Words matching none of a question's options answer it.
+                let own =
+                    !self.questions.is_empty() && !typed.trim().is_empty() && input::plain(&typed);
+                match own {
+                    true => self.answer(&[], Some(typed)),
+                    false => self.run_line(typed),
+                }
+            }
+        }
+    }
+
+    // The clipboard's image, saved and named on the line; an image already
+    // pasted keeps its number.
+    fn paste_image(&mut self) {
+        match super::clipboard::paste_image() {
+            Ok((path, about)) => {
+                let n = match self.images.iter().position(|p| *p == path) {
+                    Some(at) => at + 1,
+                    None => {
+                        self.images.push(path);
+                        self.images.len()
+                    }
+                };
+                self.editor.insert_str(&format!("[Image #{n} {about}] "));
+            }
+            Err(why) => self.flash(why),
+        }
+    }
+
+    // Esc before the model has moved means "I didn't mean to send that"; an
+    // empty editor, or unsending overwrites a line.
+    fn interrupt(&self, lane: &Lane, view: &View) -> Asked {
+        let unsendable = view
+            .state
+            .work
+            .as_ref()
+            .is_some_and(|w| matches!(w.doing, Doing::Turn { committed: false }));
+        if self.editor.is_empty() && lane.is_running() && unsendable {
+            return Asked::Own(Deed::Unsend);
+        }
+        Asked::Own(Deed::Interrupt)
+    }
+
+    fn step_lane(&mut self, lane: &Lane, forward: bool) -> Asked {
+        match self.step_checkout(lane, forward) {
+            Some(name) => Asked::Core(Intent::Builtin(Builtin::Worktree(name))),
+            None => {
+                self.flash("the only checkout there is");
+                Asked::Own(Deed::Nothing)
+            }
+        }
+    }
+
+    // The vim edits that leave Normal or change the line; false for any
+    // other action.
+    fn vim_edit(&mut self, action: Action) -> bool {
+        match action {
+            Action::InsertNewline => self.editor.insert('\n'),
+            Action::ModeNormal => self.set_mode(Mode::Normal),
+            Action::ModeInsert => self.leave_normal(),
+            Action::ModeInsertAfter => {
+                self.editor.right();
+                self.leave_normal();
+            }
+            Action::ModeInsertLineStart => {
+                self.editor.home();
+                self.leave_normal();
+            }
+            Action::ModeInsertLineEnd => {
+                self.editor.end();
+                self.leave_normal();
+            }
+            Action::ChangeChar => {
+                self.editor.delete();
+                self.leave_normal();
+            }
+            Action::ChangeToLineEnd => {
+                self.editor.kill_to_end();
+                self.leave_normal();
+            }
+            Action::ChangeLine => self.change_line(),
+            Action::OpenLineBelow => {
+                self.editor.open_below();
+                self.leave_normal();
+            }
+            Action::OpenLineAbove => {
+                self.editor.open_above();
+                self.leave_normal();
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    // What moves or folds the view rather than the line; false for any
+    // other action.
+    fn move_view(&mut self, view: &mut View, action: Action) -> bool {
+        match action {
+            Action::MoveBufferStart => self.buffer_ends(view, true),
+            Action::MoveBufferEnd => self.buffer_ends(view, false),
+            Action::ScrollPageUp => self.scroll_view(view, true, self.page_scroll_step()),
+            Action::ScrollPageDown => self.scroll_view(view, false, self.page_scroll_step()),
+            Action::ScrollHalfUp => self.scroll_view(view, true, self.half_scroll_step()),
+            Action::ScrollHalfDown => self.scroll_view(view, false, self.half_scroll_step()),
+            Action::ScrollLineDown => self.scroll_view(view, false, 1),
+            Action::ScrollLineUp => self.scroll_view(view, true, 1),
+            Action::PageClose => {
+                self.close_overlay(view);
+            }
+            Action::PageSearchNext | Action::PageSearchPrev => {
+                self.search_step(action == Action::PageSearchNext);
+            }
+            Action::Search => self.search_open(view),
+            // The last group only. The switch is left alone, so the
+            // groups no one is touching keep what they had.
+            Action::ThinkFold => view
+                .surface
+                .folds
+                .toggle_current(&mut view.surface.scrollback),
+            // Every group in the scrollback, last one included, and
+            // the switch with them: one key resets the whole screen.
+            Action::ThinkFoldAll => view.surface.folds.flip_all(&mut view.surface.scrollback),
+            _ => return false,
+        }
+        true
+    }
+
+    fn menu_accept(&mut self, view: &mut View) {
+        match self.highlighted() {
+            Some(MenuEntry::Completion(c)) => self.apply_completion(c),
+            Some(MenuEntry::File {
+                start,
+                end,
+                lead,
+                path,
+                dir,
+                ..
+            }) => self.apply_file(start, end, lead, &path, dir),
+            Some(MenuEntry::Hit { .. }) => self.search_enter(view),
+            // Onto the line, to send as it is or changed.
+            Some(MenuEntry::Pick { at, .. }) => {
+                let option = self.questions.first().and_then(|q| q.options.get(at));
+                if let Some(option) = option.cloned() {
+                    self.editor.set_line(&option);
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn menu_dismiss(&mut self) {
+        if self.list.seeded.take().as_deref() == Some(self.editor.text()) {
+            self.editor.clear();
+        }
+        // Keyed to the text, so any edit brings the list back —
+        // "not that", not "never again".
+        self.list.dismissed_at = Some(self.editor.text().to_string());
+        self.disarm();
+    }
+
+    // Unbound and printable is the one thing no table has to say — except
+    // in Normal, where it is the table saying no.
+    fn type_key(&mut self, key: &crossterm::event::KeyEvent) {
+        if let Some(c) = bare_letter(key)
+            && self.vim.is_none_or(|m| m == Mode::Insert)
+        {
+            self.editor.insert(c);
+            if let Some(last) = &mut self.last_press {
+                last.typed = true;
+            }
+        }
     }
 
     // The wheel scrolls what is shown: the reading page while one is up,
