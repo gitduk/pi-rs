@@ -283,7 +283,7 @@ pub fn resolve(
         .collect();
     let shelf = (!pinned.no_skills).then(|| {
         let shelf = skills::Shelf::new(skill_dirs);
-        let builtins = [SKILL_CREATOR, MCP_SETUP];
+        let builtins = [SKILL_CREATOR, MCP_SETUP, ARCHITECTURE];
         Arc::new(
             builtins
                 .into_iter()
@@ -527,6 +527,7 @@ fn tool_creator() -> skills::Skill {
 }
 const SKILL_CREATOR: &str = include_str!("../../skills/skill-creator/SKILL.md");
 const MCP_SETUP: &str = include_str!("../../skills/mcp-setup/SKILL.md");
+const ARCHITECTURE: &str = include_str!("../../skills/architecture/SKILL.md");
 
 /// The checkout's directories before the home's, so a name both use is the
 /// project's — skill and script alike. The reason to keep something in a
@@ -890,6 +891,7 @@ mod tests {
             ("tool-creator", super::TOOL_CREATOR),
             ("skill-creator", super::SKILL_CREATOR),
             ("mcp-setup", super::MCP_SETUP),
+            ("architecture", super::ARCHITECTURE),
         ] {
             let skill = skills::Skill::builtin(text).expect("a valid built-in skill");
             assert_eq!(skill.name, name);
@@ -918,7 +920,7 @@ mod tests {
             .unwrap();
             let loader = resolved.brief.registry.get(skills::Load::NAME);
             assert_eq!(loader.is_some(), !no_skills);
-            for name in ["tool-creator", "skill-creator", "mcp-setup"] {
+            for name in ["tool-creator", "skill-creator", "mcp-setup", "architecture"] {
                 assert_eq!(
                     resolved
                         .commands

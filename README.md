@@ -544,6 +544,7 @@ If both locations contain the same script or skill name, pi offers the project's
 The built-in `tool-creator` skill teaches the model to write tools.
 `skill-creator` teaches it to write skills.
 `mcp-setup` explains how to connect MCP servers.
+`architecture` guides the model to design structure before it builds a change.
 `pi-help` loads an index for questions about pi.
 The model reads relevant README sections through the skill's `file` argument.
 It can request `README.md` when it needs the complete documentation.
