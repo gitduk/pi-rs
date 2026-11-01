@@ -18,13 +18,20 @@ pub(super) use pi_core::execution::{Done, Fetched, Kind, Started};
 use toolbox::channel::Outcome;
 
 impl Tui {
-    // The front lane's transcript, for a run about to start on it.
-    fn take_carried(&mut self) -> Option<Session> {
-        let carried = self.core.lane_mut().take_session();
-        if carried.is_none() {
+    // The front lane's transcript, for `request`'s run about to start on it.
+    // Missing only when a panic took the transcript and the archive won't
+    // read back; then `request` fails here.
+    fn take_carried(&mut self, request: Request) -> Option<(Session, Request)> {
+        let Some(carried) = self.core.lane_mut().take_session() else {
             self.ui.flash(NO_TRANSCRIPT);
-        }
-        carried
+            self.complete(
+                request,
+                Output::Notice(String::new()),
+                Outcome::Failed(NO_TRANSCRIPT.into()),
+            );
+            return None;
+        };
+        Some((carried, request))
     }
 
     // Hands the view to a run about to start: clock running, run figures
@@ -87,14 +94,8 @@ impl Tui {
             let view = front_view(&mut self.views, lane);
             self.ui.say_note(lane, view, &note);
         }
-        // Lent to the run for the turn's length. Missing only when a panic
-        // took the transcript and the archive won't read back.
-        let Some(mut carried) = self.take_carried() else {
-            self.complete(
-                request,
-                Output::Notice(String::new()),
-                Outcome::Failed(super::NO_TRANSCRIPT.into()),
-            );
+        // Lent to the run for the turn's length.
+        let Some((mut carried, request)) = self.take_carried(request) else {
             return false;
         };
         let id = carried.send(ask);
@@ -158,12 +159,7 @@ impl Tui {
         request: Request,
         done: &UnboundedSender<Done>,
     ) {
-        let Some(carried) = self.take_carried() else {
-            self.complete(
-                request,
-                Output::Notice(String::new()),
-                Outcome::Failed(super::NO_TRANSCRIPT.into()),
-            );
+        let Some((carried, request)) = self.take_carried(request) else {
             return;
         };
         let cancel = CancellationToken::new();
@@ -285,12 +281,7 @@ impl Tui {
         request: Request,
         done: &UnboundedSender<Done>,
     ) {
-        let Some(carried) = self.take_carried() else {
-            self.complete(
-                request,
-                Output::Notice(String::new()),
-                Outcome::Failed(super::NO_TRANSCRIPT.into()),
-            );
+        let Some((carried, request)) = self.take_carried(request) else {
             return;
         };
         let cancel = CancellationToken::new();

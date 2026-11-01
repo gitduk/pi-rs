@@ -1299,36 +1299,52 @@ mod tests {
         assert!(core.commands.iter().any(|c| c.word == "/haiku"));
     }
 
+    // The test lane's resolution with one script, `name`, written into `dir`
+    // and read into its registry.
+    fn with_script(dir: &std::path::Path, name: &str, script: &str) -> super::Resolved {
+        use std::sync::Arc;
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(name), script).unwrap();
+        let scripts = Arc::new(toolbox::scripts::Dir::new(dir));
+        let mut resolved = Arc::try_unwrap(super::a_resolved("standing")).ok().unwrap();
+        Arc::make_mut(&mut resolved.brief)
+            .registry
+            .read(scripts.clone());
+        resolved.scripts = vec![scripts];
+        resolved
+    }
+
+    // An agent armed with `resolved`, and what its children are given.
+    fn armed(
+        resolved: std::sync::Arc<super::Resolved>,
+        executions: Option<std::sync::Arc<crate::driver::background::Table>>,
+    ) -> (agent::Agent, std::sync::Arc<super::Resolved>) {
+        let mut agent = agent::Agent::new(
+            std::sync::Arc::new(Recording::default()),
+            crate::core::tests::test_spec("m"),
+        );
+        let resolved = super::arm(
+            &mut agent,
+            resolved,
+            crate::core::archive::nowhere(),
+            agent::Retry::default(),
+            executions,
+        );
+        (agent, resolved)
+    }
+
     // Only the lane offers wrappers that can start background commands.
     #[tokio::test]
     async fn only_the_lane_offers_background_script_wrappers() {
         use std::sync::Arc;
 
         let dir = tempfile::tempdir().unwrap();
-        let tools = dir.path().join("tools");
-        std::fs::create_dir(&tools).unwrap();
-        std::fs::write(
-            tools.join("off"),
+        let resolved = with_script(
+            &dir.path().join("tools"),
+            "off",
             "#!/bin/sh\n# ---\n# description = \"Go off\"\n# background = true\n# ---\necho '{\"status\":\"x\"}' >&3\n",
-        )
-        .unwrap();
-        let scripts = Arc::new(toolbox::scripts::Dir::new(&tools));
-        let mut resolved = Arc::try_unwrap(super::a_resolved("standing")).ok().unwrap();
-        Arc::make_mut(&mut resolved.brief)
-            .registry
-            .read(scripts.clone());
-        resolved.scripts = vec![scripts];
-        let mut agent = agent::Agent::new(
-            Arc::new(Recording::default()),
-            crate::core::tests::test_spec("m"),
         );
-        let resolved = super::arm(
-            &mut agent,
-            Arc::new(resolved),
-            crate::core::archive::nowhere(),
-            agent::Retry::default(),
-            Some(Arc::default()),
-        );
+        let (agent, resolved) = armed(Arc::new(resolved), Some(Arc::default()));
 
         let ctx = tool::Ctx::new(tool::Workspace::new(dir.path()).unwrap());
         let off = |registry: &tool::Registry| registry.get("off").unwrap();
@@ -1342,17 +1358,7 @@ mod tests {
     fn a_lanes_shell_exposes_background_controls_without_a_separate_command_tool() {
         use std::sync::Arc;
 
-        let mut agent = agent::Agent::new(
-            Arc::new(Recording::default()),
-            crate::core::tests::test_spec("m"),
-        );
-        super::arm(
-            &mut agent,
-            super::a_resolved(""),
-            crate::core::archive::nowhere(),
-            agent::Retry::default(),
-            Some(Arc::default()),
-        );
+        let (agent, _) = armed(super::a_resolved(""), Some(Arc::default()));
         assert!(agent.brief.registry.get("job").is_none());
         let shell = agent.brief.registry.get(toolbox::bash::Bash::NAME).unwrap();
         let schema = shell.schema();
@@ -1380,31 +1386,13 @@ mod tests {
             toolbox::bash::Bash::NAME,
         ] {
             let dir = tempfile::tempdir().unwrap();
-            let tools = dir.path().join("tools");
-            std::fs::create_dir(&tools).unwrap();
-            std::fs::write(
-                tools.join(name),
+            let mut resolved = with_script(
+                &dir.path().join("tools"),
+                name,
                 "#!/bin/sh\n# ---\n# description = \"my own tool\"\n# ---\necho hi\n",
-            )
-            .unwrap();
-            let scripts = Arc::new(toolbox::scripts::Dir::new(&tools));
-            let mut resolved = Arc::try_unwrap(super::a_resolved("standing")).ok().unwrap();
+            );
             resolved.remembers = true;
-            Arc::make_mut(&mut resolved.brief)
-                .registry
-                .read(scripts.clone());
-            resolved.scripts = vec![scripts];
-            let mut agent = agent::Agent::new(
-                Arc::new(Recording::default()),
-                crate::core::tests::test_spec("m"),
-            );
-            let resolved = super::arm(
-                &mut agent,
-                Arc::new(resolved),
-                crate::core::archive::nowhere(),
-                agent::Retry::default(),
-                Some(Arc::default()),
-            );
+            let (agent, resolved) = armed(Arc::new(resolved), Some(Arc::default()));
 
             let kept = agent.brief.registry.get(name).unwrap();
             assert_ne!(kept.description(), "my own tool", "a script took {name}");
@@ -1427,30 +1415,16 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let name = crate::core::memory::Remember::NAME;
-        std::fs::write(
-            dir.path().join(name),
+        let mut resolved = with_script(
+            dir.path(),
+            name,
             "#!/bin/sh\n# ---\n# description = \"custom memory\"\n# ---\necho hi\n",
-        )
-        .unwrap();
-        let scripts = Arc::new(toolbox::scripts::Dir::new(dir.path()));
-        let mut resolved = Arc::try_unwrap(super::a_resolved("standing")).ok().unwrap();
+        );
         resolved.remembers = true;
         resolved.ceiling = tool::Tier::Write;
         let brief = Arc::make_mut(&mut resolved.brief);
-        brief.registry.read(scripts.clone());
         brief.registry = std::mem::take(&mut brief.registry).within(tool::Tier::Write);
-        resolved.scripts = vec![scripts];
-        let mut agent = agent::Agent::new(
-            Arc::new(Recording::default()),
-            crate::core::tests::test_spec("m"),
-        );
-        let resolved = super::arm(
-            &mut agent,
-            Arc::new(resolved),
-            crate::core::archive::nowhere(),
-            agent::Retry::default(),
-            None,
-        );
+        let (agent, resolved) = armed(Arc::new(resolved), None);
         let memory = agent
             .brief
             .registry

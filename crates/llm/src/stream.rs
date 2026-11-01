@@ -605,21 +605,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reasoning_carries_its_origin_and_signature() {
+    // A reasoning block opened at 0 holding `inside`, then the answer as
+    // text at 1, folded into the turn's content.
+    fn reasoned(inside: Vec<StreamEvent>) -> Vec<AssistantContent> {
         let mut a = acc();
         a.push(StreamEvent::BlockStart {
             index: 0,
             kind: BlockKind::Reasoning,
         });
-        a.push(StreamEvent::ReasoningDelta {
-            index: 0,
-            delta: "step".into(),
-        });
-        a.push(StreamEvent::ReasoningSignature {
-            index: 0,
-            signature: "sig".into(),
-        });
+        for event in inside {
+            a.push(event);
+        }
         a.push(StreamEvent::TextDelta {
             index: 1,
             delta: "answer".into(),
@@ -628,10 +624,24 @@ mod tests {
             stop: StopReason::EndTurn,
             usage: Usage::default(),
         });
-
         let Message::Assistant { content, .. } = a.finish().message else {
             panic!()
         };
+        content
+    }
+
+    #[test]
+    fn reasoning_carries_its_origin_and_signature() {
+        let content = reasoned(vec![
+            StreamEvent::ReasoningDelta {
+                index: 0,
+                delta: "step".into(),
+            },
+            StreamEvent::ReasoningSignature {
+                index: 0,
+                signature: "sig".into(),
+            },
+        ]);
         // Reasoning must precede text: Anthropic rejects the other order.
         let AssistantContent::Reasoning(r) = &content[0] else {
             panic!("{content:?}")
@@ -649,23 +659,7 @@ mod tests {
 
     #[test]
     fn empty_reasoning_block_is_omitted() {
-        let mut a = acc();
-        a.push(StreamEvent::BlockStart {
-            index: 0,
-            kind: BlockKind::Reasoning,
-        });
-        a.push(StreamEvent::TextDelta {
-            index: 1,
-            delta: "answer".into(),
-        });
-        a.push(StreamEvent::Done {
-            stop: StopReason::EndTurn,
-            usage: Usage::default(),
-        });
-
-        let Message::Assistant { content, .. } = a.finish().message else {
-            panic!()
-        };
+        let content = reasoned(Vec::new());
         assert_eq!(content.len(), 1);
         assert!(matches!(&content[0], AssistantContent::Text(t) if t.text == "answer"));
     }
