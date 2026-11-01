@@ -98,6 +98,7 @@ fn main() {
 Read `interface.md` before you write a tool's header, arguments, or output.
 Read `background.md` for a tool that continues after its call.
 Read `events.md` for a script that reports progress, delivers results, or asks the person a question.
+Read `writing.md` before you write the tool's description, argument descriptions, or error messages.
 
 ## Add and check a tool
 

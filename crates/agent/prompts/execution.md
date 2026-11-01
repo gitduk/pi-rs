@@ -33,6 +33,8 @@ Do not ignore errors to make code run.
 Do not leave placeholders, stubs, or invented data in work that you report as complete.
 Match the style, names, and error handling of the code around your change.
 Write a comment only to explain a reason that the code cannot show.
+Write comments and error messages in short, active sentences.
+Give each concept one name.
 
 For small, reversible choices, use a reasonable assumption.
 Report that assumption.

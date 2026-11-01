@@ -283,12 +283,12 @@ pub fn resolve(
         .collect();
     let shelf = (!pinned.no_skills).then(|| {
         let shelf = skills::Shelf::new(skill_dirs);
-        let builtins = [SKILL_CREATOR, MCP_SETUP, ARCHITECTURE];
+        let builtins = [MCP_SETUP, ARCHITECTURE];
         Arc::new(
             builtins
                 .into_iter()
                 .filter_map(skills::Skill::builtin)
-                .chain([tool_creator(), super::help::skill()])
+                .chain([tool_creator(), skill_creator(), super::help::skill()])
                 .fold(shelf, skills::Shelf::with_builtin),
         )
     });
@@ -500,7 +500,10 @@ fn system_file(pinned: &Pinned) -> Option<PathBuf> {
 const TOOL_CREATOR: &str = include_str!("../../skills/tool-creator/SKILL.md");
 
 // The parts few tools need stay out of the instructions until asked for.
-const TOOL_CREATOR_FILES: [(&str, &str); 3] = [
+// Both creators write text that a model reads, so they share one guide.
+const WRITING: (&str, &str) = ("writing.md", include_str!("../../skills/writing.md"));
+
+const TOOL_CREATOR_FILES: [(&str, &str); 4] = [
     (
         "interface.md",
         include_str!("../../skills/tool-creator/interface.md"),
@@ -513,6 +516,7 @@ const TOOL_CREATOR_FILES: [(&str, &str); 3] = [
         "events.md",
         include_str!("../../skills/tool-creator/events.md"),
     ),
+    WRITING,
 ];
 
 fn tool_creator() -> skills::Skill {
@@ -526,6 +530,12 @@ fn tool_creator() -> skills::Skill {
         )
 }
 const SKILL_CREATOR: &str = include_str!("../../skills/skill-creator/SKILL.md");
+
+fn skill_creator() -> skills::Skill {
+    skills::Skill::builtin(SKILL_CREATOR)
+        .expect("a valid built-in skill")
+        .with_files(vec![(WRITING.0.to_string(), WRITING.1)])
+}
 const MCP_SETUP: &str = include_str!("../../skills/mcp-setup/SKILL.md");
 const ARCHITECTURE: &str = include_str!("../../skills/architecture/SKILL.md");
 
@@ -895,6 +905,27 @@ mod tests {
         ] {
             let skill = skills::Skill::builtin(text).expect("a valid built-in skill");
             assert_eq!(skill.name, name);
+        }
+    }
+
+    // A file the instructions name but the skill cannot serve fails only when the model asks for it.
+    #[test]
+    fn the_creators_serve_every_file_their_instructions_name() {
+        for skill in [super::tool_creator(), super::skill_creator()] {
+            let text = skill.text().unwrap();
+            let named = text
+                .split('`')
+                .skip(1)
+                .step_by(2)
+                .flat_map(|code| code.split('"'))
+                .filter(|word| word.ends_with(".md") && *word != "SKILL.md");
+            for file in named {
+                assert!(
+                    skill.builtin_files.iter().any(|(name, _)| name == file),
+                    "{} names {file}",
+                    skill.name
+                );
+            }
         }
     }
 

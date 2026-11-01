@@ -38,6 +38,8 @@ Users can also invoke a skill by name.
 Read other files within the skill directory with `skill(name: "<name>", file: "<path>")`.
 Reference these files in the instructions.
 
+Read `writing.md` with `skill(name: "skill-creator", file: "writing.md")` before you write the description and the instructions.
+
 A skill in `skills/` replaces a built-in skill with the same name.
 pi reads skill directories during the session.
 A new or updated skill becomes available on the next turn.
