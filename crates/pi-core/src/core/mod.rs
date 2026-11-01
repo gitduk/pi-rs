@@ -958,4 +958,46 @@ mod tests {
             "the old endpoint is gone"
         );
     }
+
+    // A loop measures turns, so a goal that starts none is refused up front
+    // rather than looping on nothing; a bare `/loop` stops one.
+    #[test]
+    fn a_loop_needs_a_goal_that_starts_a_turn() {
+        use crate::input::{Drive, Step};
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
+        let mut run = |goal: &str| core.dispatch(Intent::Builtin(Builtin::Loop(goal.into())));
+
+        let step = run(" ");
+        assert!(matches!(step, Step::Drive(Drive::Loop(None))), "{step:?}");
+        match run(" make the tests pass ") {
+            Step::Drive(Drive::Loop(Some(goal))) => assert_eq!(goal, "make the tests pass"),
+            step => panic!("a prompt is a goal: {step:?}"),
+        }
+        let step = run("/status");
+        assert!(
+            matches!(step, Step::Notice(_)),
+            "a built-in starts no turn: {step:?}"
+        );
+    }
+
+    // Only the bare word opens the project's file; an argument is refused
+    // rather than read as a verb.
+    #[test]
+    fn settings_opens_the_projects_file_and_takes_no_argument() {
+        use crate::input::Step;
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
+        let mut settings =
+            |rest: &str| core.dispatch(Intent::Builtin(Builtin::Settings(rest.into())));
+
+        match settings(" ") {
+            Step::Edit(file) => {
+                assert_eq!(file, dir.path().canonicalize().unwrap().join(".pi.toml"))
+            }
+            step => panic!("bare, it opens the file: {step:?}"),
+        }
+        let step = settings("reset");
+        assert!(matches!(step, Step::Notice(_)), "{step:?}");
+    }
 }

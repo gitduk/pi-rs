@@ -1499,4 +1499,79 @@ mod tests {
         assert!(core.move_to("nowhere").is_err(), "a missing dir is refused");
         assert_eq!(core.lane().root(), to, "and changes nothing");
     }
+
+    // What the user said is handed back and goes with everything after it;
+    // anything else stays and only what follows goes. Either way the shorter
+    // transcript is what is on disk.
+    #[test]
+    fn a_rewind_unsends_what_was_said_and_keeps_anything_else() {
+        use crate::input::{Builtin, Intent, Rewound, Step};
+        use llm::message::{AssistantContent, Text};
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
+        let session = core.lane_mut().talk.transcript.home_mut().unwrap();
+        let first = session.prompt("first");
+        let reply =
+            session.push_assistant(vec![AssistantContent::Text(Text { text: "ok".into() })]);
+        session.prompt("second");
+        let rewind = |core: &mut crate::core::Core, id: String| {
+            core.dispatch(Intent::Builtin(Builtin::Rewind(id)))
+        };
+        let on_disk = |core: &crate::core::Core| {
+            let path = core.store.path_of(core.lane().root(), core.lane().id());
+            pi_store::session::Store::read(&path)
+                .unwrap()
+                .session
+                .entries()
+                .len()
+        };
+
+        let step = rewind(&mut core, reply.0.to_string());
+        assert!(
+            matches!(step, Step::Rewound(Rewound::Kept, None)),
+            "{step:?}"
+        );
+        assert_eq!(on_disk(&core), 2);
+
+        match rewind(&mut core, format!(" {} ", first.0)) {
+            Step::Rewound(Rewound::Unsent(text), None) => assert_eq!(text, "first"),
+            step => panic!("what was said comes back: {step:?}"),
+        }
+        assert_eq!(on_disk(&core), 0);
+
+        let step = rewind(&mut core, first.0.to_string());
+        assert!(
+            matches!(step, Step::Rewound(Rewound::Nothing, None)),
+            "{step:?}"
+        );
+        let step = rewind(&mut core, "last".into());
+        assert!(matches!(step, Step::Notice(_)), "{step:?}");
+    }
+
+    // `/resume` reads a session's row off its file, so a name lands there at
+    // once; a bare `/name` takes it away again.
+    #[test]
+    fn a_name_is_filed_as_it_is_given_and_taken_back() {
+        use crate::input::{Builtin, Intent, Step};
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
+        let filed = |core: &crate::core::Core| {
+            let path = core.store.path_of(core.lane().root(), core.lane().id());
+            pi_store::session::Store::read(&path).unwrap().name
+        };
+
+        let step = core.dispatch(Intent::Builtin(Builtin::Name("bug hunt".into())));
+        assert!(
+            matches!(&step, Step::Notice(said) if said.contains("bug hunt")),
+            "{step:?}"
+        );
+        assert_eq!(filed(&core).as_deref(), Some("bug hunt"));
+
+        let step = core.dispatch(Intent::Builtin(Builtin::Name(String::new())));
+        assert!(
+            matches!(&step, Step::Notice(said) if said.contains("unnamed")),
+            "{step:?}"
+        );
+        assert_eq!(filed(&core), None);
+    }
 }

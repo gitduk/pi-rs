@@ -907,4 +907,29 @@ mod tests {
         assert_eq!(core.lanes.len(), 2);
         assert!(home(dir.path()).unwrap().join("fix-tools").exists());
     }
+
+    // `rm` is the verb only with a name after it; bare, it names a tree.
+    #[test]
+    fn rm_removes_only_with_a_name_after_it() {
+        use crate::input::{Builtin, Intent, Step};
+        let dir = crate::core::worktree::test_repo();
+        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
+        let worktree = |core: &mut Core, arg: &str| {
+            core.dispatch(Intent::Builtin(Builtin::Worktree(arg.into())))
+        };
+
+        let step = worktree(&mut core, "");
+        assert!(matches!(step, Step::Handled(_)), "bare, it lists: {step:?}");
+
+        worktree(&mut core, "rm");
+        assert_eq!(core.lane().worktree(), Some("rm"));
+        assert!(home(dir.path()).unwrap().join("rm").exists());
+
+        core.current = 0;
+        core.in_force();
+        let step = worktree(&mut core, "rm  rm ");
+        assert!(!matches!(step, Step::Notice(_)), "{step:?}");
+        assert_eq!(core.lanes.len(), 1);
+        assert!(!home(dir.path()).unwrap().join("rm").exists());
+    }
 }
