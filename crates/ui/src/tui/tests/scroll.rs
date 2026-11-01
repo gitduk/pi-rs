@@ -357,7 +357,7 @@ fn the_editor_and_submitted_text_paint_the_same_background() {
         }
         let text = "same text wraps across several rows\nsecond line";
         ui.editor.insert_str(text);
-        view.surface.scrollback = Row::prompt(text, &ui.paint).into();
+        view.surface.scrollback = Row::prompt(text, agent::session::now(), &ui.paint).into();
         ui.flush(&lane, &mut view);
         ui.set_theme(&mut view, lane.resolved(), Arc::new(theme));
         ui.flush(&lane, &mut view);

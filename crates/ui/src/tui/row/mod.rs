@@ -92,6 +92,8 @@ enum Kind {
         border: Line<'static>,
         // The line's text, in the input style, without the border.
         body: Line<'static>,
+        // Only the first logical line carries the prompt's time.
+        at: Option<u64>,
     },
     // What the model answered, one row per markdown line, with what in it
     // reads as one. Its own kind, not a notice: it is half the conversation.
@@ -597,12 +599,12 @@ impl Row {
         Self::notice(Line::from(spans))
     }
 
-    fn said(border: Line<'static>, body: Line<'static>) -> Self {
-        Self::new(Kind::Said { border, body })
+    fn said(border: Line<'static>, body: Line<'static>, at: Option<u64>) -> Self {
+        Self::new(Kind::Said { border, body, at })
     }
 
     /// A prompt's lines as the stream echoed them, with the input's alignment.
-    pub fn prompt(text: &str, paint: &Paint) -> Vec<Self> {
+    pub fn prompt(text: &str, at: u64, paint: &Paint) -> Vec<Self> {
         let bangs = pi_core::input::bangs(text);
         if bangs > 0 {
             let sigil = match bangs {
@@ -621,6 +623,7 @@ impl Row {
                 rows.push(Self::said(
                     Line::from(prefix),
                     Line::from(paint.span(&paint.theme.input, body)),
+                    (i == 0).then_some(at),
                 ));
             }
             return rows;
@@ -628,10 +631,12 @@ impl Row {
         let border =
             Line::from(paint.span(&paint.theme.prompt.color, icons::bar(icons::SAID_RULE)));
         text.lines()
-            .map(|line| {
+            .enumerate()
+            .map(|(i, line)| {
                 Self::said(
                     border.clone(),
                     Line::from(paint.span(&paint.theme.input, line)),
+                    (i == 0).then_some(at),
                 )
             })
             .collect()
@@ -719,6 +724,15 @@ impl Row {
             }
             rest
         })
+    }
+
+    /// When the prompt this line opens was sent; only a prompt's first line
+    /// has one.
+    pub fn sent(&self) -> Option<u64> {
+        match &self.0 {
+            Kind::Said { at, .. } => *at,
+            _ => None,
+        }
     }
 
     /// Whether a wrap of this row shows its border on the first piece only,

@@ -251,7 +251,7 @@ impl Ui {
 
     // The submitted line onto the screen: the row its answer lands under.
     pub(super) fn submit(&mut self, view: &mut View, line: &str) {
-        self.submit_rows(view, Row::prompt(line, &self.paint));
+        self.submit_rows(view, Row::prompt(line, agent::session::now(), &self.paint));
     }
 
     pub(super) fn submit_relayed(&mut self, view: &mut View, label: &str, line: &str) {

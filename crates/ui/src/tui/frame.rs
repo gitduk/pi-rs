@@ -3,7 +3,7 @@
 
 use pi_core::core::lane::Lane;
 use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListState};
 
 use super::Ui;
@@ -275,7 +275,7 @@ impl Ui {
         // The query marked on the rows a search reads, a page's own.
         let look = self.rat_style(&self.paint.theme.matched);
         let here = self.rat_style(&self.paint.theme.match_current);
-        let rows = match self.search_query() {
+        let mut rows = match self.search_query() {
             Some((query, at)) => {
                 let places = self.row_targets.iter().zip(&self.row_of);
                 rows.into_iter()
@@ -302,6 +302,7 @@ impl Ui {
         self.drawn.extend(executions.iter().map(plain));
         self.drawn.resize(bar_base, String::new());
         self.drawn.extend(bar.iter().map(plain));
+        self.stamp_sent(view, &mut rows, width);
         let (rows, executions, bar) = match &self.selection {
             Some(sel) => (
                 super::select::highlight(rows, sel, 0, |at| self.lead(view, at)),
@@ -412,6 +413,40 @@ impl Ui {
         if over != self.hovered_scrollback || self.lit_text() != lit || self.on_closer() != ruled {
             self.hovered_scrollback = over;
             self.redraw = true;
+        }
+    }
+
+    // A prompt's send time in its first screen row's free end, added after
+    // `drawn` is read so selection and search never take it for text.
+    fn stamp_sent(&self, view: &View, rows: &mut [Line<'static>], width: usize) {
+        let now = agent::session::now();
+        for (at, line) in rows.iter_mut().enumerate() {
+            let (Some(Target::Scrollback(idx, _)), Some(0)) =
+                (self.row_targets.get(at), self.row_of.get(at))
+            else {
+                continue;
+            };
+            let Some(row) = view.surface.scrollback.get(*idx) else {
+                continue;
+            };
+            let Some(sent) = row.sent() else {
+                continue;
+            };
+            let time = render::clock(sent, now);
+            let cols = pi_store::text::width(&time);
+            let used = pi_store::text::width(self.drawn[at].trim_end());
+            if time.is_empty() || used + 1 + cols > width {
+                continue;
+            }
+            let mut spans = screen::clip_line(line, width - cols).spans;
+            let band = row.band(&self.paint).unwrap_or_default();
+            let filled: usize = spans.iter().map(|s| s.width()).sum();
+            if filled < width - cols {
+                spans.push(Span::styled(" ".repeat(width - cols - filled), band));
+            }
+            let span = self.paint.span(&self.paint.theme.muted, time);
+            spans.push(Span::styled(span.content, band.patch(span.style)));
+            *line = Line::from(spans);
         }
     }
 

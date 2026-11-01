@@ -655,9 +655,9 @@ pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
         LogEntry::Ask { ask, at, .. } if ask.relayed.is_some() => {
             Some(vec![Row::relayed(ask.shown_text(), &ask.text, *at, paint)])
         }
-        LogEntry::Ask { ask, .. } => Some(Row::prompt(ask.shown_text(), paint)),
-        LogEntry::Bash { run, .. } => {
-            let mut rows = Row::prompt(run.shown_text(), paint);
+        LogEntry::Ask { ask, at, .. } => Some(Row::prompt(ask.shown_text(), *at, paint)),
+        LogEntry::Bash { run, at, .. } => {
+            let mut rows = Row::prompt(run.shown_text(), *at, paint);
             rows.extend(
                 core::bash::bash_said(&run.text)
                     .into_iter()
