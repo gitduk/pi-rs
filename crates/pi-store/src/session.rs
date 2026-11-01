@@ -271,7 +271,18 @@ impl Drop for Claim {
 
 // Hold the session directory `dir`, made if missing, for this process.
 fn claim_dir(dir: PathBuf, id: &str) -> Result<Claim> {
-    std::fs::create_dir_all(&dir)?;
+    // Another claim letting go removes the workspace's directory once it is
+    // empty, which can fall between making it and making `dir` in it; made
+    // again, it is there to stay until `dir` is.
+    let made = std::fs::create_dir_all(&dir);
+    if made
+        .as_ref()
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+    {
+        std::fs::create_dir_all(&dir)?;
+    } else {
+        made?;
+    }
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -287,11 +298,16 @@ fn claim_dir(dir: PathBuf, id: &str) -> Result<Claim> {
 }
 
 /// A session directory never saved to leaves nothing behind: its lock goes,
-/// and the directory with it once nothing else is there.
+/// and the directory with it once nothing else is there — the workspace's
+/// too, when this was the last thing in it.
 fn discard_unsaved(dir: &Path) {
     if !dir.join(TRANSCRIPT).exists() {
         let _ = std::fs::remove_file(dir.join(LOCK));
-        let _ = std::fs::remove_dir(dir);
+        if std::fs::remove_dir(dir).is_ok()
+            && let Some(workspace) = dir.parent()
+        {
+            let _ = std::fs::remove_dir(workspace);
+        }
     }
 }
 
@@ -518,9 +534,13 @@ impl Store {
             .max_by_key(modified)
             .with_context(|| format!("no session `{id}` in {}", self.root.display()))?;
         let mut held = claim_dir(from.clone(), id)?;
-        // Nothing saved there yet, so letting go of it frees the name; one
+        // Nothing saved there yet, so letting go of it frees the name — and
+        // may take the workspace's directory with it, made again here; one
         // rename then moves all of it or none.
         drop(here);
+        if let Some(workspace) = dir.parent() {
+            std::fs::create_dir_all(workspace)?;
+        }
         std::fs::rename(&from, &dir)
             .with_context(|| format!("cannot move session `{id}` here from {}", from.display()))?;
         held.dir = dir;
@@ -820,6 +840,25 @@ mod tests {
         std::fs::write(dir.join(super::LOCK), "").unwrap();
         super::discard_abandoned(&dir);
         assert!(!dir.exists());
+    }
+
+    // The workspace's directory goes with the last session in it that was
+    // never saved, so a refused `take` leaves nothing; one still held stays.
+    #[test]
+    fn a_workspace_with_nothing_saved_leaves_no_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = super::Store::new(tmp.path().join("s"));
+        let ws = std::path::Path::new("/w");
+        let bucket = store.dir_of(ws);
+
+        assert!(store.take(ws, "nope").is_err());
+        assert!(!bucket.exists());
+
+        let held = store.claim(ws, "held").unwrap();
+        drop(store.claim(ws, "gone").unwrap());
+        assert!(bucket.exists(), "a held session keeps it");
+        drop(held);
+        assert!(!bucket.exists());
     }
 
     #[test]
