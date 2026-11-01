@@ -149,11 +149,11 @@ impl Drivers {
     /// Queued execution results together first: they were due already, and a loop's
     /// next round can wait one turn where a loop that never settles would hold
     /// them off for good. Inputs through executions keep their own turns.
-    pub fn next(&mut self, lane: u64, root: &std::path::Path) -> Option<Next> {
+    pub fn next(&mut self, lane: u64, root: &std::path::Path, ctx: &Ctx) -> Option<Next> {
         Some(match self.executions.take_back(root) {
             Some((_, background::Back::Result(due))) => Next {
+                note: due.note_for(ctx),
                 line: due.line,
-                note: due.note,
                 origin: Origin::Background,
                 label: Some(due.label),
             },
@@ -404,14 +404,14 @@ mod tests {
         .unwrap();
         assert!(out.flatten().contains("command #1"));
         assert!(!marker.exists(), "the command has not finished");
-        assert!(drivers.next(1, root).is_none());
+        assert!(drivers.next(1, root, &ctx).is_none());
         ctx.cancel.cancel();
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!marker.exists(), "ending the turn does not stop it");
         let next = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let changed = table.changed().notified();
-                if let Some(next) = drivers.next(1, root) {
+                if let Some(next) = drivers.next(1, root, &ctx) {
                     break next;
                 }
                 changed.await;
@@ -422,11 +422,13 @@ mod tests {
         assert_eq!(next.origin, Origin::Background);
         assert!(next.line.contains("finished"));
         assert!(marker.exists());
-        assert!(drivers.next(1, root).is_none(), "reported once");
+        assert!(drivers.next(1, root, &ctx).is_none(), "reported once");
     }
 
     #[tokio::test]
     async fn queued_results_open_one_turn_only_on_their_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
         let mut drivers = Drivers::default();
         let root = std::path::Path::new("/checkout");
         let elsewhere = std::path::Path::new("/elsewhere");
@@ -455,7 +457,7 @@ mod tests {
         first.channel().result("built".into());
         first.end();
 
-        let next = drivers.next(1, root).unwrap();
+        let next = drivers.next(1, root, &ctx).unwrap();
         assert_eq!(next.origin, Origin::Background);
         assert_eq!(next.label.as_deref(), Some("2 background command results"));
         assert_eq!(
@@ -464,21 +466,52 @@ mod tests {
         );
         assert!(next.note.contains("2 queued results"));
         assert!(
-            drivers.next(1, root).is_none(),
+            drivers.next(1, root, &ctx).is_none(),
             "one turn drains the backlog"
         );
         assert!(
             table.background(root).is_empty(),
             "ended executions are settled"
         );
-        let next = drivers.next(2, elsewhere).unwrap();
+        let next = drivers.next(2, elsewhere, &ctx).unwrap();
         assert!(next.line.ends_with("another checkout"));
         assert!(next.note.contains("background command #2 (other)"));
-        assert!(drivers.next(2, elsewhere).is_none());
+        assert!(drivers.next(2, elsewhere, &ctx).is_none());
+    }
+
+    // What the run wrote after a command started is named beside its result;
+    // what it wrote before is not.
+    #[tokio::test]
+    async fn a_result_names_the_files_written_after_its_command_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let root = ctx.workspace.root();
+        let mut drivers = Drivers::default();
+        let sink = background::Commands::new(drivers.background());
+        ctx.note_write(&root.join("before.rs"));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let build = sink.start(
+            root.into(),
+            toolbox::background::Invocation::shell("build"),
+            Default::default(),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        ctx.note_write(&root.join("after.rs"));
+        build.channel().result("built".into());
+        build.end();
+
+        let note = drivers.next(1, root, &ctx).unwrap().note;
+        assert!(
+            note.contains("You changed these files after build #1 started: `after.rs`."),
+            "{note}"
+        );
+        assert!(!note.contains("before.rs"), "{note}");
     }
 
     #[tokio::test]
     async fn batching_preserves_inputs_and_leaves_future_results_for_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
         let mut drivers = Drivers::default();
         let root = std::path::Path::new("/checkout");
         let sink = background::Commands::new(drivers.background());
@@ -500,28 +533,28 @@ mod tests {
         other.channel().result("built".into());
         other.end();
 
-        let batch = drivers.next(1, root).unwrap();
+        let batch = drivers.next(1, root, &ctx).unwrap();
         assert_eq!(batch.label.as_deref(), Some("2 background command results"));
         assert!(batch.line.ends_with("second"));
         assert!(!batch.line.contains("third"));
-        let input = drivers.next(1, root).unwrap();
+        let input = drivers.next(1, root, &ctx).unwrap();
         assert_eq!(input.origin, Origin::Input(execution.id()));
         assert_eq!(input.line, "what happened?");
         assert!(input.label.is_none());
         assert!(input.note.is_empty());
-        assert!(drivers.next(1, root).unwrap().line.ends_with("third"));
-        let input = drivers.next(1, root).unwrap();
+        assert!(drivers.next(1, root, &ctx).unwrap().line.ends_with("third"));
+        let input = drivers.next(1, root, &ctx).unwrap();
         assert_eq!(input.origin, Origin::Input(execution.id()));
         assert_eq!(input.line, "and now?");
-        assert!(drivers.next(1, root).unwrap().line.ends_with("built"));
-        assert!(drivers.next(1, root).is_none());
+        assert!(drivers.next(1, root, &ctx).unwrap().line.ends_with("built"));
+        assert!(drivers.next(1, root, &ctx).is_none());
 
         execution.channel().result("later".into());
         execution.end();
-        let next = drivers.next(1, root).unwrap();
+        let next = drivers.next(1, root, &ctx).unwrap();
         assert!(next.line.ends_with("later"));
         assert!(next.note.contains("background command #1 (watch)"));
-        assert!(drivers.next(1, root).is_none());
+        assert!(drivers.next(1, root, &ctx).is_none());
     }
 
     #[tokio::test]
@@ -683,7 +716,7 @@ mod tests {
         execution.channel().listen(tx);
         execution.channel().input("why did it fail".into());
 
-        let next = drivers.next(1, &root).expect("the input is due");
+        let next = drivers.next(1, &root, &ctx).expect("the input is due");
         assert_eq!(next.line, "why did it fail");
         assert_eq!(next.origin, Origin::Input(execution.id()));
         assert!(next.label.is_none(), "read as typed, not relayed");
@@ -824,7 +857,7 @@ mod tests {
         );
         execution.channel().listen(tx);
         execution.channel().input("btc".into());
-        let next = drivers.next(1, &root).expect("the input is due");
+        let next = drivers.next(1, &root, &ctx).expect("the input is due");
         let request = Request::new(next.origin, 1);
         drivers.started(request, true);
         assert_eq!(
@@ -916,7 +949,7 @@ mod tests {
         );
 
         execution.channel().input("btc".into());
-        let next = drivers.next(1, &root).expect("the input is due");
+        let next = drivers.next(1, &root, &ctx).expect("the input is due");
         let request = Request::new(next.origin, 1);
         drivers.started(request, true);
         drivers.observe(1, &root, &Event::TurnStart { turn: 1 });

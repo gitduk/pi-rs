@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent::session::Prompt;
+use tool::Ctx;
 
 use super::background::Table;
 
@@ -13,6 +14,8 @@ use super::background::Table;
 pub struct Input {
     root: PathBuf,
     executions: Arc<Table>,
+    // The run's context, which knows what it wrote since a command started.
+    ctx: Ctx,
     prompts: Box<dyn agent::seams::Input>,
 }
 
@@ -20,11 +23,13 @@ impl Input {
     pub fn new(
         root: PathBuf,
         executions: Arc<Table>,
+        ctx: Ctx,
         prompts: impl agent::seams::Input + 'static,
     ) -> Self {
         Self {
             root,
             executions,
+            ctx,
             prompts: Box::new(prompts),
         }
     }
@@ -36,11 +41,12 @@ impl agent::seams::Input for Input {
             return Some(prompt);
         }
         let due = self.executions.take_ready_results(&self.root)?;
+        let note = due.note_for(&self.ctx);
         Some(Prompt {
             text: due.line,
             images: Vec::new(),
             shown: Some(due.label),
-            relayed: Some(due.note),
+            relayed: Some(note),
         })
     }
 }
@@ -96,7 +102,8 @@ mod tests {
         elsewhere.end();
 
         let typed = std::sync::Mutex::new(Some(prompt("typed direction")));
-        let input = Input::new(root.clone(), executions.clone(), move || {
+        let ctx = Ctx::new(tool::Workspace::new(std::env::temp_dir()).unwrap());
+        let input = Input::new(root.clone(), executions.clone(), ctx, move || {
             typed.lock().unwrap().take()
         });
         assert_eq!(input.take().unwrap().text, "typed direction");

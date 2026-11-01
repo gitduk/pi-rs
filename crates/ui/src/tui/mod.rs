@@ -897,7 +897,7 @@ impl Tui {
         let next = if lane.is_running() {
             self.drivers.next_input(lane.root())?
         } else {
-            self.drivers.next(lane.token(), lane.root())?
+            self.drivers.next(lane.token(), lane.root(), lane.ctx())?
         };
         let view = front_view(&mut self.views, self.core.lane());
         view.surface.follow();

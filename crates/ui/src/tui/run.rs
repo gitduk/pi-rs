@@ -129,6 +129,7 @@ impl Tui {
         let input = pi_core::driver::input::Input::new(
             self.core.lane().root().to_path_buf(),
             self.drivers.background(),
+            ctx.clone(),
             move || queued.take_prompt(),
         );
         self.drivers.started(request, true);

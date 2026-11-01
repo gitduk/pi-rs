@@ -282,11 +282,11 @@ pub type FileLocks =
 
 pub type FileLock = std::sync::Arc<tokio::sync::Mutex<()>>;
 
-// The distinct paths a run has changed — a set, not a count: nothing here
-// asks how many times.
+// The distinct paths a run has changed, each with when it last did: nothing
+// here asks how many times.
 #[derive(Default)]
 struct Written {
-    paths: std::collections::BTreeSet<std::path::PathBuf>,
+    paths: std::collections::BTreeMap<std::path::PathBuf, std::time::SystemTime>,
 }
 
 pub type Viewed = std::sync::Arc<
@@ -382,7 +382,9 @@ impl Ctx {
     /// tree, so what a run says it did can be read against what it did.
     pub fn note_write(&self, path: &std::path::Path) {
         let mut written = self.writes.lock().expect("writes poisoned");
-        written.paths.insert(path.to_path_buf());
+        written
+            .paths
+            .insert(path.to_path_buf(), std::time::SystemTime::now());
     }
 
     /// Every path this run has written, in sorted order.
@@ -391,8 +393,20 @@ impl Ctx {
             .lock()
             .expect("writes poisoned")
             .paths
-            .iter()
+            .keys()
             .cloned()
+            .collect()
+    }
+
+    /// The paths this run last wrote after `since`, in sorted order.
+    pub fn written_since(&self, since: std::time::SystemTime) -> Vec<std::path::PathBuf> {
+        self.writes
+            .lock()
+            .expect("writes poisoned")
+            .paths
+            .iter()
+            .filter(|(_, at)| **at > since)
+            .map(|(path, _)| path.clone())
             .collect()
     }
 

@@ -376,6 +376,7 @@ impl Item {
             ),
             label: format!("{} {first}", self.name()),
             text: text.to_string(),
+            started: vec![(self.name(), self.started_at)],
         }
     }
 }
@@ -544,6 +545,37 @@ pub struct Due {
     pub label: String,
     /// What the execution said, as it said it.
     pub text: String,
+    // Each command it reports for, and when that run started.
+    started: Vec<(String, SystemTime)>,
+}
+
+// Past this many, a stale-result note counts the rest instead of naming them.
+const STALE_NAMED: usize = 10;
+
+impl Due {
+    /// The note, plus the files `ctx`'s run wrote after a command started:
+    /// that command's result may predate them.
+    pub fn note_for(&self, ctx: &Ctx) -> String {
+        let mut note = self.note.clone();
+        for (name, at) in &self.started {
+            let paths = ctx.written_since(*at);
+            if paths.is_empty() {
+                continue;
+            }
+            let mut list: Vec<String> = (paths.iter().take(STALE_NAMED))
+                .map(|p| format!("`{}`", ctx.workspace.display(p)))
+                .collect();
+            if paths.len() > STALE_NAMED {
+                list.push(format!("and {} more", paths.len() - STALE_NAMED));
+            }
+            note.push_str(&format!(
+                "\nYou changed these files after {name} started: {}. \
+                 Its result may not reflect these changes.",
+                list.join(", ")
+            ));
+        }
+        note
+    }
 }
 
 impl Table {
@@ -631,6 +663,7 @@ impl Table {
             due.line.push_str(&next.line);
             due.text.push_str("\n\n");
             due.text.push_str(&next.text);
+            due.started.extend(next.started);
             executions.push(execution);
         }
         if executions.len() > 1 {
