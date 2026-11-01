@@ -317,12 +317,7 @@ impl Ui {
         } else {
             scroll
         };
-        let gap = if self.background_focus.is_some() {
-            Some(Line::from(self.paint.span(
-                &self.paint.theme.muted,
-                pi_store::text::clip(super::background::HINT, width),
-            )))
-        } else if scroll > 0 {
+        let gap = if self.background_focus.is_none() && scroll > 0 {
             let shine = self
                 .pointer
                 .is_some_and(|(_, row)| row_in(regions.gap, row).is_some());
