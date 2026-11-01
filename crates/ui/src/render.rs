@@ -956,6 +956,40 @@ pub fn summarize(args: &serde_json::Value) -> String {
 mod tests {
     use super::Paint;
 
+    // What the printed form writes, `parse_sgr` reads back unchanged: every
+    // colour form, in either slot, with every attribute.
+    #[test]
+    fn a_style_survives_the_round_trip_through_sgr() {
+        use ratatui::style::{Color, Modifier, Style};
+        let colors = crate::sgr::NAMED
+            .into_iter()
+            .chain(crate::sgr::BRIGHT)
+            .chain([Color::Reset, Color::Indexed(208), Color::Rgb(88, 166, 255)]);
+        for color in colors {
+            for style in [
+                Style::default().fg(color),
+                Style::default().bg(color),
+                Style::default().fg(color).bg(Color::Indexed(17)),
+            ] {
+                let mut params = String::new();
+                super::append_style_params(&mut params, style);
+                assert_eq!(
+                    crate::sgr::parse_sgr(&params, Style::default()),
+                    style,
+                    "{params}"
+                );
+            }
+        }
+        let all = Style::default().add_modifier(Modifier::all());
+        let mut params = String::new();
+        super::append_style_params(&mut params, all);
+        assert_eq!(
+            crate::sgr::parse_sgr(&params, Style::default()),
+            all,
+            "{params}"
+        );
+    }
+
     #[test]
     fn a_tool_call_keeps_the_command_verbatim() {
         let text = "bash cd /home/wukaige/ai-agent && git diff --stat | cat; echo \"=== 改动\"; git diff src/server/app.py | head -40";

@@ -77,22 +77,27 @@ pub(crate) async fn exchange(
         .text()
         .await
         .unwrap_or_else(|e| format!("<body unreadable: {e}>"));
-    const MAX_BODY: usize = 4096;
-    let body = if body.len() > MAX_BODY {
-        let mut cut = MAX_BODY;
-        while cut > 0 && body.as_bytes()[cut - 1].is_ascii_digit() {
-            cut -= 1;
-        }
-        format!("{} (truncated)", crate::slice::head_bytes(&body, cut))
-    } else {
-        body
-    };
+    let body = capped(body);
     tracing::warn!(target: "pi::wire", format, status, took_ms, detail = %body, "refused");
     Err(crate::LlmError::Api {
         format,
         status,
         body,
     })
+}
+
+// A refusal's body, capped. The cut backs off past a run of digits so a number
+// the body states — the limit an overflow names — is never read cut short.
+fn capped(body: String) -> String {
+    const MAX_BODY: usize = 4096;
+    if body.len() <= MAX_BODY {
+        return body;
+    }
+    let mut cut = MAX_BODY;
+    while cut > 0 && body.as_bytes()[cut - 1].is_ascii_digit() {
+        cut -= 1;
+    }
+    format!("{} (truncated)", crate::slice::head_bytes(&body, cut))
 }
 
 /// The OpenAI-shaped wires' SSE frames as events: each frame's JSON goes to
@@ -331,6 +336,16 @@ impl Gaps {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_long_refusal_is_capped_short_of_a_number_it_would_split() {
+        let short = "x".repeat(4096);
+        assert_eq!(capped(short.clone()), short);
+
+        let mut body = "x".repeat(4090);
+        body.push_str(" n=131072 tokens");
+        assert_eq!(capped(body), format!("{} n= (truncated)", "x".repeat(4090)));
+    }
 
     #[test]
     fn a_stream_cut_before_its_terminal_frame_is_an_error_not_a_turn() {

@@ -1140,6 +1140,37 @@ impl Core {
 mod tests {
     use crate::core::tests::{Recording, a_lane, a_repl};
 
+    // Lanes come back in the order given, the front one stays in front, and
+    // what could not come back as asked is said rather than dropped.
+    #[test]
+    fn reopened_lanes_keep_their_order_and_say_what_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (front, other) = (dir.path().join("front"), dir.path().join("other"));
+        std::fs::create_dir_all(&front).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let mut core = a_repl(&front, std::sync::Arc::new(Recording::default()), "m");
+        let gone = dir.path().join("gone");
+        core.reopen(&[
+            (other.clone(), Some("no-such-session".into())),
+            (front.clone(), None),
+            (gone.clone(), None),
+            (other.clone(), None),
+        ]);
+
+        let roots: Vec<_> = core.lanes.iter().map(|l| l.root().to_path_buf()).collect();
+        let real = |p: &std::path::Path| p.canonicalize().unwrap();
+        assert_eq!(roots, [real(&other), real(&front)]);
+        assert_eq!(core.lane().root(), real(&front));
+        let notes = &core.lane().resolved().notes;
+        let said = |what: &str, root: &std::path::Path| {
+            notes
+                .iter()
+                .any(|n| n.starts_with(&root.display().to_string()) && n.contains(what))
+        };
+        assert!(said("started afresh", &other), "{notes:?}");
+        assert!(said("not reopened", &gone), "{notes:?}");
+    }
+
     // An opened lane is cloned from another's agent, so it would share that
     // meter unless given its own; a session taken up counts from its own file.
     #[test]

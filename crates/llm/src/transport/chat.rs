@@ -452,6 +452,53 @@ mod tests {
         );
     }
 
+    // Text and calls merge into one message in their order; reasoning never
+    // replays, and a turn left with nothing else is not sent at all.
+    #[test]
+    fn an_assistant_turn_is_one_message_of_text_and_calls() {
+        let text = |t: &str| AssistantContent::Text(crate::message::Text { text: t.into() });
+        let thought = AssistantContent::Reasoning(crate::message::Reasoning {
+            id: None,
+            content: Vec::new(),
+            by: None,
+        });
+        let msgs = [
+            Message::Assistant {
+                content: vec![
+                    text("Look"),
+                    thought.clone(),
+                    AssistantContent::ToolCall(crate::message::ToolCall {
+                        id: "c1".into(),
+                        name: "read".into(),
+                        args: json!({ "path": "a" }),
+                    }),
+                    text("ing."),
+                ],
+            },
+            Message::Assistant {
+                content: vec![thought],
+            },
+            Message::Assistant {
+                content: vec![text("plain")],
+            },
+        ];
+        assert_eq!(
+            encode(&msgs),
+            [
+                json!({
+                    "role": "assistant",
+                    "content": "Looking.",
+                    "tool_calls": [{
+                        "id": "c1",
+                        "type": "function",
+                        "function": { "name": "read", "arguments": "{\"path\":\"a\"}" },
+                    }],
+                }),
+                json!({ "role": "assistant", "content": "plain" }),
+            ]
+        );
+    }
+
     #[test]
     fn the_deepseek_cache_halves_split_into_usage() {
         // DeepSeek's chat wire reports hit and miss separately; the fresh
