@@ -1,7 +1,7 @@
 ---
 [package]
 # Bump this script's version whenever it changes.
-version = "0.1.2"
+version = "0.1.5"
 edition = "2024"
 description = "Connect this session to WeChat when the user requests it.\nMessages sent from the user's phone are submitted to this session, including commands. Each answer returns to the phone.\nThe tool runs in the background until you stop the background command.\nOn first use, the background command provides a QR code for the user to scan.\nThe login persists for later use."
 
@@ -455,6 +455,42 @@ mod bridge {
         }
     }
 
+    fn reply_text(reply: &str, told: &Value) -> String {
+        let notice = match told.get("status").and_then(Value::as_str) {
+            Some("stopped") => {
+                let reason = told
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if reason.is_empty() {
+                    "stopped".to_string()
+                } else {
+                    format!("stopped: {reason}")
+                }
+            }
+            Some("failed") => {
+                let error = told
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if error.is_empty() {
+                    match told.get("exit_code").and_then(Value::as_i64) {
+                        Some(code) => format!("failed: exit {code}"),
+                        None => "failed".to_string(),
+                    }
+                } else {
+                    format!("failed: {error}")
+                }
+            }
+            _ => return reply.to_string(),
+        };
+        if reply.is_empty() {
+            notice
+        } else {
+            format!("{reply}\n\n{notice}")
+        }
+    }
+
     // Typing while a turn the phone opened runs, then its answer, then the
     // questions it left up, in order. Ends when pi does: there is nobody
     // left to bridge to.
@@ -522,7 +558,9 @@ mod bridge {
             if let Some(why) = refused {
                 outbox.push(&to, &format!("not taken: {why}"));
             }
-            if told.get("started").and_then(Value::as_bool) == Some(true) {
+            if told.get("queued").and_then(Value::as_bool) == Some(true) {
+                outbox.push(&to, "queued: waiting for execution");
+            } else if told.get("started").and_then(Value::as_bool) == Some(true) {
                 running.insert(told.get("request").and_then(Value::as_u64));
                 tickets.typing(client, &to, true).await;
             } else if let Some(reply) = told.get("reply").and_then(Value::as_str) {
@@ -530,7 +568,7 @@ mod bridge {
                 if running.is_empty() {
                     tickets.typing(client, &to, false).await;
                 }
-                outbox.push(&to, reply);
+                outbox.push(&to, &reply_text(reply, &told));
                 shows = running.is_empty();
             } else if let Some(progress) = told.get("progress").and_then(Value::as_str) {
                 outbox.push(&to, progress);
@@ -699,6 +737,88 @@ mod bridge {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn outcome_notices_do_not_rewrite_reply_content() {
+            for reply in ["", "stopped", "partial\n\n(stopped)", "(failed: timeout)"] {
+                for told in [
+                    json!({}),
+                    json!({"status": "done"}),
+                    json!({"status": "done", "exit_code": 0}),
+                ] {
+                    assert_eq!(reply_text(reply, &told), reply);
+                }
+                for (told, notice) in [
+                    (json!({"status": "stopped"}), "stopped"),
+                    (
+                        json!({"status": "failed", "error": "connection lost"}),
+                        "failed: connection lost",
+                    ),
+                    (
+                        json!({"status": "failed", "exit_code": 3}),
+                        "failed: exit 3",
+                    ),
+                ] {
+                    let expected = if reply.is_empty() {
+                        notice.to_string()
+                    } else {
+                        format!("{reply}\n\n{notice}")
+                    };
+                    assert_eq!(reply_text(reply, &told), expected);
+                }
+            }
+            assert_eq!(
+                reply_text("", &json!({"status": "stopped", "reason": "run it again"})),
+                "stopped: run it again"
+            );
+        }
+
+        #[tokio::test]
+        async fn queued_notices_are_sent_separately_from_the_final_reply() {
+            let (_dir, kept) = kept();
+            {
+                let mut state = kept.lock();
+                state.token = Some("bot".into());
+                state.peer = Some("peer".into());
+                state.context_token = Some("context".into());
+            }
+            let (base, requests) = server(vec![(200, json!({"ret": 0})); 3]).await;
+            let client = Client::new(base);
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let (mut host, script) = tokio::net::UnixStream::pair().unwrap();
+            for told in [
+                json!({"request": 17, "queued": true}),
+                json!({"request": 17, "reply": "queued", "status": "done"}),
+            ] {
+                host.write_all(format!("{told}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            drop(host);
+            let (read, _write) = script.into_split();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                answer(
+                    &client,
+                    &kept,
+                    &Asking::default(),
+                    &Pi(tx),
+                    read,
+                    &Notify::new(),
+                ),
+            )
+            .await
+            .unwrap();
+            let requests = requests.await.unwrap();
+            assert_eq!(
+                requests[0]["msg"]["item_list"][0]["text_item"]["text"],
+                "queued: waiting for execution"
+            );
+            assert_eq!(
+                requests[2]["msg"]["item_list"][0]["text_item"]["text"],
+                "queued"
+            );
+        }
 
         #[tokio::test]
         async fn failed_pieces_are_kept_and_resume_with_the_same_id_and_fresh_context() {

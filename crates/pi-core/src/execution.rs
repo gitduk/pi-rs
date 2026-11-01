@@ -7,6 +7,7 @@ use crate::core::Core;
 use crate::driver::{Ended, Origin};
 use crate::input::{Intent, Rewound, Step};
 use pi_store::listing::Listing;
+use toolbox::channel::Outcome;
 
 /// Identity remains attached to an operation while other operations run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,7 +139,7 @@ fn rewind_output(core: &Core, outcome: &Rewound, unsaved: Option<String>) -> Str
 pub struct Completion {
     pub request: Request,
     pub output: Output,
-    pub ended: Ended,
+    pub outcome: Outcome,
 }
 
 pub enum Kind {
@@ -147,52 +148,106 @@ pub enum Kind {
     Compact(Option<agent::Report>),
 }
 
+#[derive(Debug)]
+pub enum RunError {
+    Agent(agent::AgentError),
+    Failed(String),
+    Exit(i32),
+    Crashed,
+}
+
+impl From<agent::AgentError> for RunError {
+    fn from(error: agent::AgentError) -> Self {
+        Self::Agent(error)
+    }
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Agent(error) => std::fmt::Display::fmt(error, f),
+            Self::Failed(message) => f.write_str(message),
+            Self::Exit(code) => write!(f, "exit {code}"),
+            Self::Crashed => f.write_str("the run crashed"),
+        }
+    }
+}
+
+impl std::error::Error for RunError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Agent(error) => Some(error),
+            Self::Failed(_) | Self::Exit(_) | Self::Crashed => None,
+        }
+    }
+}
+
+impl RunError {
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Agent(agent::AgentError::Cancelled))
+    }
+
+    pub fn ended(&self) -> Ended {
+        if self.is_cancelled() {
+            Ended::Stopped
+        } else {
+            Ended::Failed(self.to_string())
+        }
+    }
+
+    pub fn outcome(&self) -> Outcome {
+        match self {
+            Self::Agent(agent::AgentError::Cancelled) => Outcome::Stopped(String::new()),
+            Self::Exit(code) => Outcome::Exited(*code),
+            Self::Agent(_) | Self::Failed(_) | Self::Crashed => Outcome::Failed(self.to_string()),
+        }
+    }
+}
+
+pub type RunResult = Result<llm::stream::Usage, RunError>;
+
 pub struct Done {
     pub request: Request,
     pub kind: Kind,
-    pub ran: Option<(
-        agent::session::Session,
-        Result<llm::stream::Usage, agent::AgentError>,
-    )>,
+    pub ran: Option<(agent::session::Session, RunResult)>,
 }
 
 impl Done {
     pub fn ended(&self) -> Ended {
         match &self.ran {
             Some((_, Ok(_))) => Ended::Done,
-            Some((_, Err(agent::AgentError::Cancelled))) => Ended::Stopped,
-            Some((_, Err(e))) => Ended::Failed(e.to_string()),
-            None => Ended::Failed("the run crashed".into()),
+            Some((_, Err(error))) => error.ended(),
+            None => RunError::Crashed.ended(),
+        }
+    }
+
+    pub fn outcome(&self) -> Outcome {
+        match &self.ran {
+            Some((_, Ok(_))) if matches!(self.kind, Kind::Bash { .. }) => Outcome::Exited(0),
+            Some((_, Ok(_))) => Outcome::Done,
+            Some((_, Err(error))) => error.outcome(),
+            None => RunError::Crashed.outcome(),
         }
     }
 
     /// Model text already streams as events. Other tasks return their complete
     /// output here, including failures and operations which changed nothing.
     pub fn completion(&self) -> Option<Completion> {
-        let ended = self.ended();
+        let outcome = self.outcome();
         let output = match &self.kind {
             Kind::Turn => return None,
-            Kind::Compact(report) => compaction_output(*report, &ended),
-            Kind::Bash { lines } => {
-                let mut text = lines.join("\n");
-                let suffix = match &ended {
-                    Ended::Done => None,
-                    Ended::Stopped | Ended::Unsent => Some("stopped".into()),
-                    Ended::Failed(why) => Some(format!("failed: {why}")),
-                };
-                if let Some(suffix) = suffix {
-                    if !text.is_empty() {
-                        text.push('\n');
-                    }
-                    text.push_str(&suffix);
-                }
-                Output::Text(text)
+            Kind::Compact(report)
+                if self.ran.as_ref().is_some_and(|(_, result)| result.is_ok()) =>
+            {
+                compaction_output(*report)
             }
+            Kind::Compact(_) => Output::Notice(String::new()),
+            Kind::Bash { lines, .. } => Output::Text(lines.join("\n")),
         };
         Some(Completion {
             request: self.request,
             output,
-            ended,
+            outcome,
         })
     }
 }
@@ -223,7 +278,7 @@ pub async fn compact(
     .await;
     let (report, ran) = match out {
         Some((session, Ok(report))) => (report, Some((session, Ok(llm::stream::Usage::default())))),
-        Some((session, Err(e))) => (None, Some((session, Err(e)))),
+        Some((session, Err(e))) => (None, Some((session, Err(e.into())))),
         None => (None, None),
     };
     Done {
@@ -233,17 +288,11 @@ pub async fn compact(
     }
 }
 
-/// Every terminal outcome is derived here, before any surface renders it.
-pub fn compaction_output(report: Option<agent::Report>, ended: &Ended) -> Output {
-    match ended {
-        Ended::Done => match report {
-            Some(report) => Output::Compacted(report),
-            None => {
-                Output::Notice("nothing to compact — all of it is the working context kept".into())
-            }
-        },
-        Ended::Stopped | Ended::Unsent => Output::Notice("stopped".into()),
-        Ended::Failed(why) => Output::Notice(format!("compaction failed: {why}")),
+/// Content left by a successful compaction.
+pub fn compaction_output(report: Option<agent::Report>) -> Output {
+    match report {
+        Some(report) => Output::Compacted(report),
+        None => Output::Notice("nothing to compact — all of it is the working context kept".into()),
     }
 }
 
@@ -254,14 +303,29 @@ pub async fn bash(
     command: String,
 ) -> Done {
     let out = guard(async move {
-        let out = crate::core::bash::run_bash(&ctx, &command).await;
-        let ran = if ctx.cancel.is_cancelled() {
-            Err(agent::AgentError::Cancelled)
-        } else {
-            Ok(llm::stream::Usage::default())
+        let (lines, result) = match crate::core::bash::run_bash(&ctx, &command).await {
+            Ok(out) => {
+                crate::core::bash::record_bash(&mut session, &command, out.text);
+                let result = if ctx.cancel.is_cancelled() {
+                    Err(agent::AgentError::Cancelled.into())
+                } else if out.code != 0 {
+                    Err(RunError::Exit(out.code))
+                } else {
+                    Ok(llm::stream::Usage::default())
+                };
+                (out.output, result)
+            }
+            Err(tool::ToolError::Cancelled) => {
+                (Vec::new(), Err(agent::AgentError::Cancelled.into()))
+            }
+            Err(error) => (
+                Vec::new(),
+                Err(RunError::Failed(format!(
+                    "failed to run `{command}`: {error}"
+                ))),
+            ),
         };
-        crate::core::bash::record_bash(&mut session, &command, out.text.clone());
-        (session, ran, out.screen())
+        (session, result, lines)
     })
     .await;
     let (lines, ran) = match out {
@@ -302,26 +366,12 @@ impl Turn {
         Done {
             request,
             kind: Kind::Turn,
-            ran: out.map(|out| (session, out)),
+            ran: out.map(|out| (session, out.map_err(Into::into))),
         }
     }
 }
 
-pub struct Started {
-    pub request: Request,
-    pub output: Output,
-    pub ended: Ended,
-}
-
-impl Started {
-    pub fn completion(self) -> Completion {
-        Completion {
-            request: self.request,
-            output: self.output,
-            ended: self.ended,
-        }
-    }
-}
+pub type Started = Completion;
 
 pub async fn tool(
     request: Request,
@@ -334,23 +384,26 @@ pub async fn tool(
     let said = guard(crate::core::tools::run_named(tool, args, &ctx))
         .await
         .unwrap_or_else(|| Some(Err("it panicked".into())));
-    let (output, ended) = match said {
+    let (output, outcome) = match said {
         Some(Ok(text)) => (
             Output::Note(format!(
                 "The user ran `{name}` directly, as `{call}`, and it answered:\n\n{text}"
             )),
-            Ended::Done,
+            Outcome::Done,
         ),
         Some(Err(why)) => (
-            Output::Notice(format!("{name} failed: {why}")),
-            Ended::Failed(why),
+            Output::Notice(String::new()),
+            Outcome::Failed(format!("{name}: {why}")),
         ),
-        None => (Output::Notice("stopped".into()), Ended::Stopped),
+        None => (
+            Output::Notice(String::new()),
+            Outcome::Stopped(String::new()),
+        ),
     };
     Started {
         request,
         output,
-        ended,
+        outcome,
     }
 }
 

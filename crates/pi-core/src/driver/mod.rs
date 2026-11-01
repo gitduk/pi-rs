@@ -39,6 +39,16 @@ pub enum Ended {
     Failed(String),
 }
 
+impl Ended {
+    pub fn outcome(&self) -> toolbox::channel::Outcome {
+        match self {
+            Self::Done => toolbox::channel::Outcome::Done,
+            Self::Stopped | Self::Unsent => toolbox::channel::Outcome::Stopped(String::new()),
+            Self::Failed(why) => toolbox::channel::Outcome::Failed(why.clone()),
+        }
+    }
+}
+
 /// What a driver's command answers, and where it goes.
 pub enum Said {
     Nothing,
@@ -247,10 +257,10 @@ impl Drivers {
         for owed in self.owed.extract_if(.., |o| o.lane == lane) {
             self.executions.tell(
                 owed.execution,
-                owed.response(Response::Finished(reply(
-                    owed.said[owed.sent..].into(),
-                    ended,
-                ))),
+                owed.response(Response::Finished {
+                    text: owed.said[owed.sent..].into(),
+                    outcome: ended.outcome(),
+                }),
             );
         }
         self.loops
@@ -270,10 +280,10 @@ impl Drivers {
         for owed in self.owed.extract_if(.., |o| !live(o.lane)) {
             self.executions.tell(
                 owed.execution,
-                owed.response(Response::Finished(reply(
-                    owed.said[owed.sent..].into(),
-                    &Ended::Stopped,
-                ))),
+                owed.response(Response::Finished {
+                    text: owed.said[owed.sent..].into(),
+                    outcome: Ended::Stopped.outcome(),
+                }),
             );
         }
         self.loops.retain(live)
@@ -316,21 +326,6 @@ impl Owed {
             event,
         }
     }
-}
-
-// A turn's answer as its execution is told it: what it said, then how it ended
-// when that was not cleanly, so a stop never reads as silence.
-fn reply(mut said: String, ended: &Ended) -> String {
-    let how = match ended {
-        Ended::Done => return said,
-        Ended::Stopped | Ended::Unsent => "(stopped)".to_string(),
-        Ended::Failed(why) => format!("(failed: {why})"),
-    };
-    if !said.trim().is_empty() {
-        said.push_str("\n\n");
-    }
-    said.push_str(&how);
-    said
 }
 
 // What the user's controls changed: failures are notices; successful
@@ -379,6 +374,7 @@ mod tests {
     use super::*;
     use tool::Tool as _;
     use toolbox::background::RunSink as _;
+    use toolbox::channel::Outcome;
 
     // A background command belongs to the execution. Ending the turn that
     // started it does not cancel it; completion opens a later turn through the
@@ -615,10 +611,59 @@ mod tests {
             rx.try_recv(),
             Ok(Told::Response {
                 request: request.id,
-                event: Response::Finished("done".into())
+                event: Response::Finished {
+                    text: "done".into(),
+                    outcome: Outcome::Done,
+                }
             })
         );
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn model_outcomes_are_separate_from_the_remaining_answer() {
+        for (text, ended, outcome) in [
+            ("stopped", Ended::Done, Outcome::Done),
+            ("(stopped)", Ended::Done, Outcome::Done),
+            (
+                "running\nstopped ",
+                Ended::Stopped,
+                Outcome::Stopped(String::new()),
+            ),
+            ("", Ended::Stopped, Outcome::Stopped(String::new())),
+            ("partial", Ended::Unsent, Outcome::Stopped(String::new())),
+            (
+                "partial",
+                Ended::Failed("connection lost".into()),
+                Outcome::Failed("connection lost".into()),
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+            let mut drivers = Drivers::default();
+            let execution = background::Commands::new(drivers.background()).start(
+                dir.path().to_path_buf(),
+                toolbox::background::Invocation::shell("bridge"),
+                Default::default(),
+            );
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            execution.channel().listen(tx);
+            let request = Request::new(Origin::Input(execution.id()), 1);
+            drivers.started(request, true);
+            rx.try_recv().unwrap();
+            drivers.observe(1, dir.path(), &Event::TextDelta(text.into()));
+            drivers.turn_ended(1, &ended, &ctx, None);
+            assert_eq!(
+                rx.try_recv(),
+                Ok(Told::Response {
+                    request: request.id,
+                    event: Response::Finished {
+                        text: text.into(),
+                        outcome
+                    },
+                })
+            );
+        }
     }
 
     // The line a person sent through an execution opens a turn as if typed; the
@@ -659,11 +704,83 @@ mod tests {
             rx.try_recv(),
             Ok(Told::Response {
                 request: request.id,
-                event: Response::Finished("parse.rs\n\n(stopped)".into())
+                event: Response::Finished {
+                    text: "parse.rs".into(),
+                    outcome: Outcome::Stopped(String::new()),
+                }
             })
         );
         drivers.turn_ended(1, &Ended::Done, &ctx, None);
         assert!(rx.try_recv().is_err(), "told once");
+    }
+
+    #[tokio::test]
+    async fn queued_requests_only_emit_valid_state_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let drivers = Drivers::default();
+        let execution = background::Commands::new(drivers.background()).start(
+            dir.path().to_path_buf(),
+            toolbox::background::Invocation::shell("bridge"),
+            Default::default(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        execution.channel().listen(tx);
+        let request = Request::new(Origin::Input(execution.id()), 1);
+        for event in [
+            Response::Queued,
+            Response::Queued,
+            Response::Progress("not started".into()),
+            Response::Started,
+            Response::Started,
+            Response::Queued,
+            Response::Progress("working".into()),
+            Response::Finished {
+                text: "answer".into(),
+                outcome: Outcome::Done,
+            },
+            Response::Progress("already finished".into()),
+            Response::Finished {
+                text: "duplicate".into(),
+                outcome: Outcome::Done,
+            },
+        ] {
+            drivers.respond(request, event);
+        }
+        for event in [
+            Response::Queued,
+            Response::Started,
+            Response::Progress("working".into()),
+            Response::Finished {
+                text: "answer".into(),
+                outcome: Outcome::Done,
+            },
+        ] {
+            assert_eq!(
+                rx.try_recv(),
+                Ok(Told::Response {
+                    request: request.id,
+                    event
+                })
+            );
+        }
+        let cancelled = Request::new(request.origin, 1);
+        drivers.respond(cancelled, Response::Queued);
+        let finished = Response::Finished {
+            text: String::new(),
+            outcome: Outcome::Stopped("withdrawn".into()),
+        };
+        drivers.respond(cancelled, finished.clone());
+        drivers.respond(cancelled, finished.clone());
+        for event in [Response::Queued, finished] {
+            assert_eq!(
+                rx.try_recv(),
+                Ok(Told::Response {
+                    request: cancelled.id,
+                    event
+                })
+            );
+        }
+        assert!(rx.try_recv().is_err());
     }
 
     // The model is told of an execution the user stopped; one it could not stop
@@ -738,7 +855,10 @@ mod tests {
             rx.try_recv(),
             Ok(Told::Response {
                 request: request.id,
-                event: Response::Finished("checking. 83057.6".into())
+                event: Response::Finished {
+                    text: "checking. 83057.6".into(),
+                    outcome: Outcome::Done,
+                }
             })
         );
     }
@@ -784,7 +904,10 @@ mod tests {
             rx.try_recv(),
             Ok(Told::Response {
                 request: first,
-                event: Response::Finished("connected".into())
+                event: Response::Finished {
+                    text: "connected".into(),
+                    outcome: Outcome::Done,
+                }
             })
         );
         assert!(
@@ -810,7 +933,10 @@ mod tests {
             rx.try_recv(),
             Ok(Told::Response {
                 request: request.id,
-                event: Response::Finished("83057.6".into())
+                event: Response::Finished {
+                    text: "83057.6".into(),
+                    outcome: Outcome::Done,
+                }
             })
         );
         assert!(rx.try_recv().is_err(), "told once");

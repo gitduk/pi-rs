@@ -3,7 +3,6 @@
 //! Beside them, what is asked off the loop without lending the transcript:
 //! a tool named directly, and an MCP prompt's text.
 
-use agent::AgentError;
 use agent::session::{Entry as LogEntry, Prompt, Session};
 use ratatui::text::{Line, Span};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -14,8 +13,9 @@ use super::term::{Deafened, EXIT_GRACE, external_editor, scratch_file};
 use super::view::{Doing, Work, front_view, tail_of, view_at};
 use super::{NO_TRANSCRIPT, Tui};
 use pi_core::driver::{Ended, Origin};
-use pi_core::execution::{self, Output, Request};
+use pi_core::execution::{self, Output, Request, RunError, RunResult};
 pub(super) use pi_core::execution::{Done, Fetched, Kind, Started};
+use toolbox::channel::Outcome;
 
 impl Tui {
     // The front lane's transcript, for a run about to start on it.
@@ -54,13 +54,11 @@ impl Tui {
         done: &UnboundedSender<Done>,
     ) -> bool {
         if self.core.lane().is_running() {
-            front_view(&mut self.views, self.core.lane())
-                .queued
-                .push(super::view::Queued {
-                    input: super::view::Pending::Prompt(ask),
-                    origin: request.origin,
-                    line,
-                });
+            self.enqueue(super::view::Queued {
+                input: super::view::Pending::Prompt(ask),
+                request,
+                line,
+            });
             return false;
         }
         if let Some(line) = line {
@@ -94,8 +92,8 @@ impl Tui {
         let Some(mut carried) = self.take_carried() else {
             self.complete(
                 request,
-                Output::Notice(super::NO_TRANSCRIPT.into()),
-                Ended::Failed("no transcript".into()),
+                Output::Notice(String::new()),
+                Outcome::Failed(super::NO_TRANSCRIPT.into()),
             );
             return false;
         };
@@ -161,8 +159,8 @@ impl Tui {
         let Some(carried) = self.take_carried() else {
             self.complete(
                 request,
-                Output::Notice(super::NO_TRANSCRIPT.into()),
-                Ended::Failed("no transcript".into()),
+                Output::Notice(String::new()),
+                Outcome::Failed(super::NO_TRANSCRIPT.into()),
             );
             return;
         };
@@ -190,8 +188,8 @@ impl Tui {
         let Some(tool) = self.core.lane().agent().brief.registry.get(&name) else {
             self.complete(
                 request,
-                Output::Notice(format!("{name} cannot start here")),
-                Ended::Failed("tool unavailable".into()),
+                Output::Notice(String::new()),
+                Outcome::Failed(format!("{name} cannot start here")),
             );
             return;
         };
@@ -204,7 +202,7 @@ impl Tui {
     }
 
     pub(super) fn land_started(&mut self, started: Started) {
-        self.present(started.completion());
+        self.present(started);
     }
 
     // Asks an MCP server for a prompt's text off the loop: a slow server
@@ -236,7 +234,7 @@ impl Tui {
         let front = self.core.lane().token() == token;
         let started = match text {
             Err(why) => {
-                self.complete(request, Output::Notice(why.clone()), Ended::Failed(why));
+                self.complete(request, Output::Notice(String::new()), Outcome::Failed(why));
                 false
             }
             Ok(send) if front && !self.core.lane().is_running() => {
@@ -250,20 +248,20 @@ impl Tui {
             Ok(_) if !front => {
                 self.complete(
                     request,
-                    Output::Notice(format!(
+                    Output::Notice(String::new()),
+                    Outcome::Stopped(format!(
                         "{typed} came back after its lane left the front; run it again"
                     )),
-                    Ended::Stopped,
                 );
                 false
             }
             Ok(_) => {
                 self.complete(
                     request,
-                    Output::Notice(format!(
+                    Output::Notice(String::new()),
+                    Outcome::Stopped(format!(
                         "{typed} came back while another turn ran; run it again"
                     )),
-                    Ended::Stopped,
                 );
                 false
             }
@@ -288,8 +286,8 @@ impl Tui {
         let Some(carried) = self.take_carried() else {
             self.complete(
                 request,
-                Output::Notice(super::NO_TRANSCRIPT.into()),
-                Ended::Failed("no transcript".into()),
+                Output::Notice(String::new()),
+                Outcome::Failed(super::NO_TRANSCRIPT.into()),
             );
             return;
         };
@@ -473,6 +471,7 @@ impl Tui {
     // A turn or `!` ended: puts the transcript back and saves it; shows
     // the end only if that lane is on screen. Saving can't wait for that.
     async fn settle_run(&mut self, lane: usize, done: Done, unsend: bool) {
+        let how = if unsend { Ended::Unsent } else { done.ended() };
         let Done { ran, kind, .. } = done;
         // Only a turn is a request the model was working on, and only a turn's
         // ending is worth telling it about.
@@ -490,10 +489,7 @@ impl Tui {
                 self.core.lanes[lane].return_session(session);
                 (true, out)
             }
-            None => (
-                self.recover_session(lane, "run"),
-                Err(AgentError::Cancelled),
-            ),
+            None => (self.recover_session(lane, "run"), Err(RunError::Crashed)),
         };
 
         // The view drew every row the run left, in front or not, so its cursor
@@ -514,7 +510,7 @@ impl Tui {
         // A panic, or an unsent prompt, has nothing to tell the model; nor
         // does a user-stopped `!`, which was never the model's request.
         if ran_back && !unsend && was_turn && self.core.lanes[lane].session().is_some() {
-            self.core.lanes[lane].note_outcome(&out);
+            self.core.lanes[lane].note_ended(&how);
         }
 
         // Saved either way — an interrupted turn is worth keeping — unless
@@ -533,17 +529,6 @@ impl Tui {
         }
         // Before the split, so an off-screen round still comes due. A run
         // that never came back is named the failure it stood in for.
-        let how = if unsend {
-            Ended::Unsent
-        } else if !ran_back {
-            Ended::Failed("the run crashed".into())
-        } else {
-            match &out {
-                Ok(_) => Ended::Done,
-                Err(AgentError::Cancelled) => Ended::Stopped,
-                Err(e) => Ended::Failed(e.to_string()),
-            }
-        };
         let token = self.core.lanes[lane].token();
         match &how {
             Ended::Done => tracing::info!(target: "pi::loop", lane = token, "run ended"),
@@ -642,12 +627,7 @@ impl Tui {
     }
 
     // Draw the end of a run into its lane's view, on screen or not.
-    pub(super) fn close_run(
-        &mut self,
-        lane: usize,
-        out: Result<llm::stream::Usage, AgentError>,
-        was_turn: bool,
-    ) {
+    pub(super) fn close_run(&mut self, lane: usize, out: RunResult, was_turn: bool) {
         let on = &mut self.core.lanes[lane];
         let view = view_at(&mut self.views, on.token());
         self.ui.close(view);
@@ -663,11 +643,11 @@ impl Tui {
         view.state.work = None;
         match out {
             Ok(_) => {}
-            Err(AgentError::Cancelled) if parts.is_empty() => {
+            Err(error) if error.is_cancelled() && parts.is_empty() => {
                 let stopped = Line::from(self.ui.paint.span(&self.ui.paint.theme.muted, "stopped"));
                 self.ui.say(view, stopped);
             }
-            Err(AgentError::Cancelled) => {
+            Err(error) if error.is_cancelled() => {
                 let mut parts = parts;
                 parts.insert(0, "stopped".to_string());
                 let line = crate::status::settled(&parts);
@@ -686,6 +666,11 @@ impl Tui {
 
     // Shutdown must preserve transcripts and the cause of stopped executions.
     pub(super) async fn settle_all(&mut self, done: &mut UnboundedReceiver<Done>, why: &str) {
+        for view in self.views.values() {
+            while let Some(queued) = view.queued.pop_front() {
+                self.cancel_queued(queued.request, why);
+            }
+        }
         // A note filed while idle would otherwise wait for a turn that never comes.
         self.core.save_filed();
         let mut left = 0;

@@ -15,6 +15,7 @@ use pi_core::core::lane::Lane;
 use pi_core::core::meter::Snapshot;
 use pi_core::core::resolve::Resolved;
 use pi_core::driver::Origin;
+use pi_core::execution::Request;
 use pi_core::input::Intent;
 
 /// One lane's screen: conversation, stream, scroll, and parked draft.
@@ -143,7 +144,7 @@ pub enum StreamKind {
 // it, and who sent it.
 pub(super) struct Queued {
     pub(super) input: Pending,
-    pub(super) origin: Origin,
+    pub(super) request: Request,
     // A typed line, kept off the transcript while it waits: up hands it back
     // to the editor, or its answer echoes it if it lands under the line.
     pub(super) line: Option<String>,
@@ -187,7 +188,11 @@ impl Queue {
         match queue.first() {
             Some(Queued {
                 input: Pending::Prompt(_),
-                origin: Origin::Typed,
+                request:
+                    Request {
+                        origin: Origin::Typed,
+                        ..
+                    },
                 ..
             }) => match queue.remove(0).input {
                 Pending::Prompt(ask) => Some(ask),
@@ -229,8 +234,17 @@ pub(super) fn front_view<'a>(views: &'a mut Views, lane: &Lane) -> &'a mut View 
 
 // Drops screens for lanes that are gone. `/worktree` can remove a lane
 // without telling the surface, so this reads the lane list instead.
-pub(super) fn prune_views(core: &Core, views: &mut Views) {
-    views.retain(|token, _| core.position_of(*token).is_some());
+pub(super) fn prune_views(core: &Core, views: &mut Views) -> Vec<Request> {
+    let mut cancelled = Vec::new();
+    views.retain(|token, view| {
+        if core.position_of(*token).is_some() {
+            true
+        } else {
+            cancelled.extend(view.queued.lock().drain(..).map(|queued| queued.request));
+            false
+        }
+    });
+    cancelled
 }
 
 impl Surface {

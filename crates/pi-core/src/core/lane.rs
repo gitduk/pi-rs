@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use agent::session::{EntryId, Session};
-use agent::{Agent, Archive, Event, NoteOutcome as _, Totals};
+use agent::{Agent, Archive, Event, Totals};
 use subagent::Subagent;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
@@ -625,9 +625,13 @@ impl Lane {
     }
 
     /// What a run's ending should leave in the transcript.
-    pub fn note_outcome(&mut self, out: &Result<llm::stream::Usage, agent::AgentError>) {
+    pub fn note_ended(&mut self, ended: &crate::driver::Ended) {
         if let Some(session) = self.talk.transcript.home_mut() {
-            session.note_outcome(out);
+            match ended {
+                crate::driver::Ended::Done | crate::driver::Ended::Unsent => {}
+                crate::driver::Ended::Stopped => session.note_user_stop(),
+                crate::driver::Ended::Failed(why) => session.note_failure(why.clone()),
+            }
         }
     }
 

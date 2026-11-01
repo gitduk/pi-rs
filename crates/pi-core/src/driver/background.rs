@@ -236,7 +236,7 @@ struct Item {
     listens: Listens,
     // An operation can pass through several tasks; its recipient sees one
     // beginning and one ending for that identity.
-    requests: HashSet<u64>,
+    requests: HashMap<u64, RequestPhase>,
     // It asked to stop its checkout's running turn, not yet acted on.
     interrupt: bool,
     // Reads the latest of what it printed; None for one that keeps none.
@@ -268,6 +268,12 @@ enum Listens {
     Inputs(UnboundedSender<Told>),
     // Every turn on its checkout, not just its inputs': it asked to follow.
     Turns(UnboundedSender<Told>),
+}
+
+#[derive(PartialEq, Eq)]
+enum RequestPhase {
+    Queued,
+    Started,
 }
 
 impl Listens {
@@ -306,7 +312,7 @@ impl Item {
             waiting: VecDeque::new(),
             dropped: 0,
             listens: Listens::Never,
-            requests: HashSet::new(),
+            requests: HashMap::new(),
             interrupt: false,
             output: None,
             last_output: String::new(),
@@ -678,24 +684,48 @@ impl Table {
             if let Told::Response { request, event } = &told {
                 use toolbox::channel::Response;
                 match event {
-                    Response::Started if !item.requests.insert(*request) => return,
-                    Response::Finished(_) if !item.requests.remove(request) => return,
-                    Response::Progress(_) if !item.requests.contains(request) => return,
-                    Response::Started | Response::Progress(_) | Response::Finished(_) => {}
+                    Response::Queued => {
+                        if let std::collections::hash_map::Entry::Vacant(entry) =
+                            item.requests.entry(*request)
+                        {
+                            entry.insert(RequestPhase::Queued);
+                        } else {
+                            return;
+                        }
+                    }
+                    Response::Started => {
+                        if item.requests.get(request) == Some(&RequestPhase::Started) {
+                            return;
+                        }
+                        item.requests.insert(*request, RequestPhase::Started);
+                    }
+                    Response::Progress(_) => {
+                        if item.requests.get(request) != Some(&RequestPhase::Started) {
+                            return;
+                        }
+                    }
+                    Response::Finished { .. } => {
+                        if item.requests.remove(request).is_none() {
+                            return;
+                        }
+                    }
                 }
             }
             item.listens.to().cloned()
         };
         match &told {
             Told::Response { request, event } => match event {
+                toolbox::channel::Response::Queued => {
+                    tracing::info!(target: "pi::background", execution = id, request, "request queued")
+                }
                 toolbox::channel::Response::Started => {
                     tracing::info!(target: "pi::background", execution = id, request, "request started")
                 }
                 toolbox::channel::Response::Progress(text) => {
                     tracing::info!(target: "pi::background", execution = id, request, chars = text.chars().count(), "request progress")
                 }
-                toolbox::channel::Response::Finished(text) => {
-                    tracing::info!(target: "pi::background", execution = id, request, chars = text.chars().count(), "request finished")
+                toolbox::channel::Response::Finished { text, outcome } => {
+                    tracing::info!(target: "pi::background", execution = id, request, ?outcome, chars = text.chars().count(), "request finished")
                 }
             },
             Told::Started => {

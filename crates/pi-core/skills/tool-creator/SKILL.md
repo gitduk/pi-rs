@@ -165,11 +165,19 @@ Background mode is declared in metadata. It does not depend on fd 3 events.
 | `{"interrupt": true}` | Stop the active turn in the command's checkout, as a user stop would. |
 | `{"follow": true}` | Receive replies for all subsequent turns in the command's checkout, including turns opened by other inputs. |
 
-When an input begins execution, pi writes `{"request": 17, "started": true}` back through the same fd.
-It then writes `{"request": 17, "reply": "..."}` with the answer or reason it could not complete.
+When an input must wait, pi writes `{"request": 17, "queued": true}` back through the same fd.
+When execution begins, it writes `{"request": 17, "started": true}` with the same ID.
+Inputs that can run immediately omit the queued message.
+It then writes `{"request": 17, "reply": "...", "status": "done"}`.
+`reply` contains only the remaining answer or command output, and can be empty.
+The final `status` is `done`, `stopped`, or `failed`. A stopped response includes
+`reason` (possibly empty); a runtime failure includes `error`. A shell that
+exited includes numeric `exit_code`, with `status` set to `done` for zero or
+`failed` otherwise. Do not parse an exit code from an error message.
+Render completion notices from these fields. Do not infer status from `reply`.
 Progress messages carry the same `request` ID. Track each ID independently when operations overlap.
-An incomplete model answer ends with `(stopped)` or `(failed: …)`.
 Each input receives one reply.
+An input cancelled while queued receives a final stopped reply without a started message.
 After `follow`, the script also receives one reply for every other turn in its checkout, without duplicates.
 
 ```python

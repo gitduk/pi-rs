@@ -64,9 +64,23 @@ pub enum Told {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Response {
+    Queued,
     Started,
     Progress(String),
-    Finished(String),
+    /// Remaining content without completion notices or error details.
+    Finished {
+        text: String,
+        outcome: Outcome,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    Done,
+    /// The cancellation reason, empty when none was supplied.
+    Stopped(String),
+    Failed(String),
+    Exited(i32),
 }
 
 /// Messages from one running command into its session.

@@ -1,7 +1,7 @@
 ---
 [package]
 # Bump this script's version whenever it changes.
-version = "0.1.3"
+version = "0.1.7"
 edition = "2024"
 description = "Connect this session to Telegram when the user requests it.\nMessages sent to the user's bot are submitted to this session, including commands. Each answer returns to the chat.\nSet TELEGRAM_BOT_TOKEN in the tools' .env file to a bot token from @BotFather.\n\nThe tool runs in the background until you stop the background command.\nOn first use, the background command provides a link and QR code for the user to pair their account.\nThe pairing persists for later use."
 
@@ -75,6 +75,7 @@ mod bridge {
     const TYPING_EVERY: Duration = Duration::from_secs(4);
     const CONNECTED_NOTICE: &str = "已连接到 pi。";
     const STOPPED_NOTICE: &str = "已停止当前任务。";
+    const QUEUED_NOTICE: &str = "已排队，等待执行。";
 
     #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
     struct State {
@@ -565,21 +566,39 @@ mod bridge {
         }
     }
 
-    fn reply_text(reply: &str) -> String {
-        let body = if matches!(reply, "stopped" | "(stopped)") {
-            ""
-        } else if let Some(body) = reply
-            .strip_suffix("\n\n(stopped)")
-            .or_else(|| reply.strip_suffix("\nstopped"))
-        {
-            body.trim_end()
-        } else {
-            return reply.to_string();
+    fn reply_text(reply: &str, told: &Value) -> String {
+        let notice = match told.get("status").and_then(Value::as_str) {
+            Some("stopped") => {
+                let reason = told
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if reason.is_empty() {
+                    STOPPED_NOTICE.to_string()
+                } else {
+                    format!("{STOPPED_NOTICE}\n{reason}")
+                }
+            }
+            Some("failed") => {
+                let error = told
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if error.is_empty() {
+                    match told.get("exit_code").and_then(Value::as_i64) {
+                        Some(code) => format!("任务失败：退出码 {code}"),
+                        None => "任务失败。".to_string(),
+                    }
+                } else {
+                    format!("任务失败：{error}")
+                }
+            }
+            _ => return reply.to_string(),
         };
-        if body.is_empty() {
-            STOPPED_NOTICE.into()
+        if reply.is_empty() {
+            notice
         } else {
-            format!("{body}\n\n{STOPPED_NOTICE}")
+            format!("{reply}\n\n{notice}")
         }
     }
 
@@ -648,12 +667,14 @@ mod bridge {
                     if let Some(why) = refused {
                         outbox.push(chat, &format!("not taken: {why}"));
                     }
-                    if told.get("started").and_then(Value::as_bool) == Some(true) {
+                    if told.get("queued").and_then(Value::as_bool) == Some(true) {
+                        outbox.push(chat, QUEUED_NOTICE);
+                    } else if told.get("started").and_then(Value::as_bool) == Some(true) {
                         activity.hear(&told);
                         tick.reset_immediately();
                     } else if let Some(reply) = told.get("reply").and_then(Value::as_str) {
                         activity.hear(&told);
-                        outbox.push(chat, &reply_text(reply));
+                        outbox.push(chat, &reply_text(reply, &told));
                         shows = activity.idle();
                     } else if let Some(progress) = told.get("progress").and_then(Value::as_str) {
                         outbox.push(chat, progress);
@@ -785,23 +806,44 @@ mod bridge {
         }
 
         #[test]
-        fn stop_notices_preserve_partial_answers_and_leave_ordinary_replies_alone() {
-            for marker in ["stopped", "(stopped)"] {
-                assert_eq!(reply_text(marker), STOPPED_NOTICE);
-            }
-            for suffix in ["\n\n(stopped)", "\nstopped"] {
-                assert_eq!(
-                    reply_text(&format!("partial answer{suffix}")),
-                    format!("partial answer\n\n{STOPPED_NOTICE}")
-                );
-            }
-            for text in [
-                "the server stopped",
-                "(stopped) is a marker",
-                "normal reply",
+        fn outcome_notices_do_not_rewrite_reply_content() {
+            for reply in [
+                "",
+                "stopped",
+                "(stopped)",
+                "running\nstopped",
+                "running\n\n(stopped)",
             ] {
-                assert_eq!(reply_text(text), text);
+                for told in [
+                    json!({}),
+                    json!({"status": "done"}),
+                    json!({"status": "done", "exit_code": 0}),
+                ] {
+                    assert_eq!(reply_text(reply, &told), reply);
+                }
+                for (told, notice) in [
+                    (json!({"status": "stopped"}), STOPPED_NOTICE.to_string()),
+                    (
+                        json!({"status": "failed", "error": "network unavailable"}),
+                        "任务失败：network unavailable".to_string(),
+                    ),
+                    (
+                        json!({"status": "failed", "exit_code": 3}),
+                        "任务失败：退出码 3".to_string(),
+                    ),
+                ] {
+                    let expected = if reply.is_empty() {
+                        notice
+                    } else {
+                        format!("{reply}\n\n{notice}")
+                    };
+                    assert_eq!(reply_text(reply, &told), expected);
+                }
             }
+            assert_eq!(
+                reply_text("", &json!({"status": "stopped", "reason": "run it again"})),
+                format!("{STOPPED_NOTICE}\nrun it again")
+            );
         }
 
         #[test]
@@ -831,6 +873,85 @@ mod bridge {
             assert_eq!(rx.try_recv().unwrap(), json!({"input": " /stop"}));
             assert_eq!(rx.try_recv().unwrap(), json!({"interrupt": true}));
             assert!(rx.try_recv().is_err());
+        }
+
+        #[tokio::test]
+        async fn queued_notices_are_sent_separately_from_the_final_reply() {
+            let (_dir, kept) = kept();
+            kept.lock().chat = Some(7);
+            let (base, requests) = server(vec![(200, json!({"ok": true, "result": {}})); 3]).await;
+            let client = Client::at(base);
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let (mut host, script) = tokio::net::UnixStream::pair().unwrap();
+            for told in [
+                json!({"request": 17, "queued": true}),
+                json!({"request": 17, "reply": "queued", "status": "done"}),
+            ] {
+                host.write_all(format!("{told}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            drop(host);
+            let (read, _write) = script.into_split();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                answer(
+                    &client,
+                    &kept,
+                    &Asking::default(),
+                    &Pi(tx),
+                    read,
+                    &Notify::new(),
+                ),
+            )
+            .await
+            .unwrap();
+            let requests = requests.await.unwrap();
+            assert_eq!(requests[1]["text"], QUEUED_NOTICE);
+            assert_eq!(requests[2]["text"], "queued");
+        }
+
+        #[tokio::test]
+        async fn received_replies_use_cancellation_metadata_not_answer_text() {
+            let (_dir, kept) = kept();
+            kept.lock().chat = Some(7);
+            let (base, requests) = server(vec![(200, json!({"ok": true, "result": {}})); 3]).await;
+            let client = Client::at(base);
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let (mut host, script) = tokio::net::UnixStream::pair().unwrap();
+            for told in [
+                json!({"request": 1, "reply": "stopped", "status": "done"}),
+                json!({
+                    "request": 2,
+                    "reply": "partial answer\n\n(stopped)",
+                    "status": "stopped",
+                }),
+            ] {
+                host.write_all(format!("{told}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            drop(host);
+            let (read, _write) = script.into_split();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                answer(
+                    &client,
+                    &kept,
+                    &Asking::default(),
+                    &Pi(tx),
+                    read,
+                    &Notify::new(),
+                ),
+            )
+            .await
+            .unwrap();
+            let requests = requests.await.unwrap();
+            assert_eq!(requests[1]["text"], "stopped");
+            assert_eq!(
+                requests[2]["text"],
+                format!("partial answer\n\n(stopped)\n\n{STOPPED_NOTICE}")
+            );
         }
 
         #[tokio::test]

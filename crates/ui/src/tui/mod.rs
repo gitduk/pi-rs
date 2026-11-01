@@ -101,6 +101,7 @@ pub(crate) enum Deed {
     Interrupt,
     // Esc caught a prompt on its way out: stop the run, then unsend it.
     Unsend,
+    RecallQueued(Vec<pi_core::execution::Request>),
     // A command's row clicked: what it said that is not back yet, on a page.
     CommandOutput(u64),
     // Show or hide the completed executions waiting for delivery.
@@ -129,6 +130,7 @@ impl Deed {
             | Deed::External
             | Deed::Interrupt
             | Deed::Unsend
+            | Deed::RecallQueued(_)
             | Deed::CommandOutput(_)
             | Deed::BackgroundResults(_)
             | Deed::StopCommands(_)
@@ -142,8 +144,8 @@ impl Deed {
     // passing — the same key clears the line — and explains nothing later.
     fn journaled(&self) -> bool {
         match self {
-            // An answer is journaled where it was picked, with what was picked.
-            Deed::Nothing | Deed::Tidy | Deed::Answer { .. } => false,
+            // Answers and queue withdrawals are journaled where they take effect.
+            Deed::Nothing | Deed::Tidy | Deed::Answer { .. } | Deed::RecallQueued(_) => false,
             Deed::External
             | Deed::Rewind
             | Deed::Interrupt
@@ -168,9 +170,8 @@ enum Wake {
     // Something to carry out, once the select's borrows are gone, with the
     // line it was read from: echoed if the answer lands under it.
     Do(Asked, Option<String>),
-    // A typed prompt that waited for the lane: read at the door, so it is
-    // not read again, only sent.
-    Prompt(agent::session::Prompt, Option<String>),
+    // A waiting operation, with the identity assigned when it entered the queue.
+    Queued(Queued),
     // A line pi relays for the model: always a turn, never a command.
     Relay(agent::session::Prompt),
     // A turn ended and has to be settled, whichever lane it belongs to.
@@ -510,6 +511,11 @@ impl Tui {
             Deed::Nothing => {}
             Deed::Interrupt => self.stop_current(false),
             Deed::Unsend => self.stop_current(true),
+            Deed::RecallQueued(requests) => {
+                for request in requests {
+                    self.cancel_queued(request, "recalled for editing");
+                }
+            }
             Deed::Rewind => self.open_rewind(),
             Deed::External => self.edit_externally().await,
             Deed::BackgroundResults(shown) => self.ui.background_results_shown = shown,
@@ -590,13 +596,11 @@ impl Tui {
         match intent.fate() {
             Fate::Now => Wake::Do(Asked::Core(intent), line),
             Fate::Queued => {
-                front_view(&mut self.views, self.core.lane())
-                    .queued
-                    .push(Queued {
-                        input: Pending::Intent(intent),
-                        origin,
-                        line,
-                    });
+                self.enqueue(Queued {
+                    input: Pending::Intent(intent),
+                    request: pi_core::execution::Request::new(origin, self.core.lane().token()),
+                    line,
+                });
                 Wake::Nothing
             }
             // A command refused because a run is in flight.
@@ -607,8 +611,8 @@ impl Tui {
                 self.drivers.started(request, false);
                 self.complete(
                     request,
-                    pi_core::execution::Output::Notice(why.to_string()),
-                    pi_core::driver::Ended::Failed(why.to_string()),
+                    pi_core::execution::Output::Notice(String::new()),
+                    toolbox::channel::Outcome::Failed(why.to_string()),
                 );
                 Wake::Nothing
             }
@@ -682,7 +686,9 @@ impl Tui {
             self.serve_lanes().await;
             // Before the bar rebuilds, so a vanished tab goes with its lane.
             self.drop_vanished_lanes();
-            prune_views(&self.core, &mut self.views);
+            for request in prune_views(&self.core, &mut self.views) {
+                self.cancel_queued(request, "its session was removed");
+            }
             let core = &self.core;
             for said in self.drivers.retain(|t| core.position_of(t).is_some()) {
                 self.ui
@@ -823,11 +829,7 @@ impl Tui {
                     .queued
                     .pop_front()
                     .expect("something is waiting");
-                origin = queued.origin;
-                match queued.input {
-                    Pending::Intent(intent) => Wake::Do(Asked::Core(intent), queued.line),
-                    Pending::Prompt(ask) => Wake::Prompt(ask, queued.line),
-                }
+                Wake::Queued(queued)
             };
             // Out here, where all of `self` is free again.
             let (asked, line) = match woke {
@@ -842,8 +844,19 @@ impl Tui {
                     self.deliver_prompt(ask, Origin::Background, None, &done_tx);
                     continue;
                 }
-                Wake::Prompt(ask, line) => {
-                    self.deliver_prompt(ask, origin, line, &done_tx);
+                Wake::Queued(queued) => {
+                    let origin = queued.request.origin;
+                    if self
+                        .resume_queued(queued, &done_tx, &fetched_tx, &started_tx)
+                        .await
+                    {
+                        break match origin {
+                            Origin::Typed => "The user exited pi.",
+                            Origin::Loop | Origin::Background | Origin::Input(_) => {
+                                "pi exited in response to a background command."
+                            }
+                        };
+                    }
                     continue;
                 }
                 Wake::Do(asked, line) => (asked, line),

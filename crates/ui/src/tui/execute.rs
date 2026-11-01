@@ -3,11 +3,12 @@
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::run::{Done, Fetched, Started};
+use super::view::{Pending, Queued};
 use super::{Tui, clipboard, front_view, keys};
-use pi_core::driver::{Ended, Origin, Said};
+use pi_core::driver::{Origin, Said};
 use pi_core::execution::{self, Action, Change, Completion, Output, Request};
 use pi_core::input::{Intent, Rewound};
-use toolbox::channel::Response;
+use toolbox::channel::{Outcome, Response};
 
 impl Tui {
     /// Every admitted operation uses this executor, independently of where its
@@ -22,13 +23,29 @@ impl Tui {
         started: &UnboundedSender<Started>,
     ) -> bool {
         let request = Request::new(origin, self.core.lane().token());
+        self.execute_for(intent, request, line, done, fetched, started)
+            .await
+    }
+
+    pub(super) async fn execute_for(
+        &mut self,
+        intent: Intent,
+        request: Request,
+        line: Option<String>,
+        done: &UnboundedSender<Done>,
+        fetched: &UnboundedSender<Fetched>,
+        started: &UnboundedSender<Started>,
+    ) -> bool {
+        let origin = request.origin;
         tracing::info!(target: "pi::session", request = request.id, ?origin,
             lane = request.lane, ?intent, "dispatch");
         let was = self.core.current;
         let action = execution::dispatch(&mut self.core, intent);
         self.reconcile(was);
 
-        self.drivers.started(request, false);
+        if !matches!(action, Action::Prompt { .. }) || !self.core.lane().is_running() {
+            self.drivers.started(request, false);
+        }
         let starts_turn = matches!(action, Action::Prompt { .. } | Action::McpPrompt { .. });
         match action {
             Action::Complete { change, output } => {
@@ -39,7 +56,7 @@ impl Tui {
                         ..request
                     },
                     output,
-                    Ended::Done,
+                    Outcome::Done,
                 );
             }
             Action::Bash(command) => {
@@ -60,10 +77,10 @@ impl Tui {
             Action::Edit(file) => {
                 if matches!(origin, Origin::Input(_)) {
                     let why = "this operation needs the local terminal's editor".to_string();
-                    self.complete(request, Output::Notice(why.clone()), Ended::Failed(why));
+                    self.complete(request, Output::Notice(String::new()), Outcome::Failed(why));
                 } else {
                     let output = self.edit_file(file).await;
-                    self.complete(request, output, Ended::Done);
+                    self.complete(request, output, Outcome::Done);
                 }
                 self.ui.lists.forget();
             }
@@ -77,7 +94,7 @@ impl Tui {
                 } else {
                     Output::Notice(format!("unknown command {word}"))
                 };
-                self.complete(request, output, Ended::Done);
+                self.complete(request, output, Outcome::Done);
             }
             Action::Drive(drive) => {
                 let lane = self.core.lane();
@@ -93,7 +110,7 @@ impl Tui {
                     }
                     Said::Transcript(text) => Output::Text(text),
                 };
-                self.complete(request, output, Ended::Done);
+                self.complete(request, output, Outcome::Done);
             }
             Action::Prompt { send, typed } => {
                 let ask = clipboard::prompt(send, typed, &self.ui.images);
@@ -105,7 +122,7 @@ impl Tui {
                 }
             }
             Action::Quit => {
-                self.complete(request, Output::Notice("exiting".into()), Ended::Done);
+                self.complete(request, Output::Notice("exiting".into()), Outcome::Done);
                 return true;
             }
         }
@@ -113,6 +130,60 @@ impl Tui {
             self.say_of(self.core.current, super::by_pi(&said));
         }
         false
+    }
+
+    pub(super) fn enqueue(&mut self, queued: Queued) {
+        let request = queued.request;
+        match &queued.input {
+            Pending::Intent(intent) => {
+                tracing::info!(target: "pi::session", request = request.id,
+                    lane = request.lane, origin = ?request.origin, ?intent, "dispatch queued");
+            }
+            Pending::Prompt(_) => {
+                tracing::info!(target: "pi::session", request = request.id,
+                    lane = request.lane, origin = ?request.origin, "prompt queued");
+            }
+        }
+        front_view(&mut self.views, self.core.lane())
+            .queued
+            .push(queued);
+        self.drivers.respond(request, Response::Queued);
+    }
+
+    pub(super) async fn resume_queued(
+        &mut self,
+        queued: Queued,
+        done: &UnboundedSender<Done>,
+        fetched: &UnboundedSender<Fetched>,
+        started: &UnboundedSender<Started>,
+    ) -> bool {
+        let Queued {
+            input,
+            request,
+            line,
+        } = queued;
+        match input {
+            Pending::Intent(intent) => {
+                self.execute_for(intent, request, line, done, fetched, started)
+                    .await
+            }
+            Pending::Prompt(ask) => {
+                self.deliver_prompt_for(ask, request, line, done);
+                false
+            }
+        }
+    }
+
+    pub(super) fn cancel_queued(&self, request: Request, reason: &str) {
+        tracing::info!(target: "pi::session", request = request.id,
+            lane = request.lane, reason, "queued request cancelled");
+        self.drivers.respond(
+            request,
+            Response::Finished {
+                text: String::new(),
+                outcome: Outcome::Stopped(reason.into()),
+            },
+        );
     }
 
     fn adopt_change(&mut self, change: Change) {
@@ -137,44 +208,54 @@ impl Tui {
         }
     }
 
-    pub(super) fn complete(&mut self, request: Request, output: Output, ended: Ended) {
+    pub(super) fn complete(&mut self, request: Request, output: Output, outcome: Outcome) {
         self.present(Completion {
             request,
             output,
-            ended,
+            outcome,
         });
     }
 
-    /// One output is rendered for both consumers. Only command outputs pass
-    /// here; incidental local notifications cannot become remote answers.
+    /// Command content and its outcome travel separately. Incidental local
+    /// notifications cannot become remote answers.
     pub(super) fn present(&mut self, completion: Completion) {
         let Completion {
             request,
             output,
-            ended,
+            outcome,
         } = completion;
         tracing::info!(target: "pi::session", request = request.id,
-            lane = request.lane, outcome = ?ended, "completed");
+            lane = request.lane, ?outcome, "completed");
         let text = match &output {
             Output::Notice(text) | Output::Text(text) | Output::Note(text) => text.clone(),
             Output::Listing(rows) => crate::listing::lines(rows).join("\n"),
             Output::Compacted(report) => pi_core::core::meter::compaction_line(report),
         };
-        let text = if text.is_empty() {
-            match ended {
-                Ended::Done => "done".into(),
-                Ended::Stopped | Ended::Unsent => "stopped".into(),
-                Ended::Failed(why) => format!("failed: {why}"),
-            }
-        } else {
-            text
+        let status = match &outcome {
+            Outcome::Done => None,
+            Outcome::Stopped(reason) => Some(if reason.is_empty() {
+                "stopped".to_string()
+            } else {
+                format!("stopped: {reason}")
+            }),
+            Outcome::Failed(why) => Some(format!("failed: {why}")),
+            Outcome::Exited(0) if text.is_empty() => Some("exit 0, no output".into()),
+            Outcome::Exited(0) => None,
+            Outcome::Exited(code) => Some(format!("exit {code}")),
         };
-        self.drivers.respond(request, Response::Finished(text));
+        self.drivers
+            .respond(request, Response::Finished { text, outcome });
         let Some(at) = self.core.position_of(request.lane) else {
             return;
         };
         match output {
-            Output::Notice(text) => {
+            Output::Notice(mut text) => {
+                if let Some(status) = status {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(&status);
+                }
                 if at == self.core.current {
                     self.land_notice(text);
                 } else if !text.is_empty() {
@@ -190,7 +271,13 @@ impl Tui {
                     }
                 }
             }
-            Output::Text(text) => {
+            Output::Text(mut text) => {
+                if let Some(status) = status {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(&status);
+                }
                 super::view_at(&mut self.views, request.lane)
                     .surface
                     .scrollback

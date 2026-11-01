@@ -95,8 +95,20 @@ impl Moved {
 /// `out` with what the command changed told after it: to the model with long
 /// runs cut, on screen whole under the row's head.
 pub fn tell(mut out: ToolOutput, moved: &[Moved]) -> ToolOutput {
+    if let Some(report) = report(moved) {
+        out = report.append(out);
+    }
+    out
+}
+
+pub(crate) struct Report {
+    pub content: String,
+    preview: String,
+}
+
+pub(crate) fn report(moved: &[Moved]) -> Option<Report> {
     if moved.is_empty() {
-        return out;
+        return None;
     }
     let all = |run| {
         (moved.iter().map(|m| m.sketch(run)))
@@ -104,17 +116,26 @@ pub fn tell(mut out: ToolOutput, moved: &[Moved]) -> ToolOutput {
             .join("\n")
     };
     let files = llm::figures::count(moved.len(), "file");
-    out.content
-        .push(llm::message::ToolResultContent::Text(llm::message::Text {
-            text: format!(
-                "{files} you had seen changed while this ran:\n{}",
-                all(CHANGED_RUN)
-            ),
-        }));
-    let head = out.preview();
-    let head = head.lines().next().unwrap_or_default();
-    out.preview = Some(format!("{head}\n{}", all(usize::MAX)));
-    out
+    Some(Report {
+        content: format!(
+            "{files} you had seen changed while this ran:\n{}",
+            all(CHANGED_RUN)
+        ),
+        preview: all(usize::MAX),
+    })
+}
+
+impl Report {
+    pub fn append(self, mut out: ToolOutput) -> ToolOutput {
+        out.content
+            .push(llm::message::ToolResultContent::Text(llm::message::Text {
+                text: self.content,
+            }));
+        let head = out.preview();
+        let head = head.lines().next().unwrap_or_default();
+        out.preview = Some(format!("{head}\n{}", self.preview));
+        out
+    }
 }
 
 fn change(rel: &str, was: &str, now: &Disk, changed_run: usize) -> String {

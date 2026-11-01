@@ -253,15 +253,36 @@ async fn tell(mut to: OwnedWriteHalf, mut hear: UnboundedReceiver<Told>) {
     while let Some(told) = hear.recv().await {
         let line = match told {
             Told::Response { request, event } => match event {
+                crate::channel::Response::Queued => {
+                    serde_json::json!({ "request": request, "queued": true })
+                }
                 crate::channel::Response::Started => {
                     serde_json::json!({ "request": request, "started": true })
                 }
                 crate::channel::Response::Progress(text) => {
                     serde_json::json!({ "request": request, "progress": text })
                 }
-                crate::channel::Response::Finished(text) => {
-                    serde_json::json!({ "request": request, "reply": text })
-                }
+                crate::channel::Response::Finished { text, outcome } => match outcome {
+                    crate::channel::Outcome::Done => {
+                        serde_json::json!({ "request": request, "reply": text, "status": "done" })
+                    }
+                    crate::channel::Outcome::Stopped(reason) => {
+                        serde_json::json!({
+                            "request": request, "reply": text, "status": "stopped", "reason": reason
+                        })
+                    }
+                    crate::channel::Outcome::Failed(error) => {
+                        serde_json::json!({
+                            "request": request, "reply": text, "status": "failed", "error": error
+                        })
+                    }
+                    crate::channel::Outcome::Exited(code) => {
+                        serde_json::json!({
+                            "request": request, "reply": text, "exit_code": code,
+                            "status": if code == 0 { "done" } else { "failed" }
+                        })
+                    }
+                },
             },
             Told::Started => serde_json::json!({ "started": true }),
             Told::Progress(text) => serde_json::json!({ "progress": text }),
@@ -372,7 +393,7 @@ fn parse(line: &str) -> Option<Said> {
 mod tests {
     use super::*;
     use crate::bash::Bash;
-    use crate::channel::NoOne;
+    use crate::channel::{NoOne, Outcome, Response};
     use crate::testing::{Sink, ctx};
     use std::sync::{Arc, Mutex};
     use tool::Tool;
@@ -545,22 +566,92 @@ printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" "$e" "$f" > heard"#,
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let writer = tokio::spawn(tell(write, rx));
         for (request, event) in [
+            (7, Response::Queued),
             (7, crate::channel::Response::Started),
             (8, crate::channel::Response::Started),
-            (8, crate::channel::Response::Finished("status".into())),
+            (
+                8,
+                Response::Finished {
+                    text: "status".into(),
+                    outcome: Outcome::Done,
+                },
+            ),
             (7, crate::channel::Response::Progress("working".into())),
-            (7, crate::channel::Response::Finished("done".into())),
+            (
+                7,
+                Response::Finished {
+                    text: "done".into(),
+                    outcome: Outcome::Done,
+                },
+            ),
+            (
+                9,
+                Response::Finished {
+                    text: "stopped".into(),
+                    outcome: Outcome::Done,
+                },
+            ),
+            (
+                10,
+                Response::Finished {
+                    text: "partial answer".into(),
+                    outcome: Outcome::Stopped(String::new()),
+                },
+            ),
+            (
+                11,
+                Response::Finished {
+                    text: "partial answer".into(),
+                    outcome: Outcome::Failed("connection lost".into()),
+                },
+            ),
+            (
+                12,
+                Response::Finished {
+                    text: String::new(),
+                    outcome: Outcome::Stopped("run it again".into()),
+                },
+            ),
+            (
+                13,
+                Response::Finished {
+                    text: String::new(),
+                    outcome: Outcome::Failed("connection lost".into()),
+                },
+            ),
+            (
+                14,
+                Response::Finished {
+                    text: String::new(),
+                    outcome: Outcome::Exited(0),
+                },
+            ),
+            (
+                15,
+                Response::Finished {
+                    text: "exit 3".into(),
+                    outcome: Outcome::Exited(3),
+                },
+            ),
         ] {
             tx.send(Told::Response { request, event }).unwrap();
         }
         drop(tx);
         let mut lines = BufReader::new(theirs).lines();
         for expected in [
+            serde_json::json!({"request": 7, "queued": true}),
             serde_json::json!({"request": 7, "started": true}),
             serde_json::json!({"request": 8, "started": true}),
-            serde_json::json!({"request": 8, "reply": "status"}),
+            serde_json::json!({"request": 8, "reply": "status", "status": "done"}),
             serde_json::json!({"request": 7, "progress": "working"}),
-            serde_json::json!({"request": 7, "reply": "done"}),
+            serde_json::json!({"request": 7, "reply": "done", "status": "done"}),
+            serde_json::json!({"request": 9, "reply": "stopped", "status": "done"}),
+            serde_json::json!({"request": 10, "reply": "partial answer", "status": "stopped", "reason": ""}),
+            serde_json::json!({"request": 11, "reply": "partial answer", "status": "failed", "error": "connection lost"}),
+            serde_json::json!({"request": 12, "reply": "", "status": "stopped", "reason": "run it again"}),
+            serde_json::json!({"request": 13, "reply": "", "status": "failed", "error": "connection lost"}),
+            serde_json::json!({"request": 14, "reply": "", "status": "done", "exit_code": 0}),
+            serde_json::json!({"request": 15, "reply": "exit 3", "status": "failed", "exit_code": 3}),
         ] {
             let line = lines.next_line().await.unwrap().unwrap();
             assert_eq!(serde_json::from_str::<Value>(&line).unwrap(), expected);

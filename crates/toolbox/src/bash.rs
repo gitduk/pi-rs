@@ -40,6 +40,43 @@ const DESCRIPTION: &str = "Each call runs a shell command in a new shell. \
 
 /// Run a written command to completion under the workspace's checks and rewrite.
 pub async fn foreground(command: &str, cwd: &str, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
+    Ok(foreground_result(command, cwd, ctx).await?.into_output())
+}
+
+pub struct Foreground {
+    pub ran: Ran,
+    preview: String,
+    changes: Option<crate::drift::Report>,
+}
+
+impl Foreground {
+    pub fn content(&self) -> String {
+        let mut body = self.ran.body.clone();
+        if let Some(changes) = &self.changes {
+            if !body.is_empty() {
+                body.push('\n');
+            }
+            body.push_str(&changes.content);
+        }
+        body
+    }
+
+    pub fn into_output(self) -> ToolOutput {
+        let out = self.ran.output(self.preview);
+        match self.changes {
+            Some(changes) => changes.append(out),
+            None => out,
+        }
+    }
+}
+
+/// The command's content and exit status, before status text is added to the
+/// tool result. Workspace change reports remain part of the content.
+pub async fn foreground_result(
+    command: &str,
+    cwd: &str,
+    ctx: &Ctx,
+) -> Result<Foreground, ToolError> {
     let preview = first_line(command).to_string();
     let args = Args {
         command: command.to_string(),
@@ -50,7 +87,11 @@ pub async fn foreground(command: &str, cwd: &str, ctx: &Ctx) -> Result<ToolOutpu
     let before = crate::drift::before(ctx);
     let ran = run(&prepared.command, &prepared.cwd, None, ctx).await?;
     let moved = crate::drift::absorb(ctx, before);
-    Ok(crate::drift::tell(ran.output(preview), &moved))
+    Ok(Foreground {
+        ran,
+        preview,
+        changes: crate::drift::report(&moved),
+    })
 }
 
 // One line: whoever reads the preview, and the log, treat further newlines
@@ -518,6 +559,39 @@ mod background_tests {
         assert!(
             Bash::new(Arc::new(Sink::default())).schema()["properties"]["background"].is_object()
         );
+    }
+
+    #[tokio::test]
+    async fn foreground_content_preserves_output_and_changes_without_exit_notices() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tracked.txt");
+        std::fs::write(&path, "before\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(10))
+            .unwrap();
+        let ctx = ctx(dir.path());
+        ctx.note_view(&path, "before\n");
+        let result = foreground_result(
+            "printf 'exit 3'; printf 'after\\n' > tracked.txt; exit 3",
+            ".",
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.ran.code, 3);
+        let content = result.content();
+        assert_eq!(content.matches("exit 3").count(), 1, "{content}");
+        assert!(
+            content.contains("tracked.txt") && content.contains("after"),
+            "{content}"
+        );
+        assert_eq!(ctx.viewed(&path).as_deref(), Some("after\n"));
+        let output = result.into_output();
+        assert!(output.warned);
+        assert_eq!(output.flatten().matches("exit 3").count(), 2);
     }
 
     // The call returns at once; the end comes back as one result, exit code

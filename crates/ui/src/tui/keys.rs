@@ -398,7 +398,12 @@ impl Ui {
             }
             Some(Action::MoveBufferStart) => self.buffer_ends(view, true),
             Some(Action::MoveBufferEnd) => self.buffer_ends(view, false),
-            Some(Action::HistoryOlder) => self.history_older(view),
+            Some(Action::HistoryOlder) => {
+                let cancelled = self.history_older(view);
+                if !cancelled.is_empty() {
+                    return Asked::Own(Deed::RecallQueued(cancelled));
+                }
+            }
             Some(Action::HistoryNewer) => self.editor.down(),
             Some(Action::ScrollPageUp) => self.scroll_view(view, true, self.page_scroll_step()),
             Some(Action::ScrollPageDown) => self.scroll_view(view, false, self.page_scroll_step()),
@@ -536,13 +541,15 @@ impl Ui {
 
     // Up from the bottom of recall takes back the typed lines still queued,
     // oldest first and the draft after them, before reaching history.
-    fn history_older(&mut self, view: &mut View) {
+    fn history_older(&mut self, view: &mut View) -> Vec<pi_core::execution::Request> {
         let mut queued = view.queued.lock();
+        let mut cancelled = Vec::new();
         if self.editor.recalls_next() && queued.iter().any(|q| q.line.is_some()) {
             let mut lines = Vec::new();
             queued.retain_mut(|q| match q.line.take() {
                 Some(line) => {
                     lines.push(line);
+                    cancelled.push(q.request);
                     false
                 }
                 None => true,
@@ -551,9 +558,10 @@ impl Ui {
                 lines.push(self.editor.text().to_string());
             }
             self.editor.set_line(&lines.join("\n"));
-            return;
+            return cancelled;
         }
         self.editor.up();
+        cancelled
     }
 
     // Submit `line` as typed: kept in history if it can be recalled, then read.

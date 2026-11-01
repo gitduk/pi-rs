@@ -319,7 +319,7 @@ async fn a_stopped_run_does_not_tell_the_model_a_request_was_cancelled() {
                     tui.core.lanes[0].token(),
                 ),
                 kind,
-                ran: Some((session, Err(agent::AgentError::Cancelled))),
+                ran: Some((session, Err(agent::AgentError::Cancelled.into()))),
             })
             .await;
             let mut back = tui.core.lanes[0]
@@ -363,7 +363,7 @@ async fn a_stopped_turn_keeps_its_status_line_and_a_stopped_bang_does_not() {
                 kind,
                 ran: Some((
                     agent::session::Session::new(),
-                    Err(agent::AgentError::Cancelled),
+                    Err(agent::AgentError::Cancelled.into()),
                 )),
             })
             .await;
@@ -1102,7 +1102,7 @@ async fn a_queued_line_remembers_the_command_it_came_from() {
         .queued
         .lock()
         .iter()
-        .map(|q| q.origin)
+        .map(|q| q.request.origin)
         .collect();
     assert_eq!(from, [Origin::Input(1), Origin::Typed]);
 }
@@ -1143,7 +1143,7 @@ async fn a_typed_followup_waits_for_the_run_and_survives_cancellation() {
         kind: crate::tui::run::Kind::Turn,
         ran: Some((
             agent::session::Session::with_prompt("original"),
-            Err(agent::AgentError::Cancelled),
+            Err(agent::AgentError::Cancelled.into()),
         )),
     })
     .await;
@@ -1155,7 +1155,7 @@ async fn a_typed_followup_waits_for_the_run_and_survives_cancellation() {
         panic!("the prompt waits as it was read");
     };
     assert_eq!(waited, ask);
-    assert!(tui.deliver_prompt(waited, queued.origin, queued.line, &done));
+    assert!(tui.deliver_prompt_for(waited, queued.request, queued.line, &done));
     let completed = tokio::time::timeout(std::time::Duration::from_secs(2), ended.recv())
         .await
         .unwrap()
@@ -1317,7 +1317,7 @@ async fn leaving_with_a_command_preserves_its_stop_cause_on_resume() {
                     tui.core.lane().token(),
                 ),
                 kind: crate::tui::run::Kind::Turn,
-                ran: Some((carried, Err(agent::AgentError::Cancelled))),
+                ran: Some((carried, Err(agent::AgentError::Cancelled.into()))),
             })
             .unwrap();
         } else {
