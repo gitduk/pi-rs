@@ -140,51 +140,57 @@ fn drive(run: impl std::future::Future<Output = Result<Ended>>) -> Result<Ended>
 }
 
 async fn run(updated_from: Option<String>) -> Result<Ended> {
-    let args = std::sync::Arc::new(Args::parse());
+    let args = Arc::new(Args::parse());
     let prompt = read_prompt(&args)?;
-    let within = || format!("cannot use {} as a workspace", args.cwd);
-    let workspace = tool::Workspace::new(&args.cwd).with_context(within)?;
-    // The project file is found from the workspace, and the tier it may set
-    // fences that same workspace: read between the two steps.
-    let settings = Settings::load(args.config.as_deref(), workspace.root())?;
-    let config = Arc::new(settings.config()?);
-    let workspace = fence(workspace, &config, &args.pinned()).with_context(within)?;
-
-    let store = session::Store::default();
-    // Held for the whole run: two pi saving one session would each erase
-    // what the other said.
-    let (prior, mut claim) = match (&args.resume, args.continue_last) {
-        (Some(id), _) => Some(store.take(workspace.root(), id)?),
-        (None, true) => Some(store.take_latest(workspace.root())?),
-        _ => None,
+    let start = start(args, prompt.is_none())?;
+    match prompt {
+        None => interactive(start, updated_from).await,
+        Some(prompt) => once(start, prompt).await,
     }
-    .unzip();
-    pi_store::memory::Memory::default().lift_projects();
-    // Off the startup path: stats every bucket, almost never has anything to
-    // take. A run that exits first loses nothing — the next one sweeps.
-    tokio::task::spawn_blocking({
-        let store = store.clone();
-        let keep = config.keep();
-        let spare = prior.as_ref().map(|p| p.id.clone());
-        move || {
-            // Transcripts by reach and by age, journals by age — a run worth
-            // reading back is a fortnight old at most.
-            journal::prune(store.root());
-            store.prune();
-            if let Some(keep) = keep {
-                store.forget_older_than(keep, spare.as_deref());
-                pi_store::forget_images(keep);
-            }
-        }
-    });
+}
 
+// Everything a run starts with, whichever surface it then runs on.
+struct Start {
+    args: Arc<Args>,
+    settings: Settings,
+    config: Arc<pi_store::config::Config>,
+    pinned: pi_core::args::Pinned,
+    store: session::Store,
+    workspace: tool::Workspace,
+    root: std::path::PathBuf,
+    worktree: Option<String>,
     // What this run keeps: an interactive session, or one the user named with
     // `-c`/`--resume`. A one-shot prompt leaves nothing behind, not even a log.
-    let keeps = prior.is_some() || prompt.is_none();
+    keeps: bool,
+    id: String,
+    claim: Option<session::Claim>,
+    name: Option<String>,
+    created: u64,
+    carried: agent::session::Session,
+    // How many messages the session came back with.
+    resumed: usize,
+    words: &'static [pi_core::input::commands::Command],
+    ag: agent::Agent,
+    resolved: Arc<pi_core::core::resolve::Resolved>,
+    retry: agent::Retry,
+    model_id: String,
+}
 
-    // The one surface needs the terminal at both ends. Asked before the
-    // journal and session directory are made, so a failed start leaves neither.
-    if prompt.is_none() && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+// Everything up to the first turn. Each step that can refuse to start comes
+// before the journal and the session directory are made, so a refused start
+// leaves neither.
+fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
+    let (workspace, settings, config) = open_workspace(&args)?;
+
+    let store = session::Store::default();
+    let (prior, mut claim) = take_prior(&args, &store, workspace.root())?;
+    pi_store::memory::Memory::default().lift_projects();
+    sweep(&store, config.keep(), prior.as_ref().map(|p| p.id.clone()));
+
+    let keeps = prior.is_some() || interactive;
+
+    // The one surface needs the terminal at both ends.
+    if interactive && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         bail!(
             "interactive mode needs a terminal on both stdin and stdout \
              — give a prompt to run once instead"
@@ -199,38 +205,22 @@ async fn run(updated_from: Option<String>) -> Result<Ended> {
         claim = Some(store.claim(workspace.root(), &id)?);
     }
 
-    let Some((named, named_by)) = config.model(
-        args.model.as_deref(),
-        prior.as_ref().map(|p| p.model.as_str()),
-        settings.project_sets("model").is_some(),
-    ) else {
-        let path = args
-            .config
-            .as_ref()
-            .map(std::path::PathBuf::from)
-            .or_else(pi_store::config::global_path);
-        let file = path.map_or_else(
-            || "a config file".into(),
-            |p| core::instructions::home_relative(&p),
-        );
-        let example = concat!(
-            env!("CARGO_PKG_REPOSITORY"),
-            "/blob/master/examples/pi.toml"
-        );
-        bail!("no model to run. Define one in {file} — see {example}");
-    };
+    let (named, named_by) = config
+        .model(
+            args.model.as_deref(),
+            prior.as_ref().map(|p| p.model.as_str()),
+            settings.project_sets("model").is_some(),
+        )
+        .ok_or_else(|| no_model(&args))?;
     let pinned = args.pinned();
     let dialled = dial(&pinned, &config, &named, named_by)?;
 
     // Only the terminal answers its own words; a one-shot run has none.
-    let words = match prompt {
-        None => tui::WORDS,
-        Some(_) => &[],
-    };
+    let words: &'static [_] = if interactive { tui::WORDS } else { &[] };
     let mut resolved = resolve(&pinned, &workspace, &config, &settings, None, words)?;
     pi_core::core::mcp::sync(&config, workspace.root());
     pi_core::core::warm_rtk();
-    if prompt.is_none() {
+    if interactive {
         // Said under the banner: printed here, they would wait behind the
         // screen and surface only at exit, after the session they were for.
         let said = dialled.warning.iter().chain(&dialled.assumed).cloned();
@@ -281,7 +271,7 @@ async fn run(updated_from: Option<String>) -> Result<Ended> {
     // Armed here rather than field by field: the brief the lane keeps and the
     // one the agent runs on are the same value, subagent tool and all.
     let resolved = lane::arm(&mut ag, Arc::new(resolved), archive, retry, None);
-    if prompt.is_some() && !args.quiet {
+    if !interactive && !args.quiet {
         for note in dialled.assumed.iter().chain(&resolved.notes) {
             eprintln!("\x1b[{}m{note}\x1b[0m", config.theme.muted.codes());
         }
@@ -299,54 +289,175 @@ async fn run(updated_from: Option<String>) -> Result<Ended> {
     let carried = prior.map(|p| p.into_session()).unwrap_or_default();
     let resumed = carried.context().len();
 
-    let Some(prompt) = prompt else {
-        // Before `id` moves into the Core, since `ctx` still needs to borrow it.
-        // `commands` is the Core's copy for the front lane; `resolved` keeps its own.
-        let commands = resolved.commands.clone();
-        let ctx = tool::Ctx::new(workspace).with_session(&id, pi_store::spill_root());
-        let mut first = lane::Lane::opened(lane::Opening {
-            id,
-            created,
-            name,
-            worktree,
-            claim,
-            ..lane::Opening::new(Arc::new(ag), resolved, ctx)
-        });
-        first.return_session(carried);
-        let mut core = Core {
-            store,
-            config: config.clone(),
-            pinned: pinned.clone(),
-            commands,
-            prompts_seen: 0,
-            settings,
-            current: 0,
-            lanes: vec![first],
-            refused: Default::default(),
-            executions: None,
-            surface: words,
-        };
-        let drivers = pi_core::driver::Drivers::default();
-        core.enable_background(drivers.background());
-        core.reopen(&args.lanes());
-        core.revive_commands();
-        core::update::watch();
-        core::update::check(env!("CARGO_PKG_REPOSITORY"));
-        let out = tui::Tui::new(core, drivers, updated(updated_from.as_deref()))?
-            .run()
-            .await;
-        // Subagents handed their transcripts to a background save; wait
-        // for those to land before the runtime goes with them.
-        settle().await;
-        if let Some(why) = journal::failure() {
-            eprintln!("journal stopped recording: {why}");
-        }
-        return match out? {
-            tui::Ended::Quit => Ok(Ended::Exit(ExitCode::SUCCESS)),
-            tui::Ended::Restart(next) => Ok(Ended::Restart(next)),
-        };
-    };
+    Ok(Start {
+        args,
+        settings,
+        config,
+        pinned,
+        store,
+        workspace,
+        root,
+        worktree,
+        keeps,
+        id,
+        claim,
+        name,
+        created,
+        carried,
+        resumed,
+        words,
+        ag,
+        resolved,
+        retry,
+        model_id,
+    })
+}
 
+// The workspace pi was pointed at, fenced by the tier the settings found from
+// it may set: the project file is read between the two steps.
+fn open_workspace(
+    args: &Args,
+) -> Result<(tool::Workspace, Settings, Arc<pi_store::config::Config>)> {
+    let within = || format!("cannot use {} as a workspace", args.cwd);
+    let workspace = tool::Workspace::new(&args.cwd).with_context(within)?;
+    let settings = Settings::load(args.config.as_deref(), workspace.root())?;
+    let config = Arc::new(settings.config()?);
+    let workspace = fence(workspace, &config, &args.pinned()).with_context(within)?;
+    Ok((workspace, settings, config))
+}
+
+// The session `-c` or `--resume` names, if either does. The claim is held
+// for the whole run: two pi saving one session would each erase what the
+// other said.
+fn take_prior(
+    args: &Args,
+    store: &session::Store,
+    root: &std::path::Path,
+) -> Result<(Option<session::Stored>, Option<session::Claim>)> {
+    let taken = match (&args.resume, args.continue_last) {
+        (Some(id), _) => Some(store.take(root, id)?),
+        (None, true) => Some(store.take_latest(root)?),
+        _ => None,
+    };
+    Ok(taken.unzip())
+}
+
+// Off the startup path: stats every bucket, almost never has anything to
+// take. A run that exits first loses nothing — the next one sweeps.
+fn sweep(store: &session::Store, keep: Option<std::time::Duration>, spare: Option<String>) {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || {
+        // Transcripts by reach and by age, journals by age — a run worth
+        // reading back is a fortnight old at most.
+        journal::prune(store.root());
+        store.prune();
+        if let Some(keep) = keep {
+            store.forget_older_than(keep, spare.as_deref());
+            pi_store::forget_images(keep);
+        }
+    });
+}
+
+// No model named anywhere: where to name one.
+fn no_model(args: &Args) -> anyhow::Error {
+    let path = args
+        .config
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .or_else(pi_store::config::global_path);
+    let file = path.map_or_else(
+        || "a config file".into(),
+        |p| core::instructions::home_relative(&p),
+    );
+    let example = concat!(
+        env!("CARGO_PKG_REPOSITORY"),
+        "/blob/master/examples/pi.toml"
+    );
+    anyhow::anyhow!("no model to run. Define one in {file} — see {example}")
+}
+
+async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended> {
+    let Start {
+        args,
+        settings,
+        config,
+        pinned,
+        store,
+        workspace,
+        worktree,
+        id,
+        claim,
+        name,
+        created,
+        carried,
+        words,
+        ag,
+        resolved,
+        ..
+    } = start;
+    // `commands` is the Core's copy for the front lane; `resolved` keeps its own.
+    let commands = resolved.commands.clone();
+    let ctx = tool::Ctx::new(workspace).with_session(&id, pi_store::spill_root());
+    let mut first = lane::Lane::opened(lane::Opening {
+        id,
+        created,
+        name,
+        worktree,
+        claim,
+        ..lane::Opening::new(Arc::new(ag), resolved, ctx)
+    });
+    first.return_session(carried);
+    let mut core = Core {
+        store,
+        config,
+        pinned,
+        commands,
+        prompts_seen: 0,
+        settings,
+        current: 0,
+        lanes: vec![first],
+        refused: Default::default(),
+        executions: None,
+        surface: words,
+    };
+    let drivers = pi_core::driver::Drivers::default();
+    core.enable_background(drivers.background());
+    core.reopen(&args.lanes());
+    core.revive_commands();
+    core::update::watch();
+    core::update::check(env!("CARGO_PKG_REPOSITORY"));
+    let out = tui::Tui::new(core, drivers, updated(updated_from.as_deref()))?
+        .run()
+        .await;
+    // Subagents handed their transcripts to a background save; wait for
+    // those to land before the runtime goes with them.
+    leave().await;
+    match out? {
+        tui::Ended::Quit => Ok(Ended::Exit(ExitCode::SUCCESS)),
+        tui::Ended::Restart(next) => Ok(Ended::Restart(next)),
+    }
+}
+
+async fn once(start: Start, prompt: String) -> Result<Ended> {
+    let Start {
+        args,
+        config,
+        store,
+        workspace,
+        root,
+        worktree,
+        keeps,
+        id,
+        name,
+        created,
+        carried,
+        resumed,
+        mut ag,
+        resolved,
+        retry,
+        model_id,
+        ..
+    } = start;
     // One request, so the servers get a moment to list their tools first.
     pi_core::core::mcp::settled(std::time::Duration::from_secs(10)).await;
 
@@ -358,18 +469,16 @@ async fn run(updated_from: Option<String>) -> Result<Ended> {
         None => prompt,
     };
 
-    // Built here, past the interactive return above: the one-shot path is the
-    // only one that prints what a run emits.
+    // Only the one-shot path prints what a run emits.
     let (tx, rx) = mpsc::unbounded_channel();
-    let quiet = args.quiet;
     let painter = paint(
         rx,
-        quiet,
-        std::sync::Arc::new(config.theme.clone()),
+        args.quiet,
+        Arc::new(config.theme.clone()),
         config.status.to_vec(),
         model_id.clone(),
         ag.spec().pricing,
-        worktree.clone(),
+        worktree,
     );
     let mut ctx = tool::Ctx::new(workspace).with_cancel(cancel_on_interrupt());
     // Without a session the spills land in the temp dir rather than `~/.pi`.
@@ -404,29 +513,13 @@ async fn run(updated_from: Option<String>) -> Result<Ended> {
             created,
             spent: ag.meter.read(),
         };
-        match store.save(&root, header, &session) {
-            Ok(_) if !args.quiet => {
-                let called = name.as_deref().map_or(String::new(), |n| format!(" “{n}”"));
-                let carried = if resumed > 0 {
-                    format!("{}resumed {resumed} messages", icons::PART_SEP)
-                } else {
-                    String::new()
-                };
-                eprintln!(
-                    "session {id}{called}{carried} — continue with `pi -c` or `pi --resume {id}`"
-                );
-            }
-            Err(e) => eprintln!("{}", core::not_saved(&e)),
-            _ => {}
-        }
+        let saved = store.save(&root, header, &session);
+        say_saved(saved, &id, name.as_deref(), resumed, args.quiet);
     }
 
     // A stopped run is the one whose subagents were cut short with a save
     // in flight.
-    settle().await;
-    if let Some(why) = journal::failure() {
-        eprintln!("journal stopped recording: {why}");
-    }
+    leave().await;
     // A run the user stopped is not a failure of the run; scripts should be
     // able to tell the two apart.
     if matches!(outcome, Err(agent::AgentError::Cancelled)) {
@@ -445,6 +538,34 @@ async fn run(updated_from: Option<String>) -> Result<Ended> {
     }
     outcome?;
     Ok(Ended::Exit(ExitCode::SUCCESS))
+}
+
+// How a one-shot's save went, and how to pick the session up again.
+fn say_saved<T>(saved: Result<T>, id: &str, name: Option<&str>, resumed: usize, quiet: bool) {
+    match saved {
+        Ok(_) if !quiet => {
+            let called = name.map_or(String::new(), |n| format!(" “{n}”"));
+            let carried = if resumed > 0 {
+                format!("{}resumed {resumed} messages", icons::PART_SEP)
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "session {id}{called}{carried} — continue with `pi -c` or `pi --resume {id}`"
+            );
+        }
+        Err(e) => eprintln!("{}", core::not_saved(&e)),
+        _ => {}
+    }
+}
+
+// Before the runtime goes: what is still settling, and whether the journal
+// kept up.
+async fn leave() {
+    settle().await;
+    if let Some(why) = journal::failure() {
+        eprintln!("journal stopped recording: {why}");
+    }
 }
 
 // What leaving waits on: subagent transcripts still being saved, and the
