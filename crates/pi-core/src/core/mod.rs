@@ -371,100 +371,112 @@ impl Core {
                     Err(why) => Step::Notice(why),
                 }
             }
-            Intent::Builtin(Builtin::Loop(goal)) => match goal.trim() {
-                "" => Step::Drive(Drive::Loop(None)),
-                goal if self.starts_turn(goal) => Step::Drive(Drive::Loop(Some(goal.to_string()))),
-                goal => Step::Notice(format!(
-                    "`{goal}` starts no turn — a loop needs one to measure"
-                )),
-            },
-            Intent::Builtin(Builtin::Quit) => Step::Quit,
-            Intent::Builtin(Builtin::Help) => {
+            Intent::Builtin(builtin) => self.builtin(builtin),
+            Intent::Other { word, args } => step_for(&self.commands, &word, &args),
+        }
+    }
+
+    // A built-in command, carried out. Exhaustive for the reason `dispatch` is.
+    fn builtin(&mut self, builtin: Builtin) -> Step {
+        match builtin {
+            Builtin::Loop(goal) => self.loop_step(goal.trim()),
+            Builtin::Quit => Step::Quit,
+            Builtin::Help => {
                 Step::Handled(help(&self.commands, &self.lane().agent().brief.registry))
             }
-            Intent::Builtin(Builtin::Status) => Step::Handled(self.status()),
+            Builtin::Status => Step::Handled(self.status()),
             // Bare, it is asked; with a level, a change the surface shows.
-            Intent::Builtin(Builtin::Effort(arg)) if arg.trim().is_empty() => {
+            Builtin::Effort(arg) if arg.trim().is_empty() => {
                 Step::Handled(Listing::say(self.effort("")))
             }
-            Intent::Builtin(Builtin::Effort(arg)) => Step::Notice(notice(self.effort(&arg))),
-            Intent::Builtin(Builtin::Mcp(arg)) => crate::core::mcp::command(&arg),
-            Intent::Builtin(Builtin::Content) => Step::Handled(self.content()),
-            Intent::Builtin(Builtin::New) => match self.new_session() {
+            Builtin::Effort(arg) => Step::Notice(notice(self.effort(&arg))),
+            Builtin::Mcp(arg) => crate::core::mcp::command(&arg),
+            Builtin::Content => Step::Handled(self.content()),
+            Builtin::New => match self.new_session() {
                 Ok(()) => Step::Swap(String::new()),
                 Err(why) => Step::Notice(why),
             },
-            Intent::Builtin(Builtin::Resume(name)) if name.is_empty() => {
+            Builtin::Resume(name) if name.is_empty() => {
                 Step::Notice("/resume takes the id of a session".into())
             }
-            Intent::Builtin(Builtin::Resume(name)) => match self.resume(&name) {
+            Builtin::Resume(name) => match self.resume(&name) {
                 Ok(said) => Step::Swap(notice(said)),
                 Err(why) => Step::Notice(why),
             },
-            Intent::Builtin(Builtin::Rewind(id)) => match id.trim().parse() {
-                Ok(id) => {
-                    let (rewound, saved) = self.rewind_to(agent::session::EntryId(id));
-                    Step::Rewound(rewound, saved.err().map(|e| not_saved(&e)))
-                }
-                Err(_) => Step::Notice("/rewind takes the id of something you said".into()),
-            },
-            Intent::Builtin(Builtin::Name(name)) => {
-                let said = if name.is_empty() {
-                    self.lane_mut().set_name(None);
-                    format!("{} is unnamed again", self.lane().id())
-                } else {
-                    let said = format!("{} is now “{name}”", self.lane().id());
-                    self.lane_mut().set_name(Some(name));
-                    said
-                };
-                // `/resume` reads its row off the file, so the name has to land
-                // now; a run in flight has the session away and saves it later.
-                match self.save() {
-                    Ok(()) => Step::Notice(said),
-                    Err(e) => Step::Notice(notice([said, not_saved(&e)])),
-                }
-            }
-            Intent::Builtin(Builtin::Compact(focus)) => {
-                Step::Compact(Some(focus).filter(|f| !f.is_empty()))
-            }
-            Intent::Builtin(Builtin::Model(name)) if name.is_empty() => {
-                Step::Handled(Listing::say(self.listing()))
-            }
-            Intent::Builtin(Builtin::Model(name)) => Step::Notice(notice(self.switch(&name))),
-            Intent::Builtin(Builtin::Mv(dir)) => match dir.trim() {
+            Builtin::Rewind(id) => self.rewind_step(id.trim()),
+            Builtin::Name(name) => self.name_step(name),
+            Builtin::Compact(focus) => Step::Compact(Some(focus).filter(|f| !f.is_empty())),
+            Builtin::Model(name) if name.is_empty() => Step::Handled(Listing::say(self.listing())),
+            Builtin::Model(name) => Step::Notice(notice(self.switch(&name))),
+            Builtin::Mv(dir) => match dir.trim() {
                 "" => Step::Handled(Listing::say([self.lane().root().display().to_string()])),
                 dir => self.move_to(dir).unwrap_or_else(Step::Notice),
             },
-            Intent::Builtin(Builtin::Worktree(name)) => {
-                if name.is_empty() {
-                    Step::Handled(Listing::say(self.worktree_listing()))
-                } else {
-                    // `rm` + a name removes the tree; a bare `rm` still names
-                    // a tree of its own, so only the two-word form is the verb.
-                    let step = match name.split_once(char::is_whitespace) {
-                        Some(("rm", name)) if !name.trim().is_empty() => {
-                            self.remove_worktree(name.trim())
-                        }
-                        _ => self.enter_worktree(&name),
-                    };
-                    step.unwrap_or_else(Step::Notice)
-                }
+            Builtin::Worktree(name) => self.worktree_step(&name),
+            Builtin::Settings(rest) => self.settings_step(rest.trim()),
+            Builtin::Edit(name) => self.edit(name.trim()),
+        }
+    }
+
+    fn loop_step(&self, goal: &str) -> Step {
+        match goal {
+            "" => Step::Drive(Drive::Loop(None)),
+            goal if self.starts_turn(goal) => Step::Drive(Drive::Loop(Some(goal.to_string()))),
+            goal => Step::Notice(format!(
+                "`{goal}` starts no turn — a loop needs one to measure"
+            )),
+        }
+    }
+
+    fn rewind_step(&mut self, id: &str) -> Step {
+        match id.parse() {
+            Ok(id) => {
+                let (rewound, saved) = self.rewind_to(agent::session::EntryId(id));
+                Step::Rewound(rewound, saved.err().map(|e| not_saved(&e)))
             }
-            Intent::Other { word, args } => step_for(&self.commands, &word, &args),
-            // Only the bare word opens the file; an argument is refused
-            // rather than half-remembered as a verb.
-            Intent::Builtin(Builtin::Settings(rest)) if rest.trim().is_empty() => {
-                match pi_store::config::project_target(self.lane().root()) {
-                    Some(file) => Step::Edit(file),
-                    None => {
-                        Step::Notice("no project here: a .pi.toml in $HOME is never read".into())
-                    }
-                }
-            }
-            Intent::Builtin(Builtin::Settings(_)) => {
-                Step::Notice("bare /settings opens the project's .pi.toml".into())
-            }
-            Intent::Builtin(Builtin::Edit(name)) => self.edit(name.trim()),
+            Err(_) => Step::Notice("/rewind takes the id of something you said".into()),
+        }
+    }
+
+    fn name_step(&mut self, name: String) -> Step {
+        let said = if name.is_empty() {
+            self.lane_mut().set_name(None);
+            format!("{} is unnamed again", self.lane().id())
+        } else {
+            let said = format!("{} is now “{name}”", self.lane().id());
+            self.lane_mut().set_name(Some(name));
+            said
+        };
+        // `/resume` reads its row off the file, so the name has to land
+        // now; a run in flight has the session away and saves it later.
+        match self.save() {
+            Ok(()) => Step::Notice(said),
+            Err(e) => Step::Notice(notice([said, not_saved(&e)])),
+        }
+    }
+
+    fn worktree_step(&mut self, name: &str) -> Step {
+        if name.is_empty() {
+            return Step::Handled(Listing::say(self.worktree_listing()));
+        }
+        // `rm` + a name removes the tree; a bare `rm` still names
+        // a tree of its own, so only the two-word form is the verb.
+        let step = match name.split_once(char::is_whitespace) {
+            Some(("rm", name)) if !name.trim().is_empty() => self.remove_worktree(name.trim()),
+            _ => self.enter_worktree(name),
+        };
+        step.unwrap_or_else(Step::Notice)
+    }
+
+    // Only the bare word opens the file; an argument is refused
+    // rather than half-remembered as a verb.
+    fn settings_step(&self, rest: &str) -> Step {
+        if !rest.is_empty() {
+            return Step::Notice("bare /settings opens the project's .pi.toml".into());
+        }
+        match pi_store::config::project_target(self.lane().root()) {
+            Some(file) => Step::Edit(file),
+            None => Step::Notice("no project here: a .pi.toml in $HOME is never read".into()),
         }
     }
 }
