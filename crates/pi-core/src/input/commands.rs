@@ -608,6 +608,7 @@ mod tests {
             description: "Sync configuration. More details.".into(),
             dir: "/nowhere".into(),
             builtin: None,
+            builtin_files: Vec::new(),
         }];
         let table = commands(&skills, &[], &mut Vec::new());
         let tools = tool::Registry::new()

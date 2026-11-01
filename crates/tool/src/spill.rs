@@ -26,8 +26,8 @@ impl SpillRef {
     /// rather than stored.
     pub fn note(&self) -> String {
         format!(
-            "full output: {} ({} bytes; read it back with `read {}`)",
-            self.locator, self.bytes, self.locator
+            "full output: {} ({} bytes). To read the complete output, pass this locator as the file path.",
+            self.locator, self.bytes
         )
     }
 }

@@ -541,6 +541,41 @@ async fn the_child_is_told_what_the_checkout_says() {
         !child.contains("You are a coding agent"),
         "but not on its caller's prompt: {child}"
     );
+    assert_eq!(child.matches(agent::EXECUTION).count(), 1);
+    assert!(child.ends_with(STANDING));
+}
+
+#[tokio::test]
+async fn custom_child_prompts_replace_the_default_execution_policy_even_when_empty() {
+    for prompt in ["Only return the answer.", ""] {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(dir.path()).unwrap();
+        let saw: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let mut parent = Agent::new(
+            Arc::new(Scripted {
+                turns: vec![
+                    call_turn("c1", "subagent", r#"{"description":"go","prompt":"go"}"#),
+                    text_turn("done"),
+                    text_turn("the subagent is done"),
+                ],
+                next: AtomicUsize::new(0),
+                saw: saw.clone(),
+            }),
+            spec(),
+        );
+        Arc::make_mut(&mut parent.brief).system = "Parent-only rules.".into();
+        let child = Subagent::prompted(
+            &parent,
+            parent.brief.clone(),
+            Arc::new(Kept::default()),
+            prompt,
+            STANDING,
+            Retry::default(),
+        );
+        Arc::make_mut(&mut parent.brief).registry = parent.brief.registry.clone().with(child);
+        let _ = drive(&parent, &Ctx::new(ws), "go").await;
+        assert_eq!(saw.lock().unwrap()[1], format!("{prompt}{STANDING}"));
+    }
 }
 
 // The child's account of its own work is the one part nothing else checks

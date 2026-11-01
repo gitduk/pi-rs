@@ -132,17 +132,19 @@ impl Tool for Write {
     }
 
     fn description(&self) -> &str {
-        "Create a file or replace its entire contents. This tool creates missing parent directories. \
+        "Create a file or replace its entire contents. \
+         The tool creates missing parent directories. \
          Use `edit` to change part of an existing file. \
-         If the existing file parses but the replacement does not, the tool refuses the write. The file stays unchanged."
+         If the existing file parses but the replacement does not, the tool refuses the write. \
+         The file stays unchanged."
     }
 
     fn schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Workspace-relative path." },
-                "content": { "type": "string", "description": "Full file contents." },
+                "path": { "type": "string", "description": "Specify the file path relative to the workspace." },
+                "content": { "type": "string", "description": "Supply the complete file content." },
             },
             "required": ["path", "content"],
             "additionalProperties": false,

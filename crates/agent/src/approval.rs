@@ -15,8 +15,8 @@ impl Approver for Ceiling {
             Decision::Allow
         } else {
             Decision::Deny(format!(
-                "`{name}` needs {tier:?} access; this run is capped at {:?}. \
-                 Use a tool within the cap or tell the user what you need.",
+                "`{name}` requires {tier:?} access. This run allows at most {:?} access. \
+                 Use a tool within this limit or tell the user what you need.",
                 self.0
             ))
         }

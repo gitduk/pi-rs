@@ -92,3 +92,47 @@ fn the_first_directory_to_claim_a_name_keeps_it() {
         found.problems
     );
 }
+
+#[tokio::test]
+async fn loaded_skill_instructions_name_the_source_and_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let skill_dir = dir.path().join("review");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: review\ndescription: Review code.\n---\nRead the changed code.\n",
+    )
+    .unwrap();
+    std::fs::write(skill_dir.join("checks.txt"), "Check changed interfaces.").unwrap();
+    let found = discover(&[dir.path().to_path_buf()]);
+    let (_w, c) = ctx();
+    let loader = Load::new(found.skills);
+    let out = loader
+        .execute(json!({ "name": "review" }), &c)
+        .await
+        .unwrap();
+    let text = out
+        .content
+        .iter()
+        .filter_map(|c| match c {
+            llm::message::ToolResultContent::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.starts_with(&format!(
+        "Skill: `review`\nSource: {}\n\n",
+        skill_dir.join("SKILL.md").display(),
+    )));
+    assert!(text.contains("Read the changed code."));
+    assert!(text.contains("checks.txt"));
+    assert!(!text.contains("description:"));
+    let reference = loader
+        .execute(json!({ "name": "review", "file": "checks.txt" }), &c)
+        .await
+        .unwrap();
+    assert!(matches!(
+        &reference.content[..],
+        [llm::message::ToolResultContent::Text(t)] if t.text == "Check changed interfaces."
+    ));
+}

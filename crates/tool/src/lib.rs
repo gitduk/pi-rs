@@ -146,7 +146,7 @@ pub enum ToolError {
     Json(#[from] serde_json::Error),
 
     #[error(
-        "timed out after {}; the command and everything it spawned were killed{}",
+        "timed out after {}. The tool killed the command and all its child processes{}",
         llm::figures::elapsed(std::time::Duration::from_millis(*.ms)),
         already(.printed)
     )]
@@ -166,7 +166,7 @@ pub enum ToolError {
 fn already(printed: &str) -> String {
     match printed.trim().is_empty() {
         true => String::new(),
-        false => format!(". It had printed:\n\n{printed}"),
+        false => format!(". The command printed before the timeout:\n\n{printed}"),
     }
 }
 

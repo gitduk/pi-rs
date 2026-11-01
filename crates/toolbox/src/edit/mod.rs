@@ -43,18 +43,26 @@ const ARGS_HINT: &str = "`edit` requires `path` and `edits`. \
 
 const SHAPE: &str = r#"Replace text in one file by specifying its existing text.
 
-Use `path` to name the file. Use `edits` for the list of changes.
-Each change matches against the file before this call, independently of other changes in the list.
-The tool writes only if every change succeeds. A refusal leaves the file unchanged.
+Use this tool when existing text identifies the change.
+Examples include a particular line, function, or matching text.
 
-Specify exactly one anchor per change:
+Use `path` to name the file.
+Use `edits` for the list of changes.
+Each change matches against the file before this call.
+Changes match independently of other changes in the list.
+The tool writes only if every change succeeds.
+A refusal leaves the file unchanged.
 
-- `old_string`: literal text to replace, not a regex.
-- `insert_after`: literal text after which to insert new content.
-- `insert_before`: literal text before which to insert new content.
+An anchor is existing text that identifies where to change the file.
+Specify exactly one anchor per change.
+
+- Use `old_string` for literal text to replace, not a regex.
+- Use `insert_after` to insert new content immediately after the literal anchor text.
+- Use `insert_before` to insert new content immediately before the literal anchor text.
 
 Use `new_string` for the replacement or inserted content.
-For an insertion, include only the new content. Do not repeat the anchor.
+For an insertion, include only the new content.
+Do not repeat the anchor.
 An empty `new_string` deletes the text matched by `old_string`.
 To delete complete lines, include their newlines in `old_string`.
 Otherwise, the line breaks remain as blank lines.
@@ -67,9 +75,11 @@ Otherwise, the insertion stays within the line.
 
 Set `whole_block: true` to select a complete block by its first line.
 Supported blocks include functions, classes, and Markdown sections.
-You do not need to quote the block's body. The result reports the selected line range.
+You do not need to quote the block's body.
+The result reports the selected line range.
 
-Use bash (`sed`, `perl`) when a pattern alone defines the change.
+Use an available shell tool when a pattern or position alone selects the change.
+Examples include regex substitutions, line ranges, and character translations.
 Use `write` when the file does not exist.
 "#;
 
@@ -127,8 +137,8 @@ fn to_edits(path: &str, args: &[EditArg]) -> Result<Vec<edits::Edit>, ToolError>
                         .flatten()
                         .count();
                     return Err(ToolError::Invalid(format!(
-                        "in {path}, edits[{index}]: {} — give exactly one of \
-                             `old_string`, `insert_after`, `insert_before`",
+                        "in {path}, edits[{index}]: {}. Specify exactly one of \
+                             `old_string`, `insert_after`, `insert_before`.",
                         match given {
                             0 => "no anchor".to_string(),
                             2 => "two anchors".to_string(),
@@ -141,8 +151,8 @@ fn to_edits(path: &str, args: &[EditArg]) -> Result<Vec<edits::Edit>, ToolError>
             // send the model hunting for a line in a file nothing parses.
             if arg.whole_block && crate::syntax::Lang::of(path).is_none() {
                 return Err(ToolError::Invalid(format!(
-                    "in {path}, edits[{index}]: `whole_block` needs a parser and {path} has \
-                     none — quote the block in `old_string` instead, or use `insert_after`"
+                    "in {path}, edits[{index}]: `whole_block` requires a parser. \
+                     No parser supports {path}. Quote the block in `old_string` or use `insert_after`."
                 )));
             }
             Ok(edits::Edit {
@@ -201,12 +211,12 @@ impl Tool for Edit {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Workspace-relative path of the file to edit.",
+                    "description": "Specify the file path relative to the workspace.",
                 },
                 "edits": {
                     "type": "array",
                     "minItems": 1,
-                    "description": "Specify one or more replacements. Each matches against the file before this call, independently of other replacements.",
+                    "description": "Specify one or more changes. Each matches independently against the file before this call.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -216,11 +226,11 @@ impl Tool for Edit {
                             },
                             "insert_after": {
                                 "type": "string",
-                                "description": "Specify literal text after which to insert `new_string`.",
+                                "description": "Insert `new_string` immediately after this literal text.",
                             },
                             "insert_before": {
                                 "type": "string",
-                                "description": "Specify literal text before which to insert `new_string`.",
+                                "description": "Insert `new_string` immediately before this literal text.",
                             },
                             "new_string": {
                                 "type": "string",

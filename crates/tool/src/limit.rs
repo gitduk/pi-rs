@@ -10,7 +10,10 @@ pub const MAX_CALL: Duration = Duration::from_secs(600);
 
 /// The one refusal every over-limit file shares, whatever tool meets it.
 pub fn over_limit(name: &str, len: u64) -> String {
-    format!("{name} is {len} bytes, over the {MAX_BYTES}-byte read limit; use bash to slice it")
+    format!(
+        "{name} is {len} bytes, over the {MAX_BYTES}-byte read limit. \
+         Use a shell command to read a smaller section."
+    )
 }
 
 /// How long a call that asked for `ms` may run: `default` when it named none,

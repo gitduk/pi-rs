@@ -201,7 +201,7 @@ pub fn arm(
         agent,
         brief.clone(),
         archive,
-        resolved.prompt_files.prompt("subagent"),
+        &resolved.prompt_files.prompt("subagent"),
         &resolved.standing,
         retry,
     )
@@ -276,6 +276,7 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
             approver: Arc::new(agent::Ceiling(tool::Tier::Exec)),
             hooks: Arc::new(agent::NoHooks),
         }),
+        prompt_blocks: Vec::new(),
         hooks: Default::default(),
         subagent_deadline: None,
         standing: standing.into(),

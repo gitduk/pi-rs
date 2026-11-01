@@ -190,19 +190,23 @@ impl Tool for Read {
 
     fn description(&self) -> &str {
         "Read a file as numbered lines, list a directory, or view a PNG, JPEG, GIF, or WebP image. \
-         Output starts with `[path]`. Edits use the content as anchors. Read the file again after it changes.\n\n\
-         A long file returns an outline of its declarations. \
+         Output starts with `[path]`. \
+         An edit anchor is existing text that identifies where to change the file. \
+         Use file content as edit anchors. \
+         Read the file again after it changes.\n\n\
+         For a long file, the tool returns an outline that lists its declarations. \
          Use `offset` and `limit` to read a line range. \
-         To edit a complete block, give its outline entry to `edit` as `old_string` with `whole_block: true`."
+         To edit a complete block, give its outline entry to `edit` as `old_string` with `whole_block: true`.\n\n\
+         To read saved tool output, set `path` to its reported `spill:` locator."
     }
 
     fn schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Workspace-relative path, or an absolute path anywhere readable." },
-                "offset": { "type": "integer", "description": "1-based first line. Default 1." },
-                "limit": { "type": "integer", "description": "Max lines. Default 2000." },
+                "path": { "type": "string", "description": "Specify a path relative to the workspace or an absolute path to a readable file or directory. For saved tool output, supply its `spill:` locator." },
+                "offset": { "type": "integer", "description": "Start at this line number, counting from 1. The default is 1." },
+                "limit": { "type": "integer", "description": "Return at most this many lines. The default is 2000." },
                 "outline": {
                     "type": "boolean",
                     "description": "Return the file's declarations instead of its lines. \
@@ -277,7 +281,8 @@ impl Tool for Read {
         // coming: opening it to read blocks, and /dev/zero reads forever.
         if !meta.is_file() {
             return Err(ToolError::Invalid(format!(
-                "{rel} is not a regular file. Read reads regular files only — FIFOs, devices and sockets are not read"
+                "{rel} is not a regular file. The `read` tool reads regular files only. \
+                 It does not read FIFOs, devices, or sockets."
             )));
         }
 
@@ -392,7 +397,7 @@ impl Tool for Read {
         let left = all.len() - end;
         let note = if left > 0 {
             let unit = if left == 1 { "line" } else { "lines" };
-            format!("… {left} more {unit}. Re-read from {}\n", end + 1)
+            format!("… {left} more {unit}. Read again from line {}.\n", end + 1)
         } else {
             String::new()
         };

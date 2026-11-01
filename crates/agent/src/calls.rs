@@ -49,14 +49,14 @@ impl Agent {
                         "tool arguments were not valid JSON"
                     );
                     return Action::Reject(format!(
-                        "arguments were not valid JSON ({}); you sent: {snippet}; \
-                         send the whole object again",
+                        "arguments were not valid JSON ({}). You sent: {snippet}. \
+                         Send the complete JSON object again.",
                         invalid.error,
                     ));
                 }
                 let Some(tool) = self.brief.registry.get(&c.name) else {
                     return Action::Reject(format!(
-                        "no tool named `{}`; available: {}",
+                        "no tool named `{}`. Available tools: {}",
                         c.name,
                         self.brief.registry.names().join(", ")
                     ));

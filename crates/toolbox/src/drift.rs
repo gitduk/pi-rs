@@ -118,7 +118,7 @@ pub(crate) fn report(moved: &[Moved]) -> Option<Report> {
     let files = llm::figures::count(moved.len(), "file");
     Some(Report {
         content: format!(
-            "{files} you had seen changed while this ran:\n{}",
+            "{files} from your earlier reads changed while this command ran:\n{}",
             all(CHANGED_RUN)
         ),
         preview: all(usize::MAX),

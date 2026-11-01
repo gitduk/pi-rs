@@ -12,8 +12,13 @@ use agent::session::Session;
 use agent::{Agent, AgentError, Archive, Briefing, Event, Retry};
 use tracing::Instrument as _;
 
-/// The built-in prompt a subagent runs under, ahead of the checkout's own.
+/// The role-specific part of the built-in subagent prompt.
 pub const PROMPT: &str = include_str!("../prompts/subagent.md");
+
+/// The default role and shared execution policy, ahead of the checkout's instructions.
+pub fn default_prompt() -> String {
+    format!("{PROMPT}\n\n{}", agent::EXECUTION)
+}
 
 // Ids only have to be distinct inside one process; the parent's own namespace
 // makes them distinct across runs.
@@ -96,7 +101,7 @@ impl Subagent {
         standing: &str,
         retry: Retry,
     ) -> Self {
-        Self::prompted(parent, brief, archive, PROMPT, standing, retry)
+        Self::prompted(parent, brief, archive, &default_prompt(), standing, retry)
     }
 
     /// The same, under `prompt` in place of the built-in one.
@@ -231,21 +236,27 @@ impl Tool for Subagent {
     }
 
     fn description(&self) -> &str {
-        "Assign a self-contained task to a subagent and receive its conclusion. \
+        "Assign a self-contained task to a subagent. \
+         The tool returns the subagent's conclusion. \
          The subagent uses the same checkout and tools, with a separate context. \
          You receive only its final message, not the files it reads or commands it runs.\n\n\
          Use it for searches across many files, test suites, or summaries of large unfamiliar areas. \
          Several calls can run in parallel. \
-         Do not delegate work you can finish in one or two calls. The extra call costs more than it saves.\n\n\
+         Do not delegate work you can finish in one or two calls. \
+         The extra call costs more than it saves.\n\n\
          Do not assign work that requires answers from you while it runs. \
-         The subagent cannot ask you questions and will guess missing details. \
+         The subagent cannot ask you questions. \
+         It will guess missing details. \
          Specify the required result and its format. \
-         The subagent cannot call this tool or delegate further. Assign work it can finish itself.\n\n\
+         The subagent cannot call this tool or delegate further. \
+         Assign work it can finish itself.\n\n\
          The result ends with paths changed through `write` or `edit`. \
-         This list excludes changes made through shell commands. \
+         This list excludes changes made through shell commands.\n\n\
          Supply `verify` whenever the task has a check, such as tests, a build, or a linter. \
-         Its exit status accompanies the result and can check changes made through commands. \
-         The subagent's own report has no independent check. You cannot ask it follow-up questions."
+         The verification command's exit status accompanies the result. \
+         This command can check changes made through shell commands. \
+         The subagent's own report has no independent check. \
+         You cannot ask the subagent further questions."
     }
 
     fn schema(&self) -> Value {
@@ -254,15 +265,15 @@ impl Tool for Subagent {
             "properties": {
                 "description": {
                     "type": "string",
-                    "description": "Name the task in three to six words, such as \"find every caller of spans\" or \"run the test suite\". The user sees this label while the task runs. The subagent does not receive it.",
+                    "description": "Name the task in three to six words. Examples: \"find every caller of spans\" or \"run the test suite\". The user sees this label while the task runs. The subagent does not receive it.",
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Describe the complete task: what to do, where to look, and what to report. The subagent does not receive this conversation.",
+                    "description": "Describe the complete task. Specify what to do, where to search, and what to report. The subagent does not receive this conversation.",
                 },
                 "verify": {
                     "type": "string",
-                    "description": "A shell command to check the task, such as tests, a build, or a linter. It runs in the workspace root after the subagent stops. Its exit status accompanies the result. Omit it when the task has no check.",
+                    "description": "Supply a shell command to check the task, such as tests, a build, or a linter. The command runs in the workspace root after the subagent stops. Its exit status accompanies the result. Omit `verify` when the task has no check.",
                 },
             },
             "required": ["description", "prompt"],

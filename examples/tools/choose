@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ---
-# description = "Ask the user a question with options when the decision belongs to them.\nExamples include choosing an approach, deciding whether to proceed, or selecting the next action.\nAsk only when the request, code, and reasonable defaults do not answer the question.\nThe answer must change your next action.\nOtherwise, choose the ordinary option, state it briefly, and continue.\nSupply at least two meaningful alternatives. If only one action remains, state it briefly and continue without calling this tool.\nIf two applicable user rules conflict without stated precedence, ask the user to decide.\n\nWrite each option as the exact message the user would send to select it.\nUse words addressed to you or an available pi command.\nA selected command executes as if the user typed it.\nPut your recommended option first.\nThe user can select several text options, delivered together as one message with one option per line.\nA command must be selected alone.\n\nThe call returns immediately. End your turn after a successful call.\nThe selection, or text the user writes instead, arrives as their next message."
+# description = "Ask the user a question with options when the decision belongs to them.\nExamples include choosing an approach, deciding whether to proceed, or selecting the next action.\nAsk only when the request, code, and reasonable defaults do not answer the question.\nThe answer must change your next action.\n\nIf the request, code, or reasonable defaults answer the question, choose the ordinary option.\nIn that case, state your choice briefly.\nIn that case, continue without this tool.\n\nSupply at least two meaningful alternatives.\nIf only one action remains, state it briefly.\nContinue without this tool in that case.\nIf two applicable user rules conflict without stated precedence, ask the user to decide.\n\nWrite each option as the exact message the user would send to select it.\nUse words addressed to you or an available pi command.\nA selected command executes as if the user typed it.\nPut your recommended option first.\n\nThe user can select several text options.\npi delivers those options as one message, one option per line.\nThe user must select a command alone.\n\nThe call returns immediately.\nEnd your turn after a successful call.\nThe selection, or text the user writes instead, arrives as their next message."
 # [required]
 # question = "Write one short sentence."
 # options = "Supply 2 to 9 meaningful alternatives, one per line. Each option must be the exact one-line message that selects it."
@@ -29,7 +29,7 @@ def main():
     if not isinstance(options, list):
         fail("`options` is one option per line")
     if len(options) < 2:
-        fail("supply at least two meaningful alternatives; if only one action remains, state it and continue without choose")
+        fail("Supply at least two meaningful alternatives. If only one action remains, state it briefly. Continue without `choose` in that case.")
     fd = os.environ.get("PI_EVENTS_FD")
     if fd is None:
         fail("not run by pi: there is no one here to ask")

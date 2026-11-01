@@ -243,8 +243,9 @@ impl Broken {
         Some(Self {
             name,
             description: format!(
-                "Not usable yet. {skip}. Fix the file to make its declared tool available on the next turn. \
-                 Until then, a call only reports this problem."
+                "This tool is not usable yet. {skip}. \
+                 Fix the file to make its declared tool available on the next turn. \
+                 Until then, each call reports only this problem."
             ),
         })
     }

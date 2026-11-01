@@ -34,9 +34,12 @@ pub struct Load {
 impl Load {
     pub fn new(skills: Vec<Skill>) -> Self {
         let mut description = String::from(
-            "Load a skill's instructions. Follow the instructions after loading them. \
-             Use a skill whenever its description matches the work you are about to do. \
-             The description only summarizes the skill. It does not replace the instructions.\n\nAvailable:\n",
+            "Load a skill's instructions. \
+             Follow those instructions after you load them. \
+             Apply them only to the work that selected the skill. \
+             Use a skill whenever its description matches the work you will do next. \
+             The description only summarizes the skill. It does not replace the instructions. \
+             If earlier instructions are missing or incomplete, load the skill again before continuing related work.\n\nAvailable:\n",
         );
         for s in &skills {
             description.push_str(&format!("- {}: {}\n", s.name, s.description));
@@ -106,18 +109,35 @@ fn sibling_files(dir: &std::path::Path) -> Vec<String> {
 /// given the same instructions either way, and the skill tool is how a skill's
 /// own files are reached.
 pub fn instructions(skill: &Skill, text: &str) -> String {
-    let mut out = body(text).to_string();
-    if skill.builtin.is_some() {
-        return out;
-    }
+    let source = match skill.builtin {
+        Some(_) => "built-in".to_string(),
+        None => skill.dir.join("SKILL.md").display().to_string(),
+    };
+    let mut out = format!(
+        "Skill: `{}`\nSource: {source}\n\n{}",
+        skill.name,
+        body(text)
+    );
     // Skills usually live outside the workspace; instructions that point at a
     // sibling are useless unless the way to fetch it arrives with them.
-    let siblings = sibling_files(&skill.dir);
+    let siblings = if skill.builtin.is_some() {
+        skill
+            .builtin_files
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect()
+    } else {
+        sibling_files(&skill.dir)
+    };
     if !siblings.is_empty() {
         out.push_str(&format!(
-            "\n---\nFiles in this skill: {}\nRead a file with \
+            "\n---\nFiles in this skill:\n{}\n\nRead a file with \
              `skill(name: \"{}\", file: \"<path>\")`.\n",
-            siblings.join(", "),
+            siblings
+                .iter()
+                .map(|name| format!("- `{name}`"))
+                .collect::<Vec<_>>()
+                .join("\n"),
             skill.name
         ));
     }
@@ -138,10 +158,10 @@ impl Tool for Load {
         json!({
             "type": "object",
             "properties": {
-                "name": { "type": "string", "description": "One of the names listed above." },
+                "name": { "type": "string", "description": "Specify a skill name from the list above." },
                 "file": {
                     "type": "string",
-                    "description": "Read a file referenced by the skill's instructions. Specify its path within the skill's directory.",
+                    "description": "Read a file referenced by the skill's instructions. Specify its path within the skill.",
                 },
             },
             "required": ["name"],
@@ -159,10 +179,25 @@ impl Tool for Load {
 
         if let Some(text) = skill.builtin {
             return match args.file {
-                Some(rel) => Err(ToolError::Invalid(format!(
-                    "{}/{rel}: a built-in skill has no files",
-                    args.name
-                ))),
+                Some(rel) => match skill.builtin_files.iter().find(|(name, _)| name == &rel) {
+                    Some((_, text)) => {
+                        Ok(ToolOutput::text(*text).with_preview(format!("{}/{rel}", args.name)))
+                    }
+                    None if skill.builtin_files.is_empty() => Err(ToolError::Invalid(format!(
+                        "{}/{rel}: a built-in skill has no files",
+                        args.name
+                    ))),
+                    None => Err(ToolError::Invalid(format!(
+                        "{}/{rel}: no such built-in file. Available: {}",
+                        args.name,
+                        skill
+                            .builtin_files
+                            .iter()
+                            .map(|(name, _)| name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))),
+                },
                 None => Ok(
                     ToolOutput::text(instructions(skill, text)).with_preview(skill.name.clone())
                 ),

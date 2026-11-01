@@ -181,13 +181,15 @@ impl Tool for Fetch {
     }
 
     fn description(&self) -> &str {
-        "Fetch an HTTP or HTTPS URL and return text. \
-         For HTML, return readable text without markup, scripts, or styles. \
-         Return JSON, plain text, and other text formats verbatim.\n\n\
+        "Read an HTTP or HTTPS URL. \
+         The tool returns text. \
+         For HTML, it returns readable text without markup, scripts, or styles. \
+         It returns JSON, plain text, and other text formats verbatim.\n\n\
          Use this tool to read documentation, issues, changelogs, or API responses instead of relying on memory. \
          It reads the specified URL and follows redirects. \
-         It does not search for pages. Supply a URL that can answer your question.\n\n\
-         Only public addresses are allowed. \
+         It does not search for pages. \
+         Supply a URL that can answer your question.\n\n\
+         The tool reads only public addresses. \
          The tool refuses loopback, LAN, and link-local targets, including redirect targets. \
          It refuses binary responses and reports their content type."
     }
@@ -196,8 +198,8 @@ impl Tool for Fetch {
         json!({
             "type": "object",
             "properties": {
-                "url": { "type": "string", "description": "Absolute http or https URL." },
-                "timeout_ms": { "type": "integer", "description": "Default 30000, max 120000." },
+                "url": { "type": "string", "description": "Specify an absolute HTTP or HTTPS URL." },
+                "timeout_ms": { "type": "integer", "description": "Set the timeout in milliseconds. The default is 30000. The maximum is 120000." },
             },
             "required": ["url"],
             "additionalProperties": false,

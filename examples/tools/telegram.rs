@@ -1,9 +1,9 @@
 ---
 [package]
 # Bump this script's version whenever it changes.
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
-description = "Connect this session to Telegram when the user requests it.\nMessages sent to the user's bot are submitted to this session, including commands. Each answer returns to the chat.\nSet TELEGRAM_BOT_TOKEN in the tools' .env file to a bot token from @BotFather.\n\nThe tool runs in the background until you stop the background command.\nOn first use, the background command provides a link and QR code for the user to pair their account.\nThe pairing persists for later use."
+description = "Connect this session to Telegram when the user requests it.\nThe tool submits messages from the user's bot to this session, including commands.\nEach answer returns to the chat.\nSet TELEGRAM_BOT_TOKEN in the tool directory's .env file to a bot token from @BotFather.\n\nThe tool runs in the background until you stop its background command.\nOn first use, the background command provides a link and QR code for account pairing.\nThe pairing persists for later use."
 
 [package.metadata.pi]
 background = true

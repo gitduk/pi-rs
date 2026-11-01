@@ -25,18 +25,17 @@ fn workspace_root() -> String {
     ".".to_string()
 }
 
-const ARGS_HINT: &str =
-    "bash takes `command`, optional `cwd` for the working directory, and optional `stdin` text";
+const ARGS_HINT: &str = "`bash` requires `command`. Use optional `cwd` for the working directory. Use optional `stdin` for input text.";
 
 const DESCRIPTION: &str = "Each call runs a shell command in a new shell. \
     Use `cwd` to set the working directory instead of a leading `cd`. \
     If you omit `cwd`, the command runs in the workspace root. \
     Directory changes and environment changes do not persist between calls.\n\n\
-    Prefer `read` and `write` to `cat` and heredocs. \
+    Prefer `read` to `cat`. Prefer `write` to heredocs. \
     Prefer `edit` to `sed` when line content determines which lines to change. \
     These tools report failures you can use to correct errors. \
-    Use bash for substitutions by pattern or position (`sed`, `perl`, `awk`). \
-    Use bash for moves (`mv`) and deletions (`rm`).";
+    Use `bash` for substitutions by pattern or position (`sed`, `perl`, `awk`). \
+    Use `bash` to move files (`mv`) or delete files (`rm`).";
 
 /// Run a written command to completion under the workspace's checks and rewrite.
 pub async fn foreground(command: &str, cwd: &str, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
@@ -138,11 +137,15 @@ impl Bash {
             executions: Some(executions),
             controls: None,
             description: format!(
-                "{DESCRIPTION}\n\nWait for the command to exit or stop the run to cancel it. \
-                 A command still running after {} is cut off, so start one expected to take \
-                 longer with background=true instead. \
-                 Use background=true to start a command independently and return its id immediately; \
-                 its result opens a later turn, so carry on or end this one rather than wait. \
+                "{DESCRIPTION}\n\nThe call waits for the command to exit. \
+                 Stop the run to cancel the command. \
+                 The tool stops a foreground command after {}. \
+                 Use `background=true` for a command you expect to take longer.\n\n\
+                 With `background=true`, the command runs independently of this turn. \
+                 The call returns its command ID immediately. \
+                 Its result opens a later turn. \
+                 Continue independent work or end this turn. \
+                 Do not wait for the background result. \
                  Leave output unredirected so it can be read while the command runs.",
                 llm::figures::elapsed(tool::limit::MAX_CALL)
             ),
@@ -155,8 +158,9 @@ impl Bash {
             executions: None,
             controls: None,
             description: format!(
-                "{DESCRIPTION}\n\nWait for the command to exit or stop the run to cancel it. \
-                 A command still running after {} is cut off.",
+                "{DESCRIPTION}\n\nThe call waits for the command to exit. \
+                 Stop the run to cancel the command. \
+                 The tool stops the command after {}.",
                 llm::figures::elapsed(tool::limit::MAX_CALL)
             ),
         }
@@ -165,7 +169,7 @@ impl Bash {
     /// Add the host's controls for the executions kept by this shell. The host
     /// owns their parameters and behavior; the shell exposes them in one tool.
     pub fn with_controls(mut self, controls: Arc<dyn Controls>) -> Self {
-        self.description.push(' ');
+        self.description.push_str("\n\n");
         self.description.push_str(controls.description());
         self.controls = Some(controls);
         self
@@ -207,7 +211,7 @@ async fn schedule(
         execution.end();
     }
     Ok(ToolOutput::text(format!(
-        "started as background command #{id}. Its exit status and output arrive automatically later."
+        "Started background command #{id}. Its exit status and output will arrive automatically."
     ))
     .with_preview(format!("{preview} [background #{id}]")))
 }
@@ -227,7 +231,7 @@ impl Tool for Bash {
             "type": "object",
             "properties": {
                 "command": { "type": "string" },
-                "stdin": {"type":"string", "description":"Send this text to the command on standard input, then close it."},
+                "stdin": {"type":"string", "description":"Send this text to the command on standard input. The tool then closes standard input."},
                 "cwd": { "type": "string", "description": "Set the working directory for this call. Use a path relative to the workspace root or an absolute path. If you omit `cwd`, the command runs in the workspace root." },
             },
             "required": ["command"],
@@ -245,9 +249,10 @@ impl Tool for Bash {
         }
         schema["properties"]["background"] = json!({
             "type": "boolean",
-            "description": "Run the command independently of this turn, such as a build, deployment, development server, or watcher. \
-                The call returns immediately with an command id. \
-                When the command exits, its exit status and output arrive automatically with other queued command results. \
+            "description": "Run the command independently of this turn. \
+                Use this mode for builds, deployments, development servers, or watchers. \
+                The call returns a command ID immediately. \
+                When the command exits, its exit status and output arrive automatically with other queued results. \
                 The command stops when this process exits.\n\n\
                 Output remains readable while the command runs. Leave output unredirected. \
                 Use `background=true` instead of `nohup` or `&` for commands that must continue after this turn.",

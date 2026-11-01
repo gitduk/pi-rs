@@ -19,9 +19,10 @@ pub(super) fn broke_syntax(
     let text = crate::parses::row_text(after, row);
     let mut why = format!(
         "{path} would not parse after this edit. It parsed before the edit. \
-         The proposed line {row} is `{text}`. \
-         Check the anchor for missing or extra lines. Read the file again and check where the block ends. \
-         Nothing was written."
+         The proposed line {row} is `{text}`.\n\n\
+         Check the anchor for missing or extra lines. \
+         Read the file again. Check where the block ends. \
+         The file stays unchanged."
     );
     why.push('\n');
     why.push_str(&hunk_help(before, after, landed));
@@ -56,7 +57,7 @@ fn hunk_help(before: &str, after: &str, landed: &[Landed]) -> String {
     const SHOWN: usize = 6;
     let new: Vec<&str> = after.lines().collect();
     let old: Vec<&str> = before.lines().collect();
-    let mut out = String::from("The hunks, against the file as it stands:");
+    let mut out = String::from("Proposed changes against the current file:");
     let mut off = String::new();
     let shown = llm::figures::shown(landed.len(), SHOWN);
     for l in landed.iter().take(shown) {
@@ -83,8 +84,9 @@ fn hunk_help(before: &str, after: &str, landed: &[Landed]) -> String {
         let took: isize = l.took.iter().map(|s| brace_net(s)).sum();
         let gave: isize = hunk_rows(&new, l).iter().map(|s| brace_net(s)).sum();
         if took != gave {
-            let mut line =
-                format!("\n  {addr}: its body nets {gave}, the lines it displaces net {took}");
+            let mut line = format!(
+                "\n  {addr}: proposed net brace count {gave}, replaced net brace count {took}"
+            );
             // Where the construct the anchor opened at actually ends, read off
             // the file the model will address: the extent it got wrong, named.
             if let Some(e) = balanced_end(&old, at) {

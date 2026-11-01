@@ -267,7 +267,7 @@ fn bound_text(text: String, ctx: &Ctx) -> String {
         Ok(Some(spilled)) => {
             let head = head_bytes(&text, VIEW);
             let left = text.len() - head.len();
-            format!("{head}\n… {left} more bytes; {}\n", spilled.note())
+            format!("{head}\n… {left} more bytes. {}\n", spilled.note())
         }
         // Spilling failed and the gate still must not flood: say plainly
         // that the tail is gone instead of a clean-looking prefix.

@@ -13,7 +13,7 @@ use tool::{Ctx, Tier, Tool, ToolError, ToolOutput, output, spill};
 
 const DEFAULT_LIMIT: usize = 200;
 const PER_FILE_LIMIT: usize = 50;
-const BUDGET_NOTE: &str = "the sweep stopped at its size budget. Narrow the pattern";
+const BUDGET_NOTE: &str = "the search reached its size limit. Narrow the pattern";
 
 /// One search target or several: a directory is walked, a file is searched alone.
 #[derive(Deserialize)]
@@ -72,7 +72,8 @@ impl Tool for Grep {
     }
 
     fn description(&self) -> &str {
-        "Search file contents by regular expression. This tool respects .gitignore and skips binary files. \
+        "Search file contents by regular expression. \
+         The tool respects `.gitignore` and skips binary files. \
          Use `path` for one or more files or directories. \
          Results contain `[path]` sections with numbered lines, in the same format as `read`. \
          You can edit a matching line without reading the file first. \
@@ -83,21 +84,21 @@ impl Tool for Grep {
         json!({
             "type": "object",
             "properties": {
-                "pattern": { "type": "string", "description": "Rust regex syntax." },
+                "pattern": { "type": "string", "description": "Specify a regular expression in Rust regex syntax." },
                 "path": {
                     "type": ["string", "array"],
                     "items": { "type": "string" },
-                    "description": "Search up to 64 files or directories. An absolute path may access files outside the workspace. If omitted, search the workspace root.",
+                    "description": "Specify up to 64 file or directory paths. An absolute path may access files outside the workspace. Omit `path` to search the workspace root.",
                 },
                 "glob": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Only search files matching these, e.g. [\"*.rs\"].",
+                    "description": "Search only files that match these patterns, such as [\"*.rs\"].",
                 },
                 "exclude": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Skip files matching these, e.g. [\"*_test.go\"]. A bare name also excludes the directory of that name.",
+                    "description": "Skip files that match these patterns, such as [\"*_test.go\"]. A name without path separators also excludes that directory.",
                 },
                 "insensitive": { "type": "boolean" },
                 "files_only": { "type": "boolean", "description": "List paths instead of matching lines." },

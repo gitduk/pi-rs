@@ -32,6 +32,9 @@ pub use hooks::{GatesOnly, Hooks, NoHooks};
 pub use retry::Retry;
 pub use seams::{Approver, Archive, Compactor, Decision, Fitted, Untouched, Working};
 
+/// The execution policy shared by default agent roles. Custom prompts opt in explicitly.
+pub const EXECUTION: &str = include_str!("../prompts/execution.md");
+
 // Headroom for what the last count could not see: the turn's new entries are
 // converted at the last request's ratio, not their own.
 const SAFETY_MARGIN: usize = 2_000;

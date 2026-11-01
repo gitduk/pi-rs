@@ -264,8 +264,9 @@ impl tool::Source for Servers {
                 State::Down(why) => out.push(Arc::new(Down {
                     name: tool_name(&server.name, "unavailable"),
                     description: format!(
-                        "MCP server `{}` is not running: {why}. Its tools come back once \
-                         it starts. Calling this only says so.",
+                        "MCP server `{}` is not running: {why}. \
+                         Its tools become available when the server starts. \
+                         A call to this entry reports only this problem.",
                         server.name
                     ),
                 })),

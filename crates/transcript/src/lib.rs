@@ -470,11 +470,11 @@ impl StopCause {
 
 /// What an unanswered call is closed with when stopped by the user.
 pub const STOPPED_CALL: &str =
-    "The user stopped this call before it returned; it may have partly taken effect.";
+    "The user stopped this call before it returned. It may have partly taken effect.";
 
 /// What an unanswered call is closed with when the run died under it.
 pub const DIED_CALL: &str =
-    "The run died before this call returned; whether it took effect is unknown.";
+    "The run ended before this call returned. Whether the call took effect is unknown.";
 
 /// Whether a tool result was synthesized to close an interrupted call.
 pub fn is_stopped_call(r: &ToolResult) -> bool {
@@ -482,15 +482,18 @@ pub fn is_stopped_call(r: &ToolResult) -> bool {
         // The bare stem also matches older wording, still recorded in
         // transcripts written before it changed.
         ToolResultContent::Text(t) => {
-            t.text.starts_with("The user stopped this call") || t.text == DIED_CALL
+            t.text.starts_with("The user stopped this call")
+                || t.text == DIED_CALL
+                || t.text
+                    == "The run died before this call returned; whether it took effect is unknown."
         }
         _ => false,
     })
 }
 
 // What the model is told after a run that died for an unknown reason.
-const STOPPED_UNKNOWN: &str = "The previous run ended before it finished, for an unknown \
-     reason. Treat the request it was working on as unresolved; the message below is what to act on.";
+const STOPPED_UNKNOWN: &str = "The previous run ended before it finished. The cause is unknown. \
+     Its request remains unresolved. Act on the message below.";
 
 // What the model reads. Everything else in the list is there for a view: the
 // record of a compaction pass, and a row only the screen ever knew.
@@ -504,7 +507,7 @@ fn stopped_note(err: Option<&str>) -> String {
     };
     format!(
         "The previous run ended before it finished, with an error: {e}. \
-         Treat the request it was working on as unresolved; the message below is what to act on."
+         Its request remains unresolved. Act on the message below."
     )
 }
 
@@ -1640,6 +1643,18 @@ mod tests {
             "The user stopped this call before it returned; nothing about the call itself failed.",
         );
         assert!(is_stopped_call(&result));
+    }
+
+    #[test]
+    fn interrupted_call_wording_keeps_current_and_saved_results_recognisable() {
+        for text in [
+            STOPPED_CALL,
+            DIED_CALL,
+            "The run died before this call returned; whether it took effect is unknown.",
+        ] {
+            assert!(is_stopped_call(&ToolResult::text("c1", "bash", text)));
+        }
+        assert!(!is_stopped_call(&ToolResult::text("c1", "bash", "done")));
     }
 
     // Rewinding to an answer is the opposite call: the answer stays, and the

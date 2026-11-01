@@ -5,8 +5,8 @@ A terminal coding agent in Rust. One binary, `pi`.
 The goal: I need a capability, so I have it.
 
 It began as a rewrite of the core of
-[oh-my-pi](https://github.com/can1357/oh-my-pi); the message model is copied
-from [rig](https://github.com/0xPlaygrounds/rig).
+[oh-my-pi](https://github.com/can1357/oh-my-pi).
+Its message model comes from [rig](https://github.com/0xPlaygrounds/rig).
 
 ## Install
 
@@ -18,12 +18,12 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 Prebuilt for Linux x86_64 and aarch64. Anywhere else, `cargo build --release`
 leaves the binary at `target/release/pi`.
 
-A pi installed over the running one, a rebuild of the same version too, takes
-over every open session by itself once nothing on screen is half done. The
-resumed session keeps a restart confirmation at the end of its transcript.
+A new pi installation automatically takes over every open session when no screen operation remains incomplete.
+This also applies to a rebuild of the same version.
+Each resumed session keeps a restart confirmation at the end of its transcript.
 Consecutive identical confirmations share one row with a repeat count. At
-startup pi also asks GitHub once for the latest release; a newer one shows on
-the bar as `vX.Y.Z available`.
+startup pi also asks GitHub once for the latest release.
+The bar shows a newer release as `vX.Y.Z available`.
 
 ## Configure
 
@@ -46,7 +46,8 @@ max_output_tokens = 64_000
 | `openai`    | Responses        | `/responses`        |
 | `chat`      | Chat Completions | `/chat/completions` |
 
-A model on another endpoint says so in its own entry; the rest keep the file's:
+A model can specify another endpoint in its own entry.
+Other models use the file's endpoint:
 
 ```toml
 [models."gpt-5"]
@@ -58,81 +59,112 @@ api_key  = "$OPENAI_API_KEY"   # never the file's key: that one is for its host
 [`examples/pi.toml`](examples/pi.toml) lists every key. An unknown key is
 refused at load.
 
-A `.pi.toml` between the workspace and the repository root overrides the same
-keys, every one of them. The keys that reach past the checkout — `mcp`,
-`hooks`, `keep_days`, `base_url`, `api_key`, and a model's own
-`base_url` or `api_key` — are named under the banner when pi starts, and so
-are the checkout's own script tools. Read both in a checkout you did not write
-before running pi there.
+A `.pi.toml` between the workspace and repository root can override any of these keys.
+At startup, pi lists keys that affect resources outside the checkout under the banner.
+These include `mcp`, `hooks`, `keep_days`, `base_url`, `api_key`, and each model's own `base_url` or `api_key`.
+pi also lists the checkout's script tools.
+Inspect both lists before you run pi in a checkout you did not write.
 
-Nothing needs a restart. Within a second of a save to the settings, the lane
-in front is rebuilt from them; a file that does not parse is named once and the
-old config stays. A system prompt file, another prompt replaced under
-`~/.pi/prompts/`, an `AGENTS.md` or memory is read again at the next session or
-compaction instead: changed mid-session, the prompt would contradict what the
-model already read, and its cached prefix would be lost. `/edit` opens a prompt
-not yet replaced on the built-in's text; saved unchanged, the file is removed,
-so the built-in goes on following pi's updates.
+You do not need to restart pi after a settings change.
+Within a second of a save, pi rebuilds the active lane from the settings.
+If the file does not parse, pi reports it once and keeps the old configuration.
 
-The bar under the input line is laid out by `~/.pi/bar.rs`, a cargo script
-(`cargo +nightly -Zscript`) that reads pi's state as JSON on stdin — `model`,
-`effort`, `tier`, `running`, `root`, `worktree`, `ctx`, `spent`, `alerts`,
-`update`, `released` — and prints a layout:
-[`examples/bar.rs`](examples/bar.rs) is one to start from. Without the file,
-the bar is `tabs`, `model` and `spent` on the left, `update` and `flash` on
-the right. pi reruns it whenever its state changes, and every `refresh`
-seconds if set. A layout is `lines`, each with `left` and `right` items and
-an optional `sep` (a muted ` · ` by default). An item is a part's name;
-`{"part", "style"}` to colour one; `{"text", "style"}`, the script's own; or
-`{"group": [...]}`, items with nothing between them, gone whole when none of
-its parts has anything to say. A style is a theme name (`muted`, `heading`,
-`emphasis`, `code`, `input`, `ok`, `err`, `add`, `del`) or a style as
-`[theme]` writes one. A part with nothing to say drops out with the separator
-before it.
+pi reads system prompts, replacement prompts in `~/.pi/prompts/`, `AGENTS.md`, and memory again at the next session or compaction.
+A prompt change during a session would contradict text the model already read.
+It would also invalidate the cached prefix.
+For a prompt without a replacement, `/edit` opens the built-in text.
+If you save it unchanged, pi removes the replacement file.
+The prompt then continues to receive pi's built-in updates.
+
+The default main and subagent prompts share an execution policy.
+A replacement system or subagent prompt replaces both the role and that policy.
+pi still appends the run's workspace, permissions, standing instructions, and memory when enabled.
+`/content` shows the current system and tool definitions.
+It also shows each system block's source, size, and diagnostic fingerprint.
+Fingerprints identify content changes, not authenticity.
+
+The cargo script `~/.pi/bar.rs` defines the bar under the input line.
+It runs with `cargo +nightly -Zscript`.
+It reads pi's state as JSON on stdin and prints a layout.
+The state fields are `model`, `effort`, `tier`, `running`, `root`, `worktree`, `ctx`, `spent`, `alerts`, `update`, and `released`.
+Use [`examples/bar.rs`](examples/bar.rs) as a starting example.
+
+Without this file, the bar shows `tabs`, `model`, and `spent` on the left.
+It shows `update` and `flash` on the right.
+pi runs the script again whenever its state changes.
+If you set `refresh`, pi also runs it every `refresh` seconds.
+
+A layout contains `lines`.
+Each line has `left` and `right` items and an optional `sep`.
+The default separator is a muted ` · `.
+Use one of these item formats:
+
+- A part's name.
+- `{"part", "style"}` to style a part.
+- `{"text", "style"}` for the script's text.
+- `{"group": [...]}` for adjacent items without separators.
+  pi omits the entire group when all its parts are empty.
+
+A style can use a theme name: `muted`, `heading`, `emphasis`, `code`, `input`, `ok`, `err`, `add`, or `del`.
+It can also use the format from `[theme]`.
+pi omits an empty part and its preceding separator.
 
 | Part        | Shows                                                     |
 | ----------- | --------------------------------------------------------- |
 | `tabs`      | the checkouts, folded to the room the row leaves          |
 | `flash`     | the answer to the last key, for a moment                  |
 | `model`     | the model                                                 |
-| `effort`    | the thinking effort; absent while off                     |
+| `effort`    | the thinking effort, omitted when off                     |
 | `tier`      | the tool tier                                             |
-| `update`    | a release newer than this pi, or one installed under it   |
+| `update`    | a newer release or an installation that replaces the running pi |
 | `spent`     | what the session has cost so far                          |
 | `cost`      | what the last run cost                                    |
 | `elapsed`   | how long the last run took                                |
 | `in_out`    | its tokens in and out                                     |
 | `speed`     | its output tokens per second                              |
-| `cache`     | how much of its input was cached                          |
+| `cache`     | how much input the provider cached                        |
 | `ctx`       | the context used, against the window                      |
-| `compacted` | how often the session was compacted                       |
+| `compacted` | how often pi compacted the session                        |
 | `queued`    | lines waiting for the run to end                          |
 | `worktree`  | the worktree in front                                     |
 
-From `cost` down, the parts are the status line's, read off the run in flight
-or the one that last ended.
+The parts from `cost` through `worktree` also appear in the status line.
+They describe the active run or the last completed run.
 
 The default colours use the cool colours from Codex's Catppuccin palettes:
-Mocha on dark terminal backgrounds and Latte on light ones. Code blocks keep
-their syntax highlighting; inline code, links and clickable hints
-such as `n more` and `more below` use blue. Prose keeps the terminal
-foreground; headings follow Codex's level styles without `#` markers:
-H1 is red, bold and underlined; H2 is peach and bold; H3 is yellow, bold and
-italic; H4–H6 are yellow and italic. Bold text uses the theme green,
-and italic text and quotes use teal. Wide tables shown as source alternate
-column text between blue and green. The current search match uses blue with
-reversed colours. Secondary text uses the terminal's default foreground with
-`Dim`. Tool names and command sigils use Codex's accent blue (`#63a8f8` on
-dark backgrounds, `#1c64c8` on light
-ones). Selected menu rows use the input background with bold theme-blue text.
-Success and failure use the terminal's green and red; warnings use yellow
-on dark backgrounds and the terminal foreground on light ones. Input and
-submitted text keep their original
-background shading, derived from the terminal background with the input
-more pronounced. Both areas start at the left edge without a prefix or padding.
-Shell commands use syntax highlighting, and timing stays grey. If the terminal
-does not report its background, pi uses Mocha. Existing `[theme]` styles still
-override the defaults. For example:
+Mocha on dark terminal backgrounds and Latte on light ones.
+If the terminal does not report its background, pi uses Mocha.
+Existing `[theme]` styles still override these defaults.
+
+Code blocks keep syntax highlighting.
+Inline code, links, and clickable hints such as `n more` and `more below` use blue.
+Prose keeps the terminal foreground.
+Headings use Codex's level styles without `#` markers:
+
+- H1 uses red, bold, underlined text.
+- H2 uses peach, bold text.
+- H3 uses yellow, bold, italic text.
+- H4–H6 use yellow, italic text.
+
+Bold text uses theme green.
+Italic text and quotes use teal.
+Wide tables shown as source alternate column text between blue and green.
+The current search match uses blue with reversed colours.
+Secondary text uses the terminal's default foreground with `Dim`.
+
+Tool names and command sigils use Codex's accent blue.
+This is `#63a8f8` on dark backgrounds and `#1c64c8` on light ones.
+Selected menu rows use the input background with bold theme-blue text.
+Success and failure use the terminal's green and red.
+Warnings use yellow on dark backgrounds and the terminal foreground on light ones.
+
+Input and submitted text keep their original background shading, derived from the terminal background.
+The input shading is more pronounced.
+Both areas start at the left edge without a prefix or padding.
+Shell commands use syntax highlighting.
+Timing stays grey.
+
+For example:
 
 ```toml
 [theme]
@@ -143,26 +175,31 @@ quote = { color = "39", sgr = ["dim"] }
 strong = { color = "#a6e3a1", sgr = ["bold"] }
 ```
 
-Markdown lists retain their nesting and hanging indent when wrapped. Tasks
-show checkboxes, quotes have a rule at each level, and thematic breaks fit the
-available width. Definition lists indent their descriptions. Links retain
-their destinations and titles; bare URLs and email addresses are recognized
-outside code. Images show their description, complete address and title.
+Markdown lists retain their nesting and hanging indent when text wraps.
+Tasks show checkboxes.
+Quotes have a rule at each level.
+Thematic breaks fit the available width.
+Definition lists indent their descriptions.
+
+Links retain their destinations and titles.
+pi recognizes bare URLs and email addresses outside code.
+Images show their description, complete address, and title.
 
 Run statistics keep labels and separators grey, with blue token counts,
 speed and cache figures, and a dim green cost. Context usage takes the warning
-style at 80% of the window and the error style at 95%. Archived statistics use
-the same colours; explicitly styled bar parts keep their configured style.
-While a run is active, its statistics start with a `⠴ ⠦ ⠖ ⠲` spinner;
-once it ends, a grey `π ` keeps the figures in the same columns, including
-when the archived line is redrawn.
+style at 80% of the window and the error style at 95%.
+Archived statistics use the same colours.
+Explicitly styled bar parts keep their configured style.
+While a run is active, its statistics start with a `⠴ ⠦ ⠖ ⠲` spinner.
+After the run ends, a grey `π ` keeps the figures in the same columns, including when pi redraws the archived line.
 
-Assistant prose and tool calls are separated by one blank line, with
-continuous tool calls kept together. Separators scroll with their preceding
-line and have no click action; tool calls keep the terminal background.
-Reasoning uses the terminal's default foreground with `Dim` in the transcript;
-its reading page uses normal Markdown contrast for comfortable reading of
-long blocks.
+pi separates assistant prose and tool calls with one blank line.
+Consecutive tool calls stay together.
+Separators scroll with their preceding line and have no click action.
+Tool calls keep the terminal background.
+
+Reasoning uses the terminal's default foreground with `Dim` in the transcript.
+Its reading page uses normal Markdown contrast for long blocks.
 
 ## Run
 
@@ -183,17 +220,22 @@ pi -C ~/repo --tier read  # another directory, read-only
 | `exec`  | everything, through a shell. **The default.** |
 | `net`   | `read`, plus the web                          |
 
-**`bash` is not sandboxed.** It runs `sh -c` anywhere, and pi never asks
-before a call. Under `exec` nothing is fenced, so `write` and `edit` reach
-anywhere too rather than refuse what `bash` would do. Under `write` they are
-held inside the workspace and pi's home, symlinks resolved. The home is
-writable so the model can make its own tools and skills, which means it can
-also edit `settings.toml`, and an edit there takes effect within a second. Use
-`--tier` when that is too much.
+**`bash` is not sandboxed.**
+It runs `sh -c` anywhere, and pi never asks before a call.
+Under `exec`, `write` and `edit` can also change files anywhere.
+They do not refuse changes that `bash` could make.
+Under `write`, they can change files only inside the workspace and pi's home, after resolving symlinks.
 
-A run has no turn cap. It ends when the model stops calling tools or you press
-Esc. A session is open in one pi at a time: resuming one another pi holds is
-refused, and resuming one from another directory moves it here.
+The home is writable so the model can create tools and skills.
+This also lets it edit `settings.toml`.
+An edit there takes effect within a second.
+Use `--tier` when you need stricter limits.
+
+A run has no turn limit.
+It ends when the model stops calling tools or you press Esc.
+Only one pi can open a session at a time.
+pi refuses to resume a session that another pi holds.
+Resuming a session from another directory moves it here.
 
 ## In a session
 
@@ -204,36 +246,44 @@ refused, and resuming one from another directory moves it here.
 | `/model [name]`                    | list the models, or move the session to one   |
 | `/effort [level]`                  | `off` `low` `medium` `high`, from now on      |
 | `/worktree [name]`, `/worktree rm` | work in `<repo>.worktrees/<name>`             |
-| `/mv <dir>`                        | move this session to another directory; its background commands follow |
+| `/mv <dir>`                        | move this session and its background commands to another directory |
 | `/compact [focus]`                 | summarize everything but the working tail     |
 | `/loop <line>`                     | resubmit a line until a round edits no file   |
-| `/<tool> [key=value…]`            | run a named tool yourself; tools marked background return immediately |
-| `/mcp`, `/mcp restart [name]`      | MCP servers and their tools; reconnect        |
+| `/<tool> [key=value…]`            | run a named tool. Background tools return immediately |
+| `/mcp`, `/mcp restart [name]`      | list MCP servers and tools, or reconnect      |
 | `/settings`                        | edit the project's config                     |
 | `/edit [file]`                     | edit a prompt, an `AGENTS.md`, or memory      |
-| `/status`, `/keys`, `/help`        | session paths and spend; bindings; commands   |
-| `/exit`                            | leave; `ctrl+d` does the same                 |
-| `/content`                         | everything the model is given before you type |
+| `/status`, `/keys`, `/help`        | show session paths and spend, bindings, or commands |
+| `/exit`                            | exit pi, as with `ctrl+d`                     |
+| `/content`                         | show current system blocks, their sources, and tool definitions |
 | `/<skill> [args]`                  | run a skill (also one-shot: `pi "/commit"`)   |
 | `!<command>`                       | run a shell command and record its output     |
 | `!!<command>`                      | start one in the background and keep typing   |
 | `@path`                            | complete a workspace file                     |
-| click a code block's label         | copy it; a diagram or table, its source       |
+| click a code block's label         | copy the code, or the source of a diagram or table |
 | drag, double or triple click       | copy the text, a word, or a line              |
 | `ctrl+v`                           | paste a clipboard image as `[Image #n]`       |
 
 Slash completion lists tools directly (for example, `/wechat`), then offers
 their `key=value` arguments. Descriptions mark tools with `[tool]` and skills
 with `[skill]`. Existing commands keep their names when a tool has the same
-name; there is no `/tool` entry point.
+name.
+There is no `/tool` entry point.
 
 In Vim Normal mode, `ctrl+k` focuses the last background command above the input.
-`ctrl+k`/`ctrl+j` move between commands; `ctrl+j` below the last command or `esc` returns
-to the draft at its original cursor position. The selected command is highlighted:
-`x` stops it, `r` restarts it, `X` stops every running command in this workspace,
-and `enter` expands or folds its output. Stopped rows stay available while
-focused so they can be restarted. Completion lists and reading pages keep
-their own keys; Insert mode keeps its editing keys. `/keys` includes this help.
+`ctrl+k` and `ctrl+j` move between commands.
+`ctrl+j` below the last command or `esc` returns to the draft at its original cursor position.
+pi highlights the selected command.
+
+- `x` stops the selected command.
+- `r` restarts the selected command.
+- `X` stops every running command in this workspace.
+- `enter` expands or folds the selected command's output.
+
+Stopped rows stay available while focused so you can restart them.
+Completion lists and reading pages keep their own keys.
+Insert mode keeps its editing keys.
+`/keys` includes this help.
 
 While a model reply is generating, completed background results and additional
 messages you type wait for that reply to finish. After its tool calls complete,
@@ -242,190 +292,301 @@ also continues when messages are waiting. Generation is never interrupted.
 Waiting messages show under the status line, and `up` takes them back. A
 command queued ahead of them holds them until the run ends.
 
-A `!` command waits for the run to let go of the transcript, then runs to
-completion with nothing cutting it short. A `!!` command does not wait for
-either: it goes to the same place the model's background commands do,
-returning an id at once, so it can be started while a reply is generating.
-Its output reaches the model when it ends, with the other results waiting.
+A `!` command waits for the run to release the transcript.
+It then runs to completion without a timeout.
+A `!!` command uses the same background executor as the model's background commands.
+It returns an ID immediately, without waiting for the transcript or command completion.
+You can start it while a reply is generating.
+Its output reaches the model when the command ends, together with other waiting results.
 
 ## Tools
 
-`read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `subagent` `memory`, plus:
+The built-in tools are `read`, `write`, `edit`, `glob`, `grep`, `bash`, `fetch`, `skill`, `subagent`, and `memory`.
+MCP servers and scripts can add tools.
 
-- One tool per tool of each MCP server in `[mcp.<name>]`, offered as
-  `<name>__<tool>` once the server has listed them. `command` and `args` run
-  one over stdio, `url` reaches one over Streamable HTTP. A server that will
-  not start is listed as `<name>__unavailable`, with the reason; `/mcp`
-  shows each server and its tools, and `/mcp restart` reconnects them. A call
-  with no answer in 10 minutes is given up.
-- `bash` waits for a regular command to exit. In interactive mode,
-  `background: true` returns a command id immediately, for example:
-  `{"command":"python3 report.py","background":true}`.
-  With no command, `{}` lists background commands; `{"output":3}` reads output,
-  `{"stop":[3]}` stops commands, and `{"restart":[3]}` starts them again under
-  their ids. Each of those three names one id, a list of ids, or `"all"`; none
-  of them takes an empty list, so no stray value can reach every command at
-  once. Background results open later turns once the checkout is
-  idle. Commands appear above the input; clicking one opens its output.
-  Shell calls show the original command with shell highlighting. Named wrappers
-  show the tool name and supplied arguments with tool-call colours. Expanding
-  a command shows the actual launch command, working directory, and output.
-  The original call and launch specification both survive restart and session
-  recovery. User stop and restart actions reach the model before it next speaks.
-  A foreground command is cut off after ten minutes, and never promoted to the
-  background on its own.
-  Interrupting their run stops their process group. One-shot runs and
-  subagents offer foreground commands only; a subagent call also waits for
-  completion. Background commands stop when pi exits; use cron for work
-  that must outlive pi.
-- A script is executable code. A tool is a named interface the model can call
-  directly. A tool can use a script as its implementation.
-  Keep task scripts in the workspace. Run these scripts through `bash`.
-  Running a script repeatedly does not require a new tool.
-  Reserve the home and project `tools/` directories for registered tools.
-  New project tools belong in the project's `.pi/tools/` by default.
-  This includes tools that depend on project code, data, paths, or configuration.
-  The model receives the resolved project tool path in `<project_tools>`.
-  Use the global tool directory only when the user requests a tool shared
-  across projects. A write boundary that blocks the project directory does
-  not make the global directory a fallback.
-  Keep a skill's helper scripts inside that skill's directory.
-  One tool per script in `~/.pi/tools/`: any file whose first line is a `#!`,
-  its `description`, `[required]`, and `[optional]` written as TOML in a `# ---` comment block
-  under that line; or a cargo script `*.rs`, described by its
-  `[package] description`, `[package.metadata.pi.required]`, and
-  `[package.metadata.pi.optional]`, which needs
-  `cargo +nightly -Zscript`. Either argument table may be omitted; each entry
-  maps a parameter name to its string description.
-  A script that does not read is listed as not
-  usable, with the reason. `~/.pi/tools/.env` holds `NAME=value` lines every
-  script starts with, such as its service's key. A background wrapper loads
-  them only for its subprocess; ordinary bash calls do not receive them.
-  A checkout's own scripts go in the nearest `.pi/tools/` up to the
-  repository root (outside a repository, the workspace's own), with its own
-  `.env`; of a name both use, the checkout's is the one offered, and the
-  other is reported as skipped. A built-in tool's name is not free either:
-  a script that takes one is skipped with a note, and the built-in keeps it.
-  Set `background = true` at the top of a shebang tool's comment block, or
-  under `[package.metadata.pi]` for a Rust tool, to make its named entry
-  launch through bash background. `/telegram` and similar manual calls keep
-  their names. The wrapper supplies JSON on stdin, mirrors declared arguments
-  into the environment, and saves the launch specification for restart.
-  These wrappers are offered only in interactive sessions.
-  A script may also write JSON lines to fd 3 (`PI_EVENTS_FD`): `status` for
-  its progress and `result`
-  for each turn it sends back (its stdout at exit is the last), `input` for a
-  person's line, sent to the model as written, never run as a command
-  (what only the person reads, a QR say, goes to stderr: they open the command
-  to see it), `choose` with
-  `options` to ask a question as the `choose` tool does (stopping the command
-  takes it back), `interrupt` to stop the checkout's turn, and `follow` to
-  hear every turn there. A turn an input opened, or any once it follows, is
-  told back on fd 3: `started`, optional `{"progress": "..."}` messages,
-  then `reply` with the remaining answer (excluding text already sent as
-  progress). Progress includes completed model text before tool calls and
-  changed tool or command output, paced while work continues. One that follows is
-  also told each question up on the checkout, as
-  `{"question": {"id", "text", "options", "back"}}`, then
-  `{"closed": <id>}` once it is answered anywhere or withdrawn; it answers
-  one with `{"answer": <id>, "picks": [0]}`, by place, the pick going out as
-  if typed there, or hears `{"refused": <id>, "why"}` when it is not taken,
-  and an `input` closes every question that does not wait.
-  Foreground scripts can use `choose`, where pi answers with one line on
-  fd 3: `{"asked": true}` once it is up, or an `error` saying why not. There
-  `"answer": "back"` keeps the pick from going out: it comes down fd 3 as
-  `{"answer": "<option>"}`, your own words if you wrote some, or
-  `{"answer": null}` when you closed it — for a script that waits on you,
-  such as one that asks before letting a command run.
+### MCP tools and prompts
 
-  A question has up to 9 options, each the line you would send to pick it —
-  words for the model, or a command such as `/compact`. They are the list
-  over the input line, shown even when it is empty, as a completion list is
-  and with its keys: `↑`/`↓` (or `ctrl+j`/`ctrl+k`, and `j`/`k` in vim's
-  Normal) move, `enter` sends the highlighted one, `tab` takes it onto the
-  line to send as it is or changed, and `esc` (`q` in Normal) closes the
-  question unanswered. Typing narrows the options by their words or number;
-  words that match none are your own answer, sent with `enter`. To pick
-  several, `space` marks them while nothing is typed (or in Normal), and
-  `enter` sends the marked ones as one prompt, a line each; a command is
-  only picked alone.
-  [`examples/tools/`](examples/tools/) has five to copy: `search`; `judge`,
-  which reads its key from there; `choose`, through which the model puts
-  you a question and ends its turn; `wechat`, which bridges the session
-  to a WeChat chat — ask for it, scan the QR the first time, and what you
-  send from the phone arrives as turns, `/stop` included, and a question
-  arrives numbered, answered by replying with its number, or several such
-  as `1 3`; and `telegram`, the same over a Telegram bot, a question's
-  options as buttons, a tap answering with one: put a
-  token from @BotFather in `.env` as
-  `TELEGRAM_BOT_TOKEN`, open the link or QR it shows the first time, and
-  only the account that opened it is heard (delete `~/.pi/telegram.json` to
-  pair another). Both are cargo scripts, `wechat.rs` and `telegram.rs`, so
-  they need nightly cargo and build on first use. Both forward progress
-  before the run ends and retry temporary send failures. Unsent pieces stay
-  in memory, in order, until another incoming message triggers a retry;
-  stopping the channel discards that queue. Updating them requires copying
-  the scripts again and restarting their background commands along with the updated pi.
+Each server in `[mcp.<name>]` supplies tools as `<name>__<tool>` after it lists them.
+`command` and `args` start a server over stdio.
+`url` connects over Streamable HTTP.
+If a server cannot start, pi lists `<name>__unavailable` with the reason.
+`/mcp` shows servers and tools.
+`/mcp restart` reconnects them.
 
-A server's prompts are commands too: `/<name>:<prompt> [args]` asks the server
-for the prompt's text and sends it, one typed word per argument, the last
-taking the rest.
+pi stops waiting for an unanswered call after 10 minutes.
+A server's prompts are also commands.
+`/<name>:<prompt> [args]` requests the prompt text from the server and submits it.
+Each argument receives one typed word.
+The last argument receives the remaining text.
 
-`[[hooks]]` run a command on events, handed the event as one line of JSON on
-stdin. Around a tool call they are gates: on `tool.before`, exit 0 lets the
-call run and exit 2 refuses it with what the hook printed, and a hook that
-fails or hangs refuses it too; on `tool.after`, what it printed joins the
-result. Around a run they are waited on too: `run.start` comes before its
-first request, with the prompt, and what it prints on exit 0 is a note to the
-model; `run.stop` comes when the model would stop, with its reply, and exit 2
-keeps the run going with what the hook printed — at most three times a run.
-The other events — `tool.denied`, `turn.start`, `turn.end` (with the reply's
-text), `compacted`, `retrying`, `warning`, `run.done`, `run.failed` (with the
-error; a stop you asked for is not one) — are only watched: queued off the run, one at a time, nothing they print reaching it. A
-subagent's calls pass the same gates, but its events stay its own.
-A hook has fd 3 as a script does, so it can `choose` with `"answer": "back"`
-and wait on you, as long as you take: `examples/hooks/ask-first` holds a
-`bash` call that cannot be taken back until you allow it.
-`examples/pi.toml` has the shape.
+### Shell commands
 
-Scripts and skills are read live: one written while pi runs is offered to the
-model from its next turn, and a skill's `/name` answers the next time you type.
-A skill is a directory with a `SKILL.md` in `~/.pi/skills/`, or in the nearest
-`.pi/skills/` up to the repository root (outside a repository, the workspace's
-own) — the same two places a script is read from. Where both hold one name,
-for a script as for a skill, the project's is the one offered.
+`bash` waits for a foreground command to exit.
+In interactive mode, `background: true` returns a command ID immediately.
+For example: `{"command":"python3 report.py","background":true}`.
 
-The built-in `tool-creator` skill teaches the model to write tools, and
-`skill-creator` teaches it to write skills. `mcp-setup` covers connecting MCP
-servers. The built-in `pi-help` skill is this README, for questions about pi
-itself. A skill with the same name on disk replaces the built-in.
+The same tool controls background commands:
 
-An image pasted with `ctrl+v` goes with the message itself; its path rides
-along in the text. `read` also opens PNG, JPEG, GIF and WebP files as images.
-A model reaches them only with `vision = true` in its `[models]` entry; without
-it, each image is sent as a line saying it was left out.
+- `{}` lists background commands.
+- `{"output":3}` reads a command's output.
+- `{"stop":[3]}` stops commands.
+- `{"restart":[3]}` starts commands again under their existing IDs.
 
-`fetch` speaks http and https and refuses loopback, private and link-local
-addresses. With [rtk](https://github.com/rtk-ai/rtk) on `PATH`, `bash` runs
-each command through `rtk rewrite`; `RTK_DISABLED=1` turns that off.
+`output`, `stop`, and `restart` each accept one ID, a list of IDs, or `"all"`.
+They reject empty lists so an unintended empty value cannot affect every command.
+Background results open later turns when the checkout is idle.
+Commands appear above the input.
+Click a command to open its output.
 
-What a command prints twice reaches the model once. A run of six or more lines
-repeating an earlier one byte for byte, like the same diff printed for every
-failing test, becomes one line quoting where the first copy begins.
+Shell calls show the original command with shell highlighting.
+Named wrappers show the tool name and supplied arguments with tool-call colours.
+Expanding a command shows the actual launch command, working directory, and output.
+The original call and launch specification survive restart and session recovery.
+User stop and restart actions reach the model before its next response.
 
-When the transcript outgrows the window, pi drops repeated and old tool
-results first and summarizes whole rounds last, down to half the room it
-has, so the next compaction is many turns away. The saved session keeps
-everything; only the model's view shrinks.
+pi stops a foreground command after ten minutes.
+It never automatically moves that command to the background.
+Interrupting the run stops the command's process group.
+One-shot runs and subagents offer only foreground commands.
+A subagent call also waits for completion.
+Background commands stop when pi exits.
 
-pi remembers without being asked. When you correct it, say what you prefer,
-or settle a decision, the model writes a line to `~/.pi/memory/` with its
-`memory` tool, and you see each line go in as it does; the next session or
-compaction carries it. Memory holds 16 KiB in all: a change that would grow it
-past that is refused until the model folds or removes lines. The files are
-plain markdown, named by `/status`; edit or delete them freely. A subagent
-never writes memory, nor does a run under `--tier read` or `net`, or with
-`--no-context-files`.
+Use cron for work that must continue after pi exits.
+
+### Script tools
+
+A script is executable code.
+A tool is a named interface the model can call directly.
+A tool can use a script as its implementation.
+Keep task scripts in the workspace.
+Run these scripts through `bash`.
+Repeated script execution does not require a new tool.
+
+Reserve the home and project `tools/` directories for registered tools.
+New project tools belong in the project's `.pi/tools/` by default.
+This includes tools that depend on project code, data, paths, or configuration.
+The model receives the resolved path in `<project_tools>`.
+Use the global directory only when the user requests a tool shared across projects.
+If the write boundary blocks the project directory, do not use the global directory instead.
+
+Keep a skill's helper scripts inside that skill's directory.
+Each supported script in `~/.pi/tools/` defines one tool.
+Use one of these formats:
+
+- A script whose first line is `#!`.
+  Write `description`, `[required]`, and `[optional]` as TOML in a `# ---` comment block immediately below that line.
+- A cargo script named `*.rs`.
+  Use `[package] description`, `[package.metadata.pi.required]`, and `[package.metadata.pi.optional]`.
+  This format requires `cargo +nightly -Zscript`.
+
+You can omit either argument table.
+Each entry maps a parameter name to its string description.
+If pi cannot read a script's interface, it lists the tool as unusable with the reason.
+
+`~/.pi/tools/.env` holds `NAME=value` lines for the scripts' initial environment, such as a service key.
+A background wrapper loads these values only for its subprocess.
+Ordinary `bash` calls do not receive them.
+For checkout scripts, use the nearest `.pi/tools/` up to the repository root.
+Outside a repository, use the workspace's `.pi/tools/`.
+This directory has its own `.env`.
+
+When both directories contain the same name, pi offers the checkout's tool.
+It reports the other tool as skipped.
+Built-in tools also keep their names.
+pi skips a script that uses a built-in name and reports the conflict.
+
+To create a named background wrapper, set `background = true` in the tool's metadata.
+For a shebang tool, use the top level of its comment block.
+For a Rust tool, use `[package.metadata.pi]`.
+The wrapper runs through the bash background executor.
+Manual calls such as `/telegram` keep their names.
+
+The wrapper supplies JSON on stdin.
+It copies declared arguments into the environment.
+It saves the launch specification for restart.
+These wrappers are available only in interactive sessions.
+
+### Script events
+
+A script can write JSON lines to file descriptor 3 (fd 3), specified by `PI_EVENTS_FD`.
+
+| Event | Purpose |
+| --- | --- |
+| `status` | Report progress. |
+| `result` | Send a result that opens a turn. Stdout at exit supplies the final result. |
+| `input` | Submit a person's line as if typed, including commands. A leading space sends slash-prefixed text as prose. |
+| `choose` with `options` | Ask a question, as with the `choose` tool. Stopping the command withdraws it. |
+| `interrupt` | Stop the checkout's turn. |
+| `follow` | Receive every turn in the checkout. |
+
+Send content only the person needs, such as a QR code, to stderr.
+The person opens the command to read it.
+pi reports each turn opened by an input through fd 3.
+After `follow`, it also reports other turns in the checkout.
+The sequence is `started`, optional `{"progress": "..."}` messages, then `reply`.
+`reply` contains the remaining answer, excluding text already sent as progress.
+
+Progress includes completed model text before tool calls and changed tool or command output.
+pi paces these updates while work continues.
+A following script also receives each question in the checkout:
+
+1. `{"question": {"id", "text", "options", "back"}}` when the question appears.
+2. `{"closed": <id>}` when someone answers or withdraws it.
+
+Answer a question with `{"answer": <id>, "picks": [0]}`, using option positions.
+pi submits the selection as if the person typed it.
+If pi rejects the answer, the script receives `{"refused": <id>, "why"}`.
+An `input` closes every question that does not wait.
+
+Foreground scripts can use `choose`.
+pi answers on fd 3 with `{"asked": true}` when the question appears, or an `error` that explains the failure.
+With `"answer": "back"`, pi returns the selection to the script instead of submitting it:
+
+- `{"answer": "<option>"}` for a selected option.
+- The person's own words if they wrote an answer.
+- `{"answer": null}` when the person closes the question.
+
+Use this mode for a script that waits for the person, such as approval before a command runs.
+
+### Questions
+
+A question has up to 9 options.
+Each option is the line the person would send to select it.
+It can contain words for the model or a command such as `/compact`.
+The option list appears above the input, even when the input is empty.
+It uses completion-list keys:
+
+- `↑` and `↓` move between options.
+  Alternatives are `ctrl+j` and `ctrl+k`, or `j` and `k` in Vim Normal mode.
+- `enter` sends the highlighted option.
+- `tab` copies the option to the input for submission or editing.
+- `esc`, or `q` in Normal mode, closes the question unanswered.
+
+Typing narrows the options by their words or number.
+If no option matches, `enter` sends the typed words as the person's answer.
+To select several options, use `space` while the input is empty or in Normal mode.
+`enter` sends the marked options as one prompt, one option per line.
+A command must be selected alone.
+
+### Example tools
+
+[`examples/tools/`](examples/tools/) contains five tools to copy:
+
+- `search` searches the web.
+- `judge` asks a judgment model and reads its key from the tool directory's `.env`.
+- `choose` asks the person a question.
+  The model then ends its turn.
+- `wechat` connects the session to a WeChat chat.
+  Request it, then scan its QR code on first use.
+  Phone messages arrive as turns, including `/stop`.
+  Questions show numbered options.
+  Reply with one number or several, such as `1 3`.
+- `telegram` connects through a Telegram bot and shows question options as buttons.
+  Tap a button to select one option.
+  Put a token from @BotFather in `.env` as `TELEGRAM_BOT_TOKEN`.
+  Open the link or scan the QR code on first use.
+  pi accepts messages only from the account that opened it.
+  Delete `~/.pi/telegram.json` to pair another account.
+
+`wechat.rs` and `telegram.rs` require nightly cargo and compile on first use.
+Both send progress before the run ends and retry temporary send failures.
+Unsent pieces stay in memory, in order, until another incoming message triggers a retry.
+Stopping the channel discards that queue.
+To update either tool, copy the script again.
+Restart its background command along with the updated pi.
+
+### Hooks
+
+Each `[[hooks]]` entry runs a command for specified events.
+It receives the event as one JSON line on stdin.
+Tool hooks control or supplement calls:
+
+- On `tool.before`, exit 0 permits the call.
+  Exit 2 refuses it with the hook's output.
+  A failure or timeout also refuses the call.
+- On `tool.after`, the hook's output joins the result.
+
+pi also waits for run hooks:
+
+- `run.start` runs before the first model request and receives the prompt.
+  Its output on exit 0 becomes a note to the model.
+- `run.stop` runs when the model would stop and receives its reply.
+  Exit 2 continues the run with the hook's output.
+  This can happen at most three times per run.
+
+Other events only notify hooks.
+These are `tool.denied`, `turn.start`, `turn.end`, `compacted`, `retrying`, `warning`, `run.done`, and `run.failed`.
+`turn.end` includes the reply text.
+`run.failed` includes the error.
+A user stop is not a `run.failed` event.
+pi queues these hooks separately from the run, one at a time.
+
+Their output does not reach the model.
+A subagent's calls pass the same gates, but its events stay with the subagent.
+A hook has fd 3, as a script does.
+It can use `choose` with `"answer": "back"` and wait for the person without a time limit.
+`examples/hooks/ask-first` holds an irreversible `bash` call until the person permits it.
+See `examples/pi.toml` for the configuration format.
+
+### Skills
+
+pi reads script and skill directories during the session.
+A new script or skill becomes available to the model on its next turn.
+A skill's `/name` command becomes available the next time you type.
+A skill is a directory containing `SKILL.md`.
+Use `~/.pi/skills/` or the nearest `.pi/skills/` up to the repository root.
+Outside a repository, use the workspace's `.pi/skills/`.
+
+These follow the same location rules as scripts.
+If both locations contain the same script or skill name, pi offers the project's version.
+
+The built-in `tool-creator` skill teaches the model to write tools.
+`skill-creator` teaches it to write skills.
+`mcp-setup` explains how to connect MCP servers.
+`pi-help` loads an index for questions about pi.
+The model reads relevant README sections through the skill's `file` argument.
+It can request `README.md` when it needs the complete documentation.
+A skill with the same name on disk replaces the built-in.
+
+### Images, web access, and context
+
+An image pasted with `ctrl+v` accompanies the message.
+The message text includes its path.
+`read` also opens PNG, JPEG, GIF, and WebP files as images.
+The model receives images only with `vision = true` in its `[models]` entry.
+Otherwise, pi replaces each image with a line that explains the omission.
+
+`fetch` supports HTTP and HTTPS.
+It refuses loopback, private, and link-local addresses.
+With [rtk](https://github.com/rtk-ai/rtk) on `PATH`, `bash` passes each command through `rtk rewrite`.
+`RTK_DISABLED=1` disables this step.
+
+Repeated command output reaches the model once.
+pi replaces six or more byte-identical repeated lines with one line that identifies the first copy.
+For example, this applies to the same diff printed for each failing test.
+
+When the transcript exceeds the context window, pi removes repeated and old tool results first.
+It summarizes whole rounds last, reducing the context to half the available room.
+This leaves room for many turns before the next compaction.
+The saved session keeps everything.
+Only the model's view shrinks.
+Long user inputs keep their beginning and end in the history sent to the summarizer.
+The summary records skills that still apply and requirements specific to the task.
+The model may need to load a skill again when its instructions no longer remain in context.
+
+### Memory
+
+pi records memory without a request.
+When you correct it, state a preference, or settle a decision, the model writes a line with `memory`.
+The line goes to `~/.pi/memory/`, and pi shows it as the model writes it.
+The next session or compaction includes that memory.
+
+Memory has a total limit of 16 KiB.
+pi refuses a change that would increase memory beyond this limit until the model combines or removes lines.
+The files are plain Markdown.
+`/status` lists their paths.
+You can edit or delete them.
+Subagents and runs with `--tier read`, `--tier net`, or `--no-context-files` never write memory.
 
 ## Files
 
@@ -442,15 +603,16 @@ never writes memory, nor does a run under `--tier read` or `net`, or with
 | `.pi/skills/`                            | a project's skills                         |
 | `~/.pi/memory/*.md`                      | memory: global, and one file per project   |
 | `~/.pi/tools/`                           | script tools                               |
-| `~/.pi/tools/.env`                       | values every script starts with; `0600`    |
+| `~/.pi/tools/.env`                       | initial environment values for scripts, mode `0600` |
 | `.pi/tools/`                             | a project's script tools                   |
 | `~/.pi/images/`                          | images pasted with `ctrl+v`                |
 | `~/.pi/bar.rs`                           | a cargo script that lays out the bar       |
 | `~/.pi/sessions/<project>/<session>/`    | the transcript and `journal.jsonl`         |
 
-A session not worked on for 90 days, and a pasted image not pasted again for
-as long, is deleted when pi starts; `keep_days` in `settings.toml` changes the
-days, and `0` keeps everything.
+At startup, pi deletes sessions with no activity for 90 days.
+It also deletes pasted images with no repeated paste for 90 days.
+`keep_days` in `settings.toml` changes this interval.
+`0` keeps everything.
 
 The journal records what the transcript does not: requests, timings, refusals,
 retries. One JSON object per line, `0600`, kept two weeks. `PI_LOG` takes
@@ -458,9 +620,33 @@ retries. One JSON object per line, `0600`, kept two weeks. `PI_LOG` takes
 
 ## Develop
 
-`cargo test` and `cargo clippy --all-targets`, both expected clean. Run
-`cargo fmt` before committing. Pushing a `vX.Y.Z` tag builds and publishes the
-release on CI.
+Run `cargo test`.
+Run `cargo clippy --all-targets`.
+Both must pass without warnings or failures.
+Run `cargo fmt` before you commit.
+Pushing a `vX.Y.Z` tag builds and publishes the release on CI.
+
+For prompt changes, preserve a baseline binary before editing.
+Build the candidate binary after the changes.
+Compare them with the configured model:
+
+```bash
+python3 examples/prompt-eval.py --self-test
+python3 examples/prompt-eval.py --baseline /path/to/baseline-pi \
+  --candidate target/debug/pi --output /tmp/pi-prompt-eval.json
+```
+
+The evaluation uses temporary synthetic projects and only copies connection settings.
+It excludes user hooks, MCP servers, skills, and standing instructions.
+The help case uses built-in skills.
+Existing hooks collect tool calls, arguments, result previews, turns, and token usage.
+Each case checks its result and unexpected file changes.
+Model calls may incur charges.
+
+Use `--config` or `--model` to select the connection.
+Use `--case help` to compare only the help task.
+`--repeats` repeats the cases, with alternating baseline and candidate order.
+One repetition is a smoke check, not evidence of a general efficiency improvement.
 
 ## Not built
 

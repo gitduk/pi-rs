@@ -85,18 +85,20 @@ impl Refusal {
 /// what to do next.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
-    #[error("no edits: name at least one replacement")]
+    #[error("no edits. Specify at least one change.")]
     NoEdits,
 
-    #[error("in {path}, edits[{index}]: the anchor is empty — name the text to find")]
+    #[error("in {path}, edits[{index}]: the anchor is empty. Specify the existing text to match.")]
     EmptyAnchor { path: String, index: usize },
 
-    #[error("in {path}, edits[{index}]: inserting nothing changes nothing")]
+    #[error(
+        "in {path}, edits[{index}]: inserting nothing changes nothing. Supply nonempty `new_string`."
+    )]
     EmptyInsert { path: String, index: usize },
 
     #[error(
-        "no match in {path} for edits[{index}] — the closest real line is {line}: `{text}`. \
-         Nothing was written."
+        "no match in {path} for edits[{index}]. The closest existing line is {line}: `{text}`. \
+         The file stays unchanged."
     )]
     NoMatch {
         path: String,
@@ -107,7 +109,7 @@ pub enum Refusal {
 
     #[error(
         "edits[{index}] matches {n} places in {path}:\n{detail}\n\
-         Give more of the anchor to name one, or set `replace_all`."
+         Include more surrounding text in the anchor to select one match, or set `replace_all`."
     )]
     Ambiguous {
         path: String,
@@ -117,14 +119,14 @@ pub enum Refusal {
     },
 
     #[error(
-        "edits[{a}] and edits[{b}] overlap in {path} — merge them into one \
-         edit or target disjoint regions"
+        "edits[{a}] and edits[{b}] overlap in {path}. \
+         Combine them into one edit or select separate regions."
     )]
     Overlap { path: String, a: usize, b: usize },
 
     #[error(
-        "edits[{a}] and edits[{b}] meet at one byte in {path} — the order would \
-         be a guess; merge them into one edit"
+        "edits[{a}] and edits[{b}] meet at one byte in {path}. \
+         The tool cannot determine their order. Combine them into one edit."
     )]
     InsertInside { path: String, a: usize, b: usize },
 
@@ -137,8 +139,8 @@ pub enum Refusal {
     },
 
     #[error(
-        "in {path}, edits[{index}]: `{text}` opens {n} blocks — give more of \
-         the opening line"
+        "in {path}, edits[{index}]: `{text}` opens {n} blocks. \
+         Include more of the opening line."
     )]
     AmbiguousBlock {
         path: String,
@@ -147,7 +149,7 @@ pub enum Refusal {
         n: usize,
     },
 
-    #[error("{path}: nothing changed — the edits reproduce what is already there")]
+    #[error("{path}: nothing changed. The edits reproduce the existing content.")]
     Unchanged { path: String },
 }
 

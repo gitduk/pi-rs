@@ -2,6 +2,7 @@
 //! prompt, the ceiling, the commands. Startup, a reload and every new lane
 //! come through here.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -23,6 +24,8 @@ pub struct Resolved {
     /// What the agent runs on: the tools, the prompt, the ceiling, the effort.
     /// A subagent derives its own from this one.
     pub brief: std::sync::Arc<agent::Briefing>,
+    /// Main system blocks in wire order, with sources, sizes and fingerprints.
+    pub prompt_blocks: Vec<crate::core::prompt::Block>,
     /// The config's hooks, which the brief carries once armed: before then
     /// its hooks can ask no one.
     pub hooks: crate::core::hooks::Declared,
@@ -104,7 +107,7 @@ impl PromptFiles {
         let system = match &system_file {
             Some(path) => std::fs::read_to_string(path)
                 .with_context(|| format!("cannot read system prompt {}", path.display()))?,
-            None => crate::core::prompt::DEFAULT_SYSTEM.to_string(),
+            None => crate::core::prompt::default_system(),
         };
         let prompts = replacements()
             .map(|(path, _)| path)
@@ -138,19 +141,39 @@ impl PromptFiles {
 
     /// The text the built-in prompt `name` runs under: its replacement's, or
     /// its own.
-    pub fn prompt(&self, name: &str) -> &str {
+    pub fn prompt(&self, name: &str) -> Cow<'_, str> {
         let path = config::prompt_file(name);
         self.prompts
             .iter()
             .find(|(p, _)| Some(p) == path.as_ref())
-            .map(|(_, text)| text.as_str())
+            .map(|(_, text)| Cow::Borrowed(text.as_str()))
             .or_else(|| {
                 crate::core::prompt::REPLACEABLE
                     .iter()
                     .find(|(n, _)| *n == name)
-                    .map(|(_, text)| *text)
+                    .map(|(_, text)| Cow::Owned(text()))
             })
             .unwrap_or_default()
+    }
+
+    fn system_blocks(&self) -> Vec<crate::core::prompt::Block> {
+        use crate::core::prompt::{Block, DEFAULT_SYSTEM, default_system};
+        match &self.system_file {
+            Some(path) => vec![Block::new(
+                "system",
+                path.display().to_string(),
+                &self.system,
+            )],
+            None if self.system == default_system() => vec![
+                Block::new("role", "built-in system", DEFAULT_SYSTEM),
+                Block::new(
+                    "execution",
+                    "built-in execution",
+                    &format!("\n\n{}", agent::EXECUTION),
+                ),
+            ],
+            None => vec![Block::new("system", "provided system", &self.system)],
+        }
     }
 
     /// The files that read differently in `now`, named as a person would.
@@ -260,11 +283,12 @@ pub fn resolve(
         .collect();
     let shelf = (!pinned.no_skills).then(|| {
         let shelf = skills::Shelf::new(skill_dirs);
-        let builtins = [TOOL_CREATOR, SKILL_CREATOR, MCP_SETUP, PI_SKILL];
+        let builtins = [SKILL_CREATOR, MCP_SETUP];
         Arc::new(
             builtins
                 .into_iter()
                 .filter_map(skills::Skill::builtin)
+                .chain([tool_creator(), super::help::skill()])
                 .fold(shelf, skills::Shelf::with_builtin),
         )
     });
@@ -397,7 +421,11 @@ pub fn resolve(
         day: prompt_files.day.clone(),
         tier,
     };
-    system.push_str(&facts.render());
+    let mut prompt_blocks = prompt_files.system_blocks();
+    for (block, text) in facts.blocks() {
+        prompt_blocks.push(block);
+        system.push_str(&text);
+    }
     // A child stands on the same tree, machine and tier, but not on the blocks
     // that address a run serving a user: nobody can ask it for a tool, and it
     // has no next turn for one to appear in.
@@ -413,11 +441,12 @@ pub fn resolve(
         brief: std::sync::Arc::new(agent::Briefing {
             registry: registry.within(tier),
             system,
-            summarize: prompt_files.prompt("summarize").to_string(),
+            summarize: prompt_files.prompt("summarize").into_owned(),
             effort,
             approver: std::sync::Arc::new(agent::Ceiling(tier)),
             hooks: hooks.arm(std::sync::Arc::new(toolbox::channel::NoOne)),
         }),
+        prompt_blocks,
         hooks,
         subagent_deadline: config
             .subagent_deadline
@@ -469,16 +498,35 @@ fn system_file(pinned: &Pinned) -> Option<PathBuf> {
 }
 
 const TOOL_CREATOR: &str = include_str!("../../skills/tool-creator/SKILL.md");
+
+// The parts few tools need stay out of the instructions until asked for.
+const TOOL_CREATOR_FILES: [(&str, &str); 3] = [
+    (
+        "interface.md",
+        include_str!("../../skills/tool-creator/interface.md"),
+    ),
+    (
+        "background.md",
+        include_str!("../../skills/tool-creator/background.md"),
+    ),
+    (
+        "events.md",
+        include_str!("../../skills/tool-creator/events.md"),
+    ),
+];
+
+fn tool_creator() -> skills::Skill {
+    skills::Skill::builtin(TOOL_CREATOR)
+        .expect("a valid built-in skill")
+        .with_files(
+            TOOL_CREATOR_FILES
+                .iter()
+                .map(|(name, text)| (name.to_string(), *text))
+                .collect(),
+        )
+}
 const SKILL_CREATOR: &str = include_str!("../../skills/skill-creator/SKILL.md");
 const MCP_SETUP: &str = include_str!("../../skills/mcp-setup/SKILL.md");
-
-// pi as its README tells it, for when the user asks about pi itself: one
-// source, so a feature written up there is known here.
-const PI_SKILL: &str = concat!(
-    "---\nname: pi-help\ndescription: Read pi's README for its configuration, tools, sessions, and limits. \
-     Use this skill when asked how to use pi or how a pi feature works.\n---\n\n",
-    include_str!("../../../../README.md"),
-);
 
 /// The checkout's directories before the home's, so a name both use is the
 /// project's — skill and script alike. The reason to keep something in a
@@ -584,16 +632,16 @@ pub fn editable(pinned: &Pinned, root: &Path) -> Vec<Editable> {
 }
 
 // Where each replaceable prompt's file would be, with the text it replaces.
-fn replacements() -> impl Iterator<Item = (PathBuf, &'static str)> {
+fn replacements() -> impl Iterator<Item = (PathBuf, String)> {
     crate::core::prompt::REPLACEABLE
         .iter()
-        .filter_map(|(name, text)| Some((config::prompt_file(name)?, *text)))
+        .filter_map(|(name, text)| Some((config::prompt_file(name)?, text())))
 }
 
 // The built-in text the file at `path` replaces, when it replaces one. A
 // `--system` file is not one: the flag needs it there, so it is never removed.
-fn builtin_of(path: &Path) -> Option<&'static str> {
-    std::iter::once((config::system_file(), crate::core::prompt::DEFAULT_SYSTEM))
+fn builtin_of(path: &Path) -> Option<String> {
+    std::iter::once((config::system_file(), crate::core::prompt::default_system()))
         .filter_map(|(p, text)| Some((p?, text)))
         .chain(replacements())
         .find(|(p, _)| p == path)
@@ -772,8 +820,66 @@ mod tests {
     fn every_replaceable_prompt_falls_back_to_its_built_in() {
         let files = super::PromptFiles::default();
         for (name, text) in crate::core::prompt::REPLACEABLE {
+            let text = text();
             assert!(!text.trim().is_empty(), "{name}");
             assert_eq!(files.prompt(name), text, "{name}");
+        }
+    }
+
+    #[test]
+    fn defaults_share_execution_rules_but_replacements_replace_them_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tool::Workspace::new(dir.path()).unwrap();
+        let settings = pi_store::settings::Settings::new(toml::Table::new().into(), None);
+        let pinned = crate::args::Pinned {
+            no_skills: true,
+            no_context_files: true,
+            tier: Some(pi_store::args::TierArg::Read),
+            ..Default::default()
+        };
+        for custom in [None, Some("Only answer the question."), Some("")] {
+            let files = std::sync::Arc::new(super::PromptFiles {
+                system: custom.map_or_else(crate::core::prompt::default_system, str::to_string),
+                system_file: custom.map(|_| dir.path().join("system.md")),
+                day: "2026-11-01".into(),
+                ..Default::default()
+            });
+            let resolved = super::resolve(
+                &pinned,
+                &workspace,
+                &Default::default(),
+                &settings,
+                Some(files.clone()),
+                &[],
+            )
+            .unwrap();
+            assert!(resolved.brief.system.starts_with(&files.system));
+            assert_eq!(
+                resolved.brief.system.matches(agent::EXECUTION).count(),
+                usize::from(custom.is_none())
+            );
+            assert!(resolved.brief.system.contains("<workspace path="));
+            assert!(!resolved.brief.system.contains("<project_tools"));
+            assert!(!resolved.brief.system.contains("`write` and `edit`"));
+            assert_eq!(
+                resolved
+                    .prompt_blocks
+                    .iter()
+                    .map(|b| b.bytes)
+                    .sum::<usize>(),
+                resolved.brief.system.len(),
+            );
+            assert!(files.prompt("subagent").contains(agent::EXECUTION));
+            assert!(!files.prompt("summarize").contains(agent::EXECUTION));
+        }
+
+        let child_path = pi_store::config::prompt_file("subagent").unwrap();
+        for text in ["Only return the answer.", ""] {
+            let files = super::PromptFiles {
+                prompts: vec![(child_path.clone(), text.into())],
+                ..Default::default()
+            };
+            assert_eq!(files.prompt("subagent"), text);
         }
     }
 
@@ -828,6 +934,14 @@ mod tests {
         }
     }
 
+    // A file the instructions never name is one the model never reads.
+    #[test]
+    fn the_tool_creator_names_each_of_its_files() {
+        for (name, _) in super::TOOL_CREATOR_FILES {
+            assert!(super::TOOL_CREATOR.contains(&format!("`{name}`")), "{name}");
+        }
+    }
+
     #[test]
     fn the_skill_creator_example_parses() {
         let example = super::SKILL_CREATOR
@@ -863,7 +977,7 @@ mod tests {
 
     #[test]
     fn pi_help_is_a_builtin_skill() {
-        let help = skills::Skill::builtin(super::PI_SKILL).expect("pi-help parses");
+        let help = super::super::help::skill();
         assert_eq!(help.name, "pi-help");
     }
 
@@ -893,7 +1007,11 @@ mod tests {
         let words = crate::input::commands::BUILTIN
             .iter()
             .map(|c| c.word.to_string());
-        let gone = missing(words, &[super::PI_SKILL], &["`{}`", "`{} ", "`{}["]);
+        let gone = missing(
+            words,
+            &[super::super::help::README],
+            &["`{}`", "`{} ", "`{}["],
+        );
         assert!(gone.is_empty(), "README.md lacks {gone:?}");
     }
 
@@ -908,7 +1026,7 @@ mod tests {
             ]
             .map(String::from),
         );
-        let gone = missing(names, &[super::PI_SKILL], &["`{}`"]);
+        let gone = missing(names, &[super::super::help::README], &["`{}`"]);
         assert!(gone.is_empty(), "README.md lacks {gone:?}");
     }
 
@@ -928,7 +1046,11 @@ mod tests {
             .collect();
         assert!(keys.len() > 10, "{refused}");
         let example = include_str!("../../../../examples/pi.toml");
-        let gone = missing(keys, &[super::PI_SKILL, example], &["{} =", "[{}", "`{}`"]);
+        let gone = missing(
+            keys,
+            &[super::super::help::README, example],
+            &["{} =", "[{}", "`{}`"],
+        );
         assert!(
             gone.is_empty(),
             "README.md and examples/pi.toml lack {gone:?}"

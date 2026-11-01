@@ -1,9 +1,9 @@
 ---
 [package]
 # Bump this script's version whenever it changes.
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
-description = "Connect this session to WeChat when the user requests it.\nMessages sent from the user's phone are submitted to this session, including commands. Each answer returns to the phone.\nThe tool runs in the background until you stop the background command.\nOn first use, the background command provides a QR code for the user to scan.\nThe login persists for later use."
+description = "Connect this session to WeChat when the user requests it.\nThe tool submits messages from the user's phone to this session, including commands.\nEach answer returns to the phone.\n\nThe tool runs in the background until you stop its background command.\nOn first use, the background command provides a QR code for the user to scan.\nThe login persists for later use."
 
 [package.metadata.pi]
 background = true

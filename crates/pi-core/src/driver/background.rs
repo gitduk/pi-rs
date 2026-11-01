@@ -1444,14 +1444,17 @@ impl toolbox::channel::Channel for Handle {
 #[async_trait]
 impl Controls for Commands {
     fn description(&self) -> &str {
-        "Call without a command to list background commands. Use `output` to read a command's latest output. \
+        "Call without `command` to list background commands. \
+             Use `output` to read a command's latest output. \
              Use `stop` to stop commands. \
-             Use `restart` to run a command again under its existing id. It stops the previous run first. \
-             Each of these names one command id, a list of ids, or \"all\".\n\n\
+             Use `restart` to run a command again under its existing ID. \
+             A restart stops the previous run first. \
+             Each control accepts one command ID, a list of IDs, or \"all\".\n\n\
              Results arrive automatically before the next model request. \
              If the run ended, results open a new turn. \
              Continue independent work, or report progress and end this turn. \
-             Do not poll or wait for background work."
+             Do not poll or wait for background work. \
+             Read `output` only when your next action needs a running command's current output."
     }
 
     fn parameters(&self) -> serde_json::Map<String, Value> {

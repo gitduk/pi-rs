@@ -3,19 +3,51 @@
 //!
 //! The assistant's prompt may be replaced or emptied, so everything the run
 //! needs to know about pi is said here. Blocks refer to each other ("below"),
-//! which is why their order lives in one function: `Standing::render`.
+//! which is why their order lives in one function: `Standing::blocks`.
 
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
-/// The assistant's own prompt, when no file replaces it.
+/// The role-specific part of the default main-agent prompt.
 pub const DEFAULT_SYSTEM: &str = include_str!("../../prompts/system.md");
+
+/// The default role and shared execution policy. A replacement file replaces both.
+pub fn default_system() -> String {
+    format!("{DEFAULT_SYSTEM}\n\n{}", agent::EXECUTION)
+}
+
+/// Build a complete built-in prompt.
+pub type DefaultPrompt = fn() -> String;
 
 /// The built-in prompts a file of the same name under pi's `prompts/`
 /// replaces whole, each with its built-in text.
-pub const REPLACEABLE: [(&str, &str); 2] = [
-    ("summarize", agent::compaction::SUMMARIZE),
-    ("subagent", subagent::PROMPT),
+pub const REPLACEABLE: [(&str, DefaultPrompt); 2] = [
+    ("summarize", || agent::compaction::SUMMARIZE.to_string()),
+    ("subagent", subagent::default_prompt),
 ];
+
+/// A rendered system block, without another copy of its text.
+#[derive(Debug, Clone)]
+pub struct Block {
+    pub name: &'static str,
+    pub source: String,
+    pub bytes: usize,
+    /// A diagnostic fingerprint, not an integrity check.
+    pub version: u64,
+}
+
+impl Block {
+    pub fn new(name: &'static str, source: impl Into<String>, text: &str) -> Self {
+        let mut hash = std::hash::DefaultHasher::new();
+        text.hash(&mut hash);
+        Self {
+            name,
+            source: source.into(),
+            bytes: text.len(),
+            version: hash.finish(),
+        }
+    }
+}
 
 /// The facts a run's blocks are drawn from. Empty fields leave their block out.
 #[derive(Debug, Clone)]
@@ -42,30 +74,71 @@ impl Standing {
     /// The blocks, each opened by a blank line, steadiest first: a provider
     /// caches the prompt by prefix, so what changes daily goes last.
     pub fn render(&self) -> String {
-        let mut out = String::new();
-        self.workspace(&mut out);
-        self.project_tools(&mut out);
-        self.pi_home(&mut out);
-        self.instructions(&mut out);
-        self.memory(&mut out);
-        self.env(&mut out);
-        out
+        self.blocks().into_iter().map(|(_, text)| text).collect()
+    }
+
+    /// The same blocks separately, for composition and inspection.
+    pub fn blocks(&self) -> Vec<(Block, String)> {
+        let mut blocks = Vec::new();
+        for (name, source, render) in [
+            (
+                "workspace",
+                self.workspace.display().to_string(),
+                Self::workspace as fn(&Self, &mut String),
+            ),
+            (
+                "project_tools",
+                self.project_tools
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                Self::project_tools,
+            ),
+            (
+                "pi_home",
+                self.pi_home
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                Self::pi_home,
+            ),
+            (
+                "instructions",
+                self.instructions
+                    .iter()
+                    .map(|(p, _)| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                Self::instructions,
+            ),
+            (
+                "memory",
+                self.memory
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                Self::memory,
+            ),
+            ("env", "runtime".to_string(), Self::env),
+        ] {
+            let mut text = String::new();
+            render(self, &mut text);
+            if !text.is_empty() {
+                blocks.push((Block::new(name, source, &text), text));
+            }
+        }
+        blocks
     }
 
     fn workspace(&self, out: &mut String) {
         out.push_str(&format!(
             "\n\n<workspace path=\"{}\"/>\n\nWork in this directory. \
 Relative paths resolve from the workspace. Commands start in the workspace. \
-Keep scripts, downloads, and state files in the workspace, including temporary files. \
-The user expects to find them there.\n\n\
-A script is a code file that an interpreter or runtime executes. \
-A tool is a named interface that the model can call directly. \
-A tool can use a script as its implementation. Writing a script does not require registering a tool. \
-When a registered tool supports the operation, call it directly through its tool interface. \
-Use bash for ordinary scripts or operations that other available tool interfaces cannot express. \
-Keep scripts written for the current task in the workspace. Run those task scripts through bash. \
-Running a script repeatedly does not require a new tool.\n\n\
-Reading may access files outside the workspace through absolute paths. URLs can access sources outside this machine.",
+Keep scripts, downloads, state files, and temporary files in the workspace. \
+Run task scripts through bash without registering a tool.\n\n\
+You may read files outside the workspace with absolute paths. \
+You may read sources outside this machine through URLs.",
             escaped(self.workspace.display())
         ));
         if !tool::Tier::Write.under(self.tier) {
@@ -73,11 +146,11 @@ Reading may access files outside the workspace through absolute paths. URLs can 
         }
         out.push_str(match self.fenced {
             true => {
-                "\n\nThe tools write and edit stay inside the workspace. \
-They can also access pi's home when a `<pi_home>` block specifies it."
+                "\n\nThe `write` and `edit` tools can change files only inside the workspace. \
+They can also change files in pi's home when a `<pi_home>` block specifies it."
             }
             false => {
-                "\n\nThe tools write and edit reach anywhere. \
+                "\n\nThe `write` and `edit` tools can change files anywhere. \
 Change a file outside the workspace only when the user requests it."
             }
         });
@@ -90,8 +163,10 @@ Change a file outside the workspace only when the user requests it."
         out.push_str(&format!(
             "\n\n<project_tools path=\"{}\">\nUse this directory for project tools by default. \
 This includes tools that depend on this project's code, data, paths, or configuration. \
-Create the directory if it does not exist. The run's write boundary still applies. \
-If that boundary blocks this directory, report the limit. Do not use pi's home as a fallback.\n</project_tools>",
+Create the directory if it does not exist. \
+The run's write boundary still applies. \
+If that boundary blocks this directory, report the limit. \
+Do not use pi's home instead.\n</project_tools>",
             escaped(dir.display())
         ));
     }
@@ -105,9 +180,13 @@ If that boundary blocks this directory, report the limit. Do not use pi's home a
 Tools here are available across projects. \
 Add a tool here only when the user requests a tool shared across projects. \
 A tool that depends on this project belongs with the project, not here.\n\n\
-Tools and skills added here become available on your next turn. No restart is needed. \
-pi registers tools from scripts in `tools/`. Do not store the current task's scripts or files here. \
-Read `tool-creator` to create tools, `skill-creator` to create skills, and `mcp-setup` to connect MCP servers.\n</pi_home>",
+Tools and skills added here become available on your next turn. \
+You do not need to restart pi. \
+pi registers tools from scripts in `tools/`. \
+Do not store the current task's scripts or files here.\n\n\
+- Read `tool-creator` to create tools.\n\
+- Read `skill-creator` to create skills.\n\
+- Read `mcp-setup` to connect MCP servers.\n</pi_home>",
             escaped(home.display())
         ));
     }
@@ -120,9 +199,11 @@ Read `tool-creator` to create tools, `skill-creator` to create skills, and `mcp-
         }
         out.push_str(
             "\n\nThe `<instructions>` blocks below contain the user's standing instructions for this machine and project. \
-The most general instructions appear first. Follow these instructions. \
-If two instructions conflict, the later instruction, nearer the workspace, takes precedence. \
-These instructions specify how to work here. The user's message specifies the current task.",
+The most general instructions appear first. \
+Follow these instructions. \
+If two instructions conflict, follow the later instruction from the path nearer the workspace. \
+These instructions specify how to work here. \
+The user's message specifies the current task.",
         );
         for (path, body) in &self.instructions {
             out.push_str(&format!(
@@ -141,8 +222,10 @@ These instructions specify how to work here. The user's message specifies the cu
         }
         out.push_str(&format!(
             "\n\n<memory>\nThese facts come from earlier sessions. \
-Use them without announcing that you remember them. State their source only if asked. \
-Memory may be outdated. The user's current instructions take precedence.\n{}\n</memory>",
+Use them without announcing that you remember them. \
+State their source only if the user asks. \
+Memory may be outdated. \
+The user's current instructions take precedence.\n{}\n</memory>",
             files(&self.memory)
         ));
     }
@@ -199,7 +282,7 @@ mod tests {
     #[test]
     fn the_write_boundary_claims_only_what_the_ceiling_allows() {
         for tier in [tool::Tier::Read, tool::Tier::Net] {
-            assert!(!standing(tier).render().contains("write and edit"));
+            assert!(!standing(tier).render().contains("`write` and `edit`"));
         }
         let fenced = standing(tool::Tier::Write).render();
         let open = Standing {
@@ -207,8 +290,11 @@ mod tests {
             ..standing(tool::Tier::Exec)
         }
         .render();
-        assert!(fenced.contains("write and edit stay inside"), "{fenced}");
-        assert!(open.contains("write and edit reach anywhere"), "{open}");
+        assert!(
+            fenced.contains("can change files only inside the workspace"),
+            "{fenced}"
+        );
+        assert!(open.contains("can change files anywhere"), "{open}");
     }
 
     // Blocks point at each other ("below"), and the prompt is cached by

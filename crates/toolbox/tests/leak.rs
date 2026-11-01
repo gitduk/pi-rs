@@ -25,7 +25,7 @@ async fn a_timeout_takes_the_whole_process_group() {
     };
     assert!(
         err.to_string()
-            .contains("everything it spawned were killed"),
+            .contains("killed the command and all its child processes"),
         "{err}"
     );
     assert_eq!(err.code(), Some("TOOL_TIMEOUT"));

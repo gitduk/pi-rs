@@ -65,8 +65,12 @@ mod tests {
         assert!(properties.contains_key("command"));
         assert!(properties.contains_key("cwd"));
         assert_eq!(schema["required"], json!(["command"]));
-        assert!(shell.description().contains("Wait for the command to exit"));
-        assert!(!shell.description().contains("command id"));
+        assert!(
+            shell
+                .description()
+                .contains("The call waits for the command to exit")
+        );
+        assert!(!shell.description().contains("command ID"));
     }
 
     struct ShellModel {

@@ -408,3 +408,33 @@ pub fn notice(lines: impl IntoIterator<Item = impl AsRef<str>>) -> String {
         .collect::<Vec<_>>()
         .join(pi_store::icons::PART_SEP)
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn both_skill_command_entries_keep_provenance_and_task_arguments() {
+        let skill = skills::Skill::builtin(
+            "---\nname: review\ndescription: Review code.\n---\nRead the changed code.\n",
+        )
+        .unwrap();
+        let mut notes = Vec::new();
+        let commands = crate::input::commands::commands(&[skill], &[], &mut notes);
+        let super::Step::Prompt { send, typed } =
+            super::step_for(&commands, "/review", "Review src/api.rs without edits.")
+        else {
+            panic!("a skill command must become a task");
+        };
+        let once = super::expand(&commands, "/review Review src/api.rs without edits.")
+            .unwrap()
+            .unwrap();
+        assert_eq!(send, once);
+        assert_eq!(
+            typed.as_deref(),
+            Some("/review Review src/api.rs without edits.")
+        );
+        assert!(send.contains("Skill: `review`\nSource: built-in"));
+        assert!(send.contains("Read the changed code."));
+        assert!(send.ends_with("Review src/api.rs without edits.\n"));
+        assert!(!send.contains("description:"));
+    }
+}

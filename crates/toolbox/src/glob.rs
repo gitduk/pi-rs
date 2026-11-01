@@ -30,8 +30,11 @@ impl Tool for Glob {
     }
 
     fn description(&self) -> &str {
-        "Find files by path pattern, newest first. This tool respects .gitignore. \
-         A pattern without `/` matches at any depth. For example, `*.rs` finds Rust files at every depth. \
+        "Find files by path pattern. \
+         Results list the newest files first. \
+         The tool respects `.gitignore`. \
+         A pattern without `/` matches at any depth. \
+         For example, `*.rs` finds Rust files at every depth.\n\n\
          Use `grep` to search file contents. \
          Prefer `glob` or `grep` to `find` through bash because these tools apply the ignore rules."
     }
@@ -40,9 +43,9 @@ impl Tool for Glob {
         json!({
             "type": "object",
             "properties": {
-                "pattern": { "type": "string", "description": "e.g. `*.rs`, `src/**/mod.rs`" },
+                "pattern": { "type": "string", "description": "Specify a path pattern, such as `*.rs` or `src/**/mod.rs`." },
                 "path": { "type": "string", "description": "Set the directory to search. An absolute path may access files outside the workspace. If omitted, search the workspace root." },
-                "limit": { "type": "integer", "description": "Max paths. Default 200." },
+                "limit": { "type": "integer", "description": "Return at most this many paths. The default is 200." },
             },
             "required": ["pattern"],
             "additionalProperties": false,

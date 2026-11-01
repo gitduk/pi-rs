@@ -1,6 +1,6 @@
 use llm::message::AssistantContent;
 use llm::model::ModelSpec;
-use llm::slice::clip_bytes;
+use llm::slice::{clip_bytes, head_bytes, tail_bytes};
 
 use crate::session::Entry;
 use llm::stream::{StopReason, Usage};
@@ -35,7 +35,7 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
             Entry::Ask { ask, .. } if ask.relayed.is_some() => lines.push(format!(
                 "[came back: {}] {}",
                 ask.shown_text(),
-                clip_bytes(&ask.text, BLOCK_BYTES)
+                user_text(&ask.text)
             )),
             Entry::Ask { ask, .. } => lines.push(format!(
                 "[user]{} {}",
@@ -44,7 +44,7 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
                     1 => " (image)".to_string(),
                     n => format!(" ({n} images)"),
                 },
-                clip_bytes(&ask.text, BLOCK_BYTES)
+                user_text(&ask.text)
             )),
             Entry::Bash { run, .. } => {
                 lines.push(format!("[user ran] {}", clip_bytes(&run.text, BLOCK_BYTES)))
@@ -104,6 +104,17 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
         );
     }
     out
+}
+
+// A user's task or correction can follow a long pasted body or skill.
+fn user_text(text: &str) -> String {
+    if text.len() <= BLOCK_BYTES {
+        return text.to_string();
+    }
+    let head = head_bytes(text, BLOCK_BYTES / 2);
+    let tail = tail_bytes(text, BLOCK_BYTES / 2);
+    let gone = text.len() - head.len() - tail.len();
+    format!("{head}\n… {gone} bytes omitted …\n{tail}")
 }
 
 /// Ask the model to compact a span of history into prose.
@@ -206,5 +217,49 @@ mod tests {
         assert!(out.contains("the original task"), "the head must survive");
         assert!(out.contains("the final state"), "the tail must survive");
         assert!(out.contains("bytes omitted"), "{}", &out[..80]);
+    }
+
+    #[test]
+    fn a_long_user_input_keeps_its_source_and_final_task_constraints() {
+        let text = format!(
+            "Run the review skill.\nSource: /skills/review/SKILL.md\n{}\nReview src/api.rs. Do not change files.",
+            "步骤".repeat(2_000),
+        );
+        let ask = user(&text);
+        let out = render(&[], &[&ask]);
+        assert!(out.contains("Source: /skills/review/SKILL.md"));
+        assert!(out.ends_with("Review src/api.rs. Do not change files."));
+        assert!(out.contains("bytes omitted"));
+        assert!(out.len() < BLOCK_BYTES + 100, "{}", out.len());
+        let correction = user("Do not change files.");
+        assert_eq!(render(&[], &[&correction]), "[user] Do not change files.");
+    }
+
+    #[test]
+    fn a_long_relayed_input_keeps_its_tail_without_becoming_a_user_request() {
+        let relayed = Entry::Ask {
+            id: EntryId(1),
+            at: 0,
+            ask: Prompt {
+                text: format!(
+                    "{}\nThe command failed, not the task.",
+                    "result\n".repeat(2_000)
+                ),
+                shown: Some("watch".into()),
+                relayed: Some("came from a command".into()),
+                images: Vec::new(),
+            },
+        };
+        let note = Entry::Note {
+            id: EntryId(2),
+            at: 0,
+            note: "A stale directive.".into(),
+        };
+        let out = render(&["Earlier verified work."], &[&relayed, &note]);
+        assert!(out.contains("[earlier summary]\nEarlier verified work."));
+        assert!(out.contains("[came back: watch]"));
+        assert!(!out.contains("[user]"));
+        assert!(!out.contains("A stale directive."));
+        assert!(out.ends_with("The command failed, not the task."));
     }
 }

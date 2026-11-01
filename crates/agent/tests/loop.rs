@@ -307,7 +307,7 @@ async fn every_call_gets_a_result_even_when_nothing_runs() {
     // The model's own text rides back in the rejection, or it can only guess
     // at what failed to parse from the column number.
     assert!(
-        results[2].flatten_text().contains(r#"you sent: {"path": "#),
+        results[2].flatten_text().contains(r#"You sent: {"path": "#),
         "{:?}",
         results[2]
     );
@@ -333,7 +333,7 @@ async fn a_denied_tier_comes_back_as_a_result_not_an_abort() {
     let results = tool_results(&view);
     assert!(results[0].is_error);
     assert!(
-        results[0].flatten_text().contains("capped at Read"),
+        results[0].flatten_text().contains("at most Read access"),
         "{:?}",
         results[0]
     );

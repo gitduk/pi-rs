@@ -5,7 +5,8 @@ description: Connect or fix MCP servers for pi. Use when adding an existing MCP 
 
 # Connecting an MCP server
 
-The `<pi_home>` block specifies pi's home: `$PI_HOME` when set, or `~/.pi` otherwise.
+The `<pi_home>` block specifies pi's home.
+pi uses `$PI_HOME` if you set it, or `~/.pi` otherwise.
 
 If the capability exists as an MCP server, connect that server instead of writing a tool.
 Add a section to `settings.toml` in pi's home.
@@ -28,7 +29,9 @@ A project's `.pi.toml` adds servers for that checkout alone.
 pi reports those servers at startup.
 
 A server that cannot start appears as `<server>__unavailable`.
-Its description explains the failure. The user can list servers and their tools, or reconnect a server.
+Its description explains the failure.
+The user can list servers and their tools, or reconnect a server.
 
 Check the server's documentation for its command and required variables.
-Never put a secret in the file. Reference the environment variable with `$`.
+Never put a secret in the file.
+Reference the environment variable with `$`.

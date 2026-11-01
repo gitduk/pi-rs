@@ -22,6 +22,8 @@ pub struct Skill {
     pub dir: PathBuf,
     /// The whole `SKILL.md` when it is compiled in rather than kept in `dir`.
     pub builtin: Option<&'static str>,
+    /// Referenced files compiled into a built-in skill, addressed by relative name.
+    pub builtin_files: Vec<(String, &'static str)>,
 }
 
 impl Skill {
@@ -36,7 +38,13 @@ impl Skill {
             description,
             dir: PathBuf::new(),
             builtin: Some(text),
+            builtin_files: Vec::new(),
         })
+    }
+
+    pub fn with_files(mut self, files: Vec<(String, &'static str)>) -> Self {
+        self.builtin_files = files;
+        self
     }
 
     /// Its `SKILL.md` as it stands.
@@ -155,6 +163,7 @@ fn read_one(dir: &Path) -> Read {
         description,
         dir: dir.to_path_buf(),
         builtin: None,
+        builtin_files: Vec::new(),
     }))
 }
 

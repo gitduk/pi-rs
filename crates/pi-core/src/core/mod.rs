@@ -9,6 +9,7 @@ pub mod bar;
 pub mod bash;
 pub mod content;
 pub mod dial;
+mod help;
 pub mod hooks;
 pub mod instructions;
 pub mod lane;
@@ -575,6 +576,7 @@ mod tests {
             description: description.to_string(),
             dir: std::path::PathBuf::from("/nowhere").join(name),
             builtin: None,
+            builtin_files: Vec::new(),
         }
     }
 

@@ -352,7 +352,7 @@ impl Drivers {
                 ("commands", "them")
             };
             format!(
-                "The user stopped background {execution} {ids}; nothing more will come back from {it}."
+                "The user stopped background {execution} {ids}. No further results will arrive from {it}."
             )
         })
     }
