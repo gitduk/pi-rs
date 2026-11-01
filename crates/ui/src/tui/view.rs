@@ -129,6 +129,47 @@ pub struct Stream {
     // Model output with no trailing newline yet, kept live while still
     // being written; a completed line goes straight to scrollback.
     pub(super) text: String,
+    // The answer as last drawn: a frame with nothing new to draw, a spinner
+    // tick, draws it again from here rather than from the markdown.
+    drawn: std::cell::RefCell<Option<Drawn>>,
+}
+
+// The lines an answer drew, and what they were drawn from.
+struct Drawn {
+    text: String,
+    width: usize,
+    color: bool,
+    theme: std::sync::Arc<pi_store::theme::Theme>,
+    lines: Vec<ratatui::text::Line<'static>>,
+}
+
+impl Stream {
+    // The answer's lines `draw` makes of the text at this width and paint,
+    // drawn again only once one of them has changed.
+    pub(super) fn answer_lines(
+        &self,
+        width: usize,
+        paint: &Paint,
+        draw: impl FnOnce(&str) -> Vec<ratatui::text::Line<'static>>,
+    ) -> Vec<ratatui::text::Line<'static>> {
+        let mut drawn = self.drawn.borrow_mut();
+        let fresh = drawn.as_ref().is_some_and(|d| {
+            d.width == width
+                && d.color == paint.color
+                && std::sync::Arc::ptr_eq(&d.theme, &paint.theme)
+                && d.text == self.text
+        });
+        if !fresh {
+            *drawn = Some(Drawn {
+                text: self.text.clone(),
+                width,
+                color: paint.color,
+                theme: paint.theme.clone(),
+                lines: draw(&self.text),
+            });
+        }
+        drawn.as_ref().expect("drawn above").lines.clone()
+    }
 }
 
 #[derive(Default, PartialEq, Eq)]

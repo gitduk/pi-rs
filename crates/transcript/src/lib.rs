@@ -207,8 +207,9 @@ pub enum Entry {
         at: u64,
         ask: Prompt,
     },
-    // A `!` command with its output. `run.text` is what the model reads;
-    // `run.shown` is the `!cmd` line the screen echoes, both from one source.
+    // A shell command the user ran, with its output. `run.text` is what the
+    // model reads; `run.shown` is the command as shown to the user, both from
+    // one source.
     Bash {
         id: EntryId,
         at: u64,
@@ -326,7 +327,8 @@ impl Entry {
         })
     }
 
-    /// The prompt side of a user entry — an ask or a `!` command. `None` for
+    /// The prompt side of a user entry — an ask or a shell command the user
+    /// ran. `None` for
     /// every other kind.
     pub fn prompt(&self) -> Option<&Prompt> {
         match self {
@@ -606,7 +608,7 @@ impl Session {
         id
     }
 
-    /// A `!` command and its output, filed by the door that ran it.
+    /// A shell command the user ran and its output, filed by whoever ran it.
     pub fn push_bash(&mut self, run: Prompt) -> EntryId {
         let (id, at) = self.mint();
         self.entries.push(Entry::Bash { id, at, run });
@@ -615,7 +617,7 @@ impl Session {
 
     /// Machine prose in the user's voice — the loop's round number, a stopped
     /// run's cause. Read by the model as if the user said it, which is why
-    /// anything pushed here must survive being read that way. Shown on screen
+    /// anything pushed here must survive being read that way. Shown to the user
     /// as a notice.
     pub fn push_note(&mut self, text: impl Into<String>) -> EntryId {
         let (id, at) = self.mint();
@@ -627,10 +629,10 @@ impl Session {
         id
     }
 
-    /// A row for the screen alone: a run's tally line, a warning about the
+    /// A line shown to the user alone: a run's tally, a warning about the
     /// turn. Never content on the wire — the model is told what it needs in
-    /// prose it can act on, and a status line is not that. Kept so the rebuild
-    /// draws the same screen the live path drew.
+    /// prose it can act on, and a tally is not that. Kept so a rebuilt
+    /// session shows what the live one showed.
     pub fn push_screen(&mut self, text: impl Into<String>) -> EntryId {
         self.screen(text, false)
     }
@@ -819,7 +821,7 @@ impl Session {
     }
 
     /// Everywhere the conversation can be rewound to, in session order:
-    /// what the user said (asks and `!` asides), never an answer.
+    /// what the user said (asks and shell commands they ran), never an answer.
     ///
     /// Reads `history`, not `view`: a compacted-away prompt stays reachable,
     /// and rewinding past its compaction entry undoes the compaction too.
@@ -848,14 +850,14 @@ impl Session {
             .map(|p| p.shown_text().to_string())
     }
 
-    /// What the user last said: a prompt or a `!` command.
+    /// What the user last said: a prompt or a shell command they ran.
     pub fn last_prompt(&self) -> Option<&Prompt> {
         self.entries.iter().rev().find_map(Entry::prompt)
     }
 
     /// The last question the user asked, when there is one to take back.
     ///
-    /// Prompts only: a `!` command's output is not something anyone sent, and
+    /// Prompts only: a shell command's output is not something anyone sent, and
     /// unsending it would hand back a line that was never typed as a question.
     /// None when the last ask is one pi relayed: taking it back would throw
     /// away an answer the model is owed, and hand back a line nobody typed.
@@ -1586,7 +1588,7 @@ mod tests {
         }
     }
 
-    // Whatever the user's side files after a stop — a `!` command, a command's or
+    // Whatever the user's side files after a stop — a shell command, a command's or
     // loop's note — must not split a `tool_use` from its result: providers
     // 400 on a result that is not first in its user turn.
     #[test]
@@ -1603,7 +1605,7 @@ mod tests {
             s.push_note("loop round 2");
         };
         for (why, file) in [
-            ("a `!` command", &bang as &dyn Fn(&mut Session)),
+            ("a shell command", &bang as &dyn Fn(&mut Session)),
             ("a note", &note),
         ] {
             let mut s = Session::new();

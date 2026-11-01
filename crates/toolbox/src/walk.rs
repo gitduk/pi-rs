@@ -59,22 +59,52 @@ fn compile(
 /// Dotted entries are kept except `.git` itself; the global gitignore applies
 /// only inside the workspace; an exclude set prunes whole subtrees at the walk.
 pub fn walker(ws: &Workspace, root: &Path, skip: Option<GlobSet>) -> ignore::WalkBuilder {
-    walker_at(root, root.starts_with(ws.root()), skip)
+    let inside = root.starts_with(ws.root());
+    build(root, inside, skip, Some(ws.root().to_path_buf()))
 }
 
 /// `walker` for a caller holding a path, not a `Workspace`: `global` says
 /// whether the user's global gitignore applies at `root`.
 pub fn walker_at(root: &Path, global: bool, skip: Option<GlobSet>) -> ignore::WalkBuilder {
+    build(root, global, skip, None)
+}
+
+fn build(
+    root: &Path,
+    global: bool,
+    skip: Option<GlobSet>,
+    base: Option<PathBuf>,
+) -> ignore::WalkBuilder {
     let mut b = ignore::WalkBuilder::new(root);
+    let top = root.to_path_buf();
     b.hidden(false)
         .follow_links(false)
         .git_ignore(true)
         .git_global(global)
         .require_git(false)
         .filter_entry(move |e| {
-            e.file_name() != ".git" && skip.as_ref().is_none_or(|s| !s.is_match(e.path()))
+            e.file_name() != ".git"
+                && skip
+                    .as_ref()
+                    .is_none_or(|s| !matches(s, e.path(), &top, base.as_deref()))
         });
     b
+}
+
+/// Whether `set` matches `path`. A pattern is read against the path relative
+/// to the walk `root`, and also relative to `base` (the workspace root) when
+/// the path lies under it, so `src/**/mod.rs` means the same wherever the
+/// search starts. A root that is itself a file is matched by its name.
+pub fn matches(set: &GlobSet, path: &Path, root: &Path, base: Option<&Path>) -> bool {
+    let local = match path.strip_prefix(root) {
+        Ok(rel) if rel.as_os_str().is_empty() => path.file_name().map(Path::new),
+        Ok(rel) => Some(rel),
+        Err(_) => None,
+    };
+    let shared = base
+        .and_then(|b| path.strip_prefix(b).ok())
+        .filter(|rel| !rel.as_os_str().is_empty());
+    local.into_iter().chain(shared).any(|rel| set.is_match(rel))
 }
 
 /// Resolve an optional subdirectory argument to a walk root. The walk may

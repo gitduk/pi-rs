@@ -931,7 +931,12 @@ async fn a_summarizer_that_fails_drops_the_history_without_failing_the_turn() {
             req: &Request,
         ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
             if req.tools.is_empty() {
-                return Err(llm::LlmError::Stream("summarizer is down".into()));
+                // Not a passing fault: one that is would be retried first.
+                return Err(llm::LlmError::Api {
+                    format: "anthropic",
+                    status: 401,
+                    body: "summarizer is down".into(),
+                });
             }
             let i = self.0.fetch_add(1, Ordering::SeqCst);
             let events = if i < 4 {
@@ -1262,19 +1267,23 @@ impl Transport for Picky {
         let size = llm::estimate::tokens(&req.messages, spec);
         if size > self.fits {
             self.refusals.fetch_add(1, Ordering::SeqCst);
-            // 413, not 400: only transient statuses are retried after a squeeze.
-            let body = match self.named {
+            // As the providers send it: a window named in a 400's wording, or a
+            // bare 413 that names none.
+            let (status, body) = match self.named {
                 // A provider counts more than our estimate does, or it would
                 // not be refusing a request we fitted to its window.
-                Some(limit) => format!(
-                    "prompt is too long: {} tokens > {limit} maximum",
-                    size + limit
+                Some(limit) => (
+                    400,
+                    format!(
+                        "prompt is too long: {} tokens > {limit} maximum",
+                        size + limit
+                    ),
                 ),
-                None => "Request exceeds the maximum size".into(),
+                None => (413, "Request exceeds the maximum size".into()),
             };
             return Err(llm::LlmError::Api {
                 format: "anthropic",
-                status: 413,
+                status,
                 body,
             });
         }
@@ -1436,10 +1445,10 @@ impl Transport for Mixed {
         };
         match self.calls.fetch_add(1, Ordering::SeqCst) {
             0 => Err(unnamed()),
-            // 413, not 400: only transient statuses are retried after a squeeze.
+            // As Anthropic sends it: the window named in a 400's wording.
             1 => Err(llm::LlmError::Api {
                 format: "anthropic",
-                status: 413,
+                status: 400,
                 body: format!("prompt is too long: 99999 tokens > {} maximum", self.limit),
             }),
             2 => Err(unnamed()),

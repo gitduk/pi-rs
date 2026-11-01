@@ -3,15 +3,14 @@
 //! back. Sweeps that assemble output as items share [`Budget`]; what reaches
 //! the transcript is what [`bound`] lets through.
 
-use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use llm::message::ToolResultContent;
 use llm::slice::{head_bytes, tail_bytes};
 use serde_json::Value;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::fold::fold_repeats;
 use crate::spill::{self, SpillRef};
@@ -20,6 +19,10 @@ use crate::{Ctx, Tool, ToolError, ToolOutput};
 /// How much of a spilled stream the view keeps of each end — the same two
 /// halves [`spill::prune`] shows of a body it holds whole.
 const VIEW: usize = spill::MAX_OUTPUT / 2;
+
+/// The most one stream writes to its spill file. A runaway stream would
+/// otherwise fill the disk; past it the bytes are counted and dropped.
+const MAX_SPILL: usize = if cfg!(test) { 64 << 10 } else { 256 << 20 };
 
 /// What a finished capture leaves: a transcript-sized view of the stream, how
 /// many bytes it was, and where the whole of it lives once it spilled.
@@ -64,10 +67,13 @@ enum Spill {
     /// Nowhere yet: the stream is still under it.
     #[default]
     Held,
-    /// Into the spill file, which `locator` answers to.
+    /// Into the spill file at `path`, which `locator` answers to, `written`
+    /// bytes so far.
     To {
-        file: std::fs::File,
+        file: tokio::fs::File,
+        path: PathBuf,
         locator: String,
+        written: usize,
     },
     /// Nowhere: the spill was given up. Why, answered once the stream is dry
     /// and then taken: it still drains, keeping only its two ends, or the
@@ -91,22 +97,33 @@ impl Capture {
         loop {
             let n = reader.read(&mut buf).await?;
             if n == 0 {
+                // A tokio file finishes its last write in the background;
+                // the spill is whole only once that has landed.
+                if let Spill::To { file, .. } = &mut self.spill
+                    && let Err(e) = file.flush().await
+                {
+                    self.give_up(e.into()).await;
+                }
                 return match &mut self.spill {
                     Spill::Lost(why) => why.take().map_or(Ok(()), Err),
                     Spill::Held | Spill::To { .. } => Ok(()),
                 };
             }
-            self.absorb(&buf[..n], ctx);
+            self.absorb(&buf[..n], ctx).await;
         }
     }
 
-    fn absorb(&mut self, chunk: &[u8], ctx: &Ctx) {
+    async fn absorb(&mut self, chunk: &[u8], ctx: &Ctx) {
         self.total += chunk.len();
         match &mut self.spill {
             Spill::Held => {}
-            Spill::To { file, .. } => {
-                if let Err(e) = file.write_all(chunk) {
-                    self.give_up(e.into());
+            Spill::To { file, written, .. } => {
+                let take = chunk.len().min(MAX_SPILL.saturating_sub(*written));
+                if take > 0 {
+                    match file.write_all(&chunk[..take]).await {
+                        Ok(()) => *written += take,
+                        Err(e) => self.give_up(e.into()).await,
+                    }
                 }
                 self.keep_tail(chunk);
                 return;
@@ -123,9 +140,9 @@ impl Capture {
         let room = spill::MAX_OUTPUT - self.front.len();
         self.front.extend_from_slice(&chunk[..room]);
         let rest = &chunk[room..];
-        match self.open_with(rest, ctx) {
-            Ok((file, locator)) => self.spill = Spill::To { file, locator },
-            Err(why) => self.give_up(why),
+        match self.open_with(rest, ctx).await {
+            Ok(to) => self.spill = to,
+            Err(why) => self.give_up(why).await,
         }
         // The tail is the stream's last bytes, held ones included: a stream
         // just past the threshold has most of its tail still in `front`.
@@ -134,17 +151,34 @@ impl Capture {
         self.keep_tail(rest);
     }
 
-    fn open_with(&self, rest: &[u8], ctx: &Ctx) -> Result<(std::fs::File, String), ToolError> {
+    async fn open_with(&self, rest: &[u8], ctx: &Ctx) -> Result<Spill, ToolError> {
         let (path, locator) = spill::allocate(ctx)?;
-        let mut file = open_spill(&path)?;
-        file.write_all(&self.front)?;
-        file.write_all(rest)?;
-        Ok((file, locator))
+        let mut file = open_spill(&path).await?;
+        let written = async {
+            file.write_all(&self.front).await?;
+            file.write_all(rest).await
+        };
+        if let Err(e) = written.await {
+            let _ = tokio::fs::remove_file(&path).await;
+            return Err(e.into());
+        }
+        Ok(Spill::To {
+            file,
+            path,
+            locator,
+            written: self.front.len() + rest.len(),
+        })
     }
 
-    // A half-written spill is not offered back: its locator would read as whole.
-    fn give_up(&mut self, why: ToolError) {
-        self.spill = Spill::Lost(Some(why));
+    // A half-written spill is not offered back: its locator would read as
+    // whole, so the file goes too.
+    async fn give_up(&mut self, why: ToolError) {
+        if let Spill::To { file, path, .. } =
+            std::mem::replace(&mut self.spill, Spill::Lost(Some(why)))
+        {
+            drop(file);
+            let _ = tokio::fs::remove_file(&path).await;
+        }
     }
 
     fn keep_tail(&mut self, chunk: &[u8]) {
@@ -171,7 +205,9 @@ impl Capture {
                     spill: None,
                 };
             }
-            Spill::To { locator, .. } => (Some(locator), false),
+            Spill::To {
+                locator, written, ..
+            } => (Some((locator, written)), false),
             Spill::Lost(_) => (None, true),
         };
         let front = String::from_utf8_lossy(&front);
@@ -182,28 +218,29 @@ impl Capture {
         if lost {
             text.push_str("\n… the omitted bytes are gone — spill failed\n");
         }
+        if let Some((_, written)) = &spilled
+            && *written < total
+        {
+            text.push_str(&format!(
+                "\n… the spill keeps only the first {written} bytes; the rest was dropped\n"
+            ));
+        }
         Captured {
             total,
             text,
-            spill: spilled.map(|locator| SpillRef {
-                bytes: total,
-                locator,
-            }),
+            spill: spilled.map(|(locator, bytes)| SpillRef { bytes, locator }),
         }
     }
 }
 
 // The file grows as the stream arrives, so the tmp-and-rename dance of
 // `state::write_private` does not apply: a killed run leaves no locator behind.
-fn open_spill(path: &Path) -> std::io::Result<std::fs::File> {
-    let mut opts = std::fs::OpenOptions::new();
+async fn open_spill(path: &Path) -> std::io::Result<tokio::fs::File> {
+    let mut opts = tokio::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    opts.open(path)
+    opts.mode(0o600);
+    opts.open(path).await
 }
 
 /// Kept bytes one sweep of output assembly may hold — a grep's matches, a
@@ -329,6 +366,44 @@ mod tests {
         assert!(got.text.contains("bytes omitted"), "{got:?}");
         let back = std::fs::read(c.spill_path(&spill.locator).unwrap()).unwrap();
         assert_eq!(back.len(), body.len());
+    }
+
+    // A runaway stream fills its spill only up to the cap, and the view says
+    // the rest was dropped rather than offering the file as whole.
+    #[tokio::test]
+    async fn a_spill_stops_at_its_cap_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = ctx(dir.path());
+        let body = "y".repeat(MAX_SPILL * 2);
+        let got = take(body.as_bytes(), &c).await.unwrap();
+        assert_eq!(got.total, body.len());
+        let spill = got.spill.as_ref().expect("past the threshold must spill");
+        assert_eq!(spill.bytes, MAX_SPILL);
+        let back = std::fs::metadata(c.spill_path(&spill.locator).unwrap()).unwrap();
+        assert_eq!(back.len() as usize, MAX_SPILL);
+        assert!(
+            got.text.contains("rest was dropped"),
+            "{}",
+            tail_bytes(&got.text, 200)
+        );
+    }
+
+    // A spill given up mid-stream leaves no partial file behind.
+    #[tokio::test]
+    async fn a_spill_given_up_removes_its_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = ctx(dir.path());
+        let body = "z".repeat(spill::MAX_OUTPUT + 5_000);
+        let mut cap = Capture::new();
+        cap.drain(&mut body.as_bytes(), &c).await.unwrap();
+        let Spill::To { path, .. } = &cap.spill else {
+            panic!("past the threshold must spill");
+        };
+        let path = path.clone();
+        assert!(path.exists());
+        cap.give_up(ToolError::Spill("disk full".into())).await;
+        assert!(!path.exists());
+        assert!(cap.finish().text.contains("spill failed"));
     }
 
     // Just past the threshold, the view still ends on the stream's last

@@ -23,18 +23,16 @@ pub fn kept(memory: &Memory, dir: &Path) -> (Vec<(String, String)>, Vec<String>)
     let root = main_root(dir);
     let mut used = 0;
     let (mut kept, mut left_out) = (Vec::new(), Vec::new());
+    // Measured as the prompt carries it: a stale mark lengthens a file.
     for file in memory.files(&root) {
-        if used + file.body.len() > BUDGET {
+        let body = marked(&file.body, &root);
+        if used + body.len() > BUDGET {
             left_out.push(file.name);
             continue;
         }
-        used += file.body.len();
-        kept.push(file);
+        used += body.len();
+        kept.push((file.name, body));
     }
-    let kept = kept
-        .into_iter()
-        .map(|f| (f.name, marked(&f.body, &root)))
-        .collect();
     (kept, left_out)
 }
 
@@ -319,5 +317,28 @@ mod tests {
             "- uses `src/tools/registry.py` and `src/old.py` \
              [possibly stale: `src/old.py` no longer exists]\n- plain\n"
         );
+    }
+    // The budget bounds what the prompt carries, so it is the marked text
+    // that is measured: marks can carry a file within it on disk past it.
+    #[test]
+    fn the_budget_counts_the_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("work");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        let memory = Memory::new(dir.path().join("memory"));
+        let line = "- `src/gone.py`\n";
+        let body = line.repeat(BUDGET / line.len());
+        assert!(body.len() <= BUDGET);
+        let path = memory.project_path(&main_root(&ws));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &body).unwrap();
+
+        let (kept, left_out) = kept(&memory, &ws);
+        assert!(
+            kept.is_empty(),
+            "{:?}",
+            kept.iter().map(|k| &k.0).collect::<Vec<_>>()
+        );
+        assert_eq!(left_out.len(), 1);
     }
 }

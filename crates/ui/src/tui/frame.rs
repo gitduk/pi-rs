@@ -565,14 +565,23 @@ impl Ui {
         // count the rows the block takes, not the lines before they did.
         let pending_rows = rows.len();
 
-        let content = body(
-            &view.surface.folds,
-            &view.surface.scrollback,
-            thinking,
-            &view.surface.stream.text,
-            width,
-            &self.paint,
-        );
+        let body = |text: &str| {
+            body(
+                &view.surface.folds,
+                &view.surface.scrollback,
+                thinking,
+                text,
+                width,
+                &self.paint,
+            )
+        };
+        // Reasoning streams only its unfinished line; an answer streams
+        // whole until it closes, too long to draw anew every frame.
+        let content = if thinking {
+            body(&view.surface.stream.text)
+        } else {
+            (view.surface.stream).answer_lines(width, &self.paint, body)
+        };
         if !thinking
             && content.first().is_some_and(|line| !line.spans.is_empty())
             && (pending_rows > 0 || previous.is_some_and(Row::is_tool_area))

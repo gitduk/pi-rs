@@ -27,7 +27,7 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Args {
-    // Never read by the child — this is the caller's word to the screen and
+    // Never read by the child — this is the caller's word to the user and
     // the log, which otherwise show a delegated task as a bare `subagent`.
     description: String,
     prompt: String,
@@ -160,8 +160,9 @@ struct Heard {
     doing: Doing,
 }
 
-// The child's latest call as the row names it, held at least `HOLD` so a
-// run of short calls does not make the row jump with each.
+// The child's latest call as its progress names it, held at least `HOLD`
+// so progress updates are paced: a run of short calls does not replace the
+// named call with each.
 #[derive(Default)]
 struct Doing {
     shown: String,
@@ -177,7 +178,7 @@ impl Doing {
         self.settle(now);
     }
 
-    // When a held call is owed the row, if one is waiting.
+    // When a held call is owed its place in the progress, if one is waiting.
     fn due(&self) -> Option<Instant> {
         self.next.as_ref()?;
         Some(self.at? + HOLD)
@@ -196,7 +197,7 @@ impl Doing {
 
 impl Heard {
     // `turn 3 · 41.2k/3.1k · read src/lib.rs`: where the child is, for the
-    // caller's row. The call goes last, so a narrow row clips it first.
+    // caller's progress. The call goes last, so a line cut short loses it first.
     fn progress(&self) -> String {
         let mut spent = self.spent;
         spent.add(&self.turn);
@@ -211,7 +212,7 @@ impl Heard {
     }
 }
 
-// The caller's row gets the child's progress only when it reads differently.
+// The caller gets the child's progress only when it reads differently.
 fn tell(caller: &Ctx, heard: &Heard, said: &mut String) {
     let progress = heard.progress();
     if progress != *said {
@@ -221,7 +222,7 @@ fn tell(caller: &Ctx, heard: &Heard, said: &mut String) {
 }
 
 // `read src/lib.rs`: the call's name and the one argument worth showing,
-// cut to its first line since the row is drawn one line at a time.
+// cut to its first line since progress is a single line.
 fn call_line(name: &str, args: &Value) -> String {
     match tool::summary(args).lines().next().map(str::trim) {
         Some(asked) if !asked.is_empty() => format!("{name} {asked}"),
@@ -392,7 +393,14 @@ impl Subagent {
                             return;
                         }
                     }
-                    _ = ticking.changed() => {}
+                    changed = ticking.changed() => {
+                        // The collector is gone (it panicked, and says so
+                        // itself): no tick will come, so stop watching rather
+                        // than wake on the closed channel forever.
+                        if changed.is_err() {
+                            return;
+                        }
+                    }
                     _ = watchdog_stop.cancelled() => return,
                 }
             }
@@ -452,12 +460,13 @@ impl Subagent {
             Ok(_) => None,
             // A stop only: our own token tripping leaves the parent's alone —
             // conflating them would end the caller's whole turn over a wedged child.
-            Err(AgentError::Cancelled) if ctx.cancel.is_cancelled() => {
+            // A child that outlived its grace was stopped all the same.
+            Err(AgentError::Cancelled | AgentError::Unstopped) if ctx.cancel.is_cancelled() => {
                 return Err(ToolError::Cancelled);
             }
             // Our token trips only for the parent's stop, caught just above,
             // or for the watchdog.
-            Err(AgentError::Cancelled) => Some(format!(
+            Err(AgentError::Cancelled | AgentError::Unstopped) => Some(format!(
                 "a call ran {} with no progress",
                 llm::figures::elapsed(self.deadline)
             )),
@@ -534,12 +543,12 @@ impl Subagent {
 // because several children run at once, so a bare cost names none of them.
 fn sketch(description: &str, heard: &Heard) -> String {
     let spent = llm::figures::slash(heard.spent.input, heard.spent.output);
-    // Flattened, not trusted: this row is written one line at a time, and a
-    // newline in it would stair-step everything drawn after.
+    // Flattened, not trusted: this is a single line, and a newline in it
+    // would break the line in two.
     let task = description.replace('\n', " ");
     match task.trim() {
-        // Nothing to hold apart from, so the brackets would enclose the row
-        // rather than rank it.
+        // Nothing to hold apart from, so the brackets would enclose the
+        // whole line rather than rank it.
         "" => spent,
         task => format!("{task} [{spent}]"),
     }

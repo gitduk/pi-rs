@@ -98,6 +98,7 @@ fn encode_reasoning(r: &Reasoning, spec: &ModelSpec) -> Option<Value> {
             }
             Some(block)
         }
+        Replay::Redacted { data } => Some(json!({ "type": "redacted_thinking", "data": data })),
         // No Anthropic spec ever encrypts one: the transport is chosen by the
         // same format `replay_for` reads.
         Replay::Encrypted { .. } | Replay::Dropped => None,
@@ -123,6 +124,8 @@ fn encode_message(msg: &Message, spec: &ModelSpec) -> Option<Value> {
             let blocks: Vec<Value> = content
                 .iter()
                 .filter_map(|b| match b {
+                    // Refused outright here, and it says nothing anyway.
+                    AssistantContent::Text(t) if t.text.trim().is_empty() => None,
                     AssistantContent::Text(t) => Some(json!({ "type": "text", "text": t.text })),
                     AssistantContent::Reasoning(r) => encode_reasoning(r, spec),
                     AssistantContent::ToolCall(call) => Some(json!({
@@ -292,7 +295,11 @@ fn decode_frame(
             let block = &data["content_block"];
             let kind = match gaps.owed(block, event, "type")? {
                 "text" => BlockKind::Text,
-                "thinking" | "redacted_thinking" => BlockKind::Reasoning,
+                "thinking" => BlockKind::Reasoning,
+                // Sealed whole at the start; no delta follows.
+                "redacted_thinking" => BlockKind::RedactedReasoning {
+                    data: gaps.owed(block, "redacted_thinking", "data")?.to_string(),
+                },
                 "tool_use" => BlockKind::ToolCall {
                     id: block["id"].as_str().map(str::to_string),
                     name: gaps.owed(block, "tool_use", "name")?.to_string(),
@@ -608,6 +615,90 @@ mod tests {
                 ])
             );
         }
+    }
+
+    // A redacted block carries its payload in the start frame and nothing after;
+    // dropped, the tool-use continuation that follows it is refused.
+    #[test]
+    fn redacted_thinking_goes_back_as_it_came() {
+        let spec = spec();
+        let mut acc = crate::stream::Accumulator::new(spec.model.clone());
+        let mut stop = StopReason::default();
+        let mut usage = Usage::default();
+        let mut gaps = Gaps::new("anthropic");
+        for frame in [
+            json!({ "type": "content_block_start", "index": 0,
+                "content_block": { "type": "redacted_thinking", "data": "sealed" } }),
+            json!({ "type": "content_block_stop", "index": 0 }),
+            json!({ "type": "content_block_start", "index": 1,
+                "content_block": { "type": "text", "text": "" } }),
+            json!({ "type": "content_block_delta", "index": 1,
+                "delta": { "type": "text_delta", "text": "\n\n" } }),
+            json!({ "type": "content_block_stop", "index": 1 }),
+            json!({ "type": "content_block_start", "index": 2,
+                "content_block": { "type": "tool_use", "id": "call_1", "name": "read" } }),
+            json!({ "type": "content_block_delta", "index": 2,
+                "delta": { "type": "input_json_delta", "partial_json": "{}" } }),
+            json!({ "type": "content_block_stop", "index": 2 }),
+            json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" } }),
+            json!({ "type": "message_stop" }),
+        ] {
+            if let Some(event) = decode_frame(&frame, &mut stop, &mut usage, &mut gaps) {
+                acc.push(event);
+            }
+        }
+        let req = Request {
+            messages: vec![
+                Message::user("go"),
+                acc.finish().message,
+                Message::tool_results(vec![ToolResult::text("call_1", "read", "ok")]),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            build_body(&spec, &req)["messages"][1]["content"],
+            json!([
+                { "type": "redacted_thinking", "data": "sealed" },
+                { "type": "tool_use", "id": "call_1", "name": "read", "input": {} },
+            ])
+        );
+        assert!(
+            crate::estimate::tokens(&req.messages, &spec)
+                > crate::estimate::tokens(&req.messages[..1], &spec)
+        );
+        // Sealed by this model, for this model: another one is not sent it.
+        let other = ModelSpec {
+            model: "another-model".into(),
+            ..spec.clone()
+        };
+        assert_eq!(
+            build_body(&other, &req)["messages"][1]["content"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+    }
+
+    // Whitespace alone is refused as a text block; a turn cut short may still
+    // hold one, and a turn of nothing else is not sent at all.
+    #[test]
+    fn whitespace_text_never_leaves() {
+        let req = Request {
+            messages: vec![
+                Message::user("go"),
+                Message::assistant_text(" \n"),
+                Message::user("again"),
+            ],
+            ..Default::default()
+        };
+        let body = build_body(&spec(), &req);
+        assert_eq!(
+            body["messages"],
+            json!([{ "role": "user", "content": [
+                { "type": "text", "text": "go" },
+                { "type": "text", "text": "again" },
+            ] }])
+        );
     }
 
     // The estimate and encoder must agree on what ships; a gap between them

@@ -111,6 +111,41 @@ fn markdown_continuations_align_in_live_and_settled_rows() {
             .all(|line| line.starts_with("  │ "))
     );
 }
+// A streaming answer is drawn again only when its text, the width or the
+// paint changed: a frame for a spinner tick reuses the last drawing.
+#[test]
+fn a_streaming_answer_is_drawn_again_only_once_it_changed() {
+    let mut stream = crate::tui::view::Stream::default();
+    let paint = Paint::new(true);
+    let draws = std::cell::Cell::new(0);
+    let draw = |stream: &crate::tui::view::Stream, width, paint: &Paint| {
+        stream.answer_lines(width, paint, |text: &str| {
+            draws.set(draws.get() + 1);
+            vec![Line::from(format!("{width} {text}"))]
+        })
+    };
+    stream.text.push_str("an answer");
+    let first = draw(&stream, 20, &paint);
+    assert_eq!(draw(&stream, 20, &paint), first);
+    assert_eq!(draws.get(), 1, "nothing changed");
+    stream.text.push_str(" grows");
+    assert_eq!(
+        draw(&stream, 20, &paint)[0].to_string(),
+        "20 an answer grows"
+    );
+    let plain = Paint::new(false);
+    draw(&stream, 30, &paint);
+    draw(&stream, 30, &plain);
+    draw(&stream, 30, &plain);
+    assert_eq!(draws.get(), 4, "text, width, then paint");
+    // The same length again, from a later answer, is not the old one.
+    stream.text = "an answer grOws".into();
+    assert_eq!(
+        draw(&stream, 30, &plain)[0].to_string(),
+        "30 an answer grOws"
+    );
+}
+
 use ratatui::text::Line;
 
 use super::harness::*;

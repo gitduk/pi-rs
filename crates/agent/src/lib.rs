@@ -271,11 +271,16 @@ impl Agent {
                 } else {
                     budget
                 };
-                let fitted = self
-                    .compactor
-                    .compact(session, self.working(), fit_to, squeezes > 0, voice)
-                    .instrument(span.clone())
-                    .await;
+                // Raced, as the turn's own request is: a summary call can take
+                // as long as one. Dropped mid-way, the pass has recorded nothing.
+                let fitted = tokio::select! {
+                    biased;
+                    _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
+                    fitted = self
+                        .compactor
+                        .compact(session, self.working(Some(retry)), fit_to, squeezes > 0, voice)
+                        .instrument(span.clone()) => fitted,
+                };
                 totals.add(&fitted.spent);
                 if fitted.changed {
                     compactions += 1;
@@ -482,7 +487,7 @@ impl Agent {
         let budget = self.budget_within(self.window(), self.count_of(session));
         let report = self
             .compactor
-            .compact_now(session, self.working(), budget, focus)
+            .compact_now(session, self.working(None), budget, focus)
             .await;
         // No voice to say it through, so journal it as the loop's would be.
         if let Some(r) = report {
@@ -493,11 +498,12 @@ impl Agent {
 
     /// The model and wire for whatever needs both — the compactor writes
     /// its summary with these when it has no writer of its own.
-    fn working(&self) -> Working<'_> {
+    fn working<'a>(&'a self, retry: Option<&'a Retry>) -> Working<'a> {
         Working {
             wire: self.wire(),
             spec: &self.model.spec,
             summarize: &self.brief.summarize,
+            retry,
         }
     }
 

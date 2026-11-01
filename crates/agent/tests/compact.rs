@@ -532,6 +532,18 @@ mod budget {
         s
     }
 
+    // Weight that only dropping whole rounds reclaims: the summary is owed.
+    fn prose_session() -> Session {
+        let mut s = Session::with_prompt("go");
+        for i in 0..10 {
+            s.push_assistant(vec![AssistantContent::Text(llm::message::Text {
+                text: big(8_000),
+            })]);
+            s.prompt(format!("next {i}"));
+        }
+        s
+    }
+
     struct Never;
 
     // A summary that never comes back. The manual pass always summarizes
@@ -619,6 +631,7 @@ mod budget {
             wire: llm::meter::Metered::new(&Never, &meter),
             spec: &spec(),
             summarize: agent::compaction::SUMMARIZE,
+            retry: None,
         };
         let voice = agent::event::Voice::new(tx, Arc::new(agent::NoHooks));
         let fitted = compactor.compact(&mut s, run, budget, false, &voice).await;
@@ -661,6 +674,142 @@ mod budget {
             ];
             Ok(Box::pin(futures::stream::iter(events)))
         }
+    }
+
+    // Fails with a passing fault `failures` times, then summarizes.
+    struct Flaky {
+        failures: usize,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Transport for Flaky {
+        async fn stream(
+            &self,
+            spec: &ModelSpec,
+            req: &Request,
+        ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.failures {
+                return Err(llm::LlmError::Api {
+                    format: "anthropic",
+                    status: 503,
+                    body: "overloaded".into(),
+                });
+            }
+            Summary(llm::stream::StopReason::EndTurn)
+                .stream(spec, req)
+                .await
+        }
+    }
+
+    // A summary lost to a passing fault takes the dropped span's only record
+    // with it; the turn's own retry policy covers it like any request.
+    #[tokio::test]
+    async fn a_summary_that_hits_a_passing_fault_is_tried_again() {
+        use agent::Compactor as _;
+        let retry = agent::Retry {
+            base: std::time::Duration::from_millis(1),
+            max: std::time::Duration::from_millis(4),
+            ..agent::Retry::default()
+        };
+        for (policy, summarized) in [(Some(&retry), true), (None, false)] {
+            let compactor = agent::Summarizing::new(
+                Some((
+                    Arc::new(Flaky {
+                        failures: 2,
+                        calls: Default::default(),
+                    }),
+                    spec(),
+                )),
+                retry.idle,
+            );
+            let mut s = prose_session();
+            let budget = llm::estimate::tokens(&s.context(), &spec()) / 2;
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let meter = Arc::default();
+            let run = agent::Working {
+                wire: llm::meter::Metered::new(&Never, &meter),
+                spec: &spec(),
+                summarize: agent::compaction::SUMMARIZE,
+                retry: policy,
+            };
+            let voice = agent::event::Voice::new(tx, Arc::new(agent::NoHooks));
+            assert!(
+                compactor
+                    .compact(&mut s, run, budget, false, &voice)
+                    .await
+                    .changed
+            );
+            let Ok(agent::Event::Compacted(report)) = rx.try_recv() else {
+                panic!("a compaction says so");
+            };
+            assert_eq!(report.summarized, summarized, "{report:?}");
+        }
+    }
+
+    // Never answers: the summary is still on its way when the stop comes.
+    struct Silent;
+
+    #[async_trait]
+    impl Transport for Silent {
+        async fn stream(
+            &self,
+            _: &ModelSpec,
+            _: &Request,
+        ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
+            Ok(Box::pin(futures::stream::pending()))
+        }
+    }
+
+    // Refuses every request as too big, so the loop compacts before resending.
+    struct TooBig;
+
+    #[async_trait]
+    impl Transport for TooBig {
+        async fn stream(
+            &self,
+            _: &ModelSpec,
+            _: &Request,
+        ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
+            Err(llm::LlmError::Api {
+                format: "anthropic",
+                status: 413,
+                body: "Request exceeds the maximum size".into(),
+            })
+        }
+    }
+
+    // A stop asked for while the summary is being written ends the run then,
+    // and leaves the transcript as it was: nothing dropped unsummarized.
+    #[tokio::test]
+    async fn a_stop_during_the_summary_ends_the_run_and_drops_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = tool::Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let spec = llm::model::ModelSpec {
+            context_window: 20_000,
+            max_output_tokens: 64_000,
+            ..spec()
+        };
+        let mut a = Agent::new(Arc::new(TooBig), spec.clone());
+        crate::common::compacting(&mut a, Some((Arc::new(Silent), spec)));
+        let mut s = prose_session();
+        let before = s.context();
+
+        let stop = ctx.cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            stop.cancel();
+        });
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            a.run(&mut s, &ctx, &tx, &agent::Retry::default()),
+        )
+        .await
+        .expect("the stop ends the run");
+        assert!(matches!(out, Err(agent::AgentError::Cancelled)), "{out:?}");
+        assert_eq!(s.context(), before);
     }
 
     // A cut-short summary would stand in for the earlier one minus its last
@@ -772,6 +921,36 @@ fn the_planner_and_the_sender_count_the_summaries_the_same() {
     );
 }
 
+// What the summaries take is spent before any rung runs: a plan that stopped
+// once the items alone fit would leave the request over and call it fitted.
+#[test]
+fn a_plan_that_says_it_fits_counts_the_summaries_it_sends() {
+    let mut s = Session::new();
+    s.prompt("the original task");
+    for i in 0..10 {
+        s.push_assistant(vec![AssistantContent::Text(llm::message::Text {
+            text: big(4_000),
+        })]);
+        s.prompt(format!("next {i}"));
+    }
+    s.record(Compaction {
+        summary: Some(big(8_000)),
+        ..Compaction::default()
+    });
+    let budget = estimate::tokens(&s.context(), &spec()) / 2;
+
+    let policy = Policy {
+        protect_tail: 0,
+        ..Policy::default()
+    };
+    let (record, report) = plan(&s, &spec(), budget, &policy);
+    s.record(record);
+    let sent = estimate::tokens(&s.context(), &spec());
+    assert_eq!(report.after, sent, "{report:?}");
+    assert!(!report.still_over, "{report:?}");
+    assert!(sent <= budget, "{sent} sent against {budget}: {report:?}");
+}
+
 // An assistant turn is never omitted: its `tool_use` blocks must stay legal,
 // so the sender carries the whole turn however the record reads it.
 #[test]
@@ -860,7 +1039,7 @@ fn the_planner_and_the_sender_count_an_omitted_result_the_same() {
     );
 }
 
-// A `!` command's output is not a question, so it must not be dropped as a
+// A shell command's output is not a question, so it must not be dropped as a
 // round of its own, out from under the question that refers to it.
 #[test]
 fn a_bang_command_goes_with_the_question_that_refers_to_it() {

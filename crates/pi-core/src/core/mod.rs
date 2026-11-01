@@ -390,10 +390,10 @@ impl Core {
             Intent::Builtin(Builtin::Effort(arg)) => Step::Notice(notice(self.effort(&arg))),
             Intent::Builtin(Builtin::Mcp(arg)) => crate::core::mcp::command(&arg),
             Intent::Builtin(Builtin::Content) => Step::Handled(self.content()),
-            Intent::Builtin(Builtin::New) => {
-                self.fresh_session();
-                Step::Swap(String::new())
-            }
+            Intent::Builtin(Builtin::New) => match self.new_session() {
+                Ok(()) => Step::Swap(String::new()),
+                Err(why) => Step::Notice(why),
+            },
             Intent::Builtin(Builtin::Resume(name)) if name.is_empty() => {
                 Step::Notice("/resume takes the id of a session".into())
             }

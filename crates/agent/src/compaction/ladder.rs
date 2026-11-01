@@ -118,8 +118,9 @@ impl<'a> Item<'a> {
         }
     }
 
-    // The text an omission would stand in for: a tool's result or a `!`
-    // command's output — the two things on the user's side nobody is waiting on.
+    // The text an omission would stand in for: a tool's result or the output
+    // of a shell command the user ran — the two things on the user's side
+    // nobody is waiting on.
     fn prunable(&self) -> Option<String> {
         if self.notice().is_some() {
             return None;
@@ -136,7 +137,7 @@ impl<'a> Item<'a> {
     fn omittable(&self) -> bool {
         match self.entry {
             Entry::Tool { .. } => true,
-            // A `!` command's output is the other half of a question — bulk
+            // A user's shell command output is the other half of a question — bulk
             // nothing downstream waits on.
             Entry::Bash { .. } => true,
             // A note is the same half: machine prose nothing downstream waits
@@ -266,14 +267,16 @@ pub fn plan(
     };
 
     if before > budget {
+        // The rungs weigh items only; what the summaries take is already spent.
+        let room = budget.saturating_sub(summaries);
         let frame = Frame {
             spec,
-            budget,
+            budget: room,
             policy,
             already_gone: &already_gone,
         };
         for rung in RUNGS {
-            if total(&items) <= budget {
+            if total(&items) <= room {
                 break;
             }
             rung(&mut items, &frame, &mut report);
@@ -307,7 +310,7 @@ pub fn plan(
     }
 
     report.after = if before > budget {
-        total(&items)
+        total(&items) + summaries
     } else {
         before
     };
@@ -341,7 +344,7 @@ fn repeated<'a>(items: &mut [Item<'a>], _: &Frame<'_>, report: &mut Report) {
     }
 }
 
-// Results and `!` command output, oldest first, never inside the tail the
+// Results and the user's shell command output, oldest first, never inside the tail the
 // agent is working from. Both carry bulk nothing downstream waits on.
 fn age_out(items: &mut [Item<'_>], f: &Frame<'_>, report: &mut Report) {
     let suffix = suffixes(items);
@@ -434,8 +437,8 @@ fn drop_history(items: &mut [Item<'_>], f: &Frame<'_>, report: &mut Report) {
     }
 }
 
-// A round is a prompt plus everything that answered it. A `!` command
-// right before a prompt attaches to it, so both can be dropped together.
+// A round is a prompt plus everything that answered it. A shell command the
+// user ran right before a prompt attaches to it, so both can be dropped together.
 fn round_starts(items: &[Item<'_>]) -> Vec<usize> {
     let is_prompt = |it: &Item<'_>| matches!(it.entry, Entry::Ask { .. });
     let leads_in = |it: &Item<'_>| matches!(it.entry, Entry::Bash { .. });

@@ -95,7 +95,7 @@ fn encode_reasoning(r: &Reasoning, spec: &ModelSpec) -> Option<Value> {
         })),
         // No OpenAI spec replays text: the transport is chosen by the same
         // format `replay_for` reads.
-        Replay::Thinking { .. } | Replay::Dropped => None,
+        Replay::Thinking { .. } | Replay::Redacted { .. } | Replay::Dropped => None,
     }
 }
 
@@ -229,6 +229,8 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
         body["tool_choice"] = match &req.tool_choice {
             ToolChoice::Auto => json!("auto"),
             ToolChoice::None => json!("none"),
+            // A model that refuses a forced choice gets auto, as on the other wires.
+            _ if !spec.can_force_tool => json!("auto"),
             ToolChoice::Required => json!("required"),
             ToolChoice::Named(name) => json!({ "type": "function", "name": name }),
         };
@@ -292,6 +294,7 @@ fn read_output(
 ) -> (Vec<AssistantContent>, Vec<InvalidToolArgs>) {
     let mut content = Vec::new();
     let mut invalid = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
 
     for item in output.as_array().into_iter().flatten() {
         match item["type"].as_str() {
@@ -335,6 +338,9 @@ fn read_output(
                 let mut owed = |field| gaps.owed(item, "function_call", field).unwrap_or_default();
                 let id = owed("call_id").to_string();
                 let name = owed("name").to_string();
+                if crate::stream::repeated(&mut seen, &id) {
+                    continue;
+                }
                 let raw = owed("arguments");
                 let args = match serde_json::from_str::<Value>(raw.trim()) {
                     Ok(v) => v,
@@ -357,6 +363,23 @@ fn read_output(
         }
     }
     (content, invalid)
+}
+
+// A run that failed server-side reports it in a frame, not as a status —
+// without this the turn ends looking empty. The `error` event states its
+// `code` and `message` at the top level, with no `error` key for `sse` to see.
+fn failure(data: &Value) -> Option<LlmError> {
+    let detail = match data["type"].as_str() {
+        Some("response.failed") => &data["response"]["error"],
+        Some("error") => data,
+        _ => return None,
+    };
+    tracing::warn!(
+        target: "pi::wire", format = "openai",
+        detail = %detail, "failed response"
+    );
+    // The detail whole, so `classify` can read an overflow in its code.
+    Some(LlmError::Stream(detail.to_string()))
 }
 
 // Responses events are typed and carry their own `output_index`, so the
@@ -502,18 +525,9 @@ impl Transport for OpenAi {
         let resp = super::exchange("openai", url, spec, req, &body, call).await?;
 
         let mut dec = Decoder::new(spec.model.clone(), self.gaps.clone());
-        let events = super::sse(resp, "openai", move |data| {
-            // A run that failed server-side reports it here, not as a
-            // status — without this the turn ends looking empty.
-            if data["type"] == "response.failed" {
-                let detail = &data["response"]["error"];
-                tracing::warn!(
-                    target: "pi::wire", format = "openai",
-                    detail = %detail, "failed response"
-                );
-                return vec![Err(LlmError::Stream(detail.to_string()))];
-            }
-            dec.frame(&data).into_iter().map(Ok).collect()
+        let events = super::sse(resp, "openai", move |data| match failure(&data) {
+            Some(e) => vec![Err(e)],
+            None => dec.frame(&data).into_iter().map(Ok).collect(),
         });
         Ok(super::terminated("openai", self.gaps.clone(), events))
     }
@@ -747,6 +761,55 @@ mod tests {
             })
             .collect();
         assert_eq!(seen, "summary", "the second stream must not join the first");
+    }
+
+    #[test]
+    fn an_error_event_ends_the_turn_and_says_what_went_wrong() {
+        let overflow = json!({ "type": "error", "code": "context_length_exceeded",
+            "message": "Your input exceeds the context window of this model.", "param": null });
+        let e = failure(&overflow).expect("an error event is a failure");
+        assert_eq!(crate::classify(&e), crate::Fault::Overflow);
+        let busy = json!({ "type": "error", "code": "server_error", "message": "try again" });
+        assert_eq!(
+            crate::classify(&failure(&busy).expect("a failure")),
+            crate::Fault::Transient
+        );
+        assert!(failure(&json!({ "type": "response.output_text.delta", "delta": "hi" })).is_none());
+    }
+
+    #[test]
+    fn a_forced_tool_falls_back_to_auto_where_the_model_refuses_one() {
+        let req = Request {
+            tools: vec![crate::request::ToolDef {
+                name: "read".into(),
+                description: "read".into(),
+                input_schema: json!({ "type": "object" }),
+            }],
+            tool_choice: ToolChoice::Required,
+            ..Default::default()
+        };
+        assert_eq!(body(req.clone())["tool_choice"], "required");
+        let refuses = ModelSpec {
+            can_force_tool: false,
+            ..spec()
+        };
+        assert_eq!(build_body(&refuses, &req)["tool_choice"], "auto");
+    }
+
+    // A repeated call id is dropped before its arguments are judged, so the
+    // call that stays is not refused for the repeat's bad JSON.
+    #[test]
+    fn a_repeated_call_s_bad_arguments_do_not_land_on_the_one_kept() {
+        let (content, invalid) = read_output(
+            &json!([
+                { "type": "function_call", "call_id": "c1", "name": "read", "arguments": "{\"path\":\"a\"}" },
+                { "type": "function_call", "call_id": "c1", "name": "read", "arguments": "{oops" },
+            ]),
+            "test-model",
+            &mut Gaps::new("openai"),
+        );
+        assert_eq!(content.len(), 1);
+        assert!(invalid.is_empty(), "{invalid:?}");
     }
 
     #[test]

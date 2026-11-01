@@ -535,7 +535,8 @@ pub fn prune(sessions: &Path) {
         };
         for entry in entries.flatten() {
             let path = entry.path().join(JOURNAL_FILE);
-            if crate::older_than(&path, KEEP) {
+            // A session some pi still holds keeps its journal however old.
+            if crate::older_than(&path, KEEP) && !crate::session::held(&entry.path()) {
                 let _ = std::fs::remove_file(&path);
                 // And the directory, if the journal was the last thing in it — a run
                 // that never got as far as a transcript, since a bucket needs to be empty.
@@ -672,6 +673,26 @@ mod tests {
             "and one with a transcript keeps its directory"
         );
         assert!(!lived.join(JOURNAL_FILE).exists());
+    }
+
+    #[test]
+    fn a_held_session_keeps_its_old_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::session::Store::new(dir.path());
+        let ws = std::path::Path::new("/w");
+        let _held = store.claim(ws, "held").unwrap();
+        let journal = store.journal_path(ws, "held");
+        std::fs::write(&journal, b"{}\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&journal)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(15 * 24 * 60 * 60))
+            .unwrap();
+
+        prune(dir.path());
+
+        assert!(journal.exists());
     }
 
     #[test]

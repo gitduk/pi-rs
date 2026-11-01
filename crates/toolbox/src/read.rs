@@ -367,6 +367,12 @@ impl Tool for Read {
         let limit = args.limit.unwrap_or(DEFAULT_LIMIT).max(1);
         let start = offset - 1;
 
+        if all.is_empty() {
+            return Ok(ToolOutput::text(format!(
+                "{rel} is empty ({} bytes)",
+                bytes.len()
+            )));
+        }
         if start >= all.len() {
             return Ok(ToolOutput::text(format!(
                 "{rel} line {offset} is past the end ({})",

@@ -463,17 +463,22 @@ fn prior_hook() -> std::sync::MutexGuard<'static, Option<PriorHook>> {
 }
 
 // Terminal-restoring panic hook: raw mode off, alt screen left, the
-// prior hook chained behind. `leave` restores that prior hook.
+// prior hook chained behind. `leave` restores that prior hook. A panic
+// `guard` catches leaves the TUI running, so its terminal is left as is.
 fn set_escape_hook() {
     std::panic::set_hook(Box::new(|info| {
-        let _ = crossterm::terminal::disable_raw_mode();
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            LeaveAlternateScreen,
-            DisableBracketedPaste,
-            DisableMouseCapture
-        );
-        disable_all_motion();
+        if !pi_core::execution::panic_is_caught() {
+            let _ = crossterm::terminal::disable_raw_mode();
+            let _ = crossterm::execute!(
+                std::io::stdout(),
+                crossterm::cursor::Show,
+                crossterm::cursor::SetCursorStyle::DefaultUserShape,
+                LeaveAlternateScreen,
+                DisableBracketedPaste,
+                DisableMouseCapture
+            );
+            disable_all_motion();
+        }
         let prior = prior_hook();
         if let Some(prior) = prior.as_ref() {
             prior(info);
@@ -618,6 +623,7 @@ impl Screen {
                 enter(&mut std::io::stdout())?;
                 // `leave` gave the process's hook back; reclaim it, or a
                 // panic after this point lands on a raw alternate screen.
+                *prior_hook() = Some(std::panic::take_hook());
                 set_escape_hook();
                 t.size()?
             }

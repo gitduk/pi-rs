@@ -574,9 +574,12 @@ fn sketch_rows(rows: &[&str], p: &Paint, room: usize) -> Vec<Line<'static>> {
                 .peek()
                 .is_some_and(|next| sign(next[0]) == '+' && next.len() == 1);
         if one_each {
-            let next = runs.next().expect("peeked");
-            out.extend(replaced(run[0], next[0], p, room));
-            continue;
+            let next = runs.peek().expect("peeked")[0];
+            if let Some(pair) = replaced(run[0], next, p, room) {
+                runs.next();
+                out.extend(pair);
+                continue;
+            }
         }
         let style = match sign(run[0]) {
             '+' => &p.theme.diff.add,
@@ -591,17 +594,21 @@ fn sketch_rows(rows: &[&str], p: &Paint, room: usize) -> Vec<Line<'static>> {
 }
 
 /// The two rows of a rewritten line: the sign and number in the row's own
-/// colour, and the run the two do not share reversed on top of it.
-fn replaced(was: &str, is: &str, p: &Paint, room: usize) -> [Line<'static>; 2] {
+/// colour, and the run the two do not share reversed on top of it. None
+/// when either row has no number to lead it, or one too wide to fit.
+fn replaced(was: &str, is: &str, p: &Paint, room: usize) -> Option<[Line<'static>; 2]> {
     // The lead is the sign and the number, never the change: the number is
     // right-aligned, so its space is the first one with a digit behind it.
-    let lead = was
-        .char_indices()
-        .find(|(at, c)| *c == ' ' && was[..*at].bytes().any(|b| b.is_ascii_digit()))
-        .map_or(was.len(), |(at, _)| at + 1);
+    let lead = |row: &str| {
+        row.char_indices()
+            .find(|(at, c)| *c == ' ' && row[..*at].bytes().any(|b| b.is_ascii_digit()))
+            .map(|(at, _)| at + 1)
+            .filter(|&at| at < room)
+    };
+    let (was_lead, is_lead) = (lead(was)?, lead(is)?);
     let (was_body, is_body) = (
-        clip(&was[lead..], room.saturating_sub(lead)),
-        clip(&is[lead..], room.saturating_sub(lead)),
+        clip(&was[was_lead..], room - was_lead),
+        clip(&is[is_lead..], room - is_lead),
     );
     let (from, to) = diverged(&was_body, &is_body);
     let row = |head: &str, body: &str, (start, end): (usize, usize), style: &Style| {
@@ -612,15 +619,20 @@ fn replaced(was: &str, is: &str, p: &Paint, room: usize) -> [Line<'static>; 2] {
             p.span(style, body[end..].to_string()),
         ])
     };
-    [
+    Some([
         row(
-            &was[..lead],
+            &was[..was_lead],
             &was_body,
             (from.start, from.end),
             &p.theme.diff.del,
         ),
-        row(&is[..lead], &is_body, (to.start, to.end), &p.theme.diff.add),
-    ]
+        row(
+            &is[..is_lead],
+            &is_body,
+            (to.start, to.end),
+            &p.theme.diff.add,
+        ),
+    ])
 }
 
 /// The run two rows do not share, as byte ranges into each: what is left of
@@ -988,6 +1000,27 @@ mod tests {
             }
             assert!(painted[0].to_string().ends_with(" · in crates/ui · 3s"));
         }
+    }
+
+    // A `-` / `+` pair whose rows lead differently, or have no number to
+    // lead them, is drawn row by row rather than cut where the other led.
+    #[test]
+    fn a_rewritten_pair_is_cut_where_each_row_leads() {
+        let paint = Paint::new(false);
+        for (was, is) in [
+            ("-    let x = 1;", "+    let x=1;"),
+            ("-  9 a", "+ 10 ab"),
+            ("- 1 改", "+ 1"),
+            ("-    9 x", "+ 1 éé"),
+        ] {
+            for room in [0, 3, 6, 40] {
+                let rows = super::sketch_rows(&[was, is], &paint, room);
+                assert_eq!(rows.len(), 2);
+            }
+        }
+        let rows = super::sketch_rows(&["-  9 a", "+ 10 ab"], &paint, 40);
+        let text: Vec<String> = rows.iter().map(ToString::to_string).collect();
+        assert_eq!(text, ["  -  9 a", "  + 10 ab"]);
     }
 
     #[test]

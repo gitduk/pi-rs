@@ -105,3 +105,48 @@ async fn an_over_long_grep_drops_whole_sections_and_spills_the_rest() {
     let whole = common::spilled_body(&c2, &out);
     assert!(whole.contains("NEEDLE"), "the spill must hold what went");
 }
+
+// A pattern with `/` is anchored where the search starts, not at the
+// filesystem root, so the schema's own example finds something.
+#[tokio::test]
+async fn a_pattern_with_a_slash_matches_from_the_searched_directory() {
+    let (_d, c) = tree();
+    let r = c.workspace.root();
+    std::fs::create_dir_all(r.join("src/a/b")).unwrap();
+    std::fs::write(r.join("src/a/b/mod.rs"), "// TODO\n").unwrap();
+    std::fs::create_dir_all(r.join("src/sub")).unwrap();
+    std::fs::write(r.join("src/sub/one.txt"), "TODO\n").unwrap();
+
+    let out = run(
+        &toolbox::glob::Glob,
+        json!({ "pattern": "src/**/mod.rs" }),
+        &c,
+    )
+    .await;
+    assert!(out.contains("src/a/b/mod.rs"), "{out}");
+    let out = run(
+        &toolbox::glob::Glob,
+        json!({ "pattern": "sub/*.txt", "path": "src" }),
+        &c,
+    )
+    .await;
+    assert!(out.contains("src/sub/one.txt"), "{out}");
+
+    let out = run(
+        &toolbox::grep::Grep,
+        json!({ "pattern": "TODO", "glob": ["src/**/mod.rs"] }),
+        &c,
+    )
+    .await;
+    assert!(out.contains("src/a/b/mod.rs"), "{out}");
+    assert!(!out.contains("util.rs"), "{out}");
+
+    let out = run(
+        &toolbox::grep::Grep,
+        json!({ "pattern": "TODO", "exclude": ["src/deep"] }),
+        &c,
+    )
+    .await;
+    assert!(!out.contains("util.rs"), "{out}");
+    assert!(out.contains("README.md"), "{out}");
+}

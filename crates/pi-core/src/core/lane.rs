@@ -79,8 +79,11 @@ struct Checkout {
     worktree: Option<String>,
     // The session and its newest compaction when the prompt's files were
     // last looked at: either moving lets them be read again unnoticed.
-    read_at: Option<(String, Option<EntryId>)>,
+    read_at: Option<ReadAt>,
 }
+
+// The session, and its newest compaction, as the prompt's files were read.
+pub(super) type ReadAt = (String, Option<EntryId>);
 
 // One session: replaced whole by `/new` and `/resume`, so nothing of the one
 // being left survives into the next.
@@ -452,19 +455,29 @@ impl Lane {
         self.checkout.resolved = resolved;
     }
 
-    /// Whether the session moved or was compacted since the last look; the
-    /// first look only marks where things stand.
-    pub(super) fn prompt_files_due(&mut self) -> bool {
-        let Some(session) = self.talk.transcript.home() else {
-            return false;
-        };
+    /// Where the session stands when it moved or was compacted since the
+    /// prompt's files were last read; the first look only marks where things
+    /// stand. Marked again by `prompt_files_read`, once they were read.
+    pub(super) fn prompt_files_due(&mut self) -> Option<ReadAt> {
+        let session = self.talk.transcript.home()?;
         let compacted = session.entries().iter().rev().find_map(|e| match e {
             agent::session::Entry::Compaction { id, .. } => Some(*id),
             _ => None,
         });
-        let now = Some((self.talk.id.clone(), compacted));
-        let was = std::mem::replace(&mut self.checkout.read_at, now.clone());
-        was.is_some() && was != now
+        let now = (self.talk.id.clone(), compacted);
+        match &self.checkout.read_at {
+            None => {
+                self.checkout.read_at = Some(now);
+                None
+            }
+            Some(was) if *was == now => None,
+            Some(_) => Some(now),
+        }
+    }
+
+    /// The prompt's files were read with the session standing `at`.
+    pub(super) fn prompt_files_read(&mut self, at: ReadAt) {
+        self.checkout.read_at = Some(at);
     }
 
     /// What this checkout and the config decide.
@@ -798,6 +811,31 @@ impl Core {
             .journal_path(self.lane().root(), &self.lane().talk.id);
         journal::switched(&path, &self.lane().talk.id);
     }
+    // The session being left has to survive the switch, or it is thrown
+    // away: saved first, and the switch refused when that fails. An empty
+    // one with nothing filed since its last save has nothing to keep; a run
+    // in flight saves its own.
+    pub(super) fn leave(&mut self, what: &str) -> Result<(), String> {
+        let talk = &self.lane().talk;
+        let keep = talk
+            .transcript
+            .home()
+            .is_some_and(|s| talk.filed || !s.is_empty());
+        if !keep {
+            return Ok(());
+        }
+        self.save().map_err(|e| {
+            let why = refused(what, e);
+            format!("still on this session — {}", super::not_saved(&why))
+        })
+    }
+    /// `/new`: leave the session in front for a fresh one, refused when the
+    /// one being left cannot be saved.
+    pub(super) fn new_session(&mut self) -> Result<(), String> {
+        self.leave("new")?;
+        self.fresh_session();
+        Ok(())
+    }
     // Fresh, unnamed session; the old transcript stays on disk. Says nothing:
     // the rebuilt screen is already empty and the id is the surface's business.
     pub(super) fn fresh_session(&mut self) {
@@ -1061,18 +1099,7 @@ impl Core {
             }
             return Ok(Vec::new());
         }
-        // The session being left has to survive too, or /resume throws it
-        // away. An empty one — just opened, nothing said — has nothing to keep.
-        if self
-            .lane()
-            .talk
-            .transcript
-            .home()
-            .is_some_and(|s| !s.is_empty())
-            && let Err(e) = self.save()
-        {
-            tracing::warn!(target: "pi::session", error = %e, "resume could not save the leaving session");
-        }
+        self.leave("resume")?;
         let (stored, claim) = self
             .store
             .take(self.lane().root(), id)
@@ -1124,6 +1151,66 @@ mod tests {
         core.fresh_session();
         assert!(core.lane().ctx().viewed(&seen).is_none());
         assert_eq!(core.lane().drift(), None);
+    }
+
+    // `/new` leaves the session in front as `/resume` does: what was filed in
+    // it while idle reaches disk first, and a session that cannot is kept.
+    #[test]
+    fn a_new_session_saves_the_one_left_or_refuses() {
+        use crate::input::{Builtin, Intent, Step};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let mut core = a_repl(&root, std::sync::Arc::new(Recording::default()), "m");
+        core.lane_mut().push_note("noted while idle");
+        assert!(matches!(
+            core.dispatch(Intent::Builtin(Builtin::New)),
+            Step::Swap(_)
+        ));
+        assert!(core.store.filed(&root, "s1"));
+
+        let left = core.lane().id().to_string();
+        core.lane_mut().push_note("noted again");
+        std::fs::write(root.join("blocker"), "").unwrap();
+        core.store = pi_store::session::Store::new(root.join("blocker/state"));
+        match core.dispatch(Intent::Builtin(Builtin::New)) {
+            Step::Notice(why) => assert!(why.contains("not saved"), "{why}"),
+            step => panic!("a session that cannot be saved is not left: {step:?}"),
+        }
+        assert_eq!(core.lane().id(), left);
+    }
+
+    // A rebuild from the config in force must not take the files' stamps as
+    // read, or an edit made meanwhile is never applied.
+    #[test]
+    fn an_effort_change_leaves_a_settings_edit_to_the_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.toml");
+        std::fs::write(&settings, "").unwrap();
+        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
+        core.pinned.config = Some(settings.display().to_string());
+        let was = core.lane().resolved().watched.clone();
+        core.effort("high");
+        assert_eq!(core.lane().agent().brief.effort.name(), "high");
+        assert_eq!(core.lane().resolved().watched, was);
+        assert!(core.refresh_config().is_some());
+    }
+
+    // A skill found when the prompt's files are read again is a command at
+    // once, as when the shelf itself is looked at.
+    #[test]
+    fn a_skill_read_with_the_prompt_files_is_put_in_force() {
+        let repo = crate::core::worktree::test_repo();
+        let mut core = a_repl(repo.path(), std::sync::Arc::new(Recording::default()), "m");
+        assert!(
+            core.refresh_prompt_files().is_none(),
+            "the first look marks"
+        );
+        let skill = repo.path().join(".pi/skills/haiku");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\ndescription: d\n---\n").unwrap();
+        core.fresh_session();
+        core.refresh_prompt_files();
+        assert!(core.commands.iter().any(|c| c.word == "/haiku"));
     }
 
     // Only the lane offers wrappers that can start background commands.

@@ -94,6 +94,26 @@ async fn a_bounded_command_times_out_without_hanging_the_caller() {
 }
 
 #[tokio::test]
+async fn a_timeout_returns_even_when_an_escaped_process_holds_the_output() {
+    let (_d, c) = ctx();
+    let started = std::time::Instant::now();
+    let err = toolbox::bash::run(
+        "echo before; setsid sleep 12 & sleep 5",
+        c.workspace.root(),
+        Some(std::time::Duration::from_millis(150)),
+        &c,
+    )
+    .await
+    .err()
+    .expect("the command times out");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    let ToolError::Timeout { printed, .. } = err else {
+        panic!("not a timeout: {err}");
+    };
+    assert!(printed.contains("before"), "{printed}");
+}
+
+#[tokio::test]
 async fn a_command_cut_off_still_reports_what_it_printed() {
     let (_d, c) = ctx();
     let err = toolbox::bash::run(
@@ -828,4 +848,51 @@ async fn a_byte_order_mark_survives_an_edit() {
     // And the report is shown without it, like every other view of the file: a
     // row carrying an invisible character is one no anchor can be copied into.
     assert!(!said.contains('\u{FEFF}'), "{said}");
+}
+
+// An empty file is said to be empty, not to end before line 1.
+#[tokio::test]
+async fn reading_an_empty_file_says_it_is_empty() {
+    let (_d, c) = ctx();
+    std::fs::write(c.workspace.root().join("e.txt"), "").unwrap();
+    let out = run(&toolbox::read::Read, json!({ "path": "e.txt" }), &c).await;
+    assert!(out.contains("is empty"), "{out}");
+    assert!(!out.contains("past the end"), "{out}");
+}
+
+// A new script is made runnable where it is readable; an existing file keeps
+// the mode its owner gave it.
+#[cfg(unix)]
+#[tokio::test]
+async fn only_a_new_script_is_made_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_d, c) = ctx();
+    let root = c.workspace.root();
+    let mode = |p: &str| {
+        std::fs::metadata(root.join(p))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    };
+
+    run(
+        &toolbox::write::Write,
+        json!({ "path": "new.sh", "content": "#!/bin/sh\necho hi\n" }),
+        &c,
+    )
+    .await;
+    let m = mode("new.sh");
+    assert_ne!(m & 0o100, 0, "{m:o}");
+    assert_eq!(m & 0o111, (m & 0o444) >> 2, "{m:o}");
+
+    std::fs::write(root.join("old.sh"), "echo old\n").unwrap();
+    std::fs::set_permissions(root.join("old.sh"), std::fs::Permissions::from_mode(0o600)).unwrap();
+    run(
+        &toolbox::write::Write,
+        json!({ "path": "old.sh", "content": "#!/bin/sh\necho new\n" }),
+        &c,
+    )
+    .await;
+    assert_eq!(mode("old.sh"), 0o600);
 }

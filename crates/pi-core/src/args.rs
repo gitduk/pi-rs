@@ -142,10 +142,9 @@ impl Pinned {
             tier,
         } = self;
         let mut out = Vec::new();
+        // Joined with `=`, so a value starting with `-` is not read as a flag.
         let mut pass = |flag: &str, value: Option<String>| {
-            if let Some(value) = value {
-                out.extend([flag.to_string(), value]);
-            }
+            out.extend(value.map(|value| format!("{flag}={value}")));
         };
         pass("--config", config.clone());
         pass("--base-url", base_url.clone());
@@ -188,7 +187,7 @@ impl Args {
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, lane_arg};
+    use super::{Args, Pinned, lane_arg};
     use clap::Parser;
     use std::path::{Path, PathBuf};
 
@@ -205,5 +204,23 @@ mod tests {
                 (PathBuf::from("/w/c"), None),
             ]
         );
+    }
+
+    // A restart passes the flags on; a value that reads as a flag must not
+    // stop the next pi from starting.
+    #[test]
+    fn pinned_flags_read_back_as_they_were_written() {
+        let pinned = Pinned {
+            system: Some("-be terse".into()),
+            base_url: Some("http://x/v1".into()),
+            context: Some(1000),
+            ..Default::default()
+        };
+        let args =
+            Args::try_parse_from(["pi".to_string()].into_iter().chain(pinned.args())).unwrap();
+        let back = args.pinned();
+        assert_eq!(back.system.as_deref(), Some("-be terse"));
+        assert_eq!(back.base_url.as_deref(), Some("http://x/v1"));
+        assert_eq!(back.context, Some(1000));
     }
 }

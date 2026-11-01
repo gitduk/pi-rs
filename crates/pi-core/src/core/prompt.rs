@@ -247,7 +247,13 @@ The user's current instructions take precedence.\n{}\n</memory>",
 pub fn files(files: &[(String, String)]) -> String {
     files
         .iter()
-        .map(|(name, body)| format!("<file name=\"{name}\">\n{}\n</file>", body.trim_end()))
+        .map(|(name, body)| {
+            format!(
+                "<file name=\"{}\">\n{}\n</file>",
+                escaped(name),
+                body.trim_end()
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }

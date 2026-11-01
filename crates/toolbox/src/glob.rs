@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::SystemTime;
 
-use crate::walk::{globs, root_of, walker};
+use crate::walk::{globs, matches, root_of, walker};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput, output, spill};
 
 const DEFAULT_LIMIT: usize = 200;
@@ -34,7 +34,8 @@ impl Tool for Glob {
          Results list the newest files first. \
          The tool respects `.gitignore`. \
          A pattern without `/` matches at any depth. \
-         For example, `*.rs` finds Rust files at every depth.\n\n\
+         For example, `*.rs` finds Rust files at every depth. \
+         A pattern with `/` matches from the searched directory or the workspace root.\n\n\
          Use `grep` to search file contents. \
          Prefer `glob` or `grep` to `find` through bash because these tools apply the ignore rules."
     }
@@ -91,7 +92,7 @@ impl Tool for Glob {
                 if !entry.file_type().is_some_and(|t| t.is_file()) {
                     continue;
                 }
-                if !set.is_match(entry.path()) {
+                if !matches(&set, entry.path(), &root, Some(ws.root())) {
                     continue;
                 }
                 let mtime = entry

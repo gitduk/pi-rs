@@ -3,7 +3,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::time::SystemTime;
 
 use tool::limit::{MAX_BYTES, over_limit};
@@ -149,9 +149,13 @@ fn change(rel: &str, was: &str, now: &Disk, changed_run: usize) -> String {
 // A copy of the views, so the reads run without holding the lock every view
 // takes; in path order, so what is told reads the same each time.
 fn seen(ctx: &Ctx) -> Vec<(PathBuf, Arc<str>)> {
-    let mut seen: Vec<_> = (ctx.viewed.lock().expect("viewed poisoned").iter())
-        .map(|(path, was)| (path.clone(), was.clone()))
-        .collect();
+    let mut seen: Vec<_> = (ctx
+        .viewed
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter())
+    .map(|(path, was)| (path.clone(), was.clone()))
+    .collect();
     seen.sort_by(|a, b| a.0.cmp(&b.0));
     seen
 }
@@ -200,7 +204,7 @@ fn on_disk(path: &Path) -> std::io::Result<Disk> {
 
 // Moves the view only if no tool noted a newer one while the file was read.
 fn settle(ctx: &Ctx, path: &Path, was: &Arc<str>, now: Option<Arc<str>>) -> bool {
-    let mut viewed = ctx.viewed.lock().expect("viewed poisoned");
+    let mut viewed = ctx.viewed.lock().unwrap_or_else(PoisonError::into_inner);
     if !viewed.get(path).is_some_and(|cur| Arc::ptr_eq(cur, was)) {
         return false;
     }

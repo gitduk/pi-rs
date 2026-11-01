@@ -163,6 +163,7 @@ impl Tool for Write {
 
         let content = clean(&args.content, &rel);
 
+        let existed = tokio::fs::symlink_metadata(&path).await.is_ok();
         if tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_dir()) {
             return Err(ToolError::Invalid(format!("{rel} is a directory")));
         }
@@ -186,12 +187,18 @@ impl Tool for Write {
         ctx.note_write(&path);
 
         let mut note = "";
+        // A script the agent cannot run is one it will debug for a turn
+        // before noticing why. Only a new file: an existing one keeps the mode
+        // its owner gave it.
         #[cfg(unix)]
-        if content.starts_with("#!") {
+        if !existed
+            && content.starts_with("#!")
+            && let Ok(meta) = tokio::fs::metadata(&path).await
+        {
             use std::os::unix::fs::PermissionsExt;
-            // A script the agent cannot run is one it will debug for a turn
-            // before noticing why.
-            let perms = std::fs::Permissions::from_mode(0o755);
+            // Execute wherever read is allowed, so the umask still decides who.
+            let mode = meta.permissions().mode();
+            let perms = std::fs::Permissions::from_mode(mode | ((mode & 0o444) >> 2));
             if tokio::fs::set_permissions(&path, perms).await.is_ok() {
                 note = " · made executable";
             }

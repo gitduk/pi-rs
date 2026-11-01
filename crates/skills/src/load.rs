@@ -72,8 +72,11 @@ impl Load {
 // being a way in and starts being the message.
 const CAP: usize = 40;
 
-// Paths under `dir`, relative to it, excluding `SKILL.md` itself.
-fn sibling_files(dir: &std::path::Path) -> Vec<String> {
+// Paths under `dir`, relative to it, excluding `SKILL.md` itself and hidden
+// entries (`.git` and the like), in name order. True when more were left out
+// past `CAP`.
+fn sibling_files(dir: &std::path::Path) -> (Vec<String>, bool) {
+    // Stops once one past the cap is found: enough to know the list is cut.
     fn walk(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<String>, depth: usize) {
         if depth > 3 {
             return;
@@ -81,10 +84,17 @@ fn sibling_files(dir: &std::path::Path) -> Vec<String> {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
-        for entry in entries.flatten() {
+        // Sorted before any is taken, so which ones the cap keeps does not
+        // hang on the order the filesystem lists them in.
+        let mut entries: Vec<_> = entries
+            .flatten()
+            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
             // Inside the loop, not only at each descent: a directory holding a
             // thousand files at one level would otherwise name every one of them.
-            if out.len() >= CAP {
+            if out.len() > CAP {
                 return;
             }
             let path = entry.path();
@@ -99,8 +109,10 @@ fn sibling_files(dir: &std::path::Path) -> Vec<String> {
     }
     let mut out = Vec::new();
     walk(dir, dir, &mut out, 0);
+    let cut = out.len() > CAP;
+    out.truncate(CAP);
     out.sort();
-    out
+    (out, cut)
 }
 
 /// A skill's body, with the way to reach the files it points at.
@@ -120,24 +132,21 @@ pub fn instructions(skill: &Skill, text: &str) -> String {
     );
     // Skills usually live outside the workspace; instructions that point at a
     // sibling are useless unless the way to fetch it arrives with them.
-    let siblings = if skill.builtin.is_some() {
-        skill
-            .builtin_files
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect()
+    let (siblings, cut) = if skill.builtin.is_some() {
+        let names = skill.builtin_files.iter().map(|(name, _)| name.clone());
+        (names.collect(), false)
     } else {
         sibling_files(&skill.dir)
     };
     if !siblings.is_empty() {
+        let mut listed: Vec<String> = siblings.iter().map(|name| format!("- `{name}`")).collect();
+        if cut {
+            listed.push(format!("- (only the first {CAP} are listed)"));
+        }
         out.push_str(&format!(
             "\n---\nFiles in this skill:\n{}\n\nRead a file with \
              `skill(name: \"{}\", file: \"<path>\")`.\n",
-            siblings
-                .iter()
-                .map(|name| format!("- `{name}`"))
-                .collect::<Vec<_>>()
-                .join("\n"),
+            listed.join("\n"),
             skill.name
         ));
     }
@@ -247,5 +256,32 @@ impl Tool for Load {
         }
         let text = tokio::fs::read_to_string(&real).await?;
         Ok(ToolOutput::text(text).with_preview(format!("{}/{rel}", skill.name)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Hidden entries are not the skill's files, and which files a long list
+    // keeps must not depend on the filesystem's order.
+    #[test]
+    fn hidden_entries_are_skipped_and_a_cut_list_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git/objects")).unwrap();
+        std::fs::write(dir.path().join(".git/HEAD"), "").unwrap();
+        std::fs::write(dir.path().join(".hidden"), "").unwrap();
+        std::fs::write(dir.path().join("SKILL.md"), "").unwrap();
+        std::fs::write(dir.path().join("a.md"), "").unwrap();
+        assert_eq!(sibling_files(dir.path()), (vec!["a.md".to_string()], false));
+
+        for n in 0..CAP + 5 {
+            std::fs::write(dir.path().join(format!("f{n:03}.txt")), "").unwrap();
+        }
+        let (files, cut) = sibling_files(dir.path());
+        assert!(cut);
+        assert_eq!(files.len(), CAP);
+        assert_eq!(files[0], "a.md");
+        assert_eq!(files[CAP - 1], format!("f{:03}.txt", CAP - 2));
     }
 }

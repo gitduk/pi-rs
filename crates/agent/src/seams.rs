@@ -74,6 +74,9 @@ pub struct Working<'a> {
     pub spec: &'a ModelSpec,
     /// The prompt the run's brief writes summaries under.
     pub summarize: &'a str,
+    /// How a summary call that hits a passing fault is retried; `None` tries
+    /// it once.
+    pub retry: Option<&'a crate::Retry>,
 }
 
 /// What a transcript is shrunk by when it outgrows the window.
@@ -125,7 +128,7 @@ pub trait Compactor: Send + Sync {
 
 /// A compactor with nothing to compact with: every method is the trait's own
 /// default, so it is the identity by construction. It is what a run with none
-/// installed — a test, a `--print` — goes on.
+/// installed — a test, or one that never outgrows its window — goes on.
 pub struct Untouched;
 
 #[async_trait]

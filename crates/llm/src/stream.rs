@@ -73,6 +73,8 @@ pub enum StopReason {
 pub enum BlockKind {
     Text,
     Reasoning,
+    // Reasoning the provider sealed: its whole opaque payload rides the start.
+    RedactedReasoning { data: String },
     ToolCall { id: Option<String>, name: String },
 }
 
@@ -248,27 +250,6 @@ impl Accumulator {
             None => self.fold(whole),
         };
 
-        // A result is addressed by its call's id, so a repeated id can't be
-        // answered at all; the first (the one the deltas filled in) is kept.
-        let mut seen: BTreeSet<String> = BTreeSet::new();
-        let mut repeated = Vec::new();
-        content.retain(|c| match c {
-            AssistantContent::ToolCall(call) => {
-                let first = seen.insert(call.id.clone());
-                if !first {
-                    repeated.push(call.id.clone());
-                }
-                first
-            }
-            _ => true,
-        });
-        for id in &repeated {
-            tracing::warn!(
-                target: "pi::wire", call = %id,
-                "the turn named this call twice; the repeat was dropped"
-            );
-        }
-
         // A host that omits finish_reason would otherwise end the turn with
         // tool calls pending; the calls themselves are the authority.
         let has_calls = content
@@ -294,10 +275,14 @@ impl Accumulator {
     fn fold(&mut self, whole: bool) -> (Vec<AssistantContent>, Vec<InvalidToolArgs>) {
         let mut content = Vec::new();
         let mut invalid = Vec::new();
+        let mut seen = BTreeSet::new();
         for (_, b) in std::mem::take(&mut self.blocks) {
             match b.kind {
                 Some(BlockKind::ToolCall { id, name }) => {
                     let id = self.call_id(id);
+                    if repeated(&mut seen, &id) {
+                        continue;
+                    }
                     let raw = if b.text.trim().is_empty() {
                         "{}"
                     } else {
@@ -317,6 +302,13 @@ impl Accumulator {
                     };
                     content.push(AssistantContent::ToolCall(ToolCall { id, name, args }));
                 }
+                Some(BlockKind::RedactedReasoning { data }) => {
+                    content.push(AssistantContent::Reasoning(Reasoning {
+                        id: None,
+                        content: vec![ReasoningContent::Encrypted(data)],
+                        by: (whole || b.ended).then(|| self.by.clone()),
+                    }));
+                }
                 Some(BlockKind::Reasoning) => {
                     if !b.text.is_empty() || b.signature.is_some() {
                         content.push(AssistantContent::Reasoning(Reasoning {
@@ -329,8 +321,9 @@ impl Accumulator {
                         }));
                     }
                 }
+                // Whitespace alone says nothing, and some wires refuse it back.
                 _ => {
-                    if !b.text.is_empty() {
+                    if !b.text.trim().is_empty() {
                         content.push(AssistantContent::Text(Text { text: b.text }));
                     }
                 }
@@ -338,6 +331,21 @@ impl Accumulator {
         }
         (content, invalid)
     }
+}
+
+/// Whether `id` already named a call in this turn. A result is addressed by
+/// its call's id, so a repeat can't be answered at all: the first (the one the
+/// deltas filled in) is kept, and the repeat goes before its arguments are
+/// judged — its fault must not land on the call that stays.
+pub(crate) fn repeated(seen: &mut BTreeSet<String>, id: &str) -> bool {
+    if seen.insert(id.to_string()) {
+        return false;
+    }
+    tracing::warn!(
+        target: "pi::wire", call = %id,
+        "the turn named this call twice; the repeat was dropped"
+    );
+    true
 }
 
 #[cfg(test)]
@@ -380,6 +388,29 @@ mod tests {
         // The one the deltas filled in, not the empty repeat.
         assert_eq!(calls[0].args["path"], "a.txt");
         assert_eq!(done.stop, StopReason::ToolUse);
+    }
+
+    // The repeat's bad JSON must not refuse the call that stays.
+    #[test]
+    fn a_repeated_call_s_bad_arguments_do_not_land_on_the_one_kept() {
+        let mut a = acc();
+        for (index, args) in [(0usize, "{\"path\": \"a.txt\"}"), (1, "{oops")] {
+            a.push(StreamEvent::BlockStart {
+                index,
+                kind: BlockKind::ToolCall {
+                    id: Some("call_same".into()),
+                    name: "read".into(),
+                },
+            });
+            a.push(StreamEvent::ToolArgsDelta {
+                index,
+                delta: args.into(),
+            });
+            a.push(StreamEvent::BlockEnd { index });
+        }
+        let done = a.finish();
+        assert_eq!(done.message.tool_calls().count(), 1);
+        assert!(done.invalid.is_empty(), "{:?}", done.invalid);
     }
 
     // A call whose start was lost leaves its arguments with nowhere to go;

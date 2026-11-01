@@ -87,9 +87,10 @@ impl Tui {
             Action::Surface { word, args: _ } => {
                 let output = if word == keys::KEYS {
                     let mut listing = self.ui.keys.listing();
-                    listing.rows.push(pi_store::listing::Row::new([
-                        "Normal, with no menu: ctrl+k focuses the last execution. In executions: ctrl+k/j move; x stops; r restarts; X stops all; enter opens output; q or esc returns to input."
-                    ]));
+                    listing.rows.push(pi_store::listing::Row::new([format!(
+                        "Normal, with no menu: ctrl+k focuses the last execution. In executions: {}",
+                        super::background::HINT
+                    )]));
                     Output::Listing(listing)
                 } else {
                     Output::Notice(format!("unknown command {word}"))

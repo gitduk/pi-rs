@@ -81,7 +81,8 @@ impl Summarizing {
         Some((report, spent))
     }
 
-    /// Failure is not fatal: entries still go, only the summary is lost.
+    /// Failure is not fatal: a passing fault is retried as `run.retry` says,
+    /// and past that the entries still go, only the summary is lost.
     /// Returns tokens, for the run's own figures; the wire charges the writer's
     /// rate to the meter as it goes.
     async fn retire_span(
@@ -97,7 +98,37 @@ impl Summarizing {
         };
         let history = summary::render(&session.summaries(), &session.entries_for(&record.dropped));
 
-        match summary::run(transport, spec, run.summarize, history, focus, self.idle).await {
+        let mut attempt = 0usize;
+        let outcome = loop {
+            let e = match summary::run(
+                transport,
+                spec,
+                run.summarize,
+                history.clone(),
+                focus,
+                self.idle,
+            )
+            .await
+            {
+                Ok(done) => break Ok(done),
+                Err(e) => e,
+            };
+            match run.retry {
+                Some(retry)
+                    if attempt < retry.attempts && llm::classify(&e) == llm::Fault::Transient =>
+                {
+                    attempt += 1;
+                    let delay = retry.delay(attempt);
+                    tracing::warn!(
+                        target: "pi::compact", attempt, delay_ms = delay.as_millis() as u64,
+                        error = %e, "summarizing again"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                _ => break Err(e),
+            }
+        };
+        match outcome {
             Ok((text, used)) => {
                 record.summary = Some(text);
                 // The new summary covers what the old one did, so the entry

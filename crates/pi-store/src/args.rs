@@ -87,7 +87,7 @@ pub enum EffortArg {
 }
 
 impl EffortArg {
-    /// Every level as typed, in order: what `/effort` offers and names.
+    /// Every level as typed, in order: what a choice of level offers and names.
     pub fn names() -> Vec<String> {
         Self::value_variants()
             .iter()

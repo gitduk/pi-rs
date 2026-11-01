@@ -663,7 +663,11 @@ impl Table {
             due.line.push_str(&next.line);
             due.text.push_str("\n\n");
             due.text.push_str(&next.text);
-            due.started.extend(next.started);
+            for started in next.started {
+                if !due.started.contains(&started) {
+                    due.started.push(started);
+                }
+            }
             executions.push(execution);
         }
         if executions.len() > 1 {
@@ -697,12 +701,12 @@ impl Table {
             .collect()
     }
 
-    /// The screen answered question `id`: it comes down, and the pick goes
+    /// The user answered question `id`: it comes down, and the pick goes
     /// to an asker that waits on it — `None` when they closed it. One that
-    /// does not wait hears nothing: the screen sent the pick as typed.
+    /// does not wait hears nothing: the pick was sent on as typed.
     pub fn answer(&self, id: u64, picked: Option<String>) {
         let mut inner = self.lock();
-        inner.answered(id, "answered on the screen", picked);
+        inner.answered(id, "the user answered", picked);
         drop(inner);
         self.wake();
     }
@@ -1351,7 +1355,7 @@ impl toolbox::channel::Channel for Handle {
     }
 
     fn result(&self, text: String) {
-        tracing::info!(target: "pi::background", execution = self.id, text = %text, "result");
+        tracing::info!(target: "pi::background", execution = self.id, bytes = text.len(), "result");
         self.table.update(self.id, self.run, |i| {
             let due = i.due(&text);
             i.wait(Back::Result(due));
@@ -1361,7 +1365,7 @@ impl toolbox::channel::Channel for Handle {
     // Writing instead of picking answers every question that does not wait:
     // what they wrote is the answer.
     fn input(&self, text: String) {
-        tracing::info!(target: "pi::background", execution = self.id, text = %text, "input");
+        tracing::info!(target: "pi::background", execution = self.id, bytes = text.len(), "input");
         let mut inner = self.table.lock();
         let Some(at) = inner.mine(self.id, self.run) else {
             return;
@@ -2345,6 +2349,11 @@ mod tests {
             "Background command #1 (crawl) reports:\n\npage one\n\nBackground command #1 (crawl) reports:\n\npage two"
         );
         assert_eq!(first.text, "page one\n\npage two");
+        // One run, however many of its results: its stale files said once.
+        let (_dir, ctx) = context();
+        ctx.note_write(&ctx.workspace.root().join("a.txt"));
+        let note = first.note_for(&ctx);
+        assert_eq!(note.matches("started:").count(), 1, "{note}");
         assert!(result_of(&table, &root).is_none(), "reported once");
         assert!(table.background(&root).is_empty());
     }

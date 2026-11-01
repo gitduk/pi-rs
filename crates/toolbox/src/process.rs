@@ -122,22 +122,24 @@ pub(crate) async fn settle(launched: Launched, ends: Ends) -> Result<Exited, Too
         }
         () = &mut over => {
             put_down(&mut child, group).await;
-            // The group is down, so the pipes close and what it printed
-            // before the deadline is still there to read.
-            let (stdout, stderr) = streams.after_exit(group).await;
-            return Err(timed_out(crate::bash::body(&stdout, &stderr)));
+            return Err(timed_out(streams.printed().await));
         }
     };
-    let (stdout, stderr) = tokio::select! {
-        both = streams.checked(group) => both?,
-        () = ends.stop.cancelled() => {
-            reap(group).await;
-            return Err(ToolError::Cancelled);
+    let ended = {
+        let both = streams.checked(group);
+        tokio::pin!(both);
+        tokio::select! {
+            both = &mut both => Some(both?),
+            () = ends.stop.cancelled() => {
+                reap(group).await;
+                return Err(ToolError::Cancelled);
+            }
+            () = &mut over => None,
         }
-        () = &mut over => {
-            reap(group).await;
-            return Err(timed_out(String::new()));
-        }
+    };
+    let Some((stdout, stderr)) = ended else {
+        reap(group).await;
+        return Err(timed_out(streams.printed().await));
     };
     Ok(Exited {
         status,
@@ -381,16 +383,34 @@ where
     })
 }
 
-async fn captured(task: &mut tokio::task::JoinHandle<Captured>) -> Captured {
-    task.await.unwrap_or_else(|_| Capture::new().finish())
+/// One pipe's capture: still draining, or what the drain left. A finished
+/// handle must not be awaited again, so what it gave is kept here instead.
+enum Pipe {
+    Draining(tokio::task::JoinHandle<Captured>),
+    Drained(Captured),
+}
+
+impl Pipe {
+    /// The capture once the pipe has closed. Cancel-safe: dropped mid-wait,
+    /// the next call picks up where this one stopped.
+    async fn captured(&mut self) -> Captured {
+        if let Pipe::Draining(task) = self {
+            let got = task.await.unwrap_or_else(|_| Capture::new().finish());
+            *self = Pipe::Drained(got);
+        }
+        match self {
+            Pipe::Drained(got) => got.clone(),
+            Pipe::Draining(_) => unreachable!("drained above"),
+        }
+    }
 }
 
 /// A child's two pipes, each drained into a bounded capture on a task of its
 /// own, the latest of both kept to be read while it runs: how an execution is watched.
 pub(crate) struct Streams {
     tail: Tail,
-    stdout: tokio::task::JoinHandle<Captured>,
-    stderr: tokio::task::JoinHandle<Captured>,
+    stdout: Pipe,
+    stderr: Pipe,
     failure: Arc<Mutex<Option<ToolError>>>,
 }
 
@@ -411,8 +431,8 @@ impl Streams {
         );
         Self {
             tail,
-            stdout,
-            stderr,
+            stdout: Pipe::Draining(stdout),
+            stderr: Pipe::Draining(stderr),
             failure,
         }
     }
@@ -425,15 +445,12 @@ impl Streams {
 
     /// Both captures, once both pipes have closed.
     pub(crate) async fn captured(&mut self) -> (Captured, Captured) {
-        (
-            captured(&mut self.stdout).await,
-            captured(&mut self.stderr).await,
-        )
+        (self.stdout.captured().await, self.stderr.captured().await)
     }
 
-    async fn after_exit(&mut self, group: Option<u32>) -> (Captured, Captured) {
-        // Keep the same future across the deadline: one pipe may already
-        // have completed, and its join handle must not be awaited twice.
+    /// Both captures, reclaiming descendants still holding the pipes past the
+    /// exit grace period.
+    pub(crate) async fn after_exit(&mut self, group: Option<u32>) -> (Captured, Captured) {
         let both = self.captured();
         tokio::pin!(both);
         tokio::select! {
@@ -442,6 +459,16 @@ impl Streams {
                 reap(group).await;
                 both.await
             }
+        }
+    }
+
+    /// What a run that is already over printed, its group taken down: the
+    /// captures if the pipes close within the grace period, else the latest of
+    /// it, since something that left the group may hold them for good.
+    pub(crate) async fn printed(&mut self) -> String {
+        match tokio::time::timeout(LINGER, self.captured()).await {
+            Ok((stdout, stderr)) => crate::bash::body(&stdout, &stderr),
+            Err(_) => self.tail.read(),
         }
     }
 
@@ -496,6 +523,22 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(10));
         assert!(exited.status.success());
         assert_eq!(exited.stdout.text.trim(), "hi");
+    }
+
+    // A deadline that lands while what the shell left behind still holds the
+    // pipes keeps what the shell printed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timeout_after_the_exit_keeps_the_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("echo hi; sleep 30 &");
+        match run(cmd, None, Some(Duration::from_millis(300)), &ctx).await {
+            Err(ToolError::Timeout { printed, .. }) => assert!(printed.contains("hi"), "{printed}"),
+            Err(other) => panic!("{other:?}"),
+            Ok(_) => panic!("the pipes outlived the deadline"),
+        }
     }
 
     // A stop returns once the whole tree is gone, so a restart finds what

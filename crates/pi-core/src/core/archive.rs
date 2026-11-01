@@ -23,7 +23,11 @@ fn pending() -> &'static std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>> {
 /// finished joins instantly, and one still running is exactly the one leaving
 /// would have dropped.
 pub async fn flush() {
-    let saves = std::mem::take(&mut *pending().lock().unwrap());
+    let saves = std::mem::take(
+        &mut *pending()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
     for save in saves {
         let _ = save.await;
     }
@@ -80,7 +84,9 @@ impl Archive for Filed {
                 );
             }
         });
-        let mut pending = pending().lock().unwrap();
+        let mut pending = pending()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Finished handles are zombies otherwise; the vec only ever grew.
         pending.retain(|h| !h.is_finished());
         pending.push(handle);

@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
-use crate::walk::{excludes, globs, looks_binary, roots_of, walker};
+use crate::walk::{excludes, globs, looks_binary, matches, roots_of, walker};
 use tool::limit::MAX_BYTES;
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput, output, spill};
 
@@ -151,7 +151,10 @@ impl Tool for Grep {
                         if !entry.file_type().is_some_and(|t| t.is_file()) {
                             return ignore::WalkState::Continue;
                         }
-                        if set.as_ref().is_some_and(|s| !s.is_match(entry.path())) {
+                        if set
+                            .as_ref()
+                            .is_some_and(|s| !matches(s, entry.path(), root, Some(ws.root())))
+                        {
                             return ignore::WalkState::Continue;
                         }
                         if entry.metadata().is_ok_and(|m| m.len() > MAX_BYTES) {

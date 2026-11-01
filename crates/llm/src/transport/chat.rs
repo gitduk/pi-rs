@@ -194,6 +194,8 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
         body["tool_choice"] = match &req.tool_choice {
             ToolChoice::Auto => json!("auto"),
             ToolChoice::None => json!("none"),
+            // A model that refuses a forced choice gets auto, as on the other wires.
+            _ if !spec.can_force_tool => json!("auto"),
             ToolChoice::Required => json!("required"),
             ToolChoice::Named(name) => {
                 json!({ "type": "function", "function": { "name": name } })

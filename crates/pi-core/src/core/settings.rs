@@ -25,13 +25,11 @@ impl Core {
     /// Before a run: read the prompt's files again if the session is new or
     /// compacted since. `Some` names the files that read differently.
     pub fn refresh_prompt_files(&mut self) -> Option<Vec<String>> {
-        if !self.lane_mut().prompt_files_due() {
-            return None;
-        }
+        let at = self.lane_mut().prompt_files_due()?;
         let lane = self.lane();
         let root = lane.root().to_path_buf();
         let was = lane.resolved().prompt_files.clone();
-        let resolved = match resolve::resolve(
+        let mut resolved = match resolve::resolve(
             &self.pinned,
             lane.workspace(),
             &self.config,
@@ -46,7 +44,13 @@ impl Core {
                 return Some(vec![format!("prompt files not re-read — {why}")]);
             }
         };
-        if *resolved.prompt_files == *was {
+        let unchanged = *resolved.prompt_files == *was;
+        // Resolved from the config in force, not the files on disk: their
+        // stamps stay as last read, so an edit since is still a reload's to apply.
+        resolved.watched = lane.resolved().watched.clone();
+        let model = lane.agent().spec().model.clone();
+        self.lane_mut().prompt_files_read(at);
+        if unchanged {
             return None;
         }
         let moved = was.moved(&resolved.prompt_files, &root);
@@ -54,7 +58,7 @@ impl Core {
         // Said as it changes, not on every read.
         let left_out = resolved.prompt_files.left_out(&root);
         let left_out = left_out.filter(|now| was.left_out(&root).as_ref() != Some(now));
-        let archive = self.archive(root, lane.agent().spec().model.clone());
+        let archive = self.archive(root, model);
         let retry = crate::core::retry(&self.config);
         let executions = self.executions.clone();
         self.lane_mut().rearm(
@@ -64,6 +68,9 @@ impl Core {
             executions,
             |_| {},
         );
+        // The shelf was read again with the rest, so a skill found on it is
+        // put in force here, as `refresh_skills` would have.
+        self.in_force();
         let said: Vec<String> = (!moved.is_empty())
             .then(|| format!("re-read — {}", moved.join(", ")))
             .into_iter()
@@ -100,7 +107,7 @@ impl Core {
     ) -> Result<Vec<String>, String> {
         let root = workspace.root().to_path_buf();
         let failed = |e| Err(format!("nothing reloaded — {}", refused("reload", e)));
-        let resolved = match crate::core::resolve::resolve(
+        let mut resolved = match crate::core::resolve::resolve(
             &self.pinned,
             &workspace,
             &config,
@@ -111,6 +118,11 @@ impl Core {
             Ok(r) => r,
             Err(e) => return failed(e),
         };
+        // Without settings read afresh, the files were not read again: their
+        // stamps stay as last read, so an edit since is still a reload's to apply.
+        if settings.is_none() {
+            resolved.watched = self.lane().resolved().watched.clone();
+        }
         // The model stays; its entry is re-read via the same `dial` path.
         // A failed dial keeps the old transport rather than refusing the file.
         let running = self.lane().agent().spec().clone();

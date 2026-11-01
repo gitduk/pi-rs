@@ -137,6 +137,9 @@ pub enum Replay<'a> {
     Thinking { signature: Option<&'a str> },
     // The target's own, encrypted: the ciphertext is the whole of what goes.
     Encrypted { id: &'a str, encrypted: &'a str },
+    // The target's own, sealed by the provider before it reached us: opaque,
+    // with no id, and owed back as it came.
+    Redacted { data: &'a str },
     // Nothing leaves.
     Dropped,
 }
@@ -171,6 +174,12 @@ impl Reasoning {
                         .any(|c| matches!(c, ReasoningContent::Text { .. }))
                     {
                         return Replay::Thinking { signature };
+                    }
+                    if let Some(data) = self.content.iter().find_map(|c| match c {
+                        ReasoningContent::Encrypted(s) => Some(s.as_str()),
+                        ReasoningContent::Text { .. } => None,
+                    }) {
+                        return Replay::Redacted { data };
                     }
                 }
                 Format::OpenAi => {

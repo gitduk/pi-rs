@@ -2,7 +2,7 @@
 //! it the default below stands.
 //!
 //! The script says where things go; what a part reads as is filled by the
-//! surface each frame, so a `/model` switch shows at once, not after rerun.
+//! surface each frame, so a model switch shows at once, not after rerun.
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};

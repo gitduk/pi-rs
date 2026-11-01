@@ -157,6 +157,29 @@ impl Tool for Sleeper {
     }
 }
 
+// Ignores its token: a call that will not stop, which the child is dropped
+// over once the grace runs out.
+struct Stubborn;
+
+#[async_trait]
+impl Tool for Stubborn {
+    fn name(&self) -> &str {
+        "stubborn"
+    }
+    fn description(&self) -> &str {
+        "never returns"
+    }
+    fn schema(&self) -> Value {
+        json!({ "type": "object", "properties": {}, "additionalProperties": false })
+    }
+    fn tier(&self) -> Tier {
+        Tier::Read
+    }
+    async fn execute(&self, _args: Value, _ctx: &Ctx) -> Result<ToolOutput, ToolError> {
+        std::future::pending().await
+    }
+}
+
 #[derive(Default)]
 struct Kept {
     // The child's whole transcript, the only way anything outside it can see
@@ -201,6 +224,7 @@ fn rigged(
     );
     std::sync::Arc::make_mut(&mut parent.brief).registry = Registry::new()
         .with(Sleeper)
+        .with(Stubborn)
         .with(toolbox::write::Write)
         .with(Probe {
             seen: seen.clone(),
@@ -363,6 +387,30 @@ async fn a_child_cut_off_by_the_deadline_answers_rather_than_fails() {
     );
     let transcript = format!("{:?}", session.entries());
     assert!(transcript.contains("unfinished"), "{transcript}");
+}
+
+// A child the watchdog stopped is cut off the same whether it unwound in its
+// grace or had to be dropped past it: the caller hears why, not a failure.
+#[tokio::test(start_paused = true)]
+async fn a_child_dropped_past_its_grace_still_says_why_it_was_cut() {
+    let (_dir, agent, ctx, _seen, _kept) = rigged(
+        vec![
+            call_turn(
+                "c1",
+                "subagent",
+                r#"{"description":"wedged","prompt":"wedged"}"#,
+            ),
+            call_turn("c2", "stubborn", "{}"),
+            text_turn("it reported back"),
+        ],
+        std::time::Duration::from_millis(50),
+        false,
+    );
+    let (session, out) = drive(&agent, &ctx, "go").await;
+    assert!(out.is_ok(), "{out:?}");
+    let transcript = format!("{:?}", session.entries());
+    assert!(transcript.contains("with no progress"), "{transcript}");
+    assert!(!transcript.contains("after cancel"), "{transcript}");
 }
 
 // The deadline bounds silence, not the run or turn count — a child that

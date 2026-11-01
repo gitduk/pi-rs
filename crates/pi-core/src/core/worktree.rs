@@ -297,17 +297,8 @@ pub struct Removed {
 ///
 /// A dirty checkout's refusal from git is passed through, not forced.
 pub fn remove(dir: &Path, name: &str) -> Result<Removed> {
-    let name = vetted(name)?;
-    let trees = list(dir)?;
-    // The main checkout answers to its directory name, and a linked tree may
-    // share it; removal means a linked one, so that one wins.
-    let Some(at) = trees
-        .iter()
-        .position(|t| !t.main && t.name == name)
-        .or_else(|| trees.iter().position(|t| t.name == name))
-    else {
-        bail!("`{name}` is not one of this repository's worktrees");
-    };
+    let (trees, at) = named(dir, name)?;
+    let name = &trees[at].name;
     let tree = &trees[at];
     if tree.main {
         bail!("`{name}` is the main checkout — it cannot be removed");
@@ -347,6 +338,22 @@ pub fn remove(dir: &Path, name: &str) -> Result<Removed> {
     })
 }
 
+// The repository's trees, and which of them `name` means for removal.
+fn named(dir: &Path, name: &str) -> Result<(Vec<Tree>, usize)> {
+    let name = vetted(name)?;
+    let trees = list(dir)?;
+    // The main checkout answers to its directory name, and a linked tree may
+    // share it; removal means a linked one, so that one wins.
+    let Some(at) = trees
+        .iter()
+        .position(|t| !t.main && t.name == name)
+        .or_else(|| trees.iter().position(|t| t.name == name))
+    else {
+        bail!("`{name}` is not one of this repository's worktrees");
+    };
+    Ok((trees, at))
+}
+
 impl Core {
     // Each tree keeps its own transcript: paths in it are workspace-relative
     // and locks are keyed by absolute path, so a shared one would misresolve.
@@ -363,11 +370,7 @@ impl Core {
         }
         // Saved before the move, against the root it belongs to; an empty
         // session has nothing to keep, and a run in flight saves its own.
-        if self.lane().session().is_some_and(|s| !s.is_empty())
-            && let Err(e) = self.save()
-        {
-            tracing::warn!(target: "pi::session", error = %e, "the leaving session was not saved");
-        }
+        self.leave("worktree")?;
         // Already open: the lane that holds it comes back whole. Nothing is
         // said — the lane coming to the front says where you are.
         if let Some(i) = self.lane_at(ws.root()) {
@@ -383,16 +386,19 @@ impl Core {
     // dirty checkout's refusal from git is passed on, not forced past.
     pub(super) fn remove_worktree(&mut self, name: &str) -> Result<Step, String> {
         let from = self.lane().root().to_path_buf();
-        if let Some(target) = list(&from)
-            .ok()
-            .and_then(|trees| trees.into_iter().find(|t| !t.main && t.name == name))
+        // Resolved as `remove` resolves it, so the guard and the removal agree
+        // on which tree the name means.
+        if let Ok((trees, at)) = named(&from, name)
+            && !trees[at].main
         {
+            let target = &trees[at];
             let running = self.lanes.iter().enumerate().any(|(i, lane)| {
                 i != self.current && lane.root().starts_with(&target.path) && lane.is_running()
             });
             if running {
                 return Err(format!(
-                    "`{name}` is running in another lane of this run — stop it first"
+                    "`{}` is running in another lane of this run — stop it first",
+                    target.name
                 ));
             }
         }
@@ -485,7 +491,7 @@ impl TestRepo {
 }
 
 #[cfg(test)]
-fn test_repo() -> TestRepo {
+pub(crate) fn test_repo() -> TestRepo {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
     std::fs::create_dir(&root).unwrap();
@@ -893,8 +899,11 @@ mod tests {
         core.current = 0;
         core.in_force();
 
-        let err = core.remove_worktree("fix-tools").unwrap_err();
-        assert!(err.contains("running in another lane"), "{err}");
+        // Spelled as removal accepts it, the name still finds the running lane.
+        for name in ["fix-tools", "fix-tools/"] {
+            let err = core.remove_worktree(name).unwrap_err();
+            assert!(err.contains("running in another lane"), "{err}");
+        }
         assert_eq!(core.lanes.len(), 2);
         assert!(home(dir.path()).unwrap().join("fix-tools").exists());
     }

@@ -162,6 +162,7 @@ impl Servers {
                 let mut state = lock(&server.state);
                 server.epoch.fetch_add(1, Ordering::SeqCst);
                 *state = State::Starting;
+                GENERATION.fetch_add(1, Ordering::SeqCst);
             }
             connect(server);
         }
@@ -262,7 +263,7 @@ impl tool::Source for Servers {
                 State::Starting => {}
                 State::Up(tools, _) => out.extend(tools.iter().cloned()),
                 State::Down(why) => out.push(Arc::new(Down {
-                    name: tool_name(&server.name, "unavailable"),
+                    name: tool_name(&server.name, STAND_IN),
                     description: format!(
                         "MCP server `{}` is not running: {why}. \
                          Its tools become available when the server starts. \
@@ -320,7 +321,7 @@ async fn run(server: Arc<Server>, epoch: u64) {
             };
             let stderr = stderr.map(|s| tokio::spawn(tail(s, server.name.clone())));
             (
-                handler.serve_with_lifecycle(transport, lifecycle).await,
+                answered(handler.serve_with_lifecycle(transport, lifecycle)).await,
                 stderr,
             )
         }
@@ -353,7 +354,7 @@ async fn run(server: Arc<Server>, epoch: u64) {
             config = config.custom_headers(map);
             let transport = StreamableHttpClientTransport::from_config(config);
             (
-                handler.serve_with_lifecycle(transport, lifecycle).await,
+                answered(handler.serve_with_lifecycle(transport, lifecycle)).await,
                 None,
             )
         }
@@ -361,11 +362,19 @@ async fn run(server: Arc<Server>, epoch: u64) {
     let running = match running {
         Ok(running) => running,
         Err(e) => {
+            // What it left running may hold stderr open past the server's
+            // own end, so its last words get a moment and no more.
             let said = match stderr {
-                Some(t) => t.await.unwrap_or_default(),
+                Some(mut t) => match tokio::time::timeout(STDERR_GRACE, &mut t).await {
+                    Ok(said) => said.unwrap_or_default(),
+                    Err(_) => {
+                        t.abort();
+                        String::new()
+                    }
+                },
                 None => String::new(),
             };
-            return down(&server, epoch, with_stderr(e.to_string(), &said));
+            return down(&server, epoch, with_stderr(e, &said));
         }
     };
     list(&server, epoch, running.peer()).await;
@@ -374,6 +383,24 @@ async fn run(server: Arc<Server>, epoch: u64) {
         Err(e) => format!("stopped: {e}"),
     };
     down(&server, epoch, ended);
+}
+
+// How long a server has to answer the handshake before it is taken as down.
+const HANDSHAKE: std::time::Duration = std::time::Duration::from_secs(30);
+const STDERR_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+// The handshake's outcome, or why there was none: one that never answers is
+// a server that will not start, not one still starting.
+async fn answered<T, E: std::fmt::Display>(
+    handshake: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, String> {
+    match tokio::time::timeout(HANDSHAKE, handshake).await {
+        Ok(done) => done.map_err(|e| e.to_string()),
+        Err(_) => Err(format!(
+            "no answer to the handshake within {}s",
+            HANDSHAKE.as_secs()
+        )),
+    }
 }
 
 // The server's tools and prompts, read again: at start, and whenever it says
@@ -409,12 +436,14 @@ async fn list(server: &Arc<Server>, epoch: u64, peer: &Peer<RoleClient>) {
         .collect();
     match tools {
         Ok(listed) => {
+            let names = tool_names(&server.name, listed.iter().map(|t| t.name.as_ref()));
             let tools = listed
                 .into_iter()
-                .map(|t| {
+                .zip(names)
+                .map(|(t, name)| {
                     let (schema, described) = with_description((*t.input_schema).clone());
                     Arc::new(Remote {
-                        name: tool_name(&server.name, &t.name),
+                        name,
                         remote: t.name.to_string(),
                         description: format!(
                             "[{}] {}",
@@ -467,12 +496,40 @@ async fn tail(mut stderr: tokio::process::ChildStderr, name: String) -> String {
     llm::slice::tail_bytes(&text, KEEP).to_string()
 }
 
+// The longest name every provider takes.
+const NAME_MAX: usize = 64;
+
+// What a server that is down stands in the set as.
+const STAND_IN: &str = "unavailable";
+
 /// `<server>__<tool>`, in the characters every provider takes, within 64.
 fn tool_name(server: &str, tool: &str) -> String {
     format!("{server}__{tool}")
         .chars()
         .map(|c| if tool::name_char(c) { c } else { '_' })
-        .take(64)
+        .take(NAME_MAX)
+        .collect()
+}
+
+/// One server's tools' names, in order, each its own: `read.file` and
+/// `read_file`, or two cut at the same 64 characters, would otherwise answer
+/// to one name. The stand-in's name is never given to a real tool, so a call
+/// to it never reaches a tool the server offered.
+fn tool_names<'a>(server: &str, tools: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut taken = std::collections::HashSet::from([tool_name(server, STAND_IN)]);
+    tools
+        .map(|tool| {
+            let base = tool_name(server, tool);
+            let mut name = base.clone();
+            let mut n = 2;
+            while !taken.insert(name.clone()) {
+                let suffix = format!("_{n}");
+                let kept: String = base.chars().take(NAME_MAX - suffix.len()).collect();
+                name = format!("{kept}{suffix}");
+                n += 1;
+            }
+            name
+        })
         .collect()
 }
 
@@ -708,6 +765,23 @@ mod tests {
         assert_eq!(tool_name("github", "create_issue"), "github__create_issue");
         assert_eq!(tool_name("fs", "read.file"), "fs__read_file");
         assert_eq!(tool_name("a", &"x".repeat(100)).len(), 64);
+    }
+
+    // Two tools under one name would leave the model unable to reach one.
+    #[test]
+    fn a_servers_tool_names_never_collide() {
+        let long = "x".repeat(100);
+        let longer = format!("{long}y");
+        let names = tool_names(
+            "fs",
+            ["read.file", "read_file", &long, &longer, "unavailable"].into_iter(),
+        );
+        assert_eq!(names[0], "fs__read_file");
+        assert_eq!(names[1], "fs__read_file_2");
+        assert_eq!(names[2].len(), 64);
+        assert_eq!(names[3].len(), 64);
+        assert!(names[3].ends_with("_2"), "{}", names[3]);
+        assert_eq!(names[4], "fs__unavailable_2");
     }
 
     // The server never sees the argument pi added, nor loses one of its own.

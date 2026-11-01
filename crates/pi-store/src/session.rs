@@ -75,8 +75,8 @@ struct Peek {
     model: String,
     #[serde(default)]
     created: u64,
-    /// What the user calls this session, by `/name` or `--name`. Shallow like
-    /// `created`: a listing shows it and never builds the transcript to say it.
+    /// What the user calls this session. Shallow like `created`: a
+    /// listing shows it and never builds the transcript to say it.
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -297,19 +297,41 @@ fn discard_unsaved(dir: &Path) {
 
 /// The same for a sweep: a lock some pi still holds stays where it is.
 pub(crate) fn discard_abandoned(dir: &Path) {
-    let free = std::fs::File::open(dir.join(LOCK)).map_or(true, |f| f.try_lock().is_ok());
-    if free {
-        discard_unsaved(dir);
+    let lock = std::fs::File::open(dir.join(LOCK)).ok();
+    if lock.as_ref().is_some_and(|f| f.try_lock().is_err()) {
+        return;
     }
+    // Held through the unlink, so no claim takes the lock in between and
+    // then holds a file that is no longer there.
+    discard_unsaved(dir);
+    drop(lock);
+}
+
+/// Whether some pi holds the session in `dir`, this one included: what a
+/// sweep leaves alone.
+pub(crate) fn held(dir: &Path) -> bool {
+    std::fs::File::open(dir.join(LOCK)).is_ok_and(|f| f.try_lock().is_err())
+}
+
+// Make a rename or unlink in `dir` survive a crash. Where a directory cannot
+// be opened to sync, the rename alone is what there is.
+fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 // Beside a session's transcript: the subagents its turns called, one file each.
 const SUBAGENTS: &str = "subagents";
 
-// One transcript, written whole. The rename means a crash mid-write cannot
-// leave a truncated one.
+// One transcript, written whole. The sync then rename means a crash
+// mid-write cannot leave a truncated one.
 fn write(path: &Path, workspace: &Path, header: Header<'_>, session: &Session) -> Result<PathBuf> {
-    std::fs::create_dir_all(path.parent().expect("a session directory"))?;
+    let dir = path.parent().expect("a session directory");
+    std::fs::create_dir_all(dir)?;
     let tmp = path.with_extension("json.tmp");
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -334,12 +356,11 @@ fn write(path: &Path, workspace: &Path, header: Header<'_>, session: &Session) -
         spent: header.spent,
         session,
     };
-    use std::io::Write;
     let mut out = std::io::BufWriter::new(file);
     serde_json::to_writer_pretty(&mut out, &stored)?;
-    out.flush()?;
-    drop(out);
+    out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
     std::fs::rename(&tmp, path)?;
+    sync_dir(dir);
     Ok(path.to_path_buf())
 }
 
@@ -627,14 +648,14 @@ impl Store {
             .collect();
         let mut seen = HashSet::new();
         found.retain(|p| seen.insert(p.id.clone()));
-        // Newest by last activity, not creation — `/resume` wants where you
+        // Newest by last activity, not creation — resuming wants where you
         // left off. Ties break by id, since a stamp is only seconds.
         found.sort_by(|a, b| b.touched().cmp(&a.touched()).then_with(|| b.id.cmp(&a.id)));
         found
     }
 
     /// Sweeps buckets whose workspace is gone — a removed worktree, a
-    /// deleted checkout — since `/resume` has no other way back to them.
+    /// deleted checkout — since resuming has no other way back to them.
     ///
     /// Reachability alone isn't safe: an unmounted disk looks gone too. Age
     /// is what tells the two apart.
@@ -654,7 +675,7 @@ impl Store {
                     continue;
                 };
                 let spared = spare.as_deref().is_some_and(|s| dir.ends_with(s));
-                if !spared && crate::older_than(transcript, keep) {
+                if !spared && !held(dir) && crate::older_than(transcript, keep) {
                     let _ = std::fs::remove_dir_all(dir);
                 }
             }
@@ -682,11 +703,13 @@ impl Store {
             let mut all_gone = !transcripts.is_empty();
             for transcript in &transcripts {
                 match workspace_of(std::slice::from_ref(transcript)) {
-                    Some(ws) if !Path::new(&ws).is_dir() => {
-                        if let Some(dir) = transcript.parent() {
+                    Some(ws) if !Path::new(&ws).is_dir() => match transcript.parent() {
+                        Some(dir) if held(dir) => all_gone = false,
+                        Some(dir) => {
                             let _ = std::fs::remove_dir_all(dir);
                         }
-                    }
+                        None => {}
+                    },
                     _ => all_gone = false,
                 }
             }
@@ -709,7 +732,9 @@ impl Store {
             let mut owed: Vec<&Path> = Vec::new();
             let mut shared = false;
             for transcript in &transcripts {
+                // Unread is someone else's: nothing is deleted on a guess.
                 let Some(belongs) = belongs(transcript) else {
+                    shared = true;
                     continue;
                 };
                 if Path::new(&belongs.workspace).starts_with(root) {
@@ -739,7 +764,7 @@ impl Store {
         dropped
     }
 
-    /// Every session `/resume` can name for this workspace, newest first,
+    /// Every session a resume can name for this workspace, newest first,
     /// reduced to what the list and its completion show: the id it is named
     /// by, the name the user gave it, and its first prompt.
     pub fn choices(&self, workspace: &Path) -> Vec<ResumeChoice> {
@@ -906,6 +931,25 @@ mod tests {
             "the session being resumed stays"
         );
     }
+
+    #[test]
+    fn forgetting_spares_a_session_another_pi_holds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path());
+        let log = log_with(vec![Message::user("hi")]);
+        let ws = tempfile::tempdir().unwrap();
+        let held = store.claim(ws.path(), "held").unwrap();
+        store
+            .save(ws.path(), header("held", "test-model", None, 7), &log)
+            .unwrap();
+
+        store.forget_older_than(std::time::Duration::ZERO, None);
+        assert!(store.load("held").is_ok());
+        drop(held);
+        store.forget_older_than(std::time::Duration::ZERO, None);
+        assert!(store.load("held").is_err());
+    }
+
     // Two trees that fold to one bucket share it, so pruning must judge
     // each transcript by its own workspace, not the bucket as a whole.
     #[test]
@@ -939,7 +983,7 @@ mod tests {
         );
     }
 
-    // `/worktree rm` drops a tree's buckets immediately rather than
+    // Removing a tree drops its buckets immediately rather than
     // waiting for the sweep; a sibling tree's records must survive.
     #[test]
     fn drop_under_removes_the_buckets_of_one_checkout_and_no_others() {
@@ -963,6 +1007,26 @@ mod tests {
         assert!(store.load("in-tree").is_err());
         assert!(store.load("in-deep").is_err());
         assert!(store.load("in-sibling").is_ok());
+    }
+    #[test]
+    fn drop_under_keeps_a_bucket_holding_a_transcript_it_cannot_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path().join("store"));
+        let tree = tempfile::tempdir().unwrap();
+        store
+            .save(
+                tree.path(),
+                header("ours", "test-model", None, 7),
+                &log_with(vec![Message::user("hi")]),
+            )
+            .unwrap();
+        let unread = store.path_of(tree.path(), "unread");
+        std::fs::create_dir_all(unread.parent().unwrap()).unwrap();
+        std::fs::write(&unread, b"not json").unwrap();
+
+        assert_eq!(store.drop_under(tree.path()), 1);
+        assert!(store.load("ours").is_err());
+        assert!(unread.exists());
     }
     // Two trees folding to one bucket key share it; removing one must not
     // take the other's — the recorded workspace decides, not the bucket.
@@ -1197,7 +1261,7 @@ mod tests {
         assert!(!store.path_of(a, "s").parent().unwrap().exists());
     }
 
-    // A cached `/resume` list is dropped by this number alone: a
+    // A cached resume list is dropped by this number alone: a
     // write that changes `choices` without moving it leaves the list stale.
     #[test]
     fn writes_that_change_the_choices_move_the_version_every_clone_sees() {

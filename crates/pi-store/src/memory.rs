@@ -6,7 +6,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -15,9 +14,10 @@ use crate::session::key_of;
 /// The name an edit uses for the project's own file.
 pub const PROJECT: &str = "project";
 
+// Held by the system, not by the file being there: a run that dies lets go,
+// so no age decides a lock is stale and no two can both take one over.
 const LOCK: &str = ".lock";
-// A lock older than this is a run that died holding it.
-const STALE: Duration = Duration::from_secs(600);
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// One memory file: what an edit calls it, and what it holds.
 #[derive(Debug, Clone, PartialEq)]
@@ -223,26 +223,31 @@ impl Memory {
     /// write over the other's. `None` while another holds it.
     pub fn lock(&self) -> Option<Lock> {
         std::fs::create_dir_all(&self.dir).ok()?;
-        let path = self.dir.join(LOCK);
-        if crate::older_than(&path, STALE) {
-            let _ = std::fs::remove_file(&path);
-        }
-        std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .write(true)
-            .create_new(true)
-            .open(&path)
-            .ok()
-            .map(|_| Lock(path))
+            .create(true)
+            .truncate(false)
+            .open(self.dir.join(LOCK))
+            .ok()?;
+        // A child being started anywhere in this process holds a copy of the
+        // descriptor until it execs, and with it the lock: wait that out.
+        let until = std::time::Instant::now() + LOCK_WAIT;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Some(Lock { _file: file }),
+                Err(_) if std::time::Instant::now() < until => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => return None,
+            }
+        }
     }
 }
 
-/// Held memory; let go on drop.
-pub struct Lock(PathBuf);
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
+/// Held memory; let go on drop. The file stays: unlinking it while held
+/// would let a second pi lock a fresh one beside a third still on the old.
+pub struct Lock {
+    _file: std::fs::File,
 }
 
 /// Edits worked out but not yet written; `commit` writes them.
@@ -482,5 +487,12 @@ mod tests {
         assert!(memory.lock().is_none());
         drop(held);
         assert!(memory.lock().is_some());
+    }
+
+    #[test]
+    fn a_lock_file_left_behind_holds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(LOCK), "").unwrap();
+        assert!(Memory::new(dir.path()).lock().is_some());
     }
 }

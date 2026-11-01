@@ -117,27 +117,22 @@ pub async fn foreground(
     // Waiting on the person is not running long: the clock stops until the
     // answer, then starts over.
     let mut waiting: Option<Answer> = None;
-    loop {
+    // The pipes too: what the script left running may hold them, and the
+    // deadline and a stop still have to reach that. Made once, so an event
+    // winning the race does not restart the wait for the pipes.
+    let mut exit = Box::pin(async { (child.wait().await, streams.checked(group).await) });
+    let late = loop {
         tokio::select! {
             // Stop and deadline take priority over a busy event channel.
             // Events already buffered are read before observing process exit.
             biased;
-            () = ctx.cancel.cancelled() => {
-                reap(group).await;
-                return Err(ToolError::Cancelled);
-            }
+            () = ctx.cancel.cancelled() => break false,
             picked = async { waiting.as_mut().expect("guarded").await }, if waiting.is_some() => {
                 waiting = None;
                 let _ = told.send(Told::Answer(Ok(picked.ok().flatten())));
                 deadline.as_mut().reset(tokio::time::Instant::now() + limit);
             }
-            () = &mut deadline, if waiting.is_none() => {
-                reap(group).await;
-                return Err(ToolError::Timeout {
-                    ms: limit.as_millis() as u64,
-                    printed: String::new(),
-                });
-            }
+            () = &mut deadline, if waiting.is_none() => break true,
             said = fd3.next() => match said {
                 Said::Status(text) => ctx.progress(text),
                 Said::Choose(asked) => {
@@ -166,16 +161,22 @@ pub async fn foreground(
                     target: "pi::scripts", script = name, "session message requires background=true, dropped"
                 ),
             },
-            // The pipes too: what the script left running may hold them, and
-            // the deadline and a stop still have to reach that.
-            (status, captures) = async {
-                (child.wait().await, streams.checked(group).await)
-            } => {
+            (status, captures) = &mut exit => {
                 let (stdout, stderr) = captures?;
                 return Ok(Exited { status: status?, stdout, stderr });
             }
         }
+    };
+    drop(exit);
+    put_down(&mut child, group).await;
+    if !late {
+        return Err(ToolError::Cancelled);
     }
+    let printed = streams.printed().await;
+    Err(ToolError::Timeout {
+        ms: limit.as_millis() as u64,
+        printed,
+    })
 }
 
 /// Start one already-registered command and attach its session channel.
@@ -427,6 +428,54 @@ mod tests {
         .await
         .expect("the deadline remains observable while events arrive");
         assert!(matches!(ended, Err(ToolError::Timeout { .. })));
+    }
+
+    // A timed-out script is waited for before its group is swept, so the
+    // timeout neither sits out the sweep nor loses what was printed.
+    #[tokio::test]
+    async fn a_foreground_timeout_keeps_output_and_returns_promptly() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = script(dir.path(), "echo early; sleep 30");
+        let started = std::time::Instant::now();
+        let ended = foreground(
+            "slow",
+            cmd,
+            Vec::new(),
+            Duration::from_millis(300),
+            &ctx(dir.path()),
+            &NoOne,
+        )
+        .await;
+        assert!(started.elapsed() < 2 * SECOND, "{:?}", started.elapsed());
+        match ended {
+            Err(ToolError::Timeout { printed, .. }) => {
+                assert!(printed.contains("early"), "{printed}")
+            }
+            Err(other) => panic!("{other:?}"),
+            Ok(_) => panic!("a 30s script finished within its 300ms"),
+        }
+    }
+
+    // An event arriving after one pipe has closed must not re-poll that
+    // pipe's finished drain.
+    #[tokio::test]
+    async fn an_event_after_one_pipe_closes_does_not_break_the_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = script(
+            dir.path(),
+            "exec 1>&-; (sleep 0.2; echo '{\"status\":\"late\"}' >&3; sleep 0.2) & exit 0",
+        );
+        let ended = foreground(
+            "late",
+            cmd,
+            Vec::new(),
+            10 * SECOND,
+            &ctx(dir.path()),
+            &NoOne,
+        )
+        .await
+        .unwrap();
+        assert!(ended.status.success());
     }
 
     #[tokio::test]

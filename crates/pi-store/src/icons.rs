@@ -48,7 +48,7 @@ pub const UNOPENED_MARK: &str = "○"; // a checkout on the bar that no lane has
 pub const COMPACT_RULE: &str = "───"; // the dashes a compaction banner wears
 pub const OVER_RULE: &str = "─"; // the line parting what lies over the transcript from it
 
-pub const CURRENT_ITEM: &str = "●"; // the current row in `/model` and `/resume`
+pub const CURRENT_ITEM: &str = "●"; // the current row in a list to choose from
 
 pub const INPUT_SIGIL: &str = PROMPT_BAR; // `theme.prompt.icon` default
 pub const INPUT_SIGIL_NORMAL: &str = PROMPT_BAR; // `theme.prompt.normal` default

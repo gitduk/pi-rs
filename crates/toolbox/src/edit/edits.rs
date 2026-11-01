@@ -189,9 +189,10 @@ pub fn apply(path: &str, content: &str, edits: &[Edit]) -> Result<Applied, Refus
         if edit.whole_block {
             let opens = opens.get_or_insert_with(|| crate::blocks::by_row(path, body));
             let (span, whole) = block(path, opens, body, &lines, anchor, index)?;
+            let here = crlf_at(body, &span);
             let text = match edit.anchor {
-                Anchor::Replace(_) => splice(&whole, &edit.new, ending(crlf)),
-                _ => translate(&edit.new, crlf),
+                Anchor::Replace(_) => splice(&whole, &edit.new, ending(here)),
+                _ => translate(&edit.new, here),
             };
             placed.push(Placed {
                 index,
@@ -220,12 +221,11 @@ pub fn apply(path: &str, content: &str, edits: &[Edit]) -> Result<Applied, Refus
                 detail: candidates(path, body, &lines, &found),
             });
         }
-        let text = translate(&edit.new, crlf);
         for span in found {
             placed.push(Placed {
                 index,
+                text: translate(&edit.new, crlf_at(body, &span)),
                 span: landing(&edit.anchor, span),
-                text: text.clone(),
             });
         }
     }
@@ -376,6 +376,16 @@ fn spans(body: &str, needle: &str) -> Vec<Range<usize>> {
     body.match_indices(needle)
         .map(|(at, _)| at..at + needle.len())
         .collect()
+}
+
+/// Whether the line `span` starts on ends `\r\n` — or, on a last line with
+/// no break, the line before it. A file of mixed endings gives an edit the
+/// spelling of the lines it lands among.
+fn crlf_at(body: &str, span: &Range<usize>) -> bool {
+    let after = body[span.start..].find('\n').map(|at| span.start + at);
+    after
+        .or_else(|| body[..span.start].rfind('\n'))
+        .is_some_and(|at| body[..at].ends_with('\r'))
 }
 
 fn ending(crlf: bool) -> &'static str {
@@ -683,5 +693,16 @@ mod tests {
         let edits = [replace("x", "1"), replace("x", "2")];
         let err = apply("a.rs", "x\n", &edits).unwrap_err();
         assert!(matches!(err, Refusal::Overlap { .. }), "{err}");
+    }
+
+    // A file of mixed endings keeps each region's own: an edit among LF
+    // lines writes LF, one among CRLF lines writes CRLF.
+    #[test]
+    fn an_edit_takes_the_ending_of_the_lines_it_lands_among() {
+        let body = "a\r\nb\r\nc\nd\n";
+        let got = apply("a.txt", body, &[replace("c\n", "x\ny\n")]).unwrap();
+        assert_eq!(got.content, "a\r\nb\r\nx\ny\nd\n");
+        let got = apply("a.txt", body, &[replace("a\n", "x\ny\n")]).unwrap();
+        assert_eq!(got.content, "x\r\ny\r\nb\r\nc\nd\n");
     }
 }

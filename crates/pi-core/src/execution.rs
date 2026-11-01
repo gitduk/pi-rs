@@ -252,13 +252,41 @@ impl Done {
     }
 }
 
+thread_local! {
+    // How many `guard`s are polling on this thread right now.
+    static GUARDING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether a panic raised on this thread now is one `guard` will catch: the
+/// process goes on, so whatever a panic hook would tear down is still in use.
+pub fn panic_is_caught() -> bool {
+    GUARDING.with(std::cell::Cell::get) > 0
+}
+
 /// A panic cannot leave a request waiting forever or hide a lost session.
 pub async fn guard<F, T>(run: F) -> Option<T>
 where
     F: std::future::Future<Output = T>,
 {
     use futures::FutureExt;
-    std::panic::AssertUnwindSafe(run).catch_unwind().await.ok()
+    struct Polling;
+    impl Drop for Polling {
+        fn drop(&mut self) {
+            GUARDING.with(|n| n.set(n.get() - 1));
+        }
+    }
+    let mut run = std::pin::pin!(run);
+    // Counted only while it polls: between polls the thread runs other work,
+    // whose panics nothing here catches.
+    let polled = std::future::poll_fn(move |cx| {
+        GUARDING.with(|n| n.set(n.get() + 1));
+        let _polling = Polling;
+        run.as_mut().poll(cx)
+    });
+    std::panic::AssertUnwindSafe(polled)
+        .catch_unwind()
+        .await
+        .ok()
 }
 
 pub async fn compact(
@@ -426,5 +454,34 @@ pub async fn fetch(request: Request, prompt: mcp::Prompt, args: String, typed: S
         request,
         typed,
         text,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_panic_under_guard_is_known_to_be_caught() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let prior = std::panic::take_hook();
+        let (saw, here) = (seen.clone(), std::thread::current().id());
+        // The hook is the process's: other tests' panics are not this one's.
+        std::panic::set_hook(Box::new(move |_| {
+            if std::thread::current().id() == here {
+                saw.lock().unwrap().push(super::panic_is_caught());
+            }
+        }));
+        let out = futures::executor::block_on(super::guard(async {
+            if super::panic_is_caught() {
+                panic!("caught");
+            }
+        }));
+        let outside = std::panic::catch_unwind(|| panic!("not guarded"));
+        std::panic::set_hook(prior);
+        assert!(out.is_none() && outside.is_err());
+        assert_eq!(*seen.lock().unwrap(), [true, false]);
+        assert!(
+            !super::panic_is_caught(),
+            "the count unwound with the panic"
+        );
     }
 }

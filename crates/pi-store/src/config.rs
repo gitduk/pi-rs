@@ -82,7 +82,7 @@ pub struct Config {
     /// says each event. A checkout's are named when pi starts, like `[mcp]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<Hook>,
-    /// How many rounds a `/loop` may run before it stops on its own. Defaults
+    /// How many rounds a loop may run before it stops on its own. Defaults
     /// to 10 — the fingerprint and thin-round brakes catch a converging loop,
     /// and this is the floor for the shape they cannot (a round that keeps
     /// changing files forever). Unset reads as 10; the user's stop is always the brake.
@@ -840,7 +840,7 @@ impl Config {
             if entry.effort.is_some_and(|e| e != EffortArg::Unsupported) {
                 bail!(
                     "models.{model}.effort: only \"unsupported\" belongs here; \
-                     a level is set by the top-level `effort` or `/effort`"
+                     a level is set by the top-level `effort` key"
                 );
             }
             let reachable = config.base_url.is_some() || entry.base_url.is_some();
@@ -1043,7 +1043,7 @@ api_key = "local-key"
     #[test]
     fn the_resumed_model_outranks_the_files() {
         // Resuming means resuming, project default or not. Moving the session
-        // is `/model`'s job, and it says so when it happens.
+        // is a model switch's job, and it says so when it happens.
         let c = parse(SAMPLE).unwrap();
         assert_eq!(c.model(None, Some("resumed"), true).unwrap().0, "resumed");
         assert_eq!(

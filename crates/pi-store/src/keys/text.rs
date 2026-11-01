@@ -2,7 +2,7 @@
 //! binding is written back out.
 //!
 //! Second half of `mod.rs`: that says what the table is, this says how a key
-//! is spelled in it — the config file's side, and the `/keys` listing's.
+//! is spelled in it — the config file's side, and the binding listing's.
 
 use super::{Action, BINDINGS, Chord, Key, Keys, Layers, Mode, Mods, On, Press, When};
 use crate::listing::{Listing, Row};
@@ -58,7 +58,7 @@ impl Keys {
     }
 }
 
-// When a binding is live, as `/keys` says it; nothing for the line in
+// When a binding is live, as the listing says it; nothing for the line in
 // either mode. Insert goes unsaid: with vim off it is the only mode.
 fn live_when(when: When) -> String {
     let on = match when.on {
@@ -89,7 +89,7 @@ fn show_chord(c: Chord) -> String {
 }
 
 // Every key spelled by name, its canonical spelling first. Reading and `show`
-// both go through here, so what `/keys` prints is what a config can type back.
+// both go through here, so what the listing prints is what a config can type back.
 const NAMES: &[(Key, &[&str])] = &[
     (Key::Enter, &["enter", "return"]),
     (Key::Tab, &["tab"]),
@@ -192,7 +192,7 @@ mod tests {
     use super::{Key, Mods, NAMES, Press, parse, show};
     #[test]
     fn a_capital_survives_the_round_trip_through_the_listing() {
-        // `/keys` prints presses with `show`, and what it prints has to be
+        // The listing prints presses with `show`, and what it prints has to be
         // what a config can type back in.
         for spec in ["D", "d", "ctrl+shift+t", "shift+enter", "$", "f5"] {
             assert_eq!(press(&show(press(spec))), press(spec), "{spec}");
