@@ -50,10 +50,6 @@ impl Load {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.skills.is_empty()
-    }
-
     fn find(&self, name: &str) -> Result<&Skill, ToolError> {
         self.skills.iter().find(|s| s.name == name).ok_or_else(|| {
             ToolError::Invalid(format!(
@@ -283,5 +279,28 @@ mod tests {
         assert_eq!(files.len(), CAP);
         assert_eq!(files[0], "a.md");
         assert_eq!(files[CAP - 1], format!("f{:03}.txt", CAP - 2));
+    }
+
+    #[test]
+    fn exactly_cap_files_is_not_a_cut_list() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in 0..CAP {
+            std::fs::write(dir.path().join(format!("f{n:03}.txt")), "").unwrap();
+        }
+        let (files, cut) = sibling_files(dir.path());
+        assert_eq!((files.len(), cut), (CAP, false));
+    }
+
+    // Three levels of subdirectory are listed; a fourth is not.
+    #[test]
+    fn files_are_listed_three_directories_deep_and_no_deeper() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b/c/d")).unwrap();
+        std::fs::write(dir.path().join("a/b/c/three.md"), "").unwrap();
+        std::fs::write(dir.path().join("a/b/c/d/four.md"), "").unwrap();
+        assert_eq!(
+            sibling_files(dir.path()),
+            (vec!["a/b/c/three.md".to_string()], false)
+        );
     }
 }
