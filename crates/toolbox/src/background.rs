@@ -38,7 +38,43 @@ impl Invocation {
 }
 
 /// Reads the latest of what a running execution has printed, on demand.
-pub type Peek = Arc<dyn Fn() -> String + Send + Sync>;
+#[derive(Clone)]
+pub struct Peek(Arc<dyn Fn(usize) -> Printed + Send + Sync>);
+
+/// What an execution printed after a byte count it reported before.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Printed {
+    pub text: String,
+    /// Bytes printed so far, to read on from next time.
+    pub total: usize,
+    /// Part of what came after the count is gone: `text` starts at a later line.
+    pub cut: bool,
+}
+
+impl Peek {
+    /// `read(from)` answers with what was printed after `from` bytes.
+    pub fn new(read: impl Fn(usize) -> Printed + Send + Sync + 'static) -> Self {
+        Self(Arc::new(read))
+    }
+
+    /// Text that is all there is: read once more, it holds nothing new.
+    pub fn text(text: String) -> Self {
+        Self::new(move |from| Printed {
+            text: text.get(from..).unwrap_or_default().to_string(),
+            total: text.len(),
+            cut: false,
+        })
+    }
+
+    /// The latest of it, as much as is kept.
+    pub fn latest(&self) -> String {
+        self.since(0).text
+    }
+
+    pub fn since(&self, from: usize) -> Printed {
+        (self.0)(from)
+    }
+}
 
 /// Starts an execution over: runs it again, reporting through the handle it is
 /// given and wound down by the token, as the first run was.

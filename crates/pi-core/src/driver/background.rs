@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -21,7 +21,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tool::{Ctx, ToolError, ToolOutput};
 pub use toolbox::background::Invocation;
-use toolbox::background::{Again, Controls, Peek, Rerun, RunHandle, RunSink};
+use toolbox::background::{Again, Controls, Peek, Printed, Rerun, RunHandle, RunSink};
 use toolbox::channel::{Answer, Ask, Asked, Told};
 
 use crate::core::question::{Asker, Question};
@@ -241,6 +241,10 @@ struct Item {
     interrupt: bool,
     // Reads the latest of what it printed; None for one that keeps none.
     output: Option<Peek>,
+    // How much of `output` the model has read, in bytes.
+    read_to: usize,
+    // The model was told this run of it goes on by itself.
+    told: bool,
     last_output: String,
     // The last line of `output` as it ended, so an ended one is not read again.
     ended_last: Option<String>,
@@ -315,6 +319,8 @@ impl Item {
             requests: HashMap::new(),
             interrupt: false,
             output: None,
+            read_to: 0,
+            told: false,
             last_output: String::new(),
             ended_last: None,
             rerun: None,
@@ -333,7 +339,8 @@ impl Item {
         self.phase = Phase::Over { stopped };
         self.listens = Listens::Never;
         self.requests.clear();
-        self.ended_last = (self.output.as_ref()).map(|peek| pi_store::text::last_line(&peek()));
+        self.ended_last =
+            (self.output.as_ref()).map(|peek| pi_store::text::last_line(&peek.latest()));
     }
 
     // Stopped, with nothing left for the lane, and no way to start over:
@@ -355,6 +362,8 @@ impl Item {
     fn clear_run(&mut self) {
         self.requests.clear();
         self.last_output.clear();
+        self.read_to = 0;
+        self.told = false;
         self.progress.clear();
         self.waiting.clear();
         self.dropped = 0;
@@ -389,8 +398,7 @@ impl Item {
             return peek.clone();
         }
         let texts: Vec<&str> = (self.waiting.iter()).map(Back::text).collect();
-        let text = texts.join("\n");
-        Arc::new(move || text.clone())
+        Peek::text(texts.join("\n"))
     }
 
     fn wait(&mut self, back: Back) {
@@ -817,7 +825,7 @@ impl Table {
                 .collect()
         };
         for (id, run, root, peek) in watched {
-            let latest = pi_store::text::last_line(&peek());
+            let latest = pi_store::text::last_line(&peek.latest());
             if latest.trim().is_empty() {
                 continue;
             }
@@ -877,7 +885,7 @@ impl Table {
             .collect();
         (held.into_iter())
             .map(|(execution, last)| BackgroundCommand {
-                last: last.unwrap_or_else(|said| pi_store::text::last_line(&said())),
+                last: last.unwrap_or_else(|said| pi_store::text::last_line(&said.latest())),
                 ..execution
             })
             .collect()
@@ -891,7 +899,7 @@ impl Table {
             let item = inner.items.iter().find(|i| i.id == id && i.root == root)?;
             item.said()
         };
-        Some(said())
+        Some(said.latest())
     }
 
     /// What execution `id` of `root`'s said that is not back yet, oldest first;
@@ -909,20 +917,60 @@ impl Table {
 
     /// The latest of what execution `id` of `root`'s printed.
     pub fn output(&self, root: &Path, id: u64) -> Result<String, String> {
-        let peek = {
+        self.read(root, id).map(|(text, _)| text)
+    }
+
+    // The latest output, and whether the command still runs with nothing
+    // printed: its first word is still to come on its own. All of it now
+    // counts as read.
+    fn read(&self, root: &Path, id: u64) -> Result<(String, bool), String> {
+        let (peek, running, run) = {
             let inner = self.lock();
             let item = (inner.items.iter())
                 .find(|i| i.id == id && i.root == root)
                 .ok_or_else(|| format!("no command #{id} here"))?;
-            item.output.clone().ok_or_else(|| {
+            let peek = item.output.clone().ok_or_else(|| {
                 format!("#{id} keeps no output to show. What it says comes back as turns")
-            })?
+            })?;
+            (peek, item.running(), item.run)
         };
-        let printed = peek();
-        Ok(match printed.is_empty() {
-            true => "nothing printed yet".into(),
-            false => printed,
+        let printed = peek.since(0);
+        self.mark(id, run, printed.total);
+        Ok(match printed.text.is_empty() {
+            true => ("nothing printed yet".into(), running),
+            false => (printed.text, false),
         })
+    }
+
+    // Where execution `id` stands for one waiting on it, leaving what it
+    // printed unread.
+    fn glance(&self, root: &Path, id: u64) -> Result<Glance, String> {
+        let (peek, from, glance) = {
+            let inner = self.lock();
+            let item = (inner.items.iter())
+                .find(|i| i.id == id && i.root == root)
+                .ok_or_else(|| format!("no command #{id} here"))?;
+            let glance = Glance {
+                state: item.state(),
+                back: (item.waiting.iter()).any(|back| matches!(back, Back::Result(_))),
+                printed: Printed::default(),
+                run: item.run,
+            };
+            (item.output.clone(), item.read_to, glance)
+        };
+        Ok(Glance {
+            printed: peek.map(|peek| peek.since(from)).unwrap_or_default(),
+            ..glance
+        })
+    }
+
+    // The model has read `id`'s output up to `total` bytes, if that run is
+    // still the one there.
+    fn mark(&self, id: u64, run: u64, total: usize) {
+        let mut inner = self.lock();
+        if let Some(at) = inner.mine(id, run) {
+            inner.items[at].read_to = total;
+        }
     }
 
     /// The executions for `root`, one line each.
@@ -940,6 +988,34 @@ impl Table {
                 format!("#{}  {state}: {}", j.id, j.invocation.title())
             })
             .collect()
+    }
+
+    /// What the model has not been told yet: `root`'s commands started since
+    /// it last asked, running on by themselves. Asked once per request, so
+    /// several started together are told of together.
+    pub fn untold(&self, root: &Path) -> Option<String> {
+        let mut inner = self.lock();
+        let mut ids = Vec::new();
+        for item in inner.items.iter_mut().filter(|i| i.root == root && !i.told) {
+            item.told = true;
+            if item.running() {
+                ids.push(format!("#{}", item.id));
+            }
+        }
+        drop(inner);
+        let (which, run) = match ids.as_slice() {
+            [] => return None,
+            [one] => (format!("Background command {one}"), "is still running"),
+            [rest @ .., last] => (
+                format!("Background commands {} and {last}", rest.join(", ")),
+                "are still running",
+            ),
+        };
+        Some(format!(
+            "{which} {run}. What each reports, and its exit, arrives on its own and opens \
+             a new turn if this one has ended. Do not run commands to wait for it; if no \
+             other work remains, end this turn."
+        ))
     }
 
     /// Whether an execution for `root` is still running, so a surface keeps
@@ -1490,8 +1566,9 @@ impl Controls for Commands {
              Results arrive automatically before the next model request. \
              If the run ended, results open a new turn. \
              Continue independent work, or report progress and end this turn. \
-             Do not poll or wait for background work. \
-             Read `output` only when your next action needs a running command's current output."
+             Do not poll background work. \
+             Read `output` only when your next action needs a running command's current output. \
+             If that output is not there yet, add `wait: true` instead of reading again."
     }
 
     fn parameters(&self) -> serde_json::Map<String, Value> {
@@ -1508,16 +1585,30 @@ impl Controls for Commands {
                 ],
             })
         };
-        (Control::EVERY.iter())
+        let mut fields: serde_json::Map<String, Value> = (Control::EVERY.iter())
             .map(|control| (control.key().to_string(), which(control)))
-            .collect()
+            .collect();
+        fields.insert(
+            WAIT.into(),
+            json!({
+                "type": "boolean",
+                "description": format!(
+                    "With `output`: wait until each named command prints something new, \
+                     sends a result, or ends, then read only what is new. \
+                     The wait ends after {} at most.",
+                    llm::figures::elapsed(tool::limit::MAX_CALL),
+                ),
+            }),
+        );
+        fields
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let root = ctx.workspace.root();
         if let Some(fields) = args.as_object() {
             for (key, value) in fields {
-                if !value.is_null() && !Control::EVERY.iter().any(|c| c.key() == key) {
+                if !value.is_null() && key != WAIT && !Control::EVERY.iter().any(|c| c.key() == key)
+                {
                     return Err(ToolError::Invalid(format!(
                         "unknown background control `{key}`"
                     )));
@@ -1562,6 +1653,14 @@ impl Controls for Commands {
                 "one call does one thing: drop all but one of {}",
                 keys.join(", ")
             )));
+        }
+        let wait = match args.get(WAIT) {
+            Some(Value::Null) | None => false,
+            Some(Value::Bool(wait)) => *wait,
+            Some(_) => return Err(ToolError::Invalid("`wait` must be true or false".into())),
+        };
+        if wait && !matches!(asked.first(), Some((Control::Output, _))) {
+            return Err(ToolError::Invalid("`wait` goes with `output`".into()));
         }
         let Some((control, which)) = asked.pop() else {
             let executions = self.table.listing(root);
@@ -1610,17 +1709,146 @@ impl Controls for Commands {
             Control::Output if ids.is_empty() => {
                 Ok(ToolOutput::text("nothing in the background").with_preview(preview))
             }
+            Control::Output if wait => {
+                let out = self.wait(root, &ids, ctx).await?;
+                Ok(ToolOutput::text(out).with_preview(format!("{preview}, waited")))
+            }
             Control::Output => {
                 // One command answers for itself; several need telling apart.
-                let read = |id: &u64| match self.table.output(root, *id) {
-                    Ok(out) if ids.len() == 1 => out,
-                    Ok(out) => format!("#{id}:\n{out}"),
+                let mut silent = false;
+                let mut read = |id: &u64| match self.table.read(root, *id) {
+                    Ok((out, quiet)) => {
+                        silent |= quiet;
+                        match ids.len() {
+                            1 => out,
+                            _ => format!("#{id}:\n{out}"),
+                        }
+                    }
                     Err(why) => why,
                 };
-                let out = ids.iter().map(read).collect::<Vec<_>>().join("\n\n");
+                let mut out = ids.iter().map(&mut read).collect::<Vec<_>>().join("\n\n");
+                if silent {
+                    out.push_str(QUIET);
+                }
                 Ok(ToolOutput::text(out).with_preview(preview))
             }
         }
+    }
+}
+
+// The flag that turns a read of `output` into a wait for what is new.
+const WAIT: &str = "wait";
+// How often a wait looks again, and how long new output must hold still
+// before the wait answers with it.
+const POLL: Duration = Duration::from_millis(100);
+const SETTLE: Duration = Duration::from_millis(200);
+// Said under a read that found a running command with nothing to show.
+const QUIET: &str = "\n\nWhat a running command reports arrives on its own, \
+                     also after this run ends. If no other work remains, \
+                     report and end this turn; do not read again to wait.";
+
+/// One look at an execution for a wait: where it stands and what it printed
+/// since the model last read it.
+struct Glance {
+    state: State,
+    // A result of its is queued, to reach the model on its own.
+    back: bool,
+    printed: Printed,
+    run: u64,
+}
+
+impl Glance {
+    fn running(&self) -> bool {
+        self.state == State::Running
+    }
+
+    // Something for the wait to answer with.
+    fn ready(&self) -> bool {
+        !self.running() || self.back || !self.printed.text.is_empty()
+    }
+}
+
+impl Commands {
+    // Until each of `ids` has something new or the call's limit passes, then
+    // what each printed since it was last read. Results and ends are named,
+    // not repeated: those reach the model on their own.
+    async fn wait(&self, root: &Path, ids: &[u64], ctx: &Ctx) -> Result<String, ToolError> {
+        let began = Instant::now();
+        let deadline = began + tool::limit::MAX_CALL;
+        let look = || -> Vec<Result<Glance, String>> {
+            ids.iter().map(|id| self.table.glance(root, *id)).collect()
+        };
+        let pause = |d: Duration| async move {
+            tokio::select! {
+                () = ctx.cancel.cancelled() => Err(ToolError::Cancelled),
+                () = tokio::time::sleep(d) => Ok(()),
+            }
+        };
+        let mut looks = look();
+        while !looks.iter().all(|g| g.as_ref().map_or(true, Glance::ready)) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            pause(POLL.min(left)).await?;
+            looks = look();
+        }
+        // Output comes in bursts: let one finish before answering with it.
+        let totals = |looks: &[Result<Glance, String>]| -> Vec<usize> {
+            looks.iter().flatten().map(|g| g.printed.total).collect()
+        };
+        while (looks.iter().flatten()).any(|g| g.running() && !g.printed.text.is_empty())
+            && Instant::now() + SETTLE < deadline
+        {
+            pause(SETTLE).await?;
+            let again = look();
+            let still = totals(&again) == totals(&looks);
+            looks = again;
+            if still {
+                break;
+            }
+        }
+        let waited = llm::figures::elapsed(began.elapsed());
+        let mut quiet = false;
+        let mut said = |id: &u64, glance: Result<Glance, String>| -> String {
+            let g = match glance {
+                Ok(g) => g,
+                Err(why) => return why,
+            };
+            self.table.mark(*id, g.run, g.printed.total);
+            let mut lines = Vec::new();
+            // What an ended run printed comes back with its result.
+            if g.running() && !g.printed.text.is_empty() {
+                if g.printed.cut {
+                    lines.push("(earlier lines dropped)".to_string());
+                }
+                lines.push(g.printed.text.trim_end().to_string());
+            }
+            match g.state {
+                _ if g.back => lines.push("Its result follows on its own.".into()),
+                State::Running if lines.is_empty() => {
+                    quiet = true;
+                    lines.push(format!("Still running; nothing new in {waited}."));
+                }
+                State::Running => {}
+                State::Back => lines.push("Ended; what it sent follows on its own.".into()),
+                State::Stopped => lines.push("Stopped.".into()),
+                State::Exited => lines.push("Exited; its result was delivered already.".into()),
+            }
+            let text = lines.join("\n");
+            match ids.len() {
+                1 => text,
+                _ => format!("#{id}:\n{text}"),
+            }
+        };
+        let mut out = (ids.iter().zip(looks))
+            .map(|(id, glance)| said(id, glance))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if quiet {
+            out.push_str(QUIET);
+        }
+        Ok(out)
     }
 }
 
@@ -1687,7 +1915,10 @@ mod tests {
             .await
             .unwrap()
             .flatten();
-        assert_eq!(output, "nothing printed yet");
+        assert!(
+            output.starts_with("nothing printed yet") && output.contains("end this turn"),
+            "{output}"
+        );
         executions
             .execute(json!({"stop": [1]}), &ctx)
             .await
@@ -1737,6 +1968,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_wait_reads_only_what_is_new_and_ends_with_the_command() {
+        let (_dir, ctx) = context();
+        let table = Arc::new(Table::default());
+        let control = Arc::new(Commands::new(table.clone()));
+        let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        let _stop = ctx.cancel.clone().drop_guard();
+        let command = "echo one; sleep 1; echo two; sleep 1";
+        executions
+            .execute(json!({"background": true, "command": command}), &ctx)
+            .await
+            .unwrap();
+        let wait = async || {
+            executions
+                .execute(json!({"output": 1, "wait": true}), &ctx)
+                .await
+                .unwrap()
+                .flatten()
+        };
+        let first = wait().await;
+        assert!(first.contains("one") && !first.contains("two"), "{first}");
+        let second = wait().await;
+        assert!(
+            second.contains("two") && !second.contains("one"),
+            "{second}"
+        );
+        let ended = wait().await;
+        assert!(
+            ended.contains("follows on its own") && !ended.contains("two"),
+            "{ended}"
+        );
+    }
+
+    #[tokio::test]
+    async fn commands_started_together_are_told_of_once_together() {
+        let (_dir, ctx) = context();
+        let table = Arc::new(Table::default());
+        let control = Arc::new(Commands::new(table.clone()));
+        let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        let _stop = ctx.cancel.clone().drop_guard();
+        for command in ["sleep 5", "sleep 5", "true"] {
+            executions
+                .execute(json!({"background": true, "command": command}), &ctx)
+                .await
+                .unwrap();
+        }
+        let root = ctx.workspace.root();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while table
+                .background(root)
+                .iter()
+                .any(|c| c.id == 3 && c.state == State::Running)
+            {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .unwrap();
+        let told = table.untold(root).unwrap();
+        assert!(
+            told.starts_with("Background commands #1 and #2 are still running."),
+            "{told}"
+        );
+        assert!(
+            !told.contains("#3"),
+            "one already over is not running on: {told}"
+        );
+        assert_eq!(table.untold(root), None, "told once");
+    }
+
+    #[tokio::test]
+    async fn wait_goes_only_with_output() {
+        let (_dir, ctx) = context();
+        let control = Arc::new(Commands::new(Arc::new(Table::default())));
+        let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        for args in [json!({"wait": true}), json!({"stop": 1, "wait": true})] {
+            let refused = executions.execute(args, &ctx).await;
+            assert!(matches!(refused, Err(ToolError::Invalid(_))), "{refused:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn one_control_can_name_several_commands_or_all_of_them() {
         let (_dir, ctx) = context();
         let table = Arc::new(Table::default());
@@ -1755,13 +2067,14 @@ mod tests {
             .unwrap()
             .flatten();
         assert!(both.contains("#1:") && both.contains("#2:"), "{both}");
+        assert_eq!(both.matches("end this turn").count(), 1, "{both}");
         // One command answers for itself, with no heading to tell it apart.
         let one = executions
             .execute(json!({"output": "#2"}), &ctx)
             .await
             .unwrap()
             .flatten();
-        assert_eq!(one, "nothing printed yet");
+        assert!(one.starts_with("nothing printed yet"), "{one}");
         let stopped = executions
             .execute(json!({"stop": "all"}), &ctx)
             .await
@@ -1859,7 +2172,10 @@ mod tests {
         let execution = start(&table, root, "scan");
         let output = Arc::new(Mutex::new("1/3\n".to_string()));
         let seen = output.clone();
-        execution.watch(Arc::new(move || seen.lock().unwrap().clone()));
+        execution.watch(Peek::new(move |_| Printed {
+            text: seen.lock().unwrap().clone(),
+            ..Default::default()
+        }));
         table.relay_progress();
         assert_eq!(
             rx.try_recv(),

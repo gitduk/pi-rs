@@ -240,6 +240,7 @@ impl Agent {
 
         for turn in 1.. {
             receive(session, ctx, voice, input);
+            heed(session, voice, input);
             voice.say(Event::TurnStart { turn });
             // Entered around each await, not held across it — a guard spanning
             // an await labels whatever else the runtime polls meanwhile.
@@ -575,6 +576,21 @@ fn receive(session: &mut Session, ctx: &Ctx, voice: &Voice, input: &dyn seams::I
         say_committed(session, voice, &ids);
     }
     !ids.is_empty()
+}
+
+// The notes waiting for this request, after what joined it: a note can say
+// where things stand once those are in.
+fn heed(session: &mut Session, voice: &Voice, input: &dyn seams::Input) {
+    let mut ids = Vec::new();
+    while let Some(note) = input.note() {
+        let id = session.push_note(note.text);
+        if !note.shown {
+            ids.push(id);
+        }
+    }
+    if !ids.is_empty() {
+        say_committed(session, voice, &ids);
+    }
 }
 
 // A state update, not a drawing instruction: whoever draws derives the

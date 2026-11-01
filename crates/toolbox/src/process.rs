@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tool::output::{Capture, Captured};
 use tool::{Ctx, ToolError};
 
-use crate::background::Peek;
+use crate::background::{Peek, Printed};
 
 /// The longest a bounded process call may run, whatever its caller asked for.
 pub(crate) const MAX_RUN: Duration = tool::limit::MAX_CALL;
@@ -326,13 +326,27 @@ impl Tail {
 
     /// What it holds, cut to whole lines once earlier bytes have gone.
     fn read(&self) -> String {
+        self.since(0).text
+    }
+
+    /// What came after the first `from` bytes; cut to whole lines when some
+    /// of that is gone.
+    fn since(&self, from: usize) -> Printed {
         let held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let (kept, total) = (&held.0, held.1);
-        if kept.len() == total {
-            return String::from_utf8_lossy(kept).into_owned();
+        let gone = total - kept.len();
+        let (text, cut) = match from.checked_sub(gone) {
+            Some(at) => (&kept[at.min(kept.len())..], false),
+            None => {
+                let line = kept.iter().position(|b| *b == b'\n').map_or(0, |at| at + 1);
+                (&kept[line..], true)
+            }
+        };
+        Printed {
+            text: String::from_utf8_lossy(text).into_owned(),
+            total,
+            cut,
         }
-        let from = kept.iter().position(|b| *b == b'\n').map_or(0, |at| at + 1);
-        String::from_utf8_lossy(&kept[from..]).into_owned()
     }
 
     /// `pipe`, with what is read from it also kept here.
@@ -440,7 +454,7 @@ impl Streams {
     /// The latest of what it printed, for an execution to watch.
     pub(crate) fn peek(&self) -> Peek {
         let tail = self.tail.clone();
-        Arc::new(move || tail.read())
+        Peek::new(move |from| tail.since(from))
     }
 
     /// Both captures, once both pipes have closed.
@@ -506,6 +520,25 @@ mod tests {
         let seen = tail.read();
         assert!(!seen.is_empty() && seen.len() < 10000);
         assert!(seen.split_inclusive('\n').all(|l| l == line), "{seen}");
+    }
+
+    // Read from a count: what is still kept comes whole; what went is flagged.
+    #[test]
+    fn a_tail_reads_on_from_where_it_was_left() {
+        let tail = Tail::default();
+        tail.push(b"one\n");
+        let first = tail.since(0);
+        tail.push(b"two\n");
+        let next = tail.since(first.total);
+        assert_eq!(
+            (next.text.as_str(), next.total, next.cut),
+            ("two\n", 8, false)
+        );
+        for _ in 0..PEEK {
+            tail.push(b"x\n");
+        }
+        let late = tail.since(next.total);
+        assert!(late.cut && late.text.starts_with("x\n"), "{late:?}");
     }
 
     // A child left holding the pipes must not keep the call waiting.

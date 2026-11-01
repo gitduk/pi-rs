@@ -297,6 +297,114 @@ async fn input_after_a_tool_call_follows_its_result_before_the_next_request() {
     );
 }
 
+// Notes filed once the read has run, as a lane's are while its run works.
+struct Noting<'a> {
+    ctx: &'a Ctx,
+    read: std::path::PathBuf,
+    notes: Mutex<VecDeque<agent::seams::Note>>,
+}
+
+impl agent::seams::Input for Noting<'_> {
+    fn take(&self) -> Option<Prompt> {
+        None
+    }
+
+    fn note(&self) -> Option<agent::seams::Note> {
+        self.ctx.viewed(&self.read)?;
+        self.notes.lock().unwrap().pop_front()
+    }
+}
+
+#[tokio::test]
+async fn notes_go_with_the_next_request_and_only_unshown_ones_are_said() {
+    let (req_tx, mut requests) = mpsc::unbounded_channel();
+    let wire = Arc::new(Controlled {
+        replies: Mutex::new(VecDeque::from([
+            futures::stream::iter(
+                vec![
+                    StreamEvent::BlockStart {
+                        index: 0,
+                        kind: BlockKind::ToolCall {
+                            id: Some("read-1".into()),
+                            name: "read".into(),
+                        },
+                    },
+                    StreamEvent::ToolArgsDelta {
+                        index: 0,
+                        delta: r#"{"path":"data"}"#.into(),
+                    },
+                    StreamEvent::Done {
+                        stop: StopReason::ToolUse,
+                        usage: Usage::default(),
+                    },
+                ]
+                .into_iter()
+                .map(Ok),
+            )
+            .boxed(),
+            futures::stream::iter(response("done").into_iter().map(Ok)).boxed(),
+        ])),
+        requests: req_tx,
+    });
+    let mut agent = Agent::new(wire, common::spec());
+    Arc::make_mut(&mut agent.brief).registry = toolbox::builtin();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("data"), "result").unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let mut session = Session::with_prompt("read data");
+    let input = Noting {
+        ctx: &ctx,
+        read: dir.path().join("data"),
+        notes: Mutex::new(VecDeque::from([
+            agent::seams::Note {
+                text: "drawn already".into(),
+                shown: true,
+            },
+            agent::seams::Note {
+                text: "not yet drawn".into(),
+                shown: false,
+            },
+        ])),
+    };
+    let (tx, mut events) = mpsc::unbounded_channel();
+    agent
+        .run_with_input(&mut session, &ctx, &tx, &Retry::default(), &input)
+        .await
+        .unwrap();
+    requests.try_recv().unwrap();
+    let second = requests.try_recv().unwrap();
+    let sent: Vec<String> = second
+        .messages
+        .iter()
+        .rev()
+        .take(2)
+        .map(|m| m.text())
+        .collect();
+    assert_eq!(
+        sent,
+        ["not yet drawn", "drawn already"],
+        "after the result, in order"
+    );
+    let notes: Vec<_> = session
+        .entries()
+        .iter()
+        .filter(|e| matches!(e, Entry::Note { .. }))
+        .collect();
+    assert_eq!(notes.len(), 2, "both are kept, once each");
+    let mut said = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let Event::Committed { entries } = event {
+            said.extend(
+                entries
+                    .into_iter()
+                    .filter(|e| matches!(e, Entry::Note { .. })),
+            );
+        }
+    }
+    assert_eq!(said.len(), 1, "a shown note is not said again");
+    assert!(matches!(&said[0], Entry::Note { note, .. } if note == "not yet drawn"));
+}
+
 #[tokio::test]
 async fn cancelling_a_run_keeps_unconsumed_input() {
     let (req_tx, _) = mpsc::unbounded_channel();

@@ -19,6 +19,19 @@ use tool::Tier;
 /// callers keep unconsumed messages when a run ends.
 pub trait Input: Send + Sync {
     fn take(&self) -> Option<crate::session::Prompt>;
+
+    /// A note for the model, filed only on the way to a request so none sits
+    /// unread at the end of a run.
+    fn note(&self) -> Option<Note> {
+        None
+    }
+}
+
+/// Machine prose for the model, filed as the transcript's note.
+pub struct Note {
+    pub text: String,
+    /// Whoever draws has shown it already: filed without being said again.
+    pub shown: bool,
 }
 
 impl<F> Input for F

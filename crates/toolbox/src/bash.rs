@@ -143,7 +143,7 @@ impl Bash {
                  Use `background=true` for a command you expect to take longer.\n\n\
                  With `background=true`, the command runs independently of this turn. \
                  The call returns its command ID immediately. \
-                 Its result opens a later turn. \
+                 Its results, including a failure at startup, open a later turn. \
                  Continue independent work or end this turn. \
                  Do not wait for the background result. \
                  Leave output unredirected so it can be read while the command runs.",
@@ -201,7 +201,7 @@ async fn schedule(
     let stop = tokio_util::sync::CancellationToken::new();
     let execution = executions.start(ctx.workspace.root().to_path_buf(), invocation, stop.clone());
     let id = execution.id();
-    execution.watch(Arc::new(String::new));
+    execution.watch(crate::background::Peek::text(String::new()));
     let launch = rerun(again.clone(), ctx);
     execution.rerun(launch.clone(), again);
     if let Err(error) = launch(execution.clone(), stop) {
@@ -210,10 +210,10 @@ async fn schedule(
             .result(format!("could not start: {error}"));
         execution.end();
     }
-    Ok(ToolOutput::text(format!(
-        "Started background command #{id}. Its exit status and output will arrive automatically."
-    ))
-    .with_preview(format!("{preview} [background #{id}]")))
+    Ok(
+        ToolOutput::text(format!("Started background command #{id}."))
+            .with_preview(format!("{preview} [background #{id}]")),
+    )
 }
 
 #[async_trait]
@@ -252,7 +252,8 @@ impl Tool for Bash {
             "description": "Run the command independently of this turn. \
                 Use this mode for builds, deployments, development servers, or watchers. \
                 The call returns a command ID immediately. \
-                When the command exits, its exit status and output arrive automatically with other queued results. \
+                Each result the command reports, and its exit status and output, arrive automatically with other queued results, \
+                also after this run ends. A command that fails at startup reports that the same way. \
                 The command stops when this process exits.\n\n\
                 Output remains readable while the command runs. Leave output unredirected. \
                 Use `background=true` instead of `nohup` or `&` for commands that must continue after this turn.",
@@ -642,14 +643,14 @@ mod background_tests {
             .unwrap();
         let peek = sink.output.lock().unwrap().clone().expect("watched");
         for _ in 0..100 {
-            let seen = peek();
+            let seen = peek.latest();
             if seen.contains("listening on 8080") && seen.contains("warn") {
                 sink.stop.lock().unwrap().take().unwrap().cancel();
                 return;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        panic!("never showed: {}", peek());
+        panic!("never showed: {}", peek.latest());
     }
 
     #[tokio::test]

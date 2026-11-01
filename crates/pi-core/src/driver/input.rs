@@ -3,20 +3,26 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use agent::seams::Note;
 use agent::session::Prompt;
 use tool::Ctx;
 
 use super::background::Table;
+use crate::core::lane::Notes;
 
 /// The user's messages first, then what the checkout's background commands
 /// have ready. Who holds the user's messages, and in what order they may go,
 /// is the caller's: `prompts` is asked each time and gives none it must keep.
+///
+/// Notes follow: those filed for the lane while the run has its transcript,
+/// already shown, then the background commands it has not been told of.
 pub struct Input {
     root: PathBuf,
     executions: Arc<Table>,
     // The run's context, which knows what it wrote since a command started.
     ctx: Ctx,
     prompts: Box<dyn agent::seams::Input>,
+    notes: Option<Notes>,
 }
 
 impl Input {
@@ -25,12 +31,14 @@ impl Input {
         executions: Arc<Table>,
         ctx: Ctx,
         prompts: impl agent::seams::Input + 'static,
+        notes: Option<Notes>,
     ) -> Self {
         Self {
             root,
             executions,
             ctx,
             prompts: Box::new(prompts),
+            notes,
         }
     }
 }
@@ -48,6 +56,14 @@ impl agent::seams::Input for Input {
             shown: Some(due.label),
             relayed: Some(note),
         })
+    }
+
+    fn note(&self) -> Option<Note> {
+        if let Some(text) = self.notes.as_ref().and_then(Notes::take) {
+            return Some(Note { text, shown: true });
+        }
+        let text = self.executions.untold(&self.root)?;
+        Some(Note { text, shown: false })
     }
 }
 
@@ -103,9 +119,13 @@ mod tests {
 
         let typed = std::sync::Mutex::new(Some(prompt("typed direction")));
         let ctx = Ctx::new(tool::Workspace::new(std::env::temp_dir()).unwrap());
-        let input = Input::new(root.clone(), executions.clone(), ctx, move || {
-            typed.lock().unwrap().take()
-        });
+        let input = Input::new(
+            root.clone(),
+            executions.clone(),
+            ctx,
+            move || typed.lock().unwrap().take(),
+            None,
+        );
         assert_eq!(input.take().unwrap().text, "typed direction");
         let results = input.take().unwrap();
         assert!(results.text.contains("phone result"));

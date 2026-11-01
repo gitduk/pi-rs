@@ -13,7 +13,7 @@ fn next_token() -> u64 {
 }
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use agent::session::{EntryId, Session};
 use agent::{Agent, Archive, Event, Totals};
@@ -112,8 +112,9 @@ struct Conversation {
 enum Transcript {
     Home(Session),
     // A run has it. Rows and notes filed meanwhile land when it comes home,
-    // after everything the run committed.
-    Lent(Vec<Held>),
+    // after everything the run committed; a note the run takes on its way
+    // to a request lands there instead.
+    Lent(Arc<Mutex<Vec<Held>>>),
 }
 
 impl Transcript {
@@ -137,6 +138,23 @@ enum Held {
     Note(String),
 }
 
+/// The notes filed while a run has the transcript, for that run to take
+/// before its next request rather than leave until it is over.
+#[derive(Clone)]
+pub struct Notes(Arc<Mutex<Vec<Held>>>);
+
+impl Notes {
+    /// The oldest note not yet taken.
+    pub fn take(&self) -> Option<String> {
+        let mut held = self.0.lock().unwrap();
+        let at = held.iter().position(|h| matches!(h, Held::Note(_)))?;
+        let Held::Note(text) = held.remove(at) else {
+            unreachable!()
+        };
+        Some(text)
+    }
+}
+
 impl Conversation {
     // Held under another root now; the transcript and its figures stay.
     fn reclaim(&mut self, claim: Option<session::Claim>) {
@@ -151,7 +169,7 @@ impl Conversation {
         claim: Option<session::Claim>,
     ) -> Self {
         Self {
-            transcript: session.map_or_else(|| Transcript::Lent(Vec::new()), Transcript::Home),
+            transcript: session.map_or_else(|| Transcript::Lent(Arc::default()), Transcript::Home),
             id,
             created,
             _claim: claim,
@@ -610,7 +628,7 @@ impl Lane {
 
     /// Lend the transcript to an execution for the length of its run.
     pub fn take_session(&mut self) -> Option<Session> {
-        match std::mem::replace(&mut self.talk.transcript, Transcript::Lent(Vec::new())) {
+        match std::mem::replace(&mut self.talk.transcript, Transcript::Lent(Arc::default())) {
             Transcript::Home(session) => Some(session),
             lent @ Transcript::Lent(_) => {
                 self.talk.transcript = lent;
@@ -627,7 +645,8 @@ impl Lane {
         let Transcript::Lent(held) = &mut self.talk.transcript else {
             panic!("a lane holds one transcript: a second would drop the first")
         };
-        for held in std::mem::take(held) {
+        let held = std::mem::take(&mut *held.lock().unwrap());
+        for held in held {
             self.talk.filed = true;
             match held {
                 Held::Screen { text, tally: true } => session.push_tally(text),
@@ -636,6 +655,15 @@ impl Lane {
             };
         }
         self.talk.transcript = Transcript::Home(session);
+    }
+
+    /// The notes held for the run that has the transcript; `None` while it
+    /// is home, where a note is filed at once.
+    pub fn notes(&self) -> Option<Notes> {
+        match &self.talk.transcript {
+            Transcript::Home(_) => None,
+            Transcript::Lent(held) => Some(Notes(held.clone())),
+        }
     }
 
     /// What a run's ending should leave in the transcript.
@@ -660,7 +688,7 @@ impl Lane {
                 Some(session.push_note(note))
             }
             Transcript::Lent(held) => {
-                held.push(Held::Note(note.to_string()));
+                held.lock().unwrap().push(Held::Note(note.to_string()));
                 None
             }
         }
@@ -691,7 +719,7 @@ impl Lane {
                 })
             }
             Transcript::Lent(held) => {
-                held.push(Held::Screen {
+                held.lock().unwrap().push(Held::Screen {
                     text: text.to_string(),
                     tally,
                 });
@@ -711,7 +739,7 @@ impl Lane {
     pub fn held(&self) -> usize {
         match &self.talk.transcript {
             Transcript::Home(_) => 0,
-            Transcript::Lent(held) => held.len(),
+            Transcript::Lent(held) => held.lock().unwrap().len(),
         }
     }
 }
@@ -1151,6 +1179,33 @@ mod tests {
         core.fresh_session();
         assert!(core.lane().ctx().viewed(&seen).is_none());
         assert_eq!(core.lane().drift(), None);
+    }
+
+    // A run takes the notes filed while it works; it leaves the rest, and
+    // the rows, to land on its return.
+    #[test]
+    fn a_run_takes_its_notes_and_the_rest_land_on_return() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
+        assert!(
+            core.lane().notes().is_none(),
+            "a note at home is filed at once"
+        );
+        let session = core.lane_mut().take_session().unwrap();
+        let notes = core.lane().notes().unwrap();
+        core.lane_mut().push_screen("a row");
+        core.lane_mut().push_note("taken");
+        core.lane_mut().push_note("left");
+        assert_eq!(notes.take().as_deref(), Some("taken"));
+        core.lane_mut().return_session(session);
+        let filed: Vec<_> = (core.lane().session().unwrap().entries().iter())
+            .filter_map(|e| match e {
+                agent::session::Entry::Note { note, .. } => Some(note.as_str()),
+                agent::session::Entry::Screen { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(filed, ["a row", "left"]);
     }
 
     // `/new` leaves the session in front as `/resume` does: what was filed in

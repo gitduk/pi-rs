@@ -329,6 +329,7 @@ The same tool controls background commands:
 
 - `{}` lists background commands.
 - `{"output":3}` reads a command's output.
+- `{"output":3,"wait":true}` waits until the command prints something new, sends a result, or ends, then reads only what is new.
 - `{"stop":[3]}` stops commands.
 - `{"restart":[3]}` starts commands again under their existing IDs.
 

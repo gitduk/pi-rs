@@ -131,6 +131,7 @@ impl Tui {
             self.drivers.background(),
             ctx.clone(),
             move || queued.take_prompt(),
+            self.core.lane().notes(),
         );
         self.drivers.started(request, true);
         let turn = execution::Turn {
