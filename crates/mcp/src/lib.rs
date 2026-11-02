@@ -326,9 +326,6 @@ async fn run(server: Arc<Server>, epoch: u64) {
             )
         }
         Spec::Http { url, headers } => {
-            // The crypto reqwest uses elsewhere in pi; rmcp's own would build
-            // aws-lc. Installing twice is a no-op.
-            let _ = rustls::crypto::ring::default_provider().install_default();
             let mut config =
                 rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
                     url.as_str(),

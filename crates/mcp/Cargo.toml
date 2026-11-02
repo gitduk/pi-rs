@@ -18,8 +18,5 @@ rmcp = { version = "3.5", default-features = false, features = [
     "client",
     "transport-child-process",
     "transport-streamable-http-client-reqwest",
-    "reqwest-tls-no-provider",
+    "reqwest",
 ] }
-# The crypto reqwest already uses here, installed for rmcp's client too:
-# its own default would build aws-lc from C.
-rustls = { version = "0.23", default-features = false, features = ["ring"] }

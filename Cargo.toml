@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "2.9.6"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.92"
 license = "MIT"
 
 [workspace.dependencies]
@@ -32,7 +32,7 @@ toml = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 tokio-util = "0.7"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 eventsource-stream = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "registry"] }
