@@ -16,6 +16,58 @@ use crate::sgr::style_to_ratatui;
 
 mod document;
 
+pub(super) fn background(syntax: Syntax) -> (u8, u8, u8) {
+    let color = Palette::get(syntax)
+        .tokens
+        .settings
+        .background
+        .expect("embedded syntax themes define a background");
+    (color.r, color.g, color.b)
+}
+
+static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+
+/// A continuous source stream; diff callers keep one for each side.
+pub(super) struct Code(HighlightLines<'static>);
+
+impl Code {
+    pub(super) fn new(path: &str, syntax: Syntax) -> Self {
+        let name = std::path::Path::new(path);
+        let language = name
+            .extension()
+            .and_then(|s| s.to_str())
+            .and_then(|s| SYNTAXES.find_syntax_by_extension(s))
+            .or_else(|| {
+                name.file_name()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| SYNTAXES.find_syntax_by_token(s))
+            })
+            .unwrap_or_else(|| SYNTAXES.find_syntax_plain_text());
+        Self(HighlightLines::new(language, &Palette::get(syntax).tokens))
+    }
+
+    pub(super) fn line(&mut self, text: &str) -> Vec<Span<'static>> {
+        // Feed the newline to the parser even though a drawn row omits it.
+        let source = format!("{text}\n");
+        match self.0.highlight_line(&source, &SYNTAXES) {
+            Ok(tokens) => tokens
+                .into_iter()
+                .filter_map(|(style, token)| {
+                    let token = token.trim_end_matches('\n');
+                    let c = style.foreground;
+                    (!token.is_empty()).then(|| {
+                        Span::styled(
+                            token.to_string(),
+                            Style::new().fg(Color::Rgb(c.r, c.g, c.b)),
+                        )
+                    })
+                })
+                .collect(),
+            Err(_) => vec![Span::raw(text.to_string())],
+        }
+    }
+}
+
 pub(crate) fn link_finder() -> &'static linkify::LinkFinder {
     static FINDER: LazyLock<linkify::LinkFinder> = LazyLock::new(|| {
         let mut finder = linkify::LinkFinder::new();
@@ -81,7 +133,6 @@ impl Palette {
 /// Shell tokens as foreground colours only. Keep the exact input, including
 /// whitespace and incomplete commands, so colouring cannot change layout.
 pub(super) fn shell(text: &str, syntax: Syntax) -> Vec<Span<'static>> {
-    static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
     let shell = SYNTAXES
         .find_syntax_by_token("sh")
         .expect("bundled syntaxes include shell commands");

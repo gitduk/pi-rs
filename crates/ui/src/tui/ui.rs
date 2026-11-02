@@ -353,7 +353,7 @@ impl Ui {
         resolved: &Resolved,
         theme: Arc<pi_store::theme::Theme>,
     ) {
-        self.paint = Paint::with_theme(self.paint.color, theme);
+        self.paint = Paint::with_theme(self.paint.color, theme).with_background(self.tty_bg);
         self.bang_prompts = Self::bang_prompts(&self.paint);
         self.tab_sep = Self::paint_sep(&self.paint);
         self.band = self.paint.band(&self.paint.theme.prompt.panel.input);

@@ -212,7 +212,8 @@ impl Tui {
         let paint = Paint::with_theme(
             true,
             Arc::new(following_terminal(&core.config.theme, answer.bg)),
-        );
+        )
+        .with_background(answer.bg);
         let mut ui = Ui::new(
             screen,
             core.config.key_table.clone(),

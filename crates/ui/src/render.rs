@@ -7,18 +7,20 @@
 use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::io::{IsTerminal, Write};
-use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
 use agent::Event;
 use llm::model::Pricing;
 use ratatui::text::{Line, Span};
 
+mod diff;
+
 use crate::markdown::FENCE;
 use crate::sgr::{band_to_ratatui, style_to_ratatui};
+use diff::rows as sketch_rows;
 use pi_store::icons;
 use pi_store::text::{RESET, clip};
-use pi_store::theme::{Attr, Color, Style, Theme, push_sep};
+use pi_store::theme::{Color, Style, Theme, push_sep};
 
 /// Whether the surface being written to can carry colour, and the theme behind
 /// the codes it uses.
@@ -26,6 +28,7 @@ use pi_store::theme::{Attr, Color, Style, Theme, push_sep};
 pub struct Paint {
     pub color: bool,
     pub theme: Arc<Theme>,
+    background: Option<(u8, u8, u8)>,
     // Parsing an embedded theme is startup work, never per streaming delta.
     markdown: OnceLock<crate::markdown::Format>,
 }
@@ -40,8 +43,14 @@ impl Paint {
         Self {
             color,
             theme,
+            background: None,
             markdown: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn with_background(mut self, background: Option<(u8, u8, u8)>) -> Self {
+        self.background = background;
+        self
     }
 
     /// Dim the terminal's own foreground once. Explicitly reset the colour so
@@ -541,7 +550,22 @@ pub fn result_rows(
     let mut out = vec![Line::from(spans)];
     let diff_lines: Vec<&str> = rest.lines().collect();
     let (rows, footer) = sketched(&diff_lines, shown);
-    out.extend(sketch_rows(rows, p, room));
+    let mut sketch = sketch_rows(
+        rows,
+        head.rsplit_once(" +").map_or(head, |(path, _)| path),
+        p,
+        room,
+        shown != Shown::Page,
+    );
+    if shown == Shown::Page {
+        for line in &mut sketch {
+            line.style.bg = None;
+            for span in &mut line.spans {
+                span.style.bg = None;
+            }
+        }
+    }
+    out.extend(sketch);
     out.extend(footer.map(|text| Line::from(p.action_hint(hovered, text))));
     out
 }
@@ -557,114 +581,6 @@ pub fn sketched<T>(under: &[T], shown: Shown) -> (&[T], Option<String>) {
         Shown::Open if folds(1 + under.len()) => (under, Some("  click to collapse".into())),
         _ => (under, None),
     }
-}
-
-/// The rows of a sketch, each under the sign that opens it, and the changed
-/// run of a rewritten line reversed inside both of its rows.
-fn sketch_rows(rows: &[&str], p: &Paint, room: usize) -> Vec<Line<'static>> {
-    let sign = |row: &str| row.chars().next().unwrap_or(' ');
-    let mut out = Vec::with_capacity(rows.len());
-    let mut runs = rows.chunk_by(|a, b| sign(a) == sign(b)).peekable();
-    while let Some(run) = runs.next() {
-        // One row gone and one come back is a line rewritten, and the two are
-        // read together; a wider block has no counterpart to pair.
-        let one_each = sign(run[0]) == '-'
-            && run.len() == 1
-            && runs
-                .peek()
-                .is_some_and(|next| sign(next[0]) == '+' && next.len() == 1);
-        if one_each {
-            let next = runs.peek().expect("peeked")[0];
-            if let Some(pair) = replaced(run[0], next, p, room) {
-                runs.next();
-                out.extend(pair);
-                continue;
-            }
-        }
-        let style = match sign(run[0]) {
-            '+' => &p.theme.diff.add,
-            '-' => &p.theme.diff.del,
-            _ => &p.theme.muted,
-        };
-        for row in run {
-            out.push(Line::from(p.span(style, format!("  {}", clip(row, room)))));
-        }
-    }
-    out
-}
-
-/// The two rows of a rewritten line: the sign and number in the row's own
-/// colour, and the run the two do not share reversed on top of it. None
-/// when either row has no number to lead it, or one too wide to fit.
-fn replaced(was: &str, is: &str, p: &Paint, room: usize) -> Option<[Line<'static>; 2]> {
-    // The lead is the sign and the number, never the change: the number is
-    // right-aligned, so its space is the first one with a digit behind it.
-    let lead = |row: &str| {
-        row.char_indices()
-            .find(|(at, c)| *c == ' ' && row[..*at].bytes().any(|b| b.is_ascii_digit()))
-            .map(|(at, _)| at + 1)
-            .filter(|&at| at < room)
-    };
-    let (was_lead, is_lead) = (lead(was)?, lead(is)?);
-    let (was_body, is_body) = (
-        clip(&was[was_lead..], room - was_lead),
-        clip(&is[is_lead..], room - is_lead),
-    );
-    let (from, to) = diverged(&was_body, &is_body);
-    let row = |head: &str, body: &str, (start, end): (usize, usize), style: &Style| {
-        Line::from(vec![
-            p.span(style, format!("  {head}")),
-            p.span(style, body[..start].to_string()),
-            p.span(&style.adding(Attr::Reverse), body[start..end].to_string()),
-            p.span(style, body[end..].to_string()),
-        ])
-    };
-    Some([
-        row(
-            &was[..was_lead],
-            &was_body,
-            (from.start, from.end),
-            &p.theme.diff.del,
-        ),
-        row(
-            &is[..is_lead],
-            &is_body,
-            (to.start, to.end),
-            &p.theme.diff.add,
-        ),
-    ])
-}
-
-/// The run two rows do not share, as byte ranges into each: what is left of
-/// them once the head and the tail they have in common are set aside.
-fn diverged(was: &str, is: &str) -> (Range<usize>, Range<usize>) {
-    let head = was
-        .chars()
-        .zip(is.chars())
-        .take_while(|(a, b)| a == b)
-        .count();
-    // Cut the head off first and count the tail in what is left: the two runs
-    // then cannot overlap, however alike the rows are.
-    let at = |s: &str| s.char_indices().nth(head).map_or(s.len(), |(i, _)| i);
-    let (was_at, is_at) = (at(was), at(is));
-    let (was_rest, is_rest) = (&was[was_at..], &is[is_at..]);
-    let tail = was_rest
-        .chars()
-        .rev()
-        .zip(is_rest.chars().rev())
-        .take_while(|(a, b)| a == b)
-        .count();
-    let cut = |rest: &str| match tail {
-        0 => rest.len(),
-        n => {
-            rest.char_indices()
-                .rev()
-                .nth(n - 1)
-                .expect("counted from here")
-                .0
-        }
-    };
-    (was_at..was_at + cut(was_rest), is_at..is_at + cut(is_rest))
 }
 
 /// `at`, in wall-clock seconds, as the local time of day; on a day other
@@ -1048,11 +964,11 @@ mod tests {
             ("-    9 x", "+ 1 éé"),
         ] {
             for room in [0, 3, 6, 40] {
-                let rows = super::sketch_rows(&[was, is], &paint, room);
+                let rows = super::sketch_rows(&[was, is], "test.rs", &paint, room, true);
                 assert_eq!(rows.len(), 2);
             }
         }
-        let rows = super::sketch_rows(&["-  9 a", "+ 10 ab"], &paint, 40);
+        let rows = super::sketch_rows(&["-  9 a", "+ 10 ab"], "test.rs", &paint, 40, true);
         let text: Vec<String> = rows.iter().map(ToString::to_string).collect();
         assert_eq!(text, ["  -  9 a", "  + 10 ab"]);
     }
