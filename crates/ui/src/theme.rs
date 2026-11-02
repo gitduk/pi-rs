@@ -5,14 +5,14 @@
 //! input bands lift off whatever the background is. A style the config names
 //! keeps its colour and attributes.
 
-use pi_store::theme::{Attr, Bands, Color, Style, Syntax, Theme};
+use pi_store::theme::{Attr, Bands, Color, PaletteColor, Style, Syntax, Theme};
 
 // Catppuccin Latte's counterparts of the default colours.
-const BLUE: Color = Color::Rgb(30, 102, 245);
-const TEAL: Color = Color::Rgb(23, 146, 153);
-const GREEN: Color = Color::Rgb(64, 160, 43);
-const RED: Color = Color::Rgb(210, 15, 57);
-const ACCENT_BLUE: Color = Color::Rgb(28, 100, 200);
+const BLUE: Color = PaletteColor::Blue.color(Syntax::CatppuccinLatte);
+const TEAL: Color = PaletteColor::Teal.color(Syntax::CatppuccinLatte);
+const GREEN: Color = PaletteColor::Green.color(Syntax::CatppuccinLatte);
+const RED: Color = PaletteColor::Red.color(Syntax::CatppuccinLatte);
+const ACCENT_BLUE: Color = PaletteColor::AccentBlue.color(Syntax::CatppuccinLatte);
 
 /// `theme` fitted to a background, once it is known; unknown leaves it as is.
 pub(crate) fn following_terminal(theme: &Theme, bg: Option<(u8, u8, u8)>) -> Theme {
@@ -39,26 +39,7 @@ fn for_background(theme: &Theme, bg: (u8, u8, u8)) -> Theme {
         };
     }
     if light {
-        for (style, default, color) in [
-            (&mut theme.heading, &defaults.heading, BLUE),
-            (&mut theme.emphasis, &defaults.emphasis, TEAL),
-            (&mut theme.strong, &defaults.strong, GREEN),
-            (&mut theme.code, &defaults.code, BLUE),
-            (&mut theme.link, &defaults.link, BLUE),
-            (&mut theme.menu.selected, &defaults.menu.selected, BLUE),
-            (&mut theme.quote, &defaults.quote, TEAL),
-            (&mut theme.prompt.color, &defaults.prompt.color, ACCENT_BLUE),
-            (&mut theme.diff.add, &defaults.diff.add, GREEN),
-            (&mut theme.diff.del, &defaults.diff.del, RED),
-            (&mut theme.match_current, &defaults.match_current, BLUE),
-        ] {
-            if style == default {
-                *style = style.recolored(color);
-            }
-        }
-        if theme.table == defaults.table {
-            theme.table = [BLUE, GREEN].into_iter().map(Style::color).collect();
-        }
+        recolor_defaults(&mut theme, &defaults);
     }
     if !light && theme.status.warn == defaults.status.warn {
         theme.status.warn = Style::color(Color::Basic(33)).adding(Attr::Bold);
@@ -71,6 +52,30 @@ fn for_background(theme: &Theme, bg: (u8, u8, u8)) -> Theme {
         theme.prompt.panel.said = bands.said;
     }
     theme
+}
+
+// Keep explicit styles; replace only colours inherited from the dark defaults.
+fn recolor_defaults(theme: &mut Theme, defaults: &Theme) {
+    for (style, default, color) in [
+        (&mut theme.heading, &defaults.heading, BLUE),
+        (&mut theme.emphasis, &defaults.emphasis, TEAL),
+        (&mut theme.strong, &defaults.strong, GREEN),
+        (&mut theme.code, &defaults.code, BLUE),
+        (&mut theme.link, &defaults.link, BLUE),
+        (&mut theme.menu.selected, &defaults.menu.selected, BLUE),
+        (&mut theme.quote, &defaults.quote, TEAL),
+        (&mut theme.prompt.color, &defaults.prompt.color, ACCENT_BLUE),
+        (&mut theme.diff.add, &defaults.diff.add, GREEN),
+        (&mut theme.diff.del, &defaults.diff.del, RED),
+        (&mut theme.match_current, &defaults.match_current, BLUE),
+    ] {
+        if style == default {
+            *style = style.recolored(color);
+        }
+    }
+    if theme.table == defaults.table {
+        theme.table = [BLUE, GREEN].into_iter().map(Style::color).collect();
+    }
 }
 
 fn is_light((r, g, b): (u8, u8, u8)) -> bool {

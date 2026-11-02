@@ -650,7 +650,7 @@ impl Ui {
             {
                 let line = parts.join(icons::PART_SEP);
                 let mut painted = status::painted(&line, &self.paint);
-                let marker = status::breath_style(self.spinner, &self.paint.theme.code);
+                let marker = status::breath_style(self.spinner, self.paint.theme.syntax);
                 painted
                     .spans
                     .insert(0, self.paint.span(&marker, format!("{} ", icons::PI_MARK)));

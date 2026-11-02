@@ -9,7 +9,7 @@ use std::time::Duration;
 use pi_core::core::meter::Snapshot;
 use pi_store::icons;
 use pi_store::status::Segment;
-use pi_store::theme::{Attr, Color, Style};
+use pi_store::theme::{Attr, Color, PaletteColor, Style, Syntax};
 use ratatui::text::{Line, Span};
 
 use crate::render::Paint;
@@ -17,9 +17,9 @@ use crate::render::Paint;
 pub const SPIN: Duration = Duration::from_millis(90);
 
 /// A bold pulse that changes hue each breath while staying easy to see.
-pub fn breath_style(tick: usize, code: &Style) -> Style {
+pub fn breath_style(tick: usize, syntax: Syntax) -> Style {
     let phase = tick % 60;
-    let breath = tick / 60 % 5;
+    let breath = tick / 60 % PaletteColor::ALL.len();
     let hue_phase = phase as f64 / 60.0;
     let light = if phase < 28 {
         (1.0 - (phase as f64 / 28.0 * std::f64::consts::PI).cos()) * 0.5
@@ -28,30 +28,19 @@ pub fn breath_style(tick: usize, code: &Style) -> Style {
     } else {
         (1.0 + ((phase - 32) as f64 / 28.0 * std::f64::consts::PI).cos()) * 0.5
     };
-    let colors = [
-        (99.0, 168.0, 248.0),
-        (70.0, 205.0, 205.0),
-        (177.0, 130.0, 245.0),
-        (244.0, 166.0, 92.0),
-        (130.0, 200.0, 125.0),
-    ];
-    let from = colors[breath];
-    let to = colors[(breath + 1) % colors.len()];
+    let from = PaletteColor::ALL[breath].rgb(syntax);
+    let to = PaletteColor::ALL[(breath + 1) % PaletteColor::ALL.len()].rgb(syntax);
     let blend = hue_phase * hue_phase * (3.0 - 2.0 * hue_phase);
     let base = (
-        from.0 + (to.0 - from.0) * blend,
-        from.1 + (to.1 - from.1) * blend,
-        from.2 + (to.2 - from.2) * blend,
+        f64::from(from.0) + (f64::from(to.0) - f64::from(from.0)) * blend,
+        f64::from(from.1) + (f64::from(to.1) - f64::from(from.1)) * blend,
+        f64::from(from.2) + (f64::from(to.2) - f64::from(from.2)) * blend,
     );
-    let color = match code.color.as_ref() {
-        Some(Color::Rgb(_, _, _)) => Color::Rgb(
-            (base.0 * (0.55 + 0.45 * light)).round() as u8,
-            (base.1 * (0.55 + 0.45 * light)).round() as u8,
-            (base.2 * (0.55 + 0.45 * light)).round() as u8,
-        ),
-        Some(color) => color.clone(),
-        None => return code.clone().adding(Attr::Bold),
-    };
+    let color = Color::Rgb(
+        (base.0 * (0.55 + 0.45 * light)).round() as u8,
+        (base.1 * (0.55 + 0.45 * light)).round() as u8,
+        (base.2 * (0.55 + 0.45 * light)).round() as u8,
+    );
     Style::color(color).adding(Attr::Bold)
 }
 
@@ -69,22 +58,8 @@ pub fn render(segment: Segment, s: &Snapshot, running: bool) -> Option<String> {
         // An unpriced model reports no cost rather than $0.
         Segment::Cost if s.cost <= 0.0 => return None,
         Segment::Cost => llm::figures::dollars(s.cost),
-        // Both numbers rather than the share between them: a percentage of
-        // a million-token window reads as 0% for most of a session.
-        Segment::Ctx => match s.ctx? {
-            (_, 0) => return None,
-            // `↓`: the run resent smaller than its budget allowed; `/status` says why.
-            (used, window) => format!(
-                "ctx {}/{}{}",
-                llm::figures::short(used as u64),
-                llm::figures::size(window as u64),
-                if s.refit { "↓" } else { "" }
-            ),
-        },
-        Segment::Compacted if s.compactions == 0 => return None,
-        // A count only past one: a second pass in a run is the thing to notice.
-        Segment::Compacted if s.compactions == 1 => "compacted".to_string(),
-        Segment::Compacted => format!("compacted {}", pi_store::text::times(s.compactions)),
+        Segment::Ctx => return context(s.ctx?, s.refit),
+        Segment::Compacted => return compacted(s.compactions),
         Segment::Queued if s.queued == 0 => return None,
         Segment::Queued => format!("{} queued", s.queued),
         Segment::Model if s.model.is_empty() => return None,
@@ -93,6 +68,27 @@ pub fn render(segment: Segment, s: &Snapshot, running: bool) -> Option<String> {
         // always did for anyone not using worktrees.
         Segment::Worktree => s.worktree.clone()?,
     })
+}
+
+// Show both counts: a percentage hides useful detail in large windows.
+fn context((used, window): (usize, usize), refit: bool) -> Option<String> {
+    if window == 0 {
+        return None;
+    }
+    let refit = if refit { "↓" } else { "" };
+    Some(format!(
+        "ctx {}/{}{refit}",
+        llm::figures::short(used as u64),
+        llm::figures::size(window as u64),
+    ))
+}
+
+fn compacted(count: usize) -> Option<String> {
+    match count {
+        0 => None,
+        1 => Some("compacted".into()),
+        count => Some(format!("compacted {}", pi_store::text::times(count))),
+    }
 }
 
 /// The parts that have something to say, in the order asked for.
@@ -208,4 +204,62 @@ fn number(text: &str) -> Option<f64> {
         return None;
     }
     Some(digits.parse::<f64>().ok()? * scale)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_and_compaction_segments_keep_their_display_rules() {
+        let mut snapshot = Snapshot::default();
+        assert_eq!(render(Segment::Ctx, &snapshot, false), None);
+        snapshot.ctx = Some((1000, 0));
+        assert_eq!(render(Segment::Ctx, &snapshot, false), None);
+        snapshot.ctx = Some((1000, 1_000_000));
+        assert_eq!(
+            render(Segment::Ctx, &snapshot, false).as_deref(),
+            Some("ctx 1.0k/1m")
+        );
+        snapshot.refit = true;
+        assert_eq!(
+            render(Segment::Ctx, &snapshot, false).as_deref(),
+            Some("ctx 1.0k/1m↓")
+        );
+        for (count, expected) in [(0, None), (1, Some("compacted")), (2, Some("compacted ×2"))] {
+            snapshot.compactions = count;
+            assert_eq!(
+                render(Segment::Compacted, &snapshot, false).as_deref(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn breathing_stays_continuous_across_every_colour_and_the_cycle_boundary() {
+        for syntax in [Syntax::CatppuccinMocha, Syntax::CatppuccinLatte] {
+            let cycle = PaletteColor::ALL.len() * 60;
+            let rgb = |tick| match breath_style(tick, syntax).color.unwrap() {
+                Color::Rgb(r, g, b) => [r, g, b],
+                other => panic!("expected interpolated RGB, got {other:?}"),
+            };
+            let mut low = u8::MAX;
+            let mut high = 0;
+            for tick in 0..cycle {
+                let current = rgb(tick);
+                let next = rgb(tick + 1);
+                for (a, b) in current.into_iter().zip(next) {
+                    assert!(
+                        a.abs_diff(b) <= 8,
+                        "colour jumped at tick {tick}: {a} to {b}"
+                    );
+                    low = low.min(a);
+                    high = high.max(a);
+                }
+                assert!(breath_style(tick, syntax).sgr.contains(&Attr::Bold));
+            }
+            assert!(high - low > 100, "the animation must vary its colour");
+            assert_eq!(rgb(0), rgb(cycle));
+        }
+    }
 }

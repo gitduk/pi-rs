@@ -358,12 +358,48 @@ pub struct Theme {
     pub table: Vec<Style>,
 }
 
-// Catppuccin Mocha's semantic colours: the defaults are for a dark terminal.
-const GREEN: Color = Color::Rgb(166, 227, 161);
-const RED: Color = Color::Rgb(243, 139, 168);
-const BLUE: Color = Color::Rgb(137, 180, 250);
-const TEAL: Color = Color::Rgb(148, 226, 213);
-const ACCENT_BLUE: Color = Color::Rgb(99, 168, 248);
+// Each entry defines both terminal backgrounds. Enumeration and lookup are
+// generated together, so a new entry also joins every palette consumer.
+macro_rules! palette {
+    ($($name:ident => ($dark:expr, $light:expr)),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum PaletteColor { $($name),+ }
+
+        impl PaletteColor {
+            pub const ALL: &'static [Self] = &[$(Self::$name),+];
+
+            pub const fn rgb(self, syntax: Syntax) -> (u8, u8, u8) {
+                match (self, syntax) {
+                    $((Self::$name, Syntax::CatppuccinLatte) => $light,
+                      (Self::$name, Syntax::Auto | Syntax::CatppuccinMocha) => $dark),+
+                }
+            }
+
+            pub const fn color(self, syntax: Syntax) -> Color {
+                let (r, g, b) = self.rgb(syntax);
+                Color::Rgb(r, g, b)
+            }
+        }
+    };
+}
+
+palette! {
+    Blue => ((137, 180, 250), (30, 102, 245)),
+    AccentBlue => ((99, 168, 248), (28, 100, 200)),
+    Teal => ((148, 226, 213), (23, 146, 153)),
+    Green => ((166, 227, 161), (64, 160, 43)),
+    Red => ((243, 139, 168), (210, 15, 57)),
+    Peach => ((250, 179, 135), (254, 100, 11)),
+    Yellow => ((249, 226, 175), (223, 142, 29)),
+    Mauve => ((203, 166, 247), (136, 57, 239)),
+    Pink => ((245, 194, 231), (234, 118, 203)),
+}
+
+const GREEN: Color = PaletteColor::Green.color(Syntax::CatppuccinMocha);
+const RED: Color = PaletteColor::Red.color(Syntax::CatppuccinMocha);
+const BLUE: Color = PaletteColor::Blue.color(Syntax::CatppuccinMocha);
+const TEAL: Color = PaletteColor::Teal.color(Syntax::CatppuccinMocha);
+const ACCENT_BLUE: Color = PaletteColor::AccentBlue.color(Syntax::CatppuccinMocha);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
