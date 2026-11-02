@@ -331,11 +331,48 @@ pub fn remove(dir: &Path, name: &str) -> Result<Removed> {
             note = Some(format!("branch {on} was left — {}", stderr_of(&dropped)));
         }
     }
+    if let Err(e) = clean_home(&root, Some(&tree.path)) {
+        let cleanup = format!("worktree directory cleanup failed: {e}");
+        note = Some(match note {
+            Some(note) => format!("{note}; {cleanup}"),
+            None => cleanup,
+        });
+    }
     Ok(Removed {
         path: tree.path.clone(),
         branch,
         note,
     })
+}
+
+// Remove only empty directories: nested names can leave empty parents, while
+// unregistered files in the worktree directory must stay untouched.
+fn clean_home(root: &Path, removed: Option<&Path>) -> Result<()> {
+    let home = home(root)?;
+    if let Some(removed) = removed {
+        let mut parent = removed.parent();
+        while let Some(dir) = parent.filter(|dir| *dir != home && dir.starts_with(&home)) {
+            match std::fs::remove_dir(dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => break,
+                Err(e) => return Err(e.into()),
+            }
+            parent = dir.parent();
+        }
+    }
+    if list(root)?.iter().all(|tree| tree.main) {
+        match std::fs::remove_dir(&home) {
+            Ok(()) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                ) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
 }
 
 // The repository's trees, and which of them `name` means for removal.
@@ -355,6 +392,40 @@ fn named(dir: &Path, name: &str) -> Result<(Vec<Tree>, usize)> {
 }
 
 impl Core {
+    pub(super) fn remove_all_worktrees(&mut self) -> Result<Step, String> {
+        let from = self.lane().root().to_path_buf();
+        let trees = list(&from).map_err(|e| refused("worktree", e))?;
+        let main = trees
+            .first()
+            .ok_or_else(|| "not a git repository".to_string())?;
+        let switched = holding(&trees, &from).is_some_and(|tree| !tree.main);
+        if switched {
+            self.enter_worktree(&main.name)?;
+        }
+        let mut said = Vec::new();
+        for tree in trees.iter().filter(|tree| !tree.main) {
+            match self.remove_worktree(&tree.name) {
+                Ok(Step::Worktrees(note)) => {
+                    said.push(format!("{} removed", tree.name));
+                    if !note.is_empty() {
+                        said.push(note);
+                    }
+                }
+                Ok(_) => unreachable!("removing a worktree returns a worktree change"),
+                Err(e) => said.push(format!("{}: {e}", tree.name)),
+            }
+        }
+        if let Err(e) = clean_home(&main.path, None) {
+            said.push(format!("worktree directory cleanup failed: {e}"));
+        }
+        let note = crate::input::notice(said);
+        Ok(if switched {
+            Step::Swap(note)
+        } else {
+            Step::Worktrees(note)
+        })
+    }
+
     // Each tree keeps its own transcript: paths in it are workspace-relative
     // and locks are keyed by absolute path, so a shared one would misresolve.
     pub(super) fn enter_worktree(&mut self, name: &str) -> Result<Step, String> {
@@ -468,7 +539,7 @@ impl Core {
             "/worktree <name> works in one, creating it in {home}/ if it is not there"
         ));
         out.push(
-            "/worktree rm <name> removes one — its checkout, sessions, and its branch once merged"
+            "/worktree rm [name] removes one, or all linked worktrees without a name — checkouts, sessions, and branches once merged"
                 .into(),
         );
         out
@@ -908,9 +979,8 @@ mod tests {
         assert!(home(dir.path()).unwrap().join("fix-tools").exists());
     }
 
-    // `rm` is the verb only with a name after it; bare, it names a tree.
     #[test]
-    fn rm_removes_only_with_a_name_after_it() {
+    fn rm_with_a_name_removes_that_worktree() {
         use crate::input::{Builtin, Intent, Step};
         let dir = crate::core::worktree::test_repo();
         let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
@@ -921,7 +991,7 @@ mod tests {
         let step = worktree(&mut core, "");
         assert!(matches!(step, Step::Handled(_)), "bare, it lists: {step:?}");
 
-        worktree(&mut core, "rm");
+        core.enter_worktree("rm").unwrap();
         assert_eq!(core.lane().worktree(), Some("rm"));
         assert!(home(dir.path()).unwrap().join("rm").exists());
 

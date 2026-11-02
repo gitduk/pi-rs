@@ -101,8 +101,8 @@ pub(crate) const BUILTIN: &[Command] = &[
         Args::Subcommands {
             commands: &[Subcommand {
                 word: "rm",
-                help: "remove a worktree",
-                args: Args::required("name", Values::Worktrees),
+                help: "remove one worktree, or all linked worktrees without a name",
+                args: Args::optional("name", Values::LinkedWorktrees),
             }],
             fallback: Some(Parameter {
                 name: "name",
@@ -110,7 +110,7 @@ pub(crate) const BUILTIN: &[Command] = &[
                 values: Values::Worktrees,
             }),
         },
-        "list this repository's worktrees, or work in one — rm removes one",
+        "list this repository's worktrees, or work in one — rm removes one or all",
         |_, rest| Intent::Builtin(Builtin::Worktree(rest)),
     ),
     Command::builtin(

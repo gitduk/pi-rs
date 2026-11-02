@@ -17,6 +17,7 @@ pub enum Values {
     Models,
     Sessions,
     Worktrees,
+    LinkedWorktrees,
     Editable,
     Said,
     Servers,
@@ -38,6 +39,7 @@ impl Parameter {
             | Values::Models
             | Values::Sessions
             | Values::Worktrees
+            | Values::LinkedWorktrees
             | Values::Editable
             | Values::Said
             | Values::Servers => self.name.into(),
@@ -134,6 +136,7 @@ pub struct Sources<'a> {
     pub models: &'a [Choice],
     pub said: &'a [Choice],
     pub sessions: Option<&'a dyn Fn() -> &'a [ResumeChoice]>,
+    /// All checkouts, with the main checkout first.
     pub worktrees: Option<&'a dyn Fn() -> &'a [Choice]>,
     pub editable: Option<&'a dyn Fn() -> &'a [Choice]>,
     pub servers: Option<&'a dyn Fn() -> Vec<Choice>>,
@@ -327,13 +330,27 @@ fn values(source: Values, head: &str, typed: &str, sources: &Sources<'_>) -> Vec
                 .collect();
             offer(&choices, head, typed)
         }
-        Values::Models | Values::Worktrees | Values::Editable | Values::Servers
+        Values::Models
+        | Values::Worktrees
+        | Values::LinkedWorktrees
+        | Values::Editable
+        | Values::Servers
             if typed.contains(char::is_whitespace) =>
         {
             Vec::new()
         }
         Values::Models => offer(sources.models, head, typed),
         Values::Worktrees => offer(sources.worktrees.map_or(&[], |f| f()), head, typed),
+        Values::LinkedWorktrees => {
+            let trees: &[Choice] = sources.worktrees.map_or(&[], |f| f());
+            let mut offered = offer(trees.get(1..).unwrap_or_default(), head, typed);
+            if typed.is_empty() {
+                for candidate in &mut offered {
+                    candidate.picked_only = true;
+                }
+            }
+            offered
+        }
         Values::Editable => offer(sources.editable.map_or(&[], |f| f()), head, typed),
         Values::Servers => {
             let mut offered = offer(&sources.servers.map_or_else(Vec::new, |f| f()), head, typed);
@@ -503,7 +520,7 @@ mod tests {
         for (line, hint) in [
             ("/mcp ", "[restart [name]]"),
             ("/mcp restart ", "[name]"),
-            ("/worktree rm ", "<name>"),
+            ("/worktree rm ", "[name]"),
         ] {
             assert_eq!(
                 Input::new(line, line.len(), BUILTIN, None)

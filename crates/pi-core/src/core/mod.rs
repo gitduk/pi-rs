@@ -456,12 +456,12 @@ impl Core {
     }
 
     fn worktree_step(&mut self, name: &str) -> Step {
+        let name = name.trim();
         if name.is_empty() {
             return Step::Handled(Listing::say(self.worktree_listing()));
         }
-        // `rm` + a name removes the tree; a bare `rm` still names
-        // a tree of its own, so only the two-word form is the verb.
         let step = match name.split_once(char::is_whitespace) {
+            None if name == "rm" => self.remove_all_worktrees(),
             Some(("rm", name)) if !name.trim().is_empty() => self.remove_worktree(name.trim()),
             _ => self.enter_worktree(name),
         };
