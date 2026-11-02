@@ -1,6 +1,7 @@
 //! The line being typed: a text buffer, a caret, and the history behind it.
 
 use pi_store::keys::Action;
+use pi_store::text::{ceil_boundary, floor_boundary, grapheme_width, graphemes};
 use ratatui::text::{Line, Span};
 
 use crate::render::Paint;
@@ -11,7 +12,7 @@ pub const IMAGE_TAG: &str = "[Image #";
 #[derive(Default)]
 pub struct Editor {
     text: String,
-    // Byte offset of the caret. Always on a char boundary.
+    // Byte offset of the caret. Always on a grapheme boundary.
     cursor: usize,
     history: Vec<String>,
     // Where Up/Down currently sit. `history.len()` means the line being typed.
@@ -111,18 +112,20 @@ impl Editor {
     /// Replace `[start..end)` with `s`, caret landing after it. For an
     /// @-completion mid-line — `set_line` would strand the caret at the end.
     pub fn splice(&mut self, start: usize, end: usize, s: &str) {
+        let start = floor_boundary(&self.text, start);
+        let end = ceil_boundary(&self.text, end);
         self.text.replace_range(start..end, s);
-        self.cursor = start + s.len();
+        self.cursor = ceil_boundary(&self.text, start + s.len());
     }
 
     pub fn insert(&mut self, c: char) {
         self.text.insert(self.cursor, c);
-        self.cursor += c.len_utf8();
+        self.cursor = ceil_boundary(&self.text, self.cursor + c.len_utf8());
     }
 
     pub fn insert_str(&mut self, s: &str) {
         self.text.insert_str(self.cursor, s);
-        self.cursor += s.len();
+        self.cursor = ceil_boundary(&self.text, self.cursor + s.len());
     }
 
     /// A key table's text edit done on the buffer; false for any other
@@ -149,10 +152,11 @@ impl Editor {
     }
 
     pub fn backspace(&mut self) {
-        if let Some(c) = self.text[..self.cursor].chars().next_back() {
-            self.cursor -= c.len_utf8();
-            self.text.remove(self.cursor);
-        }
+        let Some((at, _)) = graphemes(&self.text[..self.cursor]).next_back() else {
+            return;
+        };
+        self.text.replace_range(at..self.cursor, "");
+        self.cursor = ceil_boundary(&self.text, at);
     }
 
     /// `backspace`, but a pasted image's `[Image #n …]` goes whole: half a
@@ -179,46 +183,50 @@ impl Editor {
         {
             let end = self.cursor + close + 1;
             self.text.replace_range(self.cursor..end, "");
+            self.cursor = ceil_boundary(&self.text, self.cursor);
         } else {
             self.delete();
         }
     }
 
     pub fn delete(&mut self) {
-        if self.cursor < self.text.len() {
-            self.text.remove(self.cursor);
+        let end = graphemes(&self.text[self.cursor..])
+            .next()
+            .map(|(_, g)| self.cursor + g.len());
+        if let Some(end) = end {
+            self.text.replace_range(self.cursor..end, "");
+            self.cursor = ceil_boundary(&self.text, self.cursor);
         }
     }
 
     pub fn left(&mut self) {
-        if let Some(c) = self.text[..self.cursor].chars().next_back() {
-            self.cursor -= c.len_utf8();
+        if let Some((at, _)) = graphemes(&self.text[..self.cursor]).next_back() {
+            self.cursor = at;
         }
     }
 
     pub fn right(&mut self) {
-        if let Some(c) = self.text[self.cursor..].chars().next() {
-            self.cursor += c.len_utf8();
+        if let Some((_, g)) = graphemes(&self.text[self.cursor..]).next() {
+            self.cursor += g.len();
         }
     }
 
     fn word_start(&self) -> usize {
         let head = &self.text[..self.cursor];
         let trimmed = head.trim_end_matches(char::is_whitespace);
-        let Some(last) = trimmed.chars().next_back() else {
+        let Some((_, last)) = graphemes(trimmed).next_back() else {
             return 0;
         };
-        let word = word_char(last);
-        trimmed
-            .char_indices()
+        let word = word_grapheme(last);
+        graphemes(trimmed)
             .rev()
-            .find(|(_, c)| c.is_whitespace() || word_char(*c) != word)
-            .map_or(0, |(i, c)| i + c.len_utf8())
+            .find(|(_, g)| g.chars().all(char::is_whitespace) || word_grapheme(g) != word)
+            .map_or(0, |(i, g)| i + g.len())
     }
 
     fn word_end(&self) -> usize {
         let tail = &self.text[self.cursor..];
-        let skipped = tail.len() - tail.trim_start_matches(char::is_whitespace).len();
+        let skipped = blank_prefix(tail);
         self.cursor + skipped + word_run(&tail[skipped..])
     }
 
@@ -236,7 +244,7 @@ impl Editor {
         let tail = &self.text[self.cursor..];
         let word = word_run(tail);
         let rest = &tail[word..];
-        let space = rest.len() - rest.trim_start_matches(char::is_whitespace).len();
+        let space = blank_prefix(rest);
         self.cursor += word + space;
     }
 
@@ -245,7 +253,7 @@ impl Editor {
         let end = self.text[..self.cursor].trim_end().len();
         let start = self.tag_ending_at(end).unwrap_or_else(|| self.word_start());
         self.text.replace_range(start..self.cursor, "");
-        self.cursor = start;
+        self.cursor = ceil_boundary(&self.text, start);
     }
 
     // The caret line's edges: the byte after its newline (or 0), and the
@@ -267,14 +275,14 @@ impl Editor {
     }
 
     pub fn end(&mut self) {
-        self.cursor = self.line_end();
+        self.cursor = floor_boundary(&self.text, self.line_end());
     }
 
     /// The line's first non-blank character, vim's `^`.
     pub fn first_non_blank(&mut self) {
         self.home();
         let line = &self.text[self.cursor..self.line_end()];
-        self.cursor += line.len() - line.trim_start().len();
+        self.cursor += blank_prefix(line);
     }
 
     /// The whole buffer's ends, not one line's.
@@ -289,6 +297,7 @@ impl Editor {
     pub fn kill_to_end(&mut self) {
         let end = self.line_end();
         self.text.replace_range(self.cursor..end, "");
+        self.cursor = ceil_boundary(&self.text, self.cursor);
     }
 
     pub fn kill_to_start(&mut self) {
@@ -324,7 +333,7 @@ impl Editor {
     /// A fresh empty line beside the caret's, the caret on it: vim's `o`
     /// and `O`. Landing in Insert is the caller's business.
     pub fn open_below(&mut self) {
-        let end = self.line_end();
+        let end = floor_boundary(&self.text, self.line_end());
         self.text.insert(end, '\n');
         self.cursor = end + 1;
     }
@@ -422,8 +431,8 @@ impl Editor {
         let mut used = 0usize;
         let mut caret = None;
 
-        for (i, ch) in body.char_indices() {
-            if ch == '\n' {
+        for (i, g) in graphemes(body) {
+            if g.contains('\n') {
                 if i == cursor {
                     caret = Some((rows.len() as u16, (prompt_w + used) as u16));
                 }
@@ -431,11 +440,11 @@ impl Editor {
                 used = 0;
                 continue;
             }
-            let mut w = pi_store::text::cols_at(ch, used);
+            let mut w = grapheme_width(g, used);
             if used + w > avail && used > 0 {
                 rows.push(std::mem::take(&mut row));
                 used = 0;
-                w = pi_store::text::cols_at(ch, used);
+                w = grapheme_width(g, used);
             }
             // After the wrap, so a caret sitting exactly on the break lands at
             // the start of the new row rather than off the end of the old one.
@@ -443,9 +452,10 @@ impl Editor {
                 caret = Some((rows.len() as u16, (prompt_w + used) as u16));
             }
             // A tab is drawn as the spaces it runs to; the text keeps the tab.
-            match ch {
-                '\t' => row.extend(std::iter::repeat_n(' ', w)),
-                ch => row.push(ch),
+            if g == "\t" {
+                row.extend(std::iter::repeat_n(' ', w));
+            } else {
+                row.push_str(g);
             }
             used += w;
         }
@@ -477,17 +487,27 @@ impl Editor {
     }
 }
 
-fn word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+fn word_grapheme(g: &str) -> bool {
+    g.chars()
+        .next()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+}
+
+fn blank_prefix(s: &str) -> usize {
+    graphemes(s)
+        .take_while(|(_, g)| g.chars().all(char::is_whitespace))
+        .map(|(_, g)| g.len())
+        .sum()
 }
 
 fn word_run(text: &str) -> usize {
-    let Some(first) = text.chars().next() else {
+    let Some((_, first)) = graphemes(text).next() else {
         return 0;
     };
-    let word = word_char(first);
-    text.find(|c: char| c.is_whitespace() || word_char(c) != word)
-        .unwrap_or(text.len())
+    let word = word_grapheme(first);
+    graphemes(text)
+        .find(|(_, g)| g.chars().all(char::is_whitespace) || word_grapheme(g) != word)
+        .map_or(text.len(), |(i, _)| i)
 }
 
 /// One entry per line, with the newlines inside an entry escaped, so a
@@ -525,22 +545,12 @@ pub fn decode(body: &str) -> Vec<String> {
 
 // Columns `line` spans, counted the way `view` lays it out.
 fn cols(line: &str) -> usize {
-    line.chars()
-        .fold(0, |used, c| used + pi_store::text::cols_at(c, used))
+    pi_store::text::width(line)
 }
 
-// Where in `line` the caret lands for column `col`: on the character that
-// covers it, or at the end of a line too short to reach it.
+// The byte boundary of the grapheme covering this screen column.
 fn at_col(line: &str, col: usize) -> usize {
-    let mut used = 0;
-    for (i, c) in line.char_indices() {
-        let w = pi_store::text::cols_at(c, used);
-        if used + w > col {
-            return i;
-        }
-        used += w;
-    }
-    line.len()
+    pi_store::text::byte_at_col(line, col)
 }
 
 #[cfg(test)]

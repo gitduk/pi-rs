@@ -406,7 +406,7 @@ impl Core {
             Builtin::Rewind(id) => self.rewind_step(id.trim()),
             Builtin::Name(name) => self.name_step(name),
             Builtin::Compact(focus) => Step::Compact(Some(focus).filter(|f| !f.is_empty())),
-            Builtin::Model(name) if name.is_empty() => Step::Handled(Listing::say(self.listing())),
+            Builtin::Model(name) if name.is_empty() => Step::Handled(self.listing()),
             Builtin::Model(name) => Step::Notice(notice(self.switch(&name))),
             Builtin::Mv(dir) => match dir.trim() {
                 "" => Step::Handled(Listing::say([self.lane().root().display().to_string()])),
@@ -458,7 +458,7 @@ impl Core {
     fn worktree_step(&mut self, name: &str) -> Step {
         let name = name.trim();
         if name.is_empty() {
-            return Step::Handled(Listing::say(self.worktree_listing()));
+            return Step::Handled(self.worktree_listing());
         }
         let step = match name.split_once(char::is_whitespace) {
             None if name == "rm" => self.remove_all_worktrees(),

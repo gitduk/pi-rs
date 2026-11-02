@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
 use llm::request::Effort;
+use ratatui::layout::{Constraint, Layout as RowLayout, Rect};
 use ratatui::text::{Line, Span};
 use serde::Serialize;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -80,6 +81,32 @@ impl Facts {
 enum Piece {
     Spans(Vec<Span<'static>>),
     Tabs,
+}
+
+pub(super) struct BarRow {
+    // The spatial text used for selection. Drawing uses the regions below.
+    pub(super) line: Line<'static>,
+    pub(super) parts: [(Rect, Line<'static>); 2],
+}
+
+pub(super) struct FlashHit {
+    pub(super) cols: std::ops::Range<usize>,
+    pub(super) more: Option<(Line<'static>, super::browse::MoreAreas)>,
+}
+
+impl FlashHit {
+    fn of(spans: &[Span<'static>], start: usize, cut: bool) -> Self {
+        let more = if cut {
+            let area = ratatui::layout::Rect::new(start as u16, 0, spans_width(spans) as u16, 1);
+            super::browse::MoreAreas::of(area).map(|areas| (Line::from(spans.to_vec()), areas))
+        } else {
+            None
+        };
+        Self {
+            cols: start..start + spans_width(spans),
+            more,
+        }
+    }
 }
 
 impl Ui {
@@ -175,7 +202,7 @@ impl Ui {
         facts: &Facts,
         snap: &Snapshot,
         width: usize,
-    ) -> Vec<Line<'static>> {
+    ) -> Vec<BarRow> {
         let held = self
             .pointer
             .is_some_and(|(col, row)| self.flash_at(col, row).is_some());
@@ -188,8 +215,8 @@ impl Ui {
         let mut rows = Vec::new();
         for (i, line) in self.layout.lines.iter().enumerate() {
             let (row, hit) = self.bar_row(line, facts, snap, width);
-            if let Some((cols, cut)) = hit {
-                self.flash_hit = Some((i, cols, cut));
+            if let Some(hit) = hit {
+                self.flash_hit = Some((i, hit));
             }
             rows.push(row);
         }
@@ -198,14 +225,14 @@ impl Ui {
 
     // The right side keeps up to half a row too narrow for both; the left
     // folds its checkouts, then is cut. With the row, the columns of the side
-    // holding a flash shown, and whether that side was cut.
+    // holding a flash shown, and its page action's columns when present.
     fn bar_row(
         &self,
         line: &bar::Line,
         facts: &Facts,
         snap: &Snapshot,
         width: usize,
-    ) -> (Line<'static>, Option<(std::ops::Range<usize>, bool)>) {
+    ) -> (BarRow, Option<FlashHit>) {
         let left = self.pieces(&line.left, facts, snap);
         let right = self.pieces(&line.right, facts, snap);
         let sep = match &line.sep {
@@ -218,26 +245,61 @@ impl Ui {
             GAP
         };
         let (lmin, rw) = (self.fixed(&left, &sep), self.natural(&right, &sep));
+        let area = Rect::new(0, 0, width as u16, 1);
         let rroom = if self.natural(&left, &sep) + gap + rw <= width {
             rw
         } else {
-            rw.min(width.saturating_sub(lmin + gap).max(width / 2))
+            let [_, _, unused] = RowLayout::horizontal([
+                Constraint::Length(lmin.min(u16::MAX as usize) as u16),
+                Constraint::Length(gap as u16),
+                Constraint::Fill(1),
+            ])
+            .areas(area);
+            let [half, _] =
+                RowLayout::horizontal([Constraint::Ratio(1, 2), Constraint::Fill(1)]).areas(area);
+            rw.min(unused.width.max(half.width) as usize)
         };
-        let lroom = width.saturating_sub(rroom + gap);
-        let lcut = self.natural(&left, &sep) > lroom;
-        let mut spans = self.join(left, lroom, &sep);
-        let right = self.join(right, rroom, &sep);
+        let [left_area, _, right_area] = RowLayout::horizontal([
+            Constraint::Fill(1),
+            Constraint::Length(gap as u16),
+            Constraint::Length(rroom as u16),
+        ])
+        .areas(area);
+        let lcut = self.natural(&left, &sep) > left_area.width as usize;
+        let spans = self.join(left, left_area.width as usize, &sep);
+        let right = self.join(right, right_area.width as usize, &sep);
+        let [_, right_text] = RowLayout::horizontal([
+            Constraint::Fill(1),
+            Constraint::Length(spans_width(&right) as u16),
+        ])
+        .areas(right_area);
+        let left_line = Line::from(spans);
+        let right_line = Line::from(right);
         let shown = self.flash.is_some();
-        let mut hit = (shown && holds_flash(&line.left)).then(|| (0..spans_width(&spans), lcut));
-        if !right.is_empty() {
-            let used = spans_width(&spans) + spans_width(&right);
-            spans.push(Span::raw(" ".repeat(width.saturating_sub(used))));
+        let mut hit = (shown && holds_flash(&line.left))
+            .then(|| FlashHit::of(&left_line.spans, left_area.x as usize, lcut));
+        let mut text = left_line.clone();
+        if !right_line.spans.is_empty() {
+            // Only the selection's text needs spaces; the widgets use Rects.
+            text.spans.push(Span::raw(
+                " ".repeat((right_text.x as usize).saturating_sub(text.width())),
+            ));
             if shown && holds_flash(&line.right) {
-                hit = Some((width.saturating_sub(spans_width(&right))..width, rw > rroom));
+                hit = Some(FlashHit::of(
+                    &right_line.spans,
+                    right_text.x as usize,
+                    rw > right_area.width as usize,
+                ));
             }
-            spans.extend(right);
+            text.spans.extend(right_line.spans.clone());
         }
-        (Line::from(spans), hit)
+        (
+            BarRow {
+                line: text,
+                parts: [(left_area, left_line), (right_text, right_line)],
+            },
+            hit,
+        )
     }
 
     fn pieces(&self, items: &[Item], facts: &Facts, snap: &Snapshot) -> Vec<Piece> {

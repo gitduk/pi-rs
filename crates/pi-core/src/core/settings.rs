@@ -10,6 +10,7 @@ use crate::input::{Step, refused};
 use pi_store::args::EffortArg;
 use pi_store::config::{self, Config};
 use pi_store::icons;
+use pi_store::listing::{Listing, Row};
 use pi_store::settings::Settings;
 
 impl Core {
@@ -204,13 +205,12 @@ impl Core {
     pub(super) fn edit(&self, name: &str) -> Step {
         let files = resolve::editable(&self.pinned, self.lane().root());
         if name.is_empty() {
-            let width = pi_store::text::widest(files.iter().map(|f| f.name.as_str()));
-            let mut lines: Vec<String> = files
+            let mut rows: Vec<Row> = files
                 .iter()
-                .map(|f| format!("{}  {}", pi_store::text::pad(&f.name, width), f.note))
+                .map(|f| Row::new([f.name.clone(), f.note.clone()]))
                 .collect();
-            lines.push("/edit <file> opens one in $EDITOR".into());
-            return Step::Handled(pi_store::listing::Listing::say(lines));
+            rows.push(Row::new(["/edit <file> opens one in $EDITOR"]));
+            return Step::Handled(Listing::of(rows));
         }
         match files.into_iter().find(|f| f.name == name) {
             Some(file) => match resolve::seed(&file.path) {
@@ -373,26 +373,22 @@ impl Core {
         said
     }
     // What `/model` on its own shows.
-    pub(super) fn listing(&self) -> Vec<String> {
+    pub(super) fn listing(&self) -> Listing {
         let here = &self.lane().agent().spec().model;
         let choices = self.choices();
         if choices.is_empty() {
-            return vec![
+            return Listing::say([
                 format!("on {here}, and ~/.pi/settings.toml now defines no model to switch to"),
                 "see examples/pi.toml for what a [models.<name>] entry looks like".into(),
-            ];
+            ]);
         }
-        let width = pi_store::text::widest(choices.iter().map(|c| c.name.as_str()));
-        choices
-            .iter()
-            .map(|c| {
-                let mark = if &c.name == here {
-                    icons::CURRENT_ITEM
-                } else {
-                    " "
-                };
-                format!("{mark} {}  {}", pi_store::text::pad(&c.name, width), c.note)
-            })
-            .collect()
+        Listing::of(choices.iter().map(|c| {
+            let mark = if &c.name == here {
+                icons::CURRENT_ITEM
+            } else {
+                " "
+            };
+            Row::new([format!("{mark} {}", c.name), c.note.clone()])
+        }))
     }
 }

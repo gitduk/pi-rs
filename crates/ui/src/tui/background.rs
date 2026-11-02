@@ -88,7 +88,17 @@ impl Ui {
                     self.leave_background();
                     None
                 }
-                KeyCode::Enter => return Some(Asked::Own(Deed::CommandOutput(id))),
+                KeyCode::Enter => Some(
+                    if self
+                        .every_command
+                        .iter()
+                        .any(|j| j.id == id && j.state == State::Back)
+                    {
+                        Deed::ReadCommand(id)
+                    } else {
+                        Deed::ToggleCommand(id)
+                    },
+                ),
                 KeyCode::Char('x') if key.modifiers.is_empty() => {
                     Some(Deed::StopCommands(vec![id]))
                 }

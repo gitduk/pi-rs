@@ -8,7 +8,6 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use pi_store::text::cols_at;
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd, TextMergeWithOffset};
 use ratatui::text::{Line, Span};
 
@@ -136,41 +135,55 @@ pub fn strip(lines: Vec<Line<'static>>) -> Vec<(Line<'static>, Units)> {
     lines
         .into_iter()
         .map(|line| {
-            let mut starts: Vec<usize> = vec![0; open];
-            let mut units = Units::new();
-            let mut col = 0;
-            let spans: Vec<Span<'static>> = (line.spans.into_iter())
+            if open == 0
+                && !line
+                    .spans
+                    .iter()
+                    .any(|span| span.content.contains([OPEN, CLOSE]))
+            {
+                return (line, Vec::new());
+            }
+            let mut starts = vec![0; open];
+            let mut ranges = Vec::new();
+            let mut text = String::new();
+            let spans = line
+                .spans
+                .into_iter()
                 .filter_map(|span| {
                     if !span.content.contains([OPEN, CLOSE]) {
-                        col = (span.content.chars()).fold(col, |col, c| col + cols_at(c, col));
+                        text.push_str(&span.content);
                         return Some(span);
                     }
-                    let mut kept = String::with_capacity(span.content.len());
+                    let mut kept = String::new();
                     for c in span.content.chars() {
                         match c {
-                            OPEN => starts.push(col),
+                            OPEN => starts.push(text.len()),
                             CLOSE => {
-                                if let Some(start) = starts.pop()
-                                    && col > start
-                                {
-                                    units.push(start..col);
+                                if let Some(start) = starts.pop() {
+                                    ranges.push(start..text.len());
                                 }
                             }
                             _ => {
                                 kept.push(c);
-                                col += cols_at(c, col);
+                                text.push(c);
                             }
                         }
                     }
                     (!kept.is_empty()).then(|| Span::styled(kept, span.style))
                 })
-                .collect();
+                .collect::<Vec<_>>();
             open = starts.len();
-            for start in starts {
-                if col > start {
-                    units.push(start..col);
-                }
-            }
+            ranges.extend(starts.into_iter().map(|start| start..text.len()));
+            let units = ranges
+                .into_iter()
+                .filter_map(|range| {
+                    let start = pi_store::text::floor_boundary(&text, range.start);
+                    let end = pi_store::text::ceil_boundary(&text, range.end);
+                    let from = pi_store::text::width(&text[..start]);
+                    let to = pi_store::text::width(&text[..end]);
+                    (from < to).then_some(from..to)
+                })
+                .collect();
             (Line::from(spans).style(line.style), units)
         })
         .collect()

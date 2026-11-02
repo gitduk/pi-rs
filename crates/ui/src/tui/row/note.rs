@@ -90,6 +90,10 @@ impl Note {
 }
 
 impl Fold for Note {
+    fn has_page(&self, i: usize, width: usize) -> bool {
+        !self.open && self.click_line(i, width).is_some()
+    }
+
     fn expandable(&self) -> bool {
         self.lines.len() > 1
     }

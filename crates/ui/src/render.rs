@@ -11,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 
 use agent::Event;
 use llm::model::Pricing;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 
 mod diff;
@@ -21,6 +22,20 @@ use diff::rows as sketch_rows;
 use pi_store::icons;
 use pi_store::text::{RESET, clip};
 use pi_store::theme::{Color, Style, Theme, push_sep};
+
+// A heading's mark, text and trailing metadata share one allocation rule.
+pub(crate) fn title_room(width: usize, lead: usize, tail: &str) -> usize {
+    if width > u16::MAX as usize {
+        return width;
+    }
+    let [_, body, _] = Layout::horizontal([
+        Constraint::Length(lead.min(u16::MAX as usize) as u16),
+        Constraint::Fill(1),
+        Constraint::Length(Line::raw(tail).width().min(u16::MAX as usize) as u16),
+    ])
+    .areas(Rect::new(0, 0, width as u16, 1));
+    body.width as usize
+}
 
 /// Whether the surface being written to can carry colour, and the theme behind
 /// the codes it uses.
@@ -538,8 +553,7 @@ pub fn result_rows(
     // Past the mark, the name and the `…` a cut adds; the place and time
     // are kept whole, the command gives way to them.
     let placed = placed(call.place) + &ran_for(call.took);
-    let width_of = pi_store::text::width;
-    let fits = room.saturating_sub(width_of(call.name) + 2 + width_of(placed.as_str()));
+    let fits = title_room(room, Line::raw(format!("{}  ", call.name)).width(), &placed);
     let mut spans = vec![p.span(mark_style, mark), Span::raw(" ")];
     spans.extend(p.tool_call(
         call.name,

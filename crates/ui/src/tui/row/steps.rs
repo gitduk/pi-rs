@@ -294,9 +294,7 @@ impl Head {
     // The text's columns: the mark and its space, the tail, and a column of
     // air before the terminal edge.
     fn room(&self, width: usize) -> usize {
-        width
-            .saturating_sub(MARK_WIDTH + pi_store::text::width(&self.tail) + 1)
-            .max(8)
+        render::title_room(width, MARK_WIDTH, &format!("{} ", self.tail)).max(8)
     }
 
     fn cut(&self, width: usize) -> bool {
@@ -866,6 +864,10 @@ impl Group {
 }
 
 impl Fold for Group {
+    fn has_page(&self, i: usize, width: usize) -> bool {
+        self.click_line(i, width).is_some() && self.closed_step(i).is_some()
+    }
+
     fn expandable(&self) -> bool {
         expandable(&self.steps, &self.pending)
     }

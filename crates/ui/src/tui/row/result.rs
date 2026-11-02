@@ -59,6 +59,9 @@ impl ToolOut {
     }
 
     pub(super) fn line(&self, i: usize, paint: &Paint, width: usize) -> Line<'static> {
+        if i > 0 && self.has_page(i, width) {
+            return Line::default();
+        }
         let mut painted = self.painted.borrow_mut();
         let rows = match &mut *painted {
             Some((w, rows)) if *w == width => rows,
@@ -100,6 +103,10 @@ impl ToolOut {
 }
 
 impl Fold for ToolOut {
+    fn has_page(&self, i: usize, width: usize) -> bool {
+        !self.expanded && self.click_line(i, width).is_some()
+    }
+
     fn expandable(&self) -> bool {
         render::folds(self.preview_lines)
     }

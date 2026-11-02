@@ -544,13 +544,15 @@ impl Ui {
                 self.on_drag(mouse.column, mouse.row);
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                if let Some(id) = self.page_command_at(mouse.column, mouse.row) {
+                    self.press = None;
+                    self.selection = None;
+                    return Asked::Own(Deed::ReadCommand(id));
+                }
                 if !self.reading() {
                     let deed = match self.target_at(mouse.row) {
                         Some(super::mouse::Target::BackgroundResults(_)) => {
                             Some(Deed::BackgroundResults(!self.background_results_shown))
-                        }
-                        Some(super::mouse::Target::BackgroundResult(_, id)) => {
-                            Some(Deed::CommandOutput(id))
                         }
                         _ => None,
                     };
@@ -564,7 +566,7 @@ impl Ui {
             }
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
                 if let Some(id) = self.on_release(view, mouse.column, mouse.row) {
-                    return Asked::Own(Deed::CommandOutput(id));
+                    return Asked::Own(Deed::ToggleCommand(id));
                 }
             }
             _ => {}

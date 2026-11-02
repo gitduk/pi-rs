@@ -2,9 +2,9 @@
 //! up, the menu, the bar and the editor, laid bottom-up and drawn.
 
 use pi_core::core::lane::Lane;
-use ratatui::layout::Rect;
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListState};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Borders, TableState};
 
 use super::Ui;
 use super::bar::Facts;
@@ -110,7 +110,8 @@ impl Ui {
                 line.style = line.style.add_modifier(ratatui::style::Modifier::REVERSED);
             }
         }
-        let mut bar = self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width);
+        let bar_rows = self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width);
+        let mut bar: Vec<_> = bar_rows.iter().map(|row| row.line.clone()).collect();
         let (menu, hint) = self.assistance().into_parts();
         let (input, caret) = self.input_view(width, hint.as_deref());
         // A question heads its options, and stays up over words that match
@@ -241,8 +242,7 @@ impl Ui {
             output_at = Some(room);
             rows.truncate(room);
             rows.resize(room, (Line::default(), Target::Gap, 0));
-            let rule = self.over_rule(width, ruled && self.paint.color);
-            rows.push((rule, Target::Rule, 0));
+            rows.push((Line::default(), Target::Rule, 0));
             rows.extend(text);
             (rows, scroll)
         } else {
@@ -275,7 +275,7 @@ impl Ui {
         // The query marked on the rows a search reads, a page's own.
         let look = self.rat_style(&self.paint.theme.matched);
         let here = self.rat_style(&self.paint.theme.match_current);
-        let mut rows = match self.search_query() {
+        let rows = match self.search_query() {
             Some((query, at)) => {
                 let places = self.row_targets.iter().zip(&self.row_of);
                 rows.into_iter()
@@ -302,7 +302,7 @@ impl Ui {
         self.drawn.extend(executions.iter().map(plain));
         self.drawn.resize(bar_base, String::new());
         self.drawn.extend(bar.iter().map(plain));
-        self.stamp_sent(view, &mut rows, width);
+        let stamps = self.sent_stamps(view, regions.history);
         let (rows, executions, bar) = match &self.selection {
             Some(sel) => (
                 super::select::highlight(rows, sel, 0, |at| self.lead(view, at)),
@@ -336,7 +336,7 @@ impl Ui {
         let (was, top_was) = self.window_mut(view);
         (*was, *top_was) = (scroll, top);
         let picked = self.list.highlighted(&menu);
-        let items = self.menu_items(&menu, picked, regions.menu.width as usize);
+        let table = self.menu_table(&menu, picked, regions.menu.width as usize);
         // The picked row on the input's band, the menu's width: a bar the eye
         // finds at once, where a mark in its text alone was not enough. Only
         // a row enter takes wears it; one tab alone takes shows by its name.
@@ -347,7 +347,27 @@ impl Ui {
             .map(|band| band.patch(self.rat_style(&self.paint.theme.menu.selected)))
             .unwrap_or_default();
         self.regions = regions;
-        let menu_rule = self.over_rule(width, false);
+        self.more_hits = self.more_actions(view, regions);
+        let flash_body = self.flash_hit.as_ref().and_then(|(at, hit)| {
+            if *at >= regions.bar.height as usize {
+                return None;
+            }
+            let (line, areas) = hit.more.as_ref()?;
+            let body = Rect {
+                x: areas.body.x + regions.bar.x,
+                y: regions.bar.y + *at as u16,
+                ..areas.body
+            };
+            Some((line.clone(), body))
+        });
+        let menu_rule = self.over_rule(false);
+        let page_rule = self.over_rule(ruled && self.paint.color);
+        let rule_areas: Vec<_> = regions
+            .history
+            .rows()
+            .zip(&self.row_targets)
+            .filter_map(|(area, target)| matches!(target, Target::Rule).then_some(area))
+            .collect();
         let _ = self.screen.draw(|frame| {
             // Laid out for the size last reported: a frame of another would
             // draw off its edge, and the resize on its way redraws.
@@ -355,6 +375,12 @@ impl Ui {
                 return;
             }
             frame.render_widget(Rows(&rows), regions.history);
+            for (area, line) in &stamps {
+                frame.render_widget(line, *area);
+            }
+            for &area in &rule_areas {
+                frame.render_widget(&page_rule, area);
+            }
             // While the keys are a page's, the transcript under it steps back so
             // the two do not read as one; a menu that comes with typing does not.
             let dim = ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::DIM);
@@ -379,19 +405,44 @@ impl Ui {
                 // Kept full: ratatui won't pull back an offset that a taller
                 // screen or a changed list left past the end.
                 let room = list.height as usize;
-                let mut state = ListState::default()
-                    .with_offset(self.list.top.min(menu.len().saturating_sub(room)))
+                let padding = MENU_PADDING.min(room / 2);
+                let top = self
+                    .list
+                    .top
+                    .min(picked.saturating_sub(padding))
+                    .max((picked + padding + 1).saturating_sub(room))
+                    .min(menu.len().saturating_sub(room));
+                let mut state = TableState::default()
+                    .with_offset(top)
                     .with_selected(Some(picked));
-                frame.render_stateful_widget(
-                    List::new(items)
-                        .highlight_style(cursor)
-                        .scroll_padding(MENU_PADDING),
-                    list,
-                    &mut state,
-                );
+                frame.render_stateful_widget(table.row_highlight_style(cursor), list, &mut state);
                 self.list.top = state.offset();
             }
             frame.render_widget(Rows(&bar), regions.bar);
+            if self.selection.is_none() {
+                for (area, row) in regions.bar.rows().zip(&bar_rows) {
+                    for (part, line) in &row.parts {
+                        let part = Rect {
+                            x: area.x + part.x,
+                            y: area.y,
+                            ..*part
+                        };
+                        frame.render_widget(ratatui::widgets::Clear, part);
+                        frame.render_widget(line, part);
+                    }
+                }
+            }
+            if let Some((line, body)) = &flash_body {
+                frame.render_widget(ratatui::widgets::Clear, *body);
+                frame.render_widget(line, *body);
+            }
+            for &action in &self.more_hits {
+                let hovered = self
+                    .pointer
+                    .is_some_and(|(col, row)| action.contains((col, row).into()));
+                frame.render_widget(ratatui::widgets::Clear, action);
+                frame.render_widget(self.paint.action_hint(hovered, super::browse::MORE), action);
+            }
             // Before the rows, so a span over the band keeps it: the columns the
             // input does not reach carry it too.
             if let Some(band) = self.band {
@@ -411,55 +462,137 @@ impl Ui {
         }
     }
 
-    // A prompt's send time in its first screen row's free end, added after
-    // `drawn` is read so selection and search never take it for text.
-    fn stamp_sent(&self, view: &View, rows: &mut [Line<'static>], width: usize) {
-        let now = agent::session::now();
-        for (at, line) in rows.iter_mut().enumerate() {
-            let (Some(Target::Scrollback(idx, _)), Some(0)) =
-                (self.row_targets.get(at), self.row_of.get(at))
-            else {
-                continue;
-            };
-            let Some(row) = view.surface.scrollback.get(*idx) else {
-                continue;
-            };
-            let Some(sent) = row.sent() else {
-                continue;
-            };
-            let time = render::clock(sent, now);
-            let cols = pi_store::text::width(&time);
-            let used = pi_store::text::width(self.drawn[at].trim_end());
-            if time.is_empty() || used + 1 + cols > width {
-                continue;
+    fn more_actions(&self, view: &View, regions: Regions) -> Vec<Rect> {
+        let mut actions = Vec::new();
+        let mut add = |region: Rect, at: usize| {
+            if at >= region.height as usize {
+                return;
             }
-            let mut spans = screen::clip_line(line, width - cols).spans;
-            let band = row.band(&self.paint).unwrap_or_default();
-            let filled: usize = spans.iter().map(|s| s.width()).sum();
-            if filled < width - cols {
-                spans.push(Span::styled(" ".repeat(width - cols - filled), band));
+            let area = Rect {
+                y: region.y + at as u16,
+                height: 1,
+                ..region
+            };
+            if area.intersection(regions.overlay()).is_empty()
+                && let Some(areas) = super::browse::MoreAreas::of(area)
+            {
+                actions.push(areas.action);
             }
-            let span = self.paint.span(&self.paint.theme.muted, time);
-            spans.push(Span::styled(span.content, band.patch(span.style)));
-            *line = Line::from(spans);
+        };
+        if !self.reading() {
+            for (at, target) in self.row_targets.iter().enumerate() {
+                match target {
+                    Target::Scrollback(idx, line)
+                        if self.row_of.get(at) == Some(&0)
+                            && view.surface.scrollback[*idx]
+                                .has_page(*line, self.screen.width()) =>
+                    {
+                        add(regions.history, at);
+                    }
+                    Target::BackgroundResult(..) => {
+                        add(
+                            Rect {
+                                width: regions.history.width.saturating_sub(1),
+                                ..regions.history
+                            },
+                            at,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            for (at, target) in self.command_rows.iter().enumerate() {
+                let opens = match target {
+                    call::CommandRow::Earlier(_) => true,
+                    call::CommandRow::BackgroundCommand(id) => {
+                        !self
+                            .background_open
+                            .as_ref()
+                            .is_some_and(|open| open.id == *id)
+                            && self.executions.iter().any(|execution| {
+                                execution.id == *id
+                                    && call::background_opens(execution, self.screen.width())
+                            })
+                    }
+                    call::CommandRow::Under | call::CommandRow::Fold => false,
+                };
+                if opens {
+                    add(
+                        Rect {
+                            width: regions.executions.width.saturating_sub(1),
+                            ..regions.executions
+                        },
+                        at,
+                    );
+                }
+            }
         }
+        if let Some((at, hit)) = &self.flash_hit
+            && *at < regions.bar.height as usize
+            && let Some((_, areas)) = &hit.more
+        {
+            actions.push(Rect {
+                x: areas.action.x + regions.bar.x,
+                y: regions.bar.y + *at as u16,
+                ..areas.action
+            });
+        }
+        actions
     }
 
-    // The line that parts whatever lies over the transcript from it; `lit`,
-    // it says what a click on it does, since a thin line shows no bold.
-    fn over_rule(&self, width: usize, lit: bool) -> Line<'static> {
+    // A prompt's send time in its first screen row's free end, added after
+    // `drawn` is read so selection and search never take it for text.
+    fn sent_stamps(&self, view: &View, region: Rect) -> Vec<(Rect, Line<'static>)> {
+        let now = agent::session::now();
+        region
+            .rows()
+            .zip(&self.row_targets)
+            .enumerate()
+            .filter_map(|(at, (area, target))| {
+                let Target::Scrollback(idx, _) = target else {
+                    return None;
+                };
+                if self.row_of.get(at) != Some(&0) {
+                    return None;
+                }
+                let row = view.surface.scrollback.get(*idx)?;
+                let time = render::clock(row.sent()?, now);
+                if time.is_empty() {
+                    return None;
+                }
+                let used = Line::raw(self.drawn[at].trim_end()).width() as u16;
+                let span = self.paint.span(&self.paint.theme.muted, time);
+                let wanted = span.width() as u16;
+                let [body, gap, _, stamp] = Layout::horizontal([
+                    Constraint::Length(used),
+                    Constraint::Length(1),
+                    Constraint::Fill(1),
+                    Constraint::Length(wanted),
+                ])
+                .areas(area);
+                if body.width != used || gap.width != 1 || stamp.width != wanted {
+                    return None;
+                }
+                let band = row.band(&self.paint).unwrap_or_default();
+                Some((stamp, Line::from(span).style(band)))
+            })
+            .collect()
+    }
+
+    fn over_rule(&self, lit: bool) -> Block<'static> {
         let color = &self.paint.theme.prompt.color;
-        let says = " click to close ";
-        let room = width.saturating_sub(pi_store::text::width(says));
-        if !lit || room < 2 {
-            return Line::from(self.paint.span(color, icons::OVER_RULE.repeat(width)));
+        let mut block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(self.rat_style(color))
+            .border_set(ratatui::symbols::border::Set {
+                horizontal_top: icons::OVER_RULE,
+                ..ratatui::symbols::border::PLAIN
+            });
+        if lit {
+            block = block
+                .title_top(Line::from(self.paint.action_hint(true, " click to close ")).centered());
         }
-        Line::from(vec![
-            self.paint.span(color, icons::OVER_RULE.repeat(room / 2)),
-            self.paint.action_hint(true, says),
-            self.paint
-                .span(color, icons::OVER_RULE.repeat(room - room / 2)),
-        ])
+        block
     }
 
     pub(super) fn input_view(

@@ -4,6 +4,7 @@
 use std::time::Instant;
 
 use llm::message::ToolResult;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 
@@ -293,8 +294,9 @@ pub(super) fn background_results(
                 fit_background_row(head, String::new(), &execution.last, width);
             let shine =
                 matches!(hovered, Some(Target::BackgroundResult(_, id)) if id == execution.id);
-            lines.push(closed_command_line(
-                execution, &head, last, tail, shine, paint,
+            lines.push(super::browse::more_body(
+                closed_command_line(execution, &head, last, tail, shine, paint),
+                room,
             ));
             targets.push(Target::BackgroundResult(at + targets.len(), execution.id));
         }
@@ -358,11 +360,7 @@ pub(super) fn background_lines(
                 rows.len(),
             ));
             if from > 0 {
-                let more = format!("  {from} more");
-                let shine = hovered == Some(CommandRow::Earlier(execution.id));
-                rows.push(Line::from(
-                    paint.action_hint(shine, pi_store::text::clip(&more, room)),
-                ));
+                rows.push(Line::default());
                 ids.push(CommandRow::Earlier(execution.id));
             }
             let own = rows.len();
@@ -373,7 +371,11 @@ pub(super) fn background_lines(
             let ([head, last, tail], _) = background_row(execution, width);
             let row = closed_command_line(execution, &head, last, tail, shine, paint);
             ids.push(CommandRow::BackgroundCommand(execution.id));
-            vec![row]
+            vec![if background_opens(execution, width) {
+                super::browse::more_body(row, room)
+            } else {
+                row
+            }]
         };
         lines.extend(rows);
     }
@@ -398,17 +400,37 @@ fn background_row(execution: &BackgroundCommand, width: usize) -> ([String; 3], 
 }
 
 fn fit_background_row(head: String, tail: String, last: &str, width: usize) -> ([String; 3], bool) {
-    let room = width.saturating_sub(1);
+    let [area, _] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(1)])
+        .areas(Rect::new(0, 0, width as u16, 1));
     let last = match last {
         "" => String::new(),
         last => format!("{}{last}", icons::PART_SEP),
     };
-    let w = pi_store::text::width;
-    let avail = room.saturating_sub(w(&tail));
-    let out = w(&last).min((avail / 2).max(avail.saturating_sub(w(&head))));
-    let left = avail - out;
-    let cut = w(&head) > left;
-    ([within(&head, left), within(&last, out), tail], cut)
+    let [body, clock] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(Line::raw(&tail).width() as u16),
+    ])
+    .areas(area);
+    let [half, _] = Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Fill(1)]).areas(body);
+    let [_, unused] = Layout::horizontal([
+        Constraint::Length(Line::raw(&head).width().min(u16::MAX as usize) as u16),
+        Constraint::Fill(1),
+    ])
+    .areas(body);
+    let out = Line::raw(&last)
+        .width()
+        .min(half.width.max(unused.width) as usize);
+    let [command, output] =
+        Layout::horizontal([Constraint::Fill(1), Constraint::Length(out as u16)]).areas(body);
+    let cut = Line::raw(&head).width() > command.width as usize;
+    (
+        [
+            within(&head, command.width as usize),
+            within(&last, output.width as usize),
+            within(&tail, clock.width as usize),
+        ],
+        cut,
+    )
 }
 
 // `s` in at most `cols` columns, an ellipsis ending it when cut.

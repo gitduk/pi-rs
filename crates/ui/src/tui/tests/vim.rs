@@ -50,7 +50,7 @@ fn mv_browses_every_sibling_as_a_single_path_and_completes_the_selection() {
 
     let area = ratatui::layout::Rect::new(0, 0, 80, 1);
     let mut buffer = ratatui::buffer::Buffer::empty(area);
-    ratatui::widgets::List::new(ui.menu_items(&menu[menu.len() - 1..], 0, 80))
+    ui.menu_table(&menu[menu.len() - 1..], 0, 80)
         .render(area, &mut buffer);
     let row: String = (0..80).map(|x| buffer[(x, 0)].symbol()).collect();
     assert_eq!(row.trim(), "../a long directory/");
@@ -134,7 +134,7 @@ fn path_completions_show_each_full_path_once() {
     assert!(menu.iter().all(|entry| entry.help().is_empty()));
     let area = ratatui::layout::Rect::new(0, 0, 80, 2);
     let mut buffer = ratatui::buffer::Buffer::empty(area);
-    ratatui::widgets::List::new(ui.menu_items(&menu, 1, 80)).render(area, &mut buffer);
+    ui.menu_table(&menu, 1, 80).render(area, &mut buffer);
     let rows: Vec<String> = (0..2)
         .map(|y| {
             (0..80)

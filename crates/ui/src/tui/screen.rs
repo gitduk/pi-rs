@@ -26,7 +26,9 @@ use ratatui::widgets::Widget;
 /// back by row widths.
 pub fn fit(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
     let mut out = Vec::new();
-    lay(line, width, |run, row| out.push(line_of(&run[row])));
+    lay(line, width, |run, row| {
+        out.push(line_of(&run[row]).style(line.style))
+    });
     out
 }
 
@@ -53,30 +55,29 @@ fn body_width(border: Option<&Line<'_>>, width: usize) -> Option<usize> {
 pub fn clip_line(line: &Line<'_>, width: usize) -> Line<'static> {
     let (run, ends) = cells(line);
     let first = &run[..ends.first().copied().unwrap_or(run.len())];
-    let kept: Vec<Cell> = (first.iter().copied())
+    let kept: Vec<Cell> = (first.iter().cloned())
         .scan(0usize, |used, c| {
             *used += c.w;
-            (*used <= width || *used == c.w).then_some(c)
+            (*used <= width).then_some(c)
         })
         .collect();
     line_of(&kept)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Cell {
-    c: char,
+    text: String,
     style: RStyle,
     w: usize,
 }
 
 // The line's cells in order, and where each `\n` ends a run of them. An
 // escape the outside world left in the content (tool output) is noise: no
-// cells. A tab is the spaces `text::cols_at` runs it to; after a `\r` the run
+// cells. A tab is expanded after grapheme measurement; after a `\r` the run
 // starts over, as `text::screen_line` reads a progress line.
 fn cells(line: &Line<'_>) -> (Vec<Cell>, Vec<usize>) {
-    let (mut out, mut ends) = (Vec::new(), Vec::new());
-    let (mut col, mut esc) = (0, None);
-    let (mut run_start, mut returned) = (0, false);
+    let mut chars = Vec::new();
+    let (mut esc, mut run_start, mut returned) = (None, 0, false);
     for span in &line.spans {
         let style = line.style.patch(span.style);
         for c in span.content.chars() {
@@ -85,35 +86,50 @@ fn cells(line: &Line<'_>) -> (Vec<Cell>, Vec<usize>) {
             }
             match c {
                 '\n' => {
-                    ends.push(out.len());
-                    (col, run_start, returned) = (0, out.len(), false);
-                    continue;
+                    chars.push((c, style));
+                    run_start = chars.len();
+                    returned = false;
                 }
-                '\r' => {
-                    returned = true;
-                    continue;
+                '\r' => returned = true,
+                _ => {
+                    if returned {
+                        chars.truncate(run_start);
+                        returned = false;
+                    }
+                    chars.push((c, style));
                 }
-                _ if returned => {
-                    out.truncate(run_start);
-                    (col, returned) = (0, false);
-                }
-                _ => {}
-            }
-            let w = pi_store::text::cols_at(c, col);
-            col += w;
-            if c == '\t' {
-                out.extend(std::iter::repeat_n(
-                    Cell {
-                        c: ' ',
-                        style,
-                        w: 1,
-                    },
-                    w,
-                ));
-            } else {
-                out.push(Cell { c, style, w });
             }
         }
+    }
+    let text: String = chars.iter().map(|(c, _)| c).collect();
+    let (mut out, mut ends) = (Vec::new(), Vec::new());
+    let (mut col, mut at) = (0, 0);
+    for (_, g) in pi_store::text::graphemes(&text) {
+        let style = chars[at].1;
+        at += g.chars().count();
+        if g == "\n" {
+            ends.push(out.len());
+            col = 0;
+            continue;
+        }
+        let w = pi_store::text::grapheme_width(g, col);
+        if g == "\t" {
+            out.extend(std::iter::repeat_n(
+                Cell {
+                    text: " ".into(),
+                    style,
+                    w: 1,
+                },
+                w,
+            ));
+        } else if !g.chars().all(char::is_control) {
+            out.push(Cell {
+                text: g.into(),
+                style,
+                w,
+            });
+        }
+        col += w;
     }
     (out, ends)
 }
@@ -137,7 +153,7 @@ const NO_LEAD: &[char] = &[
 // Whether a row may end between `a` and `b`: after a space, or beside a wide
 // character, whose script needs no spaces between its words.
 fn breaks_between(a: &Cell, b: &Cell) -> bool {
-    (a.c.is_whitespace() || a.w > 1 || b.w > 1) && !NO_LEAD.contains(&b.c)
+    (a.text.chars().all(char::is_whitespace) || a.w > 1 || b.w > 1) && !b.text.starts_with(NO_LEAD)
 }
 
 // The rows of one run with no `\n` in it; at least one, maybe empty. A row
@@ -164,8 +180,8 @@ fn line_of(cells: &[Cell]) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     for cell in cells {
         match spans.last_mut() {
-            Some(s) if s.style == cell.style => s.content.to_mut().push(cell.c),
-            _ => spans.push(Span::styled(cell.c.to_string(), cell.style)),
+            Some(s) if s.style == cell.style => s.content.to_mut().push_str(&cell.text),
+            _ => spans.push(Span::styled(cell.text.clone(), cell.style)),
         }
     }
     Line::from(spans)
@@ -353,50 +369,9 @@ pub fn wrap_continued(
 
 /// Lays one row in a band: color goes under every span (text keeps its
 /// own foreground) and fills columns past the text into one rectangle.
-pub fn banded(line: Line<'static>, band: RStyle, width: usize) -> Line<'static> {
-    let used = pi_store::text::width(&plain(&line));
-    let mut spans: Vec<Span<'static>> = line
-        .spans
-        .into_iter()
-        .map(|s| Span::styled(s.content, band.patch(s.style)))
-        .collect();
-    if used < width {
-        spans.push(Span::styled(" ".repeat(width - used), band));
-    }
-    Line::from(spans)
-}
-
-// Write one fitted row into the buffer: one cell per character, styled by
-// its span. Wide characters take two cells; combining marks decorate back.
-fn write_line(line: &Line<'_>, x: u16, y: u16, buf: &mut Buffer) {
-    let (mut col, mut esc) = (x, None);
-    for span in &line.spans {
-        for c in span.content.chars() {
-            if pi_store::text::escaping(&mut esc, c) {
-                continue;
-            }
-            let w = pi_store::text::cols_at(c, usize::from(col - x)) as u16;
-            if w == 0 {
-                if c.is_control() {
-                    continue;
-                }
-                // A combining mark decorates the cell before it — skipping the
-                // blank second cell a wide character leaves behind.
-                let mut prev = col;
-                while prev > x {
-                    prev -= 1;
-                    let symbol = buf[(prev, y)].symbol().to_string();
-                    if !symbol.is_empty() && symbol != " " {
-                        buf[(prev, y)].set_symbol(&format!("{symbol}{c}"));
-                        break;
-                    }
-                }
-                continue;
-            }
-            buf.set_stringn(col, y, c.to_string(), w as usize, span.style);
-            col += w;
-        }
-    }
+pub fn banded(line: Line<'static>, band: RStyle) -> Line<'static> {
+    let style = band.patch(line.style);
+    line.style(style)
 }
 
 /// Every row the screen shows, wrapped and styled into the cell buffer.
@@ -407,7 +382,8 @@ impl Widget for Rows<'_> {
         let width = area.width.max(1) as usize;
         let pieces = self.0.iter().flat_map(|line| fit(line, width));
         for (row, piece) in area.rows().zip(pieces) {
-            write_line(&piece, row.x, row.y, buf);
+            buf.set_style(row, piece.style);
+            piece.render(row, buf);
         }
     }
 }

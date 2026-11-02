@@ -25,13 +25,14 @@ fn facts(model: &str) -> crate::tui::bar::Facts {
 fn a_flash_stands_beside_the_bar_rather_than_over_it() {
     let mut ui = test_ui(60, 24);
     ui.flash("nothing to rewind to");
-    let row = plain(&ui.bar_lines(&facts("deepseek"), &Default::default(), 60)[0]);
+    let row = plain(&ui.bar_lines(&facts("deepseek"), &Default::default(), 60)[0].line);
     assert!(row.starts_with("deepseek"), "{row:?}");
     assert!(row.ends_with("nothing to rewind to"), "{row:?}");
     assert_eq!(row.chars().count(), 60);
 
     // Too narrow for both: the flash keeps half the row, cut with its `…`.
-    let row = plain(&ui.bar_lines(&facts("a-rather-long-model-name"), &Default::default(), 30)[0]);
+    let row =
+        plain(&ui.bar_lines(&facts("a-rather-long-model-name"), &Default::default(), 30)[0].line);
     assert!(row.ends_with('…'), "{row:?}");
     assert!(pi_store::text::width(&row) <= 30, "{row:?}");
 }

@@ -347,7 +347,7 @@ impl screen::Piece for Piece<'_> {
                 let mut pieces = match row.band(paint) {
                     Some(band) => pieces
                         .into_iter()
-                        .map(|piece| screen::banded(piece, band, width))
+                        .map(|piece| screen::banded(piece, band))
                         .collect(),
                     None => pieces,
                 };

@@ -164,6 +164,8 @@ fn page_of(lines: Opened) -> Opening {
 // A row that opens and closes. A new kind that folds implements this and
 // joins `Row::fold`; nothing else about folding names the kinds.
 trait Fold {
+    // A closed heading whose hidden content can be read on a page.
+    fn has_page(&self, i: usize, width: usize) -> bool;
     // Whether opening would show more than the row's own line.
     fn expandable(&self) -> bool;
     // Open if closed, close if open; the caller checked `expandable`.
@@ -449,9 +451,8 @@ impl Row {
         self.fold()?.opening(i, paint)
     }
 
-    /// Whether lines are cut at `width` that only its opening shows whole.
-    pub fn clipped(&self, width: usize) -> bool {
-        self.fold().is_some_and(|f| f.clipped(width))
+    pub fn has_page(&self, i: usize, width: usize) -> bool {
+        self.fold().is_some_and(|f| f.has_page(i, width))
     }
 
     /// Brings a row up to date before the frame draws: hover line, spinner
@@ -711,7 +712,7 @@ impl Row {
             Kind::Relayed(r) => r.line(i, paint, width),
             Kind::Steps(g) => g.line(i, paint, width),
         };
-        match &self.2 {
+        let (line, border) = match &self.2 {
             None => (line, border),
             Some(prefix) => {
                 let line = prefix.fit_body(line, width);
@@ -721,6 +722,12 @@ impl Row {
                 }
                 (line, Some(first))
             }
+        };
+        if self.has_page(i, width) {
+            let room = width.saturating_sub(border.as_ref().map_or(0, Line::width));
+            (crate::tui::browse::more_body(line, room), border)
+        } else {
+            (line, border)
         }
     }
 
@@ -899,7 +906,7 @@ pub(super) use llm::figures::count;
 
 // `text` cut to one row beside a `lead` wide mark and the `tail` after it.
 fn clip_beside(text: &str, lead: usize, tail: &str, width: usize) -> String {
-    let room = width.saturating_sub(lead + pi_store::text::width(tail) + 1);
+    let room = render::title_room(width, lead, &format!("{tail} "));
     pi_store::text::clip(text, room.max(8))
 }
 

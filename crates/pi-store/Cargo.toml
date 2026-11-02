@@ -19,6 +19,7 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 unicode-width = "0.2.2"
+unicode-segmentation = "1.13.3"
 
 [dev-dependencies]
 tempfile = "3"

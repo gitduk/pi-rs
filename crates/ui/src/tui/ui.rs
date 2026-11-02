@@ -98,8 +98,9 @@ pub(super) struct Ui {
     // where the layout puts it for `flash_for` and then goes — see `bar_lines`.
     pub(super) flash: Option<(String, Instant)>,
     // Where the last frame drew the flash: its row in the bar region, its
-    // columns, and whether the bar cut it. A pointer there holds it.
-    pub(super) flash_hit: Option<(usize, std::ops::Range<usize>, bool)>,
+    // columns, and its page action. A pointer there holds it.
+    pub(super) flash_hit: Option<(usize, super::bar::FlashHit)>,
+    pub(super) more_hits: Vec<ratatui::layout::Rect>,
     // When a click last copied: the row says so for `FLASH`, and the loop
     // ticks until it is gone.
     pub(super) copied: Option<Instant>,
@@ -261,6 +262,7 @@ impl Ui {
             tabs: Vec::new(),
             flash: None,
             flash_hit: None,
+            more_hits: Vec::new(),
             copied: None,
             executions: Vec::new(),
             background_focus: None,

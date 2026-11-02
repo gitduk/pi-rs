@@ -83,13 +83,19 @@ impl Ui {
         (open || opens).then_some(id)
     }
 
-    /// The flash under screen cell (`col`, `row`), and whether the bar cut
-    /// it: the side of the bar row that holds it.
+    /// The flash under screen cell (`col`, `row`), and whether its page action
+    /// is under that cell.
     pub(super) fn flash_at(&self, col: u16, row: u16) -> Option<bool> {
-        let (at, cols, cut) = self.flash_hit.as_ref()?;
+        let (at, hit) = self.flash_hit.as_ref()?;
         let r = row_in(self.regions.bar, row)?;
         let c = col.checked_sub(self.regions.bar.x)? as usize;
-        (r == *at && cols.contains(&c)).then_some(*cut)
+        (r == *at && hit.cols.contains(&c)).then(|| {
+            hit.more.as_ref().is_some_and(|(_, areas)| {
+                areas
+                    .action
+                    .contains(Position::new(col - self.regions.bar.x, 0))
+            })
+        })
     }
 
     pub(super) fn target_at(&self, row: u16) -> Option<Target> {
@@ -99,6 +105,24 @@ impl Ui {
         self.row_targets
             .get(row_in(self.regions.history, row)?)
             .copied()
+    }
+
+    pub(super) fn page_command_at(&self, col: u16, row: u16) -> Option<u64> {
+        if self.reading() || !self.more_at_pointer(col, row) {
+            return None;
+        }
+        match self.target_at(row) {
+            Some(Target::BackgroundResult(_, id)) => Some(id),
+            _ => self.earlier_at(row).or_else(|| self.command_at(row)),
+        }
+    }
+
+    fn more_at_pointer(&self, col: u16, row: u16) -> bool {
+        !self.over_menu(row)
+            && self
+                .more_hits
+                .iter()
+                .any(|area| area.contains(Position::new(col, row)))
     }
 
     // Whether a click on screen row `row` closes the page: its rule, or the
@@ -125,6 +149,7 @@ impl Ui {
         };
         // A drawn block is one line, its label the first row.
         let below_top = *self.row_of.get(row_in(self.regions.history, row)?)?;
+        let on_more = self.more_at_pointer(col, row);
         let row = view.surface.scrollback.get(idx)?;
         let width = self.screen.width();
         let clicked = line;
@@ -142,8 +167,8 @@ impl Ui {
         // at, not the line it toggles, which may be narrower.
         let (text, border) = row.line(clicked, &self.paint, width);
         let start = border.map_or(0, |b| b.width());
-        (start..start + pi_store::text::width(&screen::plain(&text)))
-            .contains(&(col as usize))
+        ((start..start + pi_store::text::width(&screen::plain(&text))).contains(&(col as usize))
+            || on_more)
             .then_some((idx, line))
     }
 
@@ -167,21 +192,7 @@ impl Ui {
             self.background_all = !self.background_all;
             return;
         }
-        // The page shows the whole of it, so the execution folds: its tail twice
-        // over would read as two outputs.
-        if let Some(id) = self.earlier_at(row) {
-            let open = self.background_open.take();
-            let execution = self.executions.iter().find(|j| j.id == id);
-            if let (Some(open), Some(execution)) = (open, execution) {
-                self.open_page(super::call::background_page(
-                    execution,
-                    &open.body,
-                    &self.paint,
-                ));
-            }
-            return;
-        }
-        // A cut flash opens whole on the page.
+        // Only the explicit page action opens a cut flash.
         if self.flash_at(col, row) == Some(true)
             && let Some((line, _)) = &self.flash
         {
@@ -204,6 +215,11 @@ impl Ui {
             }
             _ => {
                 let width = self.screen.width();
+                let clicked = match self.target_at(row) {
+                    Some(Target::Scrollback(_, line)) => line,
+                    _ => 0,
+                };
+                let more = self.more_at_pointer(col, row);
                 let hit = self.hovered_row(view, col, row);
                 if let Some((idx, code)) =
                     hit.and_then(|(idx, _)| Some((idx, view.surface.scrollback.get(idx)?.code()?)))
@@ -219,12 +235,9 @@ impl Ui {
                 } else if let Some((idx, line)) = hit
                     && let Some(row) = view.surface.scrollback.get_mut(idx)
                 {
-                    // Too long or too wide to read in place: read on a page of
-                    // its own, left folded here. A lone line opens only cut.
-                    let half = (self.regions.history.height as usize / 2).max(1);
-                    if self.read.is_none()
+                    if row.has_page(clicked, width)
+                        && more
                         && let Some(page) = row.opening(line, &self.paint)
-                        && (page.len() > half || row.clipped(width))
                     {
                         self.open_page(page);
                         return;

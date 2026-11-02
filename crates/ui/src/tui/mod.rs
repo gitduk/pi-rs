@@ -102,8 +102,9 @@ pub(crate) enum Deed {
     // Esc caught a prompt on its way out: stop the run, then unsend it.
     Unsend,
     RecallQueued(Vec<pi_core::execution::Request>),
-    // A command's row clicked: what it said that is not back yet, on a page.
-    CommandOutput(u64),
+    // The explicit page action, independent of an execution's state.
+    ReadCommand(u64),
+    ToggleCommand(u64),
     // Show or hide the completed executions waiting for delivery.
     BackgroundResults(bool),
     // An empty list stops every running execution in the current checkout.
@@ -131,7 +132,8 @@ impl Deed {
             | Deed::Interrupt
             | Deed::Unsend
             | Deed::RecallQueued(_)
-            | Deed::CommandOutput(_)
+            | Deed::ReadCommand(_)
+            | Deed::ToggleCommand(_)
             | Deed::BackgroundResults(_)
             | Deed::StopCommands(_)
             | Deed::RestartCommands(_)
@@ -150,7 +152,8 @@ impl Deed {
             | Deed::Rewind
             | Deed::Interrupt
             | Deed::Unsend
-            | Deed::CommandOutput(_)
+            | Deed::ReadCommand(_)
+            | Deed::ToggleCommand(_)
             | Deed::BackgroundResults(_)
             | Deed::StopCommands(_)
             | Deed::RestartCommands(_) => true,
@@ -520,28 +523,16 @@ impl Tui {
             Deed::Rewind => self.open_rewind(),
             Deed::External => self.edit_externally().await,
             Deed::BackgroundResults(shown) => self.ui.background_results_shown = shown,
-            Deed::CommandOutput(id) => {
-                if let Some(execution) = self
-                    .ui
-                    .every_command
-                    .iter()
-                    .find(|j| j.id == id && j.state == pi_core::driver::background::State::Back)
+            Deed::ReadCommand(id) => {
+                if let Some(execution) = self.ui.every_command.iter().find(|j| j.id == id)
+                    && let Some(body) = self.drivers.background().body(self.core.lane().root(), id)
                 {
-                    if let Some(body) = self.drivers.background().body(self.core.lane().root(), id)
-                    {
-                        self.ui
-                            .open_page(call::background_page(execution, &body, &self.ui.paint));
-                    }
-                    return;
+                    self.ui.background_open = None;
+                    self.ui
+                        .open_page(call::background_page(execution, &body, &self.ui.paint));
                 }
-                self.ui.background_open = match &self.ui.background_open {
-                    Some(open) if open.id == id => None,
-                    _ => Some(ui::OpenCommand {
-                        id,
-                        body: String::new(),
-                    }),
-                };
             }
+            Deed::ToggleCommand(id) => self.toggle_command(id),
             Deed::StopCommands(ids) => {
                 let said = self.drivers.stop_commands(self.core.lane().root(), &ids);
                 self.land_driven(said);
@@ -553,6 +544,16 @@ impl Tui {
             Deed::Tidy => self.ui.tidy(front_view(&mut self.views, self.core.lane())),
             Deed::Answer { question, picked } => self.drivers.background().answer(question, picked),
         }
+    }
+
+    fn toggle_command(&mut self, id: u64) {
+        self.ui.background_open = match &self.ui.background_open {
+            Some(open) if open.id == id => None,
+            _ => Some(ui::OpenCommand {
+                id,
+                body: String::new(),
+            }),
+        };
     }
 
     fn land_driven(&mut self, said: Said) {

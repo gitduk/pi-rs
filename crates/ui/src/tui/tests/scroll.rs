@@ -809,7 +809,11 @@ fn a_search_brings_each_line_holding_it_to_the_middle() {
         ui.key(&lane, view, event, false);
         ui.flush(&lane, view);
         let rule = pi_store::icons::OVER_RULE;
-        assert!(ui.drawn[0].starts_with(rule), "the rule stays pinned");
+        assert_eq!(
+            ui.screen.test_buffer()[(ui.regions.history.x, ui.regions.history.y)].symbol(),
+            rule,
+            "the rule stays pinned"
+        );
         current_hit(ui).map_or(String::new(), |(_, line)| line)
     };
     let key = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
@@ -985,10 +989,10 @@ fn a_menu_entry_shows_no_escape_tail() {
         more: false,
         picked_only: false,
     });
-    let items = ui.menu_items(&[entry], 0, 40);
+    let table = ui.menu_table(&[entry], 0, 40);
     let area = ratatui::layout::Rect::new(0, 0, 40, 1);
     let mut buf = ratatui::buffer::Buffer::empty(area);
-    ratatui::widgets::List::new(items).render(area, &mut buf);
+    table.render(area, &mut buf);
     let row: String = (0..40).map(|x| buf[(x, 0)].symbol().to_string()).collect();
     assert_eq!(
         row.trim_end(),

@@ -359,7 +359,7 @@ fn normal_keys_move_from_the_draft_through_commands_and_back() {
     );
     assert!(matches!(
         ui.key(&lane, &mut view, key(KeyCode::Enter), true),
-        Asked::Own(Deed::CommandOutput(30))
+        Asked::Own(Deed::ToggleCommand(30))
     ));
     for expected in [26, 6, 6] {
         ui.key(&lane, &mut view, ctrl('k'), true);
@@ -662,12 +662,12 @@ async fn waiting_results_expand_and_open_the_original_output_without_delivering_
         let view = crate::tui::view_at(&mut tui.views, tui.core.lane().token());
         tui.ui.flush(tui.core.lane(), view);
     };
-    let click = |tui: &mut crate::tui::Tui, at: usize| {
+    let click = |tui: &mut crate::tui::Tui, at: usize, column: u16| {
         press(
             tui,
             TermEvent::Mouse(crossterm::event::MouseEvent {
                 kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-                column: 5,
+                column,
                 row: tui.ui.regions.history.y + at as u16,
                 modifiers: KeyModifiers::NONE,
             }),
@@ -681,7 +681,7 @@ async fn waiting_results_expand_and_open_the_original_output_without_delivering_
         .iter()
         .position(|t| matches!(t, Target::BackgroundResults(_)))
         .unwrap();
-    let asked = click(&mut tui, at);
+    let asked = click(&mut tui, at, 5);
     assert_eq!(deed(asked), Deed::BackgroundResults(true));
     tui.carry(Deed::BackgroundResults(true)).await;
     flush(&mut tui);
@@ -691,7 +691,14 @@ async fn waiting_results_expand_and_open_the_original_output_without_delivering_
         .iter()
         .position(|t| matches!(t, Target::BackgroundResult(_, id) if *id == execution.id()))
         .unwrap();
-    let asked = click(&mut tui, at);
+    let col = tui
+        .ui
+        .more_hits
+        .iter()
+        .find(|area| area.y == tui.ui.regions.history.y + at as u16)
+        .unwrap()
+        .x;
+    let asked = click(&mut tui, at, col);
     tui.carry(deed(asked)).await;
     let page = tui
         .ui
@@ -713,7 +720,7 @@ async fn waiting_results_expand_and_open_the_original_output_without_delivering_
         .iter()
         .position(|t| matches!(t, Target::BackgroundResults(_)))
         .unwrap();
-    let asked = click(&mut tui, at);
+    let asked = click(&mut tui, at, 5);
     tui.carry(deed(asked)).await;
     assert!(!tui.ui.background_results_shown);
 }

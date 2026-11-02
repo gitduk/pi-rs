@@ -88,51 +88,49 @@ pub(super) fn text(sel: &Selection, rows: &[Drawn], width: usize) -> String {
     out
 }
 
-// Columns `c` takes from column `at`, by the one rule layout uses.
-fn cell(c: char, at: usize) -> usize {
-    pi_store::text::cols_at(c, at)
-}
-
-/// The characters of `s` whose cells start in `from..to`.
+/// Whole graphemes intersecting the screen columns `from..to`.
 pub(super) fn cols(s: &str, from: usize, to: usize) -> String {
     let mut at = 0;
     let mut out = String::new();
-    for c in s.chars() {
-        if at >= from && at < to {
-            out.push(c);
+    for (_, g) in pi_store::text::graphemes(s) {
+        let w = pi_store::text::grapheme_width(g, at);
+        if at < to && at + w > from {
+            out.push_str(g);
         }
-        at += cell(c, at);
+        at += w;
     }
     out
 }
 
-/// The word under `col` in `s`, as a column range: letters, digits and `_`
-/// run together, so does a run of CJK; anything else is a word of one.
+/// A word under the pointer, with each non-word grapheme kept whole.
 pub(super) fn word_at(s: &str, col: usize) -> (usize, usize) {
-    let word = |c: char| c.is_alphanumeric() || c == '_';
-    let mut cells: Vec<(usize, char)> = Vec::new();
+    let word = |g: &str| {
+        g.chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    };
+    let mut cells = Vec::new();
     let mut at = 0;
-    for c in s.chars() {
-        cells.push((at, c));
-        at += cell(c, at);
+    for (_, g) in pi_store::text::graphemes(s) {
+        let w = pi_store::text::grapheme_width(g, at);
+        cells.push((at, at + w, word(g)));
+        at += w;
     }
-    let Some(hit) = cells.iter().rposition(|(start, _)| *start <= col) else {
+    let Some(hit) = cells
+        .iter()
+        .position(|&(start, end, _)| start <= col && col < end)
+    else {
         return (col, col + 1);
     };
-    if !word(cells[hit].1) {
-        let (start, c) = cells[hit];
-        return (start, start + cell(c, start).max(1));
+    if !cells[hit].2 {
+        return (cells[hit].0, cells[hit].1);
     }
-    let first = cells[..hit]
-        .iter()
-        .rposition(|(_, c)| !word(*c))
-        .map_or(0, |i| i + 1);
+    let first = cells[..hit].iter().rposition(|c| !c.2).map_or(0, |i| i + 1);
     let last = cells[hit..]
         .iter()
-        .position(|(_, c)| !word(*c))
+        .position(|c| !c.2)
         .map_or(cells.len(), |i| hit + i);
-    let (end_at, end_c) = cells[last - 1];
-    (cells[first].0, end_at + cell(end_c, end_at))
+    (cells[first].0, cells[last - 1].1)
 }
 
 /// `line` with the cells `from..to` drawn reversed.
@@ -147,20 +145,22 @@ pub(super) fn reversed(line: Line<'static>, from: usize, to: usize) -> Line<'sta
 
 /// `line` with `mark` laid over the cells `from..to`.
 pub(super) fn modified(line: Line<'static>, from: usize, to: usize, mark: Style) -> Line<'static> {
+    let line = super::screen::clip_line(&line, usize::MAX).style(line.style);
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut at = 0;
     for span in line.spans {
-        for c in span.content.chars() {
-            let style = if at >= from && at < to {
+        for (_, g) in pi_store::text::graphemes(&span.content) {
+            let w = pi_store::text::grapheme_width(g, at);
+            let style = if at + w > from && at < to {
                 span.style.patch(mark)
             } else {
                 span.style
             };
             match spans.last_mut() {
-                Some(s) if s.style == style => s.content.to_mut().push(c),
-                _ => spans.push(Span::styled(c.to_string(), style)),
+                Some(s) if s.style == style => s.content.to_mut().push_str(g),
+                _ => spans.push(Span::styled(g.to_string(), style)),
             }
-            at += cell(c, at);
+            at += w;
         }
     }
     Line::from(spans).style(line.style)

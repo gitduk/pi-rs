@@ -5,6 +5,7 @@
 //! The page keeps its own scroll, so the transcript's is where it was when
 //! the page closes.
 
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::Line;
 
 use super::Ui;
@@ -12,6 +13,30 @@ use super::search::Anchor;
 use super::view::View;
 use pi_store::keys::Mode;
 use pi_store::listing::Listing;
+
+pub(super) const MORE: &str = " · more";
+
+#[derive(Clone, Copy)]
+pub(super) struct MoreAreas {
+    pub(super) body: Rect,
+    pub(super) action: Rect,
+}
+
+impl MoreAreas {
+    pub(super) fn of(area: Rect) -> Option<Self> {
+        let wanted = Line::raw(MORE).width() as u16;
+        let [body, action] =
+            Layout::horizontal([Constraint::Fill(1), Constraint::Length(wanted)]).areas(area);
+        (action.width == wanted).then_some(Self { body, action })
+    }
+}
+
+// The action is rendered separately by the frame, in the same layout.
+pub(super) fn more_body(line: Line<'static>, width: usize) -> Line<'static> {
+    let area = Rect::new(0, 0, width as u16, 1);
+    let body = MoreAreas::of(area).map_or(area, |areas| areas.body);
+    super::screen::clip_line(&line, body.width as usize)
+}
 
 // A line of a text page: the code block a click on it copies when it is
 // that block's badge, and what in it a double click takes whole.

@@ -10,9 +10,9 @@ use pi_core::input::commands::{Candidate, Choice, Input, Sources};
 use pi_store::keys::Action;
 use pi_store::session::ResumeChoice;
 use pi_store::session::Store;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::Line;
-use ratatui::text::Span;
-use ratatui::widgets::ListItem;
+use ratatui::widgets::{Cell, Row, Table};
 use std::collections::BTreeSet;
 
 impl Ui {
@@ -209,62 +209,60 @@ impl Ui {
 
     // Every row muted but `picked`: the mark, `menu.selected` on its name (a
     // found line's stays plain), and the list's band.
-    pub(super) fn menu_items(
+    pub(super) fn menu_table(
         &self,
         menu: &[MenuEntry],
         picked: usize,
         width: usize,
-    ) -> Vec<ListItem<'static>> {
-        // ratatui draws an escape's tail as text, so the list gets it as the
-        // screen would show it; a hit's row was drawn once already.
-        let shown: Vec<String> = (menu.iter())
+    ) -> Table<'static> {
+        let shown: Vec<String> = menu
+            .iter()
             .map(|c| pi_store::text::screen_line(c.show()))
             .collect();
-        let head = pi_store::text::widest(shown.iter().map(String::as_str));
+        let head = shown
+            .iter()
+            .map(|name| Line::raw(name).width())
+            .max()
+            .unwrap_or(0);
         let muted = self.rat_style(&self.paint.theme.muted);
-        let mark = self.rat_style(&self.paint.theme.prompt.color);
         let chosen = self.rat_style(&self.paint.theme.menu.selected);
         let query = self.search_query().map(|(query, _)| query);
         let look = self.rat_style(&self.paint.theme.matched);
-        // The band says which row is picked; without colour there is none,
-        // and the mark says it instead, the other rows set in as far.
         let marker = if self.paint.color { "" } else { MENU_MARK };
-        let indent = " ".repeat(pi_store::text::width(marker));
-        menu.iter()
-            .enumerate()
-            .map(|(at, c)| {
-                if let (MenuEntry::Hit { show, k }, Some(query)) = (c, query) {
-                    let room = width.saturating_sub(pi_store::text::width(marker));
-                    let text = found_text(show, *k, query, room);
-                    let line = if at == picked {
-                        Line::from(vec![Span::styled(marker, mark), text.into()])
-                    } else {
-                        Line::from(Span::styled(format!("{indent}{text}"), muted))
-                    };
-                    return ListItem::new(super::search::marked(line, query, None, look, look));
-                }
-                let name = shown[at].as_str();
-                let pad = head.saturating_sub(pi_store::text::width(name));
-                let lead = format!("{}  ", " ".repeat(pad));
-                // Cut where the menu ends, marked, not mid-word at its edge.
-                let used = pi_store::text::width(marker)
-                    + pi_store::text::width(name)
-                    + pi_store::text::width(&lead);
-                let help = pi_store::text::screen_line(c.help());
-                let help = pi_store::text::clip(&help, width.saturating_sub(used));
-                let rest = format!("{lead}{help}");
-                let line = if at != picked {
-                    Line::from(Span::styled(format!("{indent}{name}{rest}"), muted))
-                } else {
-                    Line::from(vec![
-                        Span::styled(marker, mark),
-                        Span::styled(name.to_string(), chosen),
-                        rest.into(),
-                    ])
-                };
-                ListItem::new(line)
-            })
-            .collect()
+        let [_, body] = Layout::horizontal([
+            Constraint::Length(Line::raw(marker).width() as u16),
+            Constraint::Fill(1),
+        ])
+        .areas(Rect::new(0, 0, width as u16, 1));
+        let search = query.is_some()
+            && menu
+                .iter()
+                .all(|entry| matches!(entry, MenuEntry::Hit { .. }));
+        let rows = menu.iter().enumerate().map(|(at, entry)| {
+            if let (MenuEntry::Hit { show, k }, Some(query)) = (entry, query) {
+                let text = found_text(show, *k, query, body.width as usize);
+                let line = super::search::marked(Line::raw(text), query, None, look, look);
+                return Row::new([Cell::from(line)]).style(muted);
+            }
+            let name =
+                Cell::from(shown[at].clone()).style(if at == picked { chosen } else { muted });
+            let help = Cell::from(pi_store::text::screen_line(entry.help())).style(muted);
+            Row::new([name, help])
+        });
+        let widths = if search || menu.iter().all(|entry| entry.help().is_empty()) {
+            vec![Constraint::Fill(1)]
+        } else {
+            vec![
+                Constraint::Length(head.min(u16::MAX as usize) as u16),
+                Constraint::Fill(1),
+            ]
+        };
+        Table::new(rows, widths)
+            .column_spacing(2)
+            .highlight_symbol(Line::styled(
+                marker,
+                self.rat_style(&self.paint.theme.prompt.color),
+            ))
     }
 
     pub(super) fn step_menu(&mut self, action: Action) {

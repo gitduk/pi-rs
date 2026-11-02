@@ -1990,6 +1990,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "transcript",
+ "unicode-segmentation",
  "unicode-width",
 ]
 

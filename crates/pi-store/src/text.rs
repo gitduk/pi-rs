@@ -5,6 +5,9 @@
 //! the same width, and an escape sequence occupies none.
 
 use llm::figures::{in_out, short};
+use std::borrow::Cow;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::icons;
 
@@ -112,13 +115,100 @@ pub fn size(bytes: u64) -> String {
 /// Columns between tab stops, as terminals set them.
 pub const TAB_STOP: usize = 8;
 
-/// Columns `c` takes when it starts at column `col`: a tab runs to the next
-/// stop, a control takes none. The one rule every surface measures by.
+/// Columns of one scalar. Use `grapheme_width` for displayed text.
 pub fn cols_at(c: char, col: usize) -> usize {
     match c {
         '\t' => TAB_STOP - col % TAB_STOP,
         c => unicode_width::UnicodeWidthChar::width(c).unwrap_or(0),
     }
+}
+
+/// Extended graphemes and their byte offsets in the original string.
+pub fn graphemes(s: &str) -> impl DoubleEndedIterator<Item = (usize, &str)> + Clone {
+    s.grapheme_indices(true)
+}
+
+pub fn grapheme_width(s: &str, col: usize) -> usize {
+    match s {
+        "\t" => TAB_STOP - col % TAB_STOP,
+        _ if s.chars().all(char::is_control) => 0,
+        _ => UnicodeWidthStr::width(s),
+    }
+}
+
+pub fn floor_boundary(s: &str, at: usize) -> usize {
+    if at >= s.len() {
+        return s.len();
+    }
+    graphemes(s)
+        .map(|(i, _)| i)
+        .take_while(|&i| i <= at)
+        .last()
+        .unwrap_or(0)
+}
+
+pub fn ceil_boundary(s: &str, at: usize) -> usize {
+    graphemes(s)
+        .map(|(i, _)| i)
+        .find(|&i| i >= at)
+        .unwrap_or(s.len())
+}
+
+// Strip escape sequences before grouping: a style change can fall inside
+// one grapheme. Keep the source offsets so clipping preserves complete ANSI.
+struct DisplayText<'a> {
+    text: Cow<'a, str>,
+    source: Vec<(usize, usize)>,
+}
+
+impl<'a> DisplayText<'a> {
+    fn new(s: &'a str) -> Self {
+        if !s
+            .chars()
+            .any(|c| c == '\x1b' || Escape::after_c1(c).is_some())
+        {
+            return Self {
+                text: Cow::Borrowed(s),
+                source: Vec::new(),
+            };
+        }
+        let mut text = String::new();
+        let mut source = Vec::new();
+        let mut esc = None;
+        for (i, c) in s.char_indices() {
+            if !escaping(&mut esc, c) {
+                source.push((text.len(), i));
+                text.push(c);
+            }
+        }
+        source.push((text.len(), s.len()));
+        Self {
+            text: Cow::Owned(text),
+            source,
+        }
+    }
+
+    fn source_at(&self, at: usize) -> usize {
+        if self.source.is_empty() {
+            return at;
+        }
+        let i = self.source.partition_point(|&(visible, _)| visible < at);
+        self.source[i].1
+    }
+}
+
+/// Byte offset of the grapheme covering `col`, or the end of the text.
+pub fn byte_at_col(s: &str, col: usize) -> usize {
+    let shown = DisplayText::new(s);
+    let mut used = 0;
+    for (at, g) in graphemes(&shown.text) {
+        let w = grapheme_width(g, used);
+        if used + w > col {
+            return shown.source_at(at);
+        }
+        used += w;
+    }
+    s.len()
 }
 
 /// Whether `c` belongs to an escape sequence, opening or inside one; `esc`
@@ -143,35 +233,33 @@ pub fn collapsed(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Display columns of one line by `cols_at`, escapes taking none.
+/// Display columns of one line, with escapes omitted and graphemes kept whole.
 pub fn width(s: &str) -> usize {
-    let mut esc = None;
-    s.chars()
-        .filter(|&c| !escaping(&mut esc, c))
-        .fold(0, |col, c| col + cols_at(c, col))
+    let shown = DisplayText::new(s);
+    graphemes(&shown.text).fold(0, |col, (_, g)| col + grapheme_width(g, col))
 }
 
 /// `s` with each tab spelled as the spaces it runs to; a `\n` starts over.
 pub fn expand_tabs(s: &str) -> String {
-    let (mut esc, mut col) = (None, 0);
+    let shown = DisplayText::new(s);
+    let (mut from, mut col) = (0, 0);
     let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if escaping(&mut esc, c) {
-            out.push(c);
-            continue;
+    for (at, g) in graphemes(&shown.text) {
+        let start = shown.source_at(at);
+        // A source boundary includes any escapes before the next grapheme.
+        let end = shown.source_at(at + g.len());
+        out.push_str(&s[from..start]);
+        let w = grapheme_width(g, col);
+        if g == "\t" {
+            out.extend(std::iter::repeat_n(' ', w));
+            out.push_str(&s[start + 1..end]);
+        } else {
+            out.push_str(&s[start..end]);
         }
-        let w = cols_at(c, col);
-        match c {
-            '\t' => out.extend(std::iter::repeat_n(' ', w)),
-            '\n' => {
-                out.push(c);
-                col = 0;
-                continue;
-            }
-            c => out.push(c),
-        }
-        col += w;
+        col = if g.contains('\n') { 0 } else { col + w };
+        from = end;
     }
+    out.push_str(&s[from..]);
     out
 }
 
@@ -185,14 +273,12 @@ pub fn clip(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }
-    let (mut esc, mut used) = (None, 0);
-    for (i, c) in one.char_indices() {
-        if escaping(&mut esc, c) {
-            continue;
-        }
-        used += cols_at(c, used);
+    let shown = DisplayText::new(&one);
+    let mut used = 0;
+    for (i, g) in graphemes(&shown.text) {
+        used += grapheme_width(g, used);
         if used >= max {
-            return marked(&one[..i]);
+            return marked(&one[..shown.source_at(i)]);
         }
     }
     one
@@ -235,23 +321,28 @@ fn marked(s: &str) -> String {
 /// Plain `s` from at most `keep` columns before byte `at` on, the `…` that
 /// marks a cut counted among them. `at` must lie on a char boundary.
 pub fn clip_left(s: &str, at: usize, keep: usize) -> String {
+    let shown = DisplayText::new(s);
+    let at = graphemes(&shown.text)
+        .map(|(i, _)| shown.source_at(i))
+        .chain([s.len()])
+        .take_while(|&i| i <= at)
+        .last()
+        .unwrap_or(0);
     let before = &s[..at];
     if width(before) <= keep {
         return s.to_string();
     }
-    // Escapes found going forward: walked backward, `\x1b[31m` reads as `m13[`.
-    let mut esc = None;
-    let shown: Vec<(usize, char)> = (before.char_indices())
-        .filter(|&(_, c)| !escaping(&mut esc, c))
-        .collect();
     let mut used = width(icons::ELLIPSIS);
     let mut from = at;
-    for &(i, c) in shown.iter().rev() {
-        used += cols_at(c, 0);
+    for (i, g) in graphemes(&shown.text)
+        .rev()
+        .filter(|(i, _)| shown.source_at(*i) < at)
+    {
+        used += grapheme_width(g, 0);
         if used > keep {
             break;
         }
-        from = i;
+        from = shown.source_at(i);
     }
     format!("{}{}", icons::ELLIPSIS, &s[from..])
 }
@@ -269,9 +360,20 @@ pub fn found(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
     } else {
         (text.to_ascii_lowercase(), query.to_ascii_lowercase())
     };
-    (hay.match_indices(&needle))
-        .map(|(b, m)| b..b + m.len())
-        .collect()
+    let boundaries: Vec<_> = graphemes(text)
+        .map(|(at, _)| at)
+        .chain([text.len()])
+        .collect();
+    let mut found: Vec<_> = hay
+        .match_indices(&needle)
+        .map(|(b, m)| {
+            let start = boundaries.partition_point(|&at| at <= b) - 1;
+            let end = boundaries.partition_point(|&at| at < b + m.len());
+            boundaries[start]..boundaries[end]
+        })
+        .collect();
+    found.dedup();
+    found
 }
 
 /// Whether a list filtered by `query` keeps `text`: all of it while nothing

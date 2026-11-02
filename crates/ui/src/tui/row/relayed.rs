@@ -114,6 +114,10 @@ impl Relayed {
 }
 
 impl Fold for Relayed {
+    fn has_page(&self, i: usize, _width: usize) -> bool {
+        i == 0 && !self.open && self.expandable()
+    }
+
     fn expandable(&self) -> bool {
         !self.body.is_empty()
     }

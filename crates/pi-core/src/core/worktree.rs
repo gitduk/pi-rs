@@ -6,7 +6,7 @@
 use super::Core;
 use crate::input::Step;
 use crate::input::refused;
-use pi_store::listing::Listing;
+use pi_store::listing::{Listing, Row};
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -502,17 +502,16 @@ impl Core {
     }
     // The checkouts `/worktree` can move to, the repository's own first, the
     // one the session is in marked.
-    pub(super) fn worktree_listing(&self) -> Vec<String> {
+    pub(super) fn worktree_listing(&self) -> Listing {
         let here = self.lane().root();
         let trees = match list(here) {
             Ok(t) => t,
-            Err(e) => return vec![refused("worktree", e)],
+            Err(e) => return Listing::say([refused("worktree", e)]),
         };
         // By containment rather than equality: a run started in a subdirectory
         // is still in that checkout, and it is the one to mark.
         let at = holding(&trees, here).map(|t| t.path.clone());
-        let width = pi_store::text::widest(trees.iter().map(|t| t.name.as_str()));
-        let mut out: Vec<String> = trees
+        let mut out: Vec<Row> = trees
             .iter()
             .map(|t| {
                 let mark = if at.as_ref() == Some(&t.path) {
@@ -520,12 +519,11 @@ impl Core {
                 } else {
                     " "
                 };
-                let name = pi_store::text::pad(&t.name, width);
-                let on = t
-                    .branch_note()
-                    .map(|on| format!("  {on}"))
-                    .unwrap_or_default();
-                format!("{mark} {name}{on}").trim_end().to_string()
+                let name = format!("{mark} {}", t.name);
+                match t.branch_note() {
+                    Some(on) => Row::new([name, on.to_string()]),
+                    None => Row::new([name]),
+                }
             })
             .collect();
         let home = trees
@@ -535,14 +533,13 @@ impl Core {
                 || "beside the repository".into(),
                 |h| h.display().to_string(),
             );
-        out.push(format!(
+        out.push(Row::new([format!(
             "/worktree <name> works in one, creating it in {home}/ if it is not there"
-        ));
-        out.push(
+        )]));
+        out.push(Row::new([
             "/worktree rm [name] removes one, or all linked worktrees without a name — checkouts, sessions, and branches once merged"
-                .into(),
-        );
-        out
+        ]));
+        Listing::of(out)
     }
 }
 
