@@ -190,7 +190,7 @@ speed and cache figures, and a dim green cost. Context usage takes the warning
 style at 80% of the window and the error style at 95%.
 Archived statistics use the same colours.
 Explicitly styled bar parts keep their configured style.
-While a run is active, its statistics start with a `⠴ ⠦ ⠖ ⠲` spinner.
+While a run is active, its statistics start with a breathing `π` marker.
 After the run ends, a grey `π ` keeps the figures in the same columns, including when pi redraws the archived line.
 
 pi separates assistant prose and tool calls with one blank line.

@@ -11,7 +11,7 @@ use super::bar::Facts;
 use super::call::{self, drawn, pending_line};
 use super::menu::MenuEntry;
 use super::mouse::{Regions, Target, row_in};
-use super::row::{PendingTool, Row, StepMark, count};
+use super::row::{PendingTool, Row, count};
 use super::screen::{self, Rows};
 use super::scrollback::{Piece, ScrollbackRows, body};
 use super::search::{self, Anchor, Laid, Spot};
@@ -650,12 +650,10 @@ impl Ui {
             {
                 let line = parts.join(icons::PART_SEP);
                 let mut painted = status::painted(&line, &self.paint);
-                let frame = StepMark::Out(self.spinner).glyph();
-                painted.spans.insert(
-                    0,
-                    self.paint
-                        .span(&self.paint.theme.muted, format!("{frame} ")),
-                );
+                let marker = status::breath_style(self.spinner, &self.paint.theme.code);
+                painted
+                    .spans
+                    .insert(0, self.paint.span(&marker, format!("{} ", icons::PI_MARK)));
                 rows.extend(screen::fit(&painted, width));
             }
         }

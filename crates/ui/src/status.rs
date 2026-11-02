@@ -9,12 +9,51 @@ use std::time::Duration;
 use pi_core::core::meter::Snapshot;
 use pi_store::icons;
 use pi_store::status::Segment;
-use pi_store::theme::Attr;
+use pi_store::theme::{Attr, Color, Style};
 use ratatui::text::{Line, Span};
 
 use crate::render::Paint;
 
 pub const SPIN: Duration = Duration::from_millis(90);
+
+/// A bold pulse that changes hue each breath while staying easy to see.
+pub fn breath_style(tick: usize, code: &Style) -> Style {
+    let phase = tick % 60;
+    let breath = tick / 60 % 5;
+    let hue_phase = phase as f64 / 60.0;
+    let light = if phase < 28 {
+        (1.0 - (phase as f64 / 28.0 * std::f64::consts::PI).cos()) * 0.5
+    } else if phase < 32 {
+        1.0
+    } else {
+        (1.0 + ((phase - 32) as f64 / 28.0 * std::f64::consts::PI).cos()) * 0.5
+    };
+    let colors = [
+        (99.0, 168.0, 248.0),
+        (70.0, 205.0, 205.0),
+        (177.0, 130.0, 245.0),
+        (244.0, 166.0, 92.0),
+        (130.0, 200.0, 125.0),
+    ];
+    let from = colors[breath];
+    let to = colors[(breath + 1) % colors.len()];
+    let blend = hue_phase * hue_phase * (3.0 - 2.0 * hue_phase);
+    let base = (
+        from.0 + (to.0 - from.0) * blend,
+        from.1 + (to.1 - from.1) * blend,
+        from.2 + (to.2 - from.2) * blend,
+    );
+    let color = match code.color.as_ref() {
+        Some(Color::Rgb(_, _, _)) => Color::Rgb(
+            (base.0 * (0.55 + 0.45 * light)).round() as u8,
+            (base.1 * (0.55 + 0.45 * light)).round() as u8,
+            (base.2 * (0.55 + 0.45 * light)).round() as u8,
+        ),
+        Some(color) => color.clone(),
+        None => return code.clone().adding(Attr::Bold),
+    };
+    Style::color(color).adding(Attr::Bold)
+}
 
 /// What this part reads as, or None when the run has nothing to say for it.
 pub fn render(segment: Segment, s: &Snapshot, running: bool) -> Option<String> {
