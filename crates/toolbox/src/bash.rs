@@ -18,6 +18,20 @@ struct Args {
     cwd: String,
     #[serde(default)]
     stdin: Option<String>,
+    // Not offered in the schema; accepted because models trained on other
+    // shells send it, and shown in place of the command when they do.
+    #[serde(default)]
+    description: Option<String>,
+}
+
+impl Args {
+    fn label(&self) -> Option<&str> {
+        self.description
+            .as_deref()
+            .map(first_line)
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+    }
 }
 
 // Optional: a required cwd was still left out, and each miss cost a turn.
@@ -84,6 +98,7 @@ pub async fn foreground_result(
         command: command.to_string(),
         cwd: cwd.to_string(),
         stdin: None,
+        description: None,
     };
     let prepared = prepare(args, Tier::Exec, ctx, true).await?;
     let before = crate::drift::before(ctx);
@@ -197,7 +212,9 @@ async fn schedule(
     call: Call,
     invocation: Invocation,
 ) -> Result<ToolOutput, ToolError> {
-    let preview = invocation.title().into_owned();
+    let preview = args
+        .label()
+        .map_or_else(|| invocation.title().into_owned(), str::to_string);
     let mut again = prepare(args, Tier::Exec, ctx, call.written).await?;
     again.environment = call.environment;
     again.output = call.output;
@@ -347,7 +364,10 @@ impl Bash {
             )
             .await;
         }
-        let preview = first_line(&args.command).to_string();
+        let preview = args
+            .label()
+            .unwrap_or_else(|| first_line(&args.command))
+            .to_string();
         let mut prepared = prepare(args, self.tier(), ctx, call.written).await?;
         prepared.environment = call.environment;
         prepared.output = call.output;
