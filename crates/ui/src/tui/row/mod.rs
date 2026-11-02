@@ -87,13 +87,14 @@ impl Height {
 
 enum Kind {
     // One logical line of a said prompt: border and body kept apart so
-    // a wrap can repeat the border.
+    // a wrap can repeat the rule or blank a command's sigil.
     Said {
         border: Line<'static>,
         // The line's text, in the input style, without the border.
         body: Line<'static>,
         // Only the first logical line carries the prompt's time.
         at: Option<u64>,
+        hangs: bool,
     },
     // What the model answered, one row per markdown line, with what in it
     // reads as one. Its own kind, not a notice: it is half the conversation.
@@ -599,8 +600,13 @@ impl Row {
         Self::notice(Line::from(spans))
     }
 
-    fn said(border: Line<'static>, body: Line<'static>, at: Option<u64>) -> Self {
-        Self::new(Kind::Said { border, body, at })
+    fn said(border: Line<'static>, body: Line<'static>, at: Option<u64>, hangs: bool) -> Self {
+        Self::new(Kind::Said {
+            border,
+            body,
+            at,
+            hangs,
+        })
     }
 
     /// A prompt's lines as the stream echoed them, with the input's alignment.
@@ -624,6 +630,7 @@ impl Row {
                     Line::from(prefix),
                     Line::from(paint.span(&paint.theme.input, body)),
                     (i == 0).then_some(at),
+                    true,
                 ));
             }
             return rows;
@@ -637,6 +644,7 @@ impl Row {
                     border.clone(),
                     Line::from(paint.span(&paint.theme.input, line)),
                     (i == 0).then_some(at),
+                    false,
                 )
             })
             .collect()
@@ -738,7 +746,10 @@ impl Row {
     /// Whether a wrap of this row shows its border on the first piece only,
     /// blanking it on the rest; the columns it takes stay the same.
     pub fn hangs(&self) -> bool {
-        matches!(self.0, Kind::Note(_) | Kind::Lines(_))
+        matches!(
+            self.0,
+            Kind::Note(_) | Kind::Lines(_) | Kind::Said { hangs: true, .. }
+        )
     }
 
     /// What in line `i` reads as one — a stretch of code, a link, a table's

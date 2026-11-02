@@ -5,6 +5,36 @@ use crate::tui::{View, following_terminal};
 use pi_store::theme::{Color, Theme};
 
 #[test]
+fn command_sigils_only_lead_the_first_screen_row() {
+    use crate::tui::screen::{Piece, plain};
+
+    let paint = Paint::new(false);
+    for sigil in ["!", "!!"] {
+        let source = format!(
+            "{sigil}xh POST :8000/documents 'Authorization: Bearer example-token'\nnext line also wraps"
+        );
+        let history = Row::prompt(&source, 0, &paint);
+        for width in [12, 24, 80, 12] {
+            let pieces: Vec<_> = ScrollbackRows::new(&history, &paint, width).collect();
+            let measured: usize = pieces.iter().map(Piece::height).sum();
+            let rows: Vec<String> = pieces
+                .into_iter()
+                .flat_map(Piece::pieces)
+                .map(|line| plain(&line))
+                .collect();
+            let (_, border) = history[0].line(0, &paint, width);
+            let border = border.unwrap();
+            assert_eq!(measured, rows.len());
+            assert!(rows[0].starts_with(&plain(&border)));
+            let indent = " ".repeat(border.width());
+            assert!(rows.iter().skip(1).all(|row| row.starts_with(&indent)));
+            let body: String = rows.iter().map(|row| &row[indent.len()..]).collect();
+            assert_eq!(body, source[sigil.len()..].replace('\n', ""));
+        }
+    }
+}
+
+#[test]
 fn notice_folding_keeps_persistence_styles_blocks_and_prose_separate() {
     let paint = Paint::new(true);
     let blocks = [
