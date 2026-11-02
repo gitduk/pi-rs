@@ -221,7 +221,7 @@ pi -C ~/repo --tier read  # another directory, read-only
 | `net`   | `read`, plus the web                          |
 
 **`bash` is not sandboxed.**
-It runs `sh -c` anywhere, and pi never asks before a call.
+It runs `bash -c` anywhere, and pi never asks before a call.
 Under `exec`, `write` and `edit` can also change files anywhere.
 They do not refuse changes that `bash` could make.
 Under `write`, they can change files only inside the workspace and pi's home, after resolving symlinks.

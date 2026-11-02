@@ -25,6 +25,9 @@ fn workspace_root() -> String {
     ".".to_string()
 }
 
+/// The shell every command runs under as `SHELL -c command`.
+pub const SHELL: &str = "bash";
+
 const ARGS_HINT: &str = "`bash` requires `command`. Use optional `cwd` for the working directory. Use optional `stdin` for input text.";
 
 const DESCRIPTION: &str = "Each call runs a shell command in a new shell. \
@@ -390,7 +393,7 @@ pub fn rerun(again: Again, ctx: &Ctx) -> Rerun {
 type Launched = crate::process::Launched;
 
 fn command(again: &Again) -> Command {
-    let mut cmd = Command::new("sh");
+    let mut cmd = Command::new(SHELL);
     cmd.arg("-c").arg(&again.command).current_dir(&again.cwd);
     let shared: Vec<_> = again
         .environment
@@ -491,7 +494,7 @@ pub async fn run(
     timeout: Option<std::time::Duration>,
     ctx: &Ctx,
 ) -> Result<Ran, ToolError> {
-    let mut cmd = Command::new("sh");
+    let mut cmd = Command::new(SHELL);
     cmd.arg("-c").arg(command).current_dir(cwd);
     let exited = crate::process::run(cmd, None, timeout, ctx)
         .await

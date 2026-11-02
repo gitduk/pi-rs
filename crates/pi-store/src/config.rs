@@ -160,7 +160,7 @@ pub struct Hook {
     /// The tools a `tool.*` event must be about; empty is every tool.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
-    /// Run by `sh -c` in the workspace.
+    /// Run by `bash -c` in the workspace.
     pub command: String,
 }
 

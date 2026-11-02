@@ -134,7 +134,7 @@ api_key  = "$OPENAI_API_KEY"
 context_window    = 400_000
 max_output_tokens = 128_000
 
-# Commands run on events by `sh -c` in the workspace, each handed the event
+# Commands run on events by `bash -c` in the workspace, each handed the event
 # as one line of JSON on stdin. `tool.before` and `tool.after` are gates, given
 # {"tool", "args", "workspace"} ("result" too, after): before a call, exit 0
 # lets it run and exit 2 refuses it with what the hook printed; any other exit,

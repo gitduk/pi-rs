@@ -386,7 +386,7 @@ fn warn(hook: &Hook, why: &str) {
 // The hook's exit code and what it printed, stdout then stderr. Run as a
 // script runs in its turn: fd 3 for its questions, and a stop ends it.
 async fn run(hook: &Hook, input: &[u8], ctx: &Ctx, ask: &dyn Ask) -> Result<(i32, String), String> {
-    let mut cmd = tokio::process::Command::new("sh");
+    let mut cmd = tokio::process::Command::new(toolbox::bash::SHELL);
     cmd.arg("-c")
         .arg(&hook.command)
         .current_dir(ctx.workspace.root());

@@ -230,14 +230,15 @@ The user's current instructions take precedence.\n{}\n</memory>",
         ));
     }
 
-    // `sh`, not `$SHELL`: the bash tool runs `Command::new("sh")` whatever the
-    // login shell is. Only the day, so runs an hour apart share a cache entry.
+    // The bash tool's shell, not `$SHELL`: it runs that whatever the login
+    // shell is. Only the day, so runs an hour apart share a cache entry.
     fn env(&self, out: &mut String) {
         let tier = format!("{:?}", self.tier).to_lowercase();
         out.push_str(&format!(
-            "\n\n<env date=\"{}\" platform=\"{}\" shell=\"sh\" pi=\"{}\" tier=\"{tier}\"/>",
+            "\n\n<env date=\"{}\" platform=\"{}\" shell=\"{}\" pi=\"{}\" tier=\"{tier}\"/>",
             self.day,
             std::env::consts::OS,
+            toolbox::bash::SHELL,
             env!("CARGO_PKG_VERSION"),
         ));
     }
