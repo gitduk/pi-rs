@@ -90,12 +90,20 @@ impl Note {
 }
 
 impl Fold for Note {
-    fn has_page(&self, i: usize, width: usize) -> bool {
-        !self.open && self.click_line(i, width).is_some()
+    fn is_open(&self) -> bool {
+        self.open
     }
 
     fn expandable(&self) -> bool {
         self.lines.len() > 1
+    }
+
+    fn toggle_at(&mut self, i: usize, width: usize) -> bool {
+        if i != 0 || !(self.open || self.expandable() || self.clipped(width)) {
+            return false;
+        }
+        self.flip();
+        true
     }
 
     fn flip(&mut self) {
@@ -105,13 +113,10 @@ impl Fold for Note {
     // Its first line opens and closes it, or shows it whole if only cut;
     // the rest is read.
     fn click_line(&self, i: usize, width: usize) -> Option<usize> {
-        (i == 0 && (self.expandable() || self.clipped(width))).then_some(0)
+        (i == 0 && (self.open || self.expandable() || self.clipped(width))).then_some(0)
     }
 
     fn opened(&self, _i: usize, paint: &Paint) -> Option<Opened> {
-        if self.open {
-            return None;
-        }
         Some(
             (0..self.lines.len())
                 .map(|i| self.opened_line(i, false, paint))

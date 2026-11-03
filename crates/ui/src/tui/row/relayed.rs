@@ -36,7 +36,7 @@ impl Relayed {
     }
 
     pub(super) fn len(&self) -> usize {
-        1 + if self.open { self.body.len() } else { 0 }
+        if self.open { 1 + self.body.len() } else { 1 }
     }
 
     pub(super) fn line(
@@ -114,8 +114,12 @@ impl Relayed {
 }
 
 impl Fold for Relayed {
-    fn has_page(&self, i: usize, _width: usize) -> bool {
-        i == 0 && !self.open && self.expandable()
+    fn is_open(&self) -> bool {
+        self.open
+    }
+
+    fn click_line(&self, i: usize, _width: usize) -> Option<usize> {
+        (i == 0 && self.expandable()).then_some(0)
     }
 
     fn expandable(&self) -> bool {
@@ -127,7 +131,7 @@ impl Fold for Relayed {
     }
 
     fn opened(&self, _i: usize, paint: &Paint) -> Option<Opened> {
-        if self.open || !self.expandable() {
+        if !self.expandable() {
             return None;
         }
         Some(

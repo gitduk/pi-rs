@@ -715,14 +715,11 @@ impl Group {
         !self.pending.is_empty() || self.steps.iter().any(|step| matches!(step, Step::Tool(_)))
     }
 
-    // The closed step that a click can open, and whether it is the group alone.
-    fn closed_step(&self, i: usize) -> Option<(&Step, bool)> {
+    // The step a heading or preview footer belongs to, and whether it stands alone.
+    fn page_step(&self, i: usize) -> Option<(&Step, bool)> {
         match self.lone() {
-            Some(step) if i == 0 && self.folded => Some((step, true)),
-            None if i > 0 => {
-                let step = &self.steps[self.listed_step(i)?];
-                (!step.is_open()).then_some((step, false))
-            }
+            Some(step) if i == 0 => Some((step, true)),
+            None if i > 0 => Some((&self.steps[self.listed_step(i)?], false)),
             _ => None,
         }
     }
@@ -765,7 +762,7 @@ impl Group {
     // Line `i` as drawn, with what in it reads as one, and its border.
     fn drawn(&self, i: usize, paint: &Paint, width: usize) -> (PageLine, Option<Line<'static>>) {
         let open = self.open();
-        let hover = |at: usize| self.hovered == Some(at);
+        let hover = |at: usize| self.hovered == Some(self.click_line(at, width).unwrap_or(at));
         let (steps, pending, tick) = (&self.steps, &self.pending, self.spinner);
         match self.lone() {
             Some(step) if open => (
@@ -864,8 +861,8 @@ impl Group {
 }
 
 impl Fold for Group {
-    fn has_page(&self, i: usize, width: usize) -> bool {
-        self.click_line(i, width).is_some() && self.closed_step(i).is_some()
+    fn is_open(&self) -> bool {
+        self.open()
     }
 
     fn expandable(&self) -> bool {
@@ -903,10 +900,10 @@ impl Fold for Group {
         true
     }
 
-    // A step closed on line `i`: a lone one from the folded line, a
+    // The step headed by line `i`: a lone one from the group line, a
     // listed one from its own.
     fn opened(&self, i: usize, paint: &Paint) -> Option<Opened> {
-        let (step, lone) = self.closed_step(i)?;
+        let (step, lone) = self.page_step(i)?;
         let lines = (0..step.opened_len()).map(|j| {
             (
                 step.opened_content(j, false, 0, paint),
@@ -917,31 +914,65 @@ impl Fold for Group {
     }
 
     fn opening(&self, i: usize, paint: &Paint) -> Option<Opening> {
-        let (step, lone) = self.closed_step(i)?;
-        let Step::Thinking { lines, .. } = step else {
-            return self.opened(i, paint).map(page_of);
-        };
-        // Reading a reasoning block uses ordinary Markdown contrast. Repaint
-        // from the source so the transcript's dim style does not override
-        // headings, links and code colours on the page.
-        let text = lines
-            .iter()
-            .map(screen::plain)
-            .collect::<Vec<_>>()
-            .join("\n");
-        let opened = render::render_coded(&text, paint)
-            .into_iter()
-            .enumerate()
-            .map(|(j, row)| (step.marked(j, row.into(), 0, paint), opened_border(j, lone)))
-            .collect();
-        Some(page_of(opened))
+        if i == 0 && self.lone().is_none() {
+            let mut page = vec![
+                steps_header(
+                    &self.steps,
+                    &self.pending,
+                    true,
+                    false,
+                    0,
+                    paint,
+                    usize::MAX,
+                )
+                .into(),
+            ];
+            for step in &self.steps {
+                page.extend(step_page(step, false, paint));
+            }
+            page.extend(self.pending.iter().map(|p| {
+                pending_head(p, 0, true)
+                    .line(true, false, paint, usize::MAX)
+                    .into()
+            }));
+            return Some(page);
+        }
+
+        let (step, lone) = self.page_step(i)?;
+        Some(step_page(step, lone, paint))
     }
+}
+
+fn step_page(step: &Step, lone: bool, paint: &Paint) -> Opening {
+    let Step::Thinking { lines, .. } = step else {
+        return page_of(
+            (0..step.opened_len())
+                .map(|j| {
+                    (
+                        step.opened_content(j, false, 0, paint),
+                        opened_border(j, lone),
+                    )
+                })
+                .collect(),
+        );
+    };
+    // Pages use normal Markdown contrast instead of muted reasoning colours.
+    let text = lines
+        .iter()
+        .map(screen::plain)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let opened = render::render_coded(&text, paint)
+        .into_iter()
+        .enumerate()
+        .map(|(j, row)| (step.marked(j, row.into(), 0, paint), opened_border(j, lone)))
+        .collect();
+    page_of(opened)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render;
     use crate::tui::row::Row;
 
     fn tool(name: &str, preview: &str) -> FoldedTool {
@@ -1158,12 +1189,16 @@ mod tests {
             preview.push_str(&format!("\n  {i} + line {i}"));
         }
         let mut row = Row::result(crate::render::Outcome::Done, "edit", preview);
-        assert_eq!(row.len(), render::SKETCHED_ROWS + 1);
+        assert_eq!(row.len(), 1);
+        assert!(!row.has_page(0, 80));
 
         assert!(row.toggle_expand());
-        assert_eq!(row.len(), 32);
+        row.prepare_preview(&Paint::new(false), 80, 20);
+        assert_eq!(row.len(), 10);
+        assert!(row.has_page(row.len() - 1, 80));
+        assert_eq!(row.opening(0, &Paint::new(false)).unwrap().len(), 31);
 
         assert!(row.toggle_expand());
-        assert_eq!(row.len(), render::SKETCHED_ROWS + 1);
+        assert_eq!(row.len(), 1);
     }
 }

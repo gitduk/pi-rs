@@ -64,31 +64,6 @@ impl Ui {
         }
         let (live, live_targets) = self.live(lane, view, row_holds, now);
 
-        // What the keys asked is answered before anything is laid out, so the
-        // list, the bar and the line are drawn as the answer left them.
-        if self.search_due() {
-            let laid: Vec<Laid> = ScrollbackRows::new(&view.surface.scrollback, &self.paint, width)
-                .indexed()
-                .map(|(piece, idx)| {
-                    let line = match &piece {
-                        Piece::Row { line, .. } => *line,
-                        Piece::Live(_) => 0,
-                    };
-                    Laid::of(Spot::Row(idx, line), screen::Piece::pieces(piece))
-                })
-                .chain(
-                    live.iter()
-                        .enumerate()
-                        .map(|(i, l)| Laid::of(Spot::Live(i), screen::fit(l, width))),
-                )
-                .chain(
-                    text.iter()
-                        .enumerate()
-                        .map(|(n, l)| Laid::of(Spot::Text(n), screen::fit(l, width))),
-                )
-                .collect();
-            self.search_answer(view, &laid);
-        }
         let hovered_command = self.pointer.and_then(|(_, row)| {
             (self
                 .command_at(row)
@@ -135,6 +110,32 @@ impl Ui {
             bar.len(),
             input.len(),
         );
+        for row in view.surface.scrollback.iter() {
+            row.prepare_preview(&self.paint, width, regions.history.height as usize);
+        }
+        if self.search_due() {
+            let laid: Vec<Laid> = ScrollbackRows::new(&view.surface.scrollback, &self.paint, width)
+                .indexed()
+                .map(|(piece, idx)| {
+                    let line = match &piece {
+                        Piece::Row { line, .. } => *line,
+                        Piece::Live(_) => 0,
+                    };
+                    Laid::of(Spot::Row(idx, line), screen::Piece::pieces(piece))
+                })
+                .chain(
+                    live.iter()
+                        .enumerate()
+                        .map(|(i, l)| Laid::of(Spot::Live(i), screen::fit(l, width))),
+                )
+                .chain(
+                    text.iter()
+                        .enumerate()
+                        .map(|(n, l)| Laid::of(Spot::Text(n), screen::fit(l, width))),
+                )
+                .collect();
+            self.search_answer(view, &laid);
+        }
         asked.truncate(regions.asked.height as usize);
         // A hidden selection must never receive destructive keys.
         let focus_row = self.background_focus.and_then(|id| {
@@ -441,6 +442,14 @@ impl Ui {
                 frame.render_widget(line, *body);
             }
             for &action in &self.more_hits {
+                if matches!(
+                    self.row_targets
+                        .get(action.y.saturating_sub(regions.history.y) as usize),
+                    Some(Target::Scrollback(..))
+                ) && regions.history.contains((action.x, action.y).into())
+                {
+                    continue;
+                }
                 let hovered = self
                     .pointer
                     .is_some_and(|(col, row)| action.contains((col, row).into()));
@@ -467,6 +476,7 @@ impl Ui {
     }
 
     fn more_actions(&self, view: &View, regions: Regions) -> Vec<Rect> {
+        let mut row_actions = Vec::new();
         let mut actions = Vec::new();
         let mut add = |region: Rect, at: usize| {
             if at >= region.height as usize {
@@ -491,7 +501,24 @@ impl Ui {
                             && view.surface.scrollback[*idx]
                                 .has_page(*line, self.screen.width()) =>
                     {
-                        add(regions.history, at);
+                        let (text, border) = view.surface.scrollback[*idx].line(
+                            *line,
+                            &self.paint,
+                            self.screen.width(),
+                        );
+                        let start = border.as_ref().map_or(0, Line::width);
+                        let text = super::screen::plain(&text);
+                        let indent = text.len() - text.trim_start().len();
+                        let action = Rect::new(
+                            regions.history.x + (start + indent) as u16,
+                            regions.history.y + at as u16,
+                            pi_store::text::width(text.trim_start()) as u16,
+                            1,
+                        )
+                        .intersection(regions.history);
+                        if action.intersection(regions.overlay()).is_empty() {
+                            row_actions.push(action);
+                        }
                     }
                     Target::BackgroundResult(..) => {
                         add(
@@ -541,6 +568,7 @@ impl Ui {
                 ..areas.action
             });
         }
+        actions.extend(row_actions);
         actions
     }
 

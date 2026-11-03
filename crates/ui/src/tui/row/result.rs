@@ -49,34 +49,31 @@ impl ToolOut {
     }
 
     pub(super) fn len(&self) -> usize {
-        if !render::folds(self.preview_lines) {
+        if self.expanded {
             self.preview_lines.max(1)
-        } else if self.expanded {
-            self.preview_lines + 1
         } else {
-            render::SKETCHED_ROWS + 1
+            1
         }
     }
 
     pub(super) fn line(&self, i: usize, paint: &Paint, width: usize) -> Line<'static> {
-        if i > 0 && self.has_page(i, width) {
-            return Line::default();
-        }
         let mut painted = self.painted.borrow_mut();
         let rows = match &mut *painted {
             Some((w, rows)) if *w == width => rows,
             slot => {
-                let rows = render::result_rows(
-                    &self.finished(),
-                    if self.expanded {
-                        render::Shown::Open
-                    } else {
-                        render::Shown::Sketch
-                    },
+                let mut finished = self.finished();
+                if !self.expanded {
+                    finished.preview = self.preview.lines().next().unwrap_or_default();
+                }
+                let mut rows = render::result_rows(
+                    &finished,
+                    render::Shown::Open,
                     self.hovered,
                     paint,
-                    width,
+                    if self.expanded { usize::MAX } else { width },
                 );
+                // The viewport owns the footer.
+                rows.truncate(self.len());
                 &mut slot.insert((width, rows)).1
             }
         };
@@ -103,22 +100,29 @@ impl ToolOut {
 }
 
 impl Fold for ToolOut {
-    fn has_page(&self, i: usize, width: usize) -> bool {
-        !self.expanded && self.click_line(i, width).is_some()
+    fn is_open(&self) -> bool {
+        self.expanded
+    }
+
+    fn toggle_at(&mut self, i: usize, width: usize) -> bool {
+        if i != 0 || !(self.expanded || self.expandable() || self.clipped(width)) {
+            return false;
+        }
+        self.flip();
+        true
     }
 
     fn expandable(&self) -> bool {
-        render::folds(self.preview_lines)
+        self.preview_lines > 1
     }
 
     fn clipped(&self, width: usize) -> bool {
         self.widest > render::result_room(width)
     }
 
-    // The head and the footer under the diff answer; the diff is for reading.
+    // The title expands or collapses; the diff itself is for reading.
     fn click_line(&self, i: usize, width: usize) -> Option<usize> {
-        let edge = i == 0 || (self.expandable() && i + 1 == self.len());
-        (edge && (self.expandable() || self.clipped(width))).then_some(0)
+        (i == 0 && (self.expanded || self.expandable() || self.clipped(width))).then_some(0)
     }
 
     fn flip(&mut self) {
@@ -128,9 +132,6 @@ impl Fold for ToolOut {
 
     // The whole preview, uncut: a page wraps what the row would clip.
     fn opened(&self, _i: usize, paint: &Paint) -> Option<Opened> {
-        if self.expanded {
-            return None;
-        }
         let rows = render::result_rows(
             &self.finished(),
             render::Shown::Page,
