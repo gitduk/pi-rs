@@ -25,7 +25,10 @@ async fn nothing_is_elided_without_somewhere_to_recover_it_from() {
             .await
             .unwrap()
             .flatten();
-        if out.contains("\n…\n") {
+        if out
+            .lines()
+            .any(|line| line.starts_with("… lines ") && line.ends_with(" omitted."))
+        {
             elided = true;
             assert!(
                 out.contains("full output: spill:"),

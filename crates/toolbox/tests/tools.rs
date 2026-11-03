@@ -511,7 +511,11 @@ async fn read_spills_an_over_long_view_without_splitting_a_row() {
         .await
         .unwrap()
         .flatten();
-    assert!(out.contains("\n…\n"), "{out}");
+    assert!(
+        out.lines()
+            .any(|line| line.starts_with("… lines ") && line.ends_with(" omitted.")),
+        "{out}"
+    );
     for row in out.lines().filter(|l| l.starts_with(char::is_numeric)) {
         let (n, text) = row.split_once(':').expect("every row is addressed");
         assert_eq!(text, format!("line {n}"), "half a row survived: {row}");

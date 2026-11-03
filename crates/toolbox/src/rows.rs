@@ -1,9 +1,9 @@
 //! How a view spells the address of a line it prints.
 //!
-//! Five views print lines — a skeleton, a range read, a grep hit, an edit's
+//! Views print lines — a skeleton, a grep hit, an edit's
 //! echo, and the refusal that hands back numbering an edit moved — and the
 //! edit tool reads the addresses back out of them. One spelling here rather
-//! than five `format!`s is the difference between that staying true and
+//! than separate `format!`s is the difference between that staying true and
 //! staying true by luck.
 
 use std::collections::HashMap;
@@ -19,20 +19,7 @@ pub(crate) fn view_hash(content: &str) -> String {
     format!("{:016X}", tool::stamp::fnv(content.as_bytes()))
 }
 
-/// Where each construct that opens on a row ends, keyed by the row it opens on.
-///
-/// Only constructs spanning more than one row — `addr` renders `N-N` when a
-/// row has no entry. Every construct, not just outline declarations: a range
-/// ending one line off a `match` or struct literal is what breaks a file.
-pub(crate) fn spans(path: &str, content: &str) -> HashMap<usize, usize> {
-    let Some(lang) = crate::syntax::Lang::of(path) else {
-        return HashMap::new();
-    };
-    crate::syntax::spans(lang, content)
-}
-
-/// The same, for a skeleton — which lists declarations and shows spans for
-/// those alone.
+/// Where each outline declaration ends, keyed by its opening row.
 pub(crate) fn of(items: &[crate::syntax::Item]) -> HashMap<usize, usize> {
     items
         .iter()

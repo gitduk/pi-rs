@@ -92,7 +92,14 @@ impl View {
         };
         for (i, span) in kept.iter().enumerate() {
             if i > 0 {
-                out.push_str(crate::rows::GAP);
+                let (head, tail) = cut.expect("two spans come from a cut");
+                let first = self.rows[head].0;
+                let last = self.rows[self.rows.len() - tail - 1].0;
+                let subject = match self.kind {
+                    Kind::Lines { .. } => "lines",
+                    Kind::Outline { .. } => "declarations at lines",
+                };
+                out.push_str(&format!("… {subject} {first}-{last} omitted.\n"));
             }
             for (_, row) in *span {
                 out.push_str(row);
@@ -105,7 +112,11 @@ impl View {
     // Whole rows from each end until the budget is gone: cutting assembled text
     // at a byte offset lands mid-row, and half a line under a number reads as content.
     fn cut(&self) -> Cut {
-        let spent = self.head.len() + self.note.len() + crate::rows::GAP.len();
+        // Reserve enough for either gap label and the widest possible line
+        // numbers, so naming the omitted range cannot exceed the budget.
+        let last = self.rows.last().map_or(0, |(n, _)| *n);
+        let gap = format!("… declarations at lines {last}-{last} omitted.\n");
+        let spent = self.head.len() + self.note.len() + gap.len();
         let room = spill::MAX_OUTPUT.saturating_sub(spent);
         let total: usize = self.rows.iter().map(|(_, r)| r.len()).sum();
         if total <= room {
@@ -331,8 +342,7 @@ impl Tool for Read {
         if wants_outline && let Some(lang) = crate::syntax::Lang::of(&rel) {
             let items = crate::syntax::outline(lang, shown);
             if !items.is_empty() {
-                // From the items already in hand: asking `rows::spans` here
-                // would parse the file a second time for the same answer.
+                // Reuse the declarations' ranges without parsing again.
                 let spans = crate::rows::of(&items);
                 let rows = items
                     .iter()
@@ -381,29 +391,30 @@ impl Tool for Read {
         }
 
         let end = start.saturating_add(limit).min(all.len());
-        // A construct opening inside the window often closes outside it; a row
-        // that says where it ends saves a second read.
-        let spans = crate::rows::spans(&rel, content);
         let rows = all[start..end]
             .iter()
             .enumerate()
             .map(|(i, line)| {
                 let n = start + i + 1;
-                let mut row = String::new();
+                let mut row = format!("{n}:");
                 if line.len() > MAX_LINE {
-                    row.push_str(&crate::rows::addr(n, &spans));
                     row.push_str(llm::slice::head_bytes(line, MAX_LINE));
                     row.push_str("… (line truncated)\n");
                 } else {
-                    crate::rows::line(&mut row, n, &spans, line);
+                    row.push_str(line);
+                    row.push('\n');
                 }
                 (n, row)
             })
             .collect();
         let left = all.len() - end;
         let note = if left > 0 {
-            let unit = if left == 1 { "line" } else { "lines" };
-            format!("… {left} more {unit}. Read again from line {}.\n", end + 1)
+            format!(
+                "… lines {}-{} not shown. Read again from line {}.\n",
+                end + 1,
+                all.len(),
+                end + 1
+            )
         } else {
             String::new()
         };

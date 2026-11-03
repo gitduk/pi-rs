@@ -174,16 +174,6 @@ pub fn extents(lang: Lang, content: &str) -> HashMap<usize, (usize, usize)> {
         .collect()
 }
 
-/// Every multi-row construct, as the row it opens on mapped to the row it
-/// closes on. Keyed by the extent's start, annotations included — the number a
-/// patch writes, which is not always the row that named it.
-pub fn spans(lang: Lang, content: &str) -> HashMap<usize, usize> {
-    extents(lang, content)
-        .into_values()
-        .filter(|(start, end)| end > start)
-        .collect()
-}
-
 /// Every row tree-sitter could not parse, 1-based and ascending.
 ///
 /// All of them, not just the first: an unbalanced brace makes the whole file
