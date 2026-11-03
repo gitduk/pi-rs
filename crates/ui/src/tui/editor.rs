@@ -39,6 +39,11 @@ impl Editor {
         &self.text
     }
 
+    /// The caret's logical line, without its newline.
+    pub fn current_line(&self) -> &str {
+        &self.text[self.line_start()..self.line_end()]
+    }
+
     /// Replace the whole buffer, caret at the end. For accepting a completion.
     pub fn set_line(&mut self, line: &str) {
         self.text.clear();

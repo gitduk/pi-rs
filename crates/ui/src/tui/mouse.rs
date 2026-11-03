@@ -561,7 +561,7 @@ impl Ui {
     }
 
     // `text` to the clipboard, the bar saying how much went.
-    fn copy_text(&mut self, text: &str) {
+    pub(super) fn copy_text(&mut self, text: &str) {
         if text.is_empty() {
             return;
         }

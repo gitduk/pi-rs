@@ -266,6 +266,10 @@ impl Ui {
             Some(Action::LineSubmit) => return self.enter(view),
             Some(Action::EditExternally) => return Asked::Own(Deed::External),
             Some(Action::PasteImage) => self.paste_image(),
+            Some(Action::CopyLine) => {
+                let text = self.editor.current_line().to_string();
+                self.copy_text(&text);
+            }
             Some(Action::RunInterrupt) => return self.interrupt(lane, view),
             Some(Action::Rewind) => return Asked::Own(Deed::Rewind),
             Some(action @ (Action::LaneNext | Action::LanePrev)) => {

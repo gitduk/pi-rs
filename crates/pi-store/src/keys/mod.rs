@@ -128,6 +128,7 @@ pub enum Action {
     DeleteToLineStart,
     // The line, whole: vim's `dd`.
     DeleteLine,
+    CopyLine,
     MoveCharLeft,
     MoveCharRight,
     MoveWordLeft,
@@ -590,6 +591,13 @@ const BINDINGS: &[Binding] = &[
         action: A::DeleteLine,
         when: LINE.normal(),
         keys: &["d d"],
+        note: "",
+    },
+    Binding {
+        id: "edit.copy.line",
+        action: A::CopyLine,
+        when: LINE.normal(),
+        keys: &["y y"],
         note: "",
     },
     Binding {
