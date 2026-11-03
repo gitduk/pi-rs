@@ -155,6 +155,7 @@ pub enum Action {
     // The highlighted option in or out of the ones sent together.
     MenuMark,
     RunInterrupt,
+    RunBackground,
     Rewind,
     // The page up searched, or the transcript with none: the query typed
     // at once.
@@ -340,7 +341,7 @@ const BINDINGS: &[Binding] = &[
         id: "menu.accept",
         action: A::MenuAccept,
         when: LIST,
-        keys: &["tab"],
+        keys: &["tab", "ctrl+i"],
         note: "takes the highlighted one onto the line, and goes on",
     },
     Binding {
@@ -405,6 +406,13 @@ const BINDINGS: &[Binding] = &[
         when: RUN,
         keys: &["esc"],
         note: "before the model answers, it takes the prompt back to the editor",
+    },
+    Binding {
+        id: "run.background",
+        action: A::RunBackground,
+        when: APP,
+        keys: &["ctrl+i ctrl+i", "tab tab"],
+        note: "continue running commands in the background",
     },
     Binding {
         id: "conversation.rewind",

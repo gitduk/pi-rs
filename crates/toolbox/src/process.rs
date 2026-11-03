@@ -42,6 +42,8 @@ pub(crate) struct Ends {
     /// At most [`MAX_RUN`]. `None` leaves the command to run until it exits
     /// or `stop` fires.
     pub(crate) deadline: Option<Duration>,
+    /// A handoff can lift a foreground deadline without restarting the child.
+    pub(crate) unbounded: Option<CancellationToken>,
 }
 
 /// Start `cmd` under the workspace's clamps, feeding it `stdin` when there is
@@ -111,7 +113,17 @@ pub(crate) async fn settle(launched: Launched, ends: Ends) -> Result<Exited, Too
     };
     // One future across both phases: the deadline is on the command, not on
     // each thing waited for in turn.
-    let over = past(deadline);
+    let over = async {
+        if let Some(unbounded) = ends.unbounded {
+            tokio::select! {
+                biased;
+                () = unbounded.cancelled() => std::future::pending().await,
+                () = past(deadline) => {},
+            }
+        } else {
+            past(deadline).await;
+        }
+    };
     tokio::pin!(over);
 
     let status = tokio::select! {
@@ -179,6 +191,7 @@ pub async fn run(
     let ends = Ends {
         stop: ctx.cancel.clone(),
         deadline: timeout,
+        unbounded: None,
     };
     settle(launched, ends).await
 }

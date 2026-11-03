@@ -145,6 +145,7 @@ pub struct Completion {
 pub enum Kind {
     Turn,
     Bash { lines: Vec<String> },
+    BashBackground { id: u64, lines: Vec<String> },
     Compact(Option<agent::Report>),
 }
 
@@ -242,7 +243,9 @@ impl Done {
                 compaction_output(*report)
             }
             Kind::Compact(_) => Output::Notice(String::new()),
-            Kind::Bash { lines, .. } => Output::Text(lines.join("\n")),
+            Kind::Bash { lines, .. } | Kind::BashBackground { lines, .. } => {
+                Output::Text(lines.join("\n"))
+            }
         };
         Some(Completion {
             request: self.request,
@@ -329,42 +332,51 @@ pub async fn bash(
     mut session: agent::session::Session,
     ctx: tool::Ctx,
     command: String,
+    shell: toolbox::bash::Bash,
 ) -> Done {
     let out = guard(async move {
-        let (lines, result) = match crate::core::bash::run_bash(&ctx, &command).await {
+        let (kind, result) = match crate::core::bash::run_bash(&ctx, &command, &shell).await {
             Ok(out) => {
                 crate::core::bash::record_bash(&mut session, &command, out.text);
-                let result = if ctx.cancel.is_cancelled() {
-                    Err(agent::AgentError::Cancelled.into())
-                } else if out.code != 0 {
-                    Err(RunError::Exit(out.code))
-                } else {
-                    Ok(llm::stream::Usage::default())
-                };
-                (out.output, result)
+                match out.completion {
+                    toolbox::bash::Completion::Background { id } => (
+                        Kind::BashBackground {
+                            id,
+                            lines: out.output,
+                        },
+                        Ok(llm::stream::Usage::default()),
+                    ),
+                    toolbox::bash::Completion::Exited(code) => {
+                        let result = if ctx.cancel.is_cancelled() {
+                            Err(agent::AgentError::Cancelled.into())
+                        } else if code != 0 {
+                            Err(RunError::Exit(code))
+                        } else {
+                            Ok(llm::stream::Usage::default())
+                        };
+                        (Kind::Bash { lines: out.output }, result)
+                    }
+                }
             }
-            Err(tool::ToolError::Cancelled) => {
-                (Vec::new(), Err(agent::AgentError::Cancelled.into()))
-            }
+            Err(tool::ToolError::Cancelled) => (
+                Kind::Bash { lines: Vec::new() },
+                Err(agent::AgentError::Cancelled.into()),
+            ),
             Err(error) => (
-                Vec::new(),
+                Kind::Bash { lines: Vec::new() },
                 Err(RunError::Failed(format!(
                     "failed to run `{command}`: {error}"
                 ))),
             ),
         };
-        (session, result, lines)
+        (session, result, kind)
     })
     .await;
-    let (lines, ran) = match out {
-        Some((session, ran, lines)) => (lines, Some((session, ran))),
-        None => (Vec::new(), None),
+    let (kind, ran) = match out {
+        Some((session, ran, kind)) => (kind, Some((session, ran))),
+        None => (Kind::Bash { lines: Vec::new() }, None),
     };
-    Done {
-        request,
-        kind: Kind::Bash { lines },
-        ran,
-    }
+    Done { request, kind, ran }
 }
 
 /// Resources lent to one model run. A host provides queued input through the
@@ -459,6 +471,88 @@ pub async fn fetch(request: Request, prompt: mcp::Prompt, args: String, typed: S
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_completed_direct_command_reports_its_actual_exit_code() {
+        use super::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = tool::Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        for code in [0, 3] {
+            let done = bash(
+                Request::new(Origin::Input(99), 1),
+                agent::session::Session::default(),
+                ctx.clone(),
+                format!("exit {code}"),
+                toolbox::bash::Bash::foreground(),
+            )
+            .await;
+            assert!(matches!(done.outcome(), Outcome::Exited(actual) if actual == code));
+            assert!(matches!(
+                (code, done.ended()),
+                (0, Ended::Done) | (3, Ended::Failed(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_handed_off_command_acknowledges_without_reporting_an_exit() {
+        use super::*;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = tool::Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let table = Arc::new(crate::driver::background::Table::default());
+        let shell = toolbox::bash::Bash::new(Arc::new(crate::driver::background::Commands::new(
+            table.clone(),
+        )));
+        let command = "echo ready > started; while [ ! -f release ]; do sleep 0.01; done; exit 3";
+        let call = {
+            let ctx = ctx.clone();
+            tokio::spawn(bash(
+                Request::new(Origin::Input(99), 1),
+                agent::session::Session::default(),
+                ctx,
+                command.into(),
+                shell,
+            ))
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !dir.path().join("started").exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the command started");
+        assert_eq!(ctx.background_running(), 1);
+        let done = tokio::time::timeout(std::time::Duration::from_secs(5), call)
+            .await
+            .unwrap()
+            .unwrap();
+        let outcome = done.outcome();
+        assert!(matches!(done.ended(), Ended::Done));
+        let output = done.completion().unwrap().output;
+        std::fs::write(dir.path().join("release"), "").unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(result) = table.take_ready_results(dir.path()) {
+                    break result.line;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the real exit arrived");
+        assert!(result.contains("exited 3"), "{result}");
+        assert!(
+            matches!(outcome, Outcome::Done),
+            "handoff is not an exit: {outcome:?}"
+        );
+        let Output::Text(notice) = output else {
+            panic!("the handoff notice")
+        };
+        assert!(notice.contains("command #1"), "{notice}");
+    }
+
     #[test]
     fn a_panic_under_guard_is_known_to_be_caught() {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));

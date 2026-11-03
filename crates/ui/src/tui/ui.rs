@@ -161,6 +161,7 @@ pub(super) struct Ui {
 #[derive(Clone, Copy)]
 pub(super) struct LastPress {
     pub(super) press: pi_store::keys::Press,
+    pub(super) surface: pi_store::keys::Surface,
     pub(super) at: Instant,
     // It put a character on the line, which a pair it starts takes back.
     pub(super) typed: bool,

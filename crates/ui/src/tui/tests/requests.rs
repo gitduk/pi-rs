@@ -382,6 +382,7 @@ async fn bash_cancellation_and_refusal_do_not_become_reply_lines() {
         agent::session::Session::default(),
         tui.core.lane().ctx_for(cancel),
         "printf should-not-run".into(),
+        toolbox::bash::Bash::foreground(),
     )
     .await;
     tui.settle(done).await;

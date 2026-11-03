@@ -1,4 +1,3 @@
-#[cfg(not(unix))]
 use crate::background::RunHandle;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -60,14 +59,22 @@ pub async fn foreground(command: &str, cwd: &str, ctx: &Ctx) -> Result<ToolOutpu
 }
 
 pub struct Foreground {
-    pub ran: Ran,
+    pub completion: Completion,
+    body: String,
     preview: String,
     changes: Option<crate::drift::Report>,
 }
 
+/// Whether the command exited or was handed to its background runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Completion {
+    Exited(i32),
+    Background { id: u64 },
+}
+
 impl Foreground {
     pub fn content(&self) -> String {
-        let mut body = self.ran.body.clone();
+        let mut body = self.body.clone();
         if let Some(changes) = &self.changes {
             if !body.is_empty() {
                 body.push('\n');
@@ -78,7 +85,14 @@ impl Foreground {
     }
 
     pub fn into_output(self) -> ToolOutput {
-        let out = self.ran.output(self.preview);
+        let out = match self.completion {
+            Completion::Exited(code) => Ran {
+                code,
+                body: self.body,
+            }
+            .output(self.preview),
+            Completion::Background { .. } => ToolOutput::text(self.body).with_preview(self.preview),
+        };
         match self.changes {
             Some(changes) => changes.append(out),
             None => out,
@@ -86,29 +100,16 @@ impl Foreground {
     }
 }
 
-/// The command's content and exit status, before status text is added to the
-/// tool result. Workspace change reports remain part of the content.
+/// The command's content and completion, before exit diagnostics are added to
+/// the tool result. Workspace change reports remain part of the content.
 pub async fn foreground_result(
     command: &str,
     cwd: &str,
     ctx: &Ctx,
 ) -> Result<Foreground, ToolError> {
-    let preview = first_line(command).to_string();
-    let args = Args {
-        command: command.to_string(),
-        cwd: cwd.to_string(),
-        stdin: None,
-        description: None,
-    };
-    let prepared = prepare(args, Tier::Exec, ctx, true).await?;
-    let before = crate::drift::before(ctx);
-    let ran = run(&prepared.command, &prepared.cwd, None, ctx).await?;
-    let moved = crate::drift::absorb(ctx, before);
-    Ok(Foreground {
-        ran,
-        preview,
-        changes: crate::drift::report(&moved),
-    })
+    Bash::foreground()
+        .foreground_result(command, cwd, ctx)
+        .await
 }
 
 // One line: whoever reads the preview, and the log, treat further newlines
@@ -147,6 +148,30 @@ pub struct Bash {
 }
 
 impl Bash {
+    /// Run a command in the foreground, allowing the host to request a handoff.
+    pub async fn foreground_result(
+        &self,
+        command: &str,
+        cwd: &str,
+        ctx: &Ctx,
+    ) -> Result<Foreground, ToolError> {
+        let args = Args {
+            command: command.to_string(),
+            cwd: cwd.to_string(),
+            stdin: None,
+            description: None,
+        };
+        let prepared = prepare(args, Tier::Exec, ctx, true).await?;
+        self.finish(
+            prepared,
+            Invocation::shell(command),
+            first_line(command).to_string(),
+            None,
+            ctx,
+        )
+        .await
+    }
+
     pub const NAME: &'static str = "bash";
 
     /// The shell whose background calls are kept by `executions`.
@@ -158,7 +183,9 @@ impl Bash {
                 "{DESCRIPTION}\n\nThe call waits for the command to exit. \
                  Stop the run to cancel the command. \
                  The tool stops a foreground command after {}. \
-                 Use `background=true` for a command you expect to take longer.\n\n\
+                 The user can move a running foreground command to the background; \
+                 the call then returns its command ID. \
+                 Use `background=true` to start in the background immediately.\n\n\
                  With `background=true`, the command runs independently of this turn. \
                  The call returns its command ID immediately. \
                  Its results, including a failure at startup, open a later turn. \
@@ -368,16 +395,79 @@ impl Bash {
             .label()
             .unwrap_or_else(|| first_line(&args.command))
             .to_string();
+        let invocation = invocation.unwrap_or_else(|| Invocation::shell(args.command.clone()));
         let mut prepared = prepare(args, self.tier(), ctx, call.written).await?;
         prepared.environment = call.environment;
         prepared.output = call.output;
+        Ok(self
+            .finish(
+                prepared,
+                invocation,
+                preview,
+                Some(tool::limit::MAX_CALL),
+                ctx,
+            )
+            .await?
+            .into_output())
+    }
+
+    async fn finish(
+        &self,
+        prepared: Again,
+        invocation: Invocation,
+        mut preview: String,
+        deadline: Option<std::time::Duration>,
+        ctx: &Ctx,
+    ) -> Result<Foreground, ToolError> {
         let before = crate::drift::before(ctx);
         let launched = launch(&prepared, ctx)?;
-        // A command the model waits for holds the turn, and in a run with
-        // nobody at the keyboard nothing else would ever end it.
-        let ran = wait(launched, ctx.cancel.clone(), Some(tool::limit::MAX_CALL)).await?;
+        let (completion, body) = if let Some(executions) = &self.executions {
+            let mut requests = ctx.background_requests();
+            let peek = launched.streams.peek();
+            // The turn can stop this wait, but must not own the cancellation
+            // of a command that has already been handed to the host.
+            let stop = tokio_util::sync::CancellationToken::new();
+            let unbounded = tokio_util::sync::CancellationToken::new();
+            let mut running: Running = Box::pin(wait(
+                launched,
+                stop.clone(),
+                deadline,
+                Some(unbounded.clone()),
+            ));
+            tokio::select! {
+                biased;
+                () = ctx.cancel.cancelled() => {
+                    stop.cancel();
+                    running.await?.completed()
+                }
+                ran = &mut running => ran?.completed(),
+                _ = requests.recv() => {
+                    unbounded.cancel();
+                    let execution = executions.start(
+                        ctx.workspace.root().to_path_buf(), invocation, stop,
+                    );
+                    let id = execution.id();
+                    execution.watch(peek);
+                    execution.rerun(rerun(prepared.clone(), ctx), prepared);
+                    supervise(running, execution);
+                    preview = format!("{preview} [background #{id}]");
+                    (Completion::Background { id },
+                     format!("The user moved this command to the background as command #{id}. Continue independent work; its result will arrive later."))
+                }
+            }
+        } else {
+            // Without a host the command cannot outlive this call.
+            wait(launched, ctx.cancel.clone(), deadline, None)
+                .await?
+                .completed()
+        };
         let moved = crate::drift::absorb(ctx, before);
-        Ok(crate::drift::tell(ran.output(preview), &moved))
+        Ok(Foreground {
+            completion,
+            body,
+            preview,
+            changes: crate::drift::report(&moved),
+        })
     }
 }
 
@@ -401,7 +491,7 @@ pub fn rerun(again: Again, ctx: &Ctx) -> Rerun {
         {
             let launched = launch(&again, &ctx)?;
             execution.watch(launched.streams.peek());
-            supervise(Box::pin(wait(launched, stop, None)), execution);
+            supervise(Box::pin(wait(launched, stop, None, None)), execution);
             Ok(())
         }
     })
@@ -449,9 +539,14 @@ async fn wait(
     launched: Launched,
     stop: tokio_util::sync::CancellationToken,
     deadline: Option<std::time::Duration>,
+    unbounded: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<Ran, ToolError> {
     let group = launched.group;
-    let ends = crate::process::Ends { stop, deadline };
+    let ends = crate::process::Ends {
+        stop,
+        deadline,
+        unbounded,
+    };
     let exited = crate::process::settle(launched, ends).await?;
     let (out, err) = (exited.stdout, exited.stderr);
     let code = exited.status.code().unwrap_or(-1);
@@ -462,10 +557,8 @@ async fn wait(
     })
 }
 
-#[cfg(not(unix))]
 type Running = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Ran, ToolError>> + Send>>;
 
-#[cfg(not(unix))]
 fn supervise(running: Running, execution: Arc<dyn RunHandle>) {
     tokio::spawn(async move {
         match running.await {
@@ -493,6 +586,10 @@ pub struct Ran {
 }
 
 impl Ran {
+    fn completed(self) -> (Completion, String) {
+        (Completion::Exited(self.code), self.body)
+    }
+
     fn output(mut self, preview: String) -> ToolOutput {
         if self.code != 0 {
             self.body.push_str(&format!("exit {}\n", self.code));
@@ -610,7 +707,7 @@ mod background_tests {
         )
         .await
         .unwrap();
-        assert_eq!(result.ran.code, 3);
+        assert_eq!(result.completion, Completion::Exited(3));
         let content = result.content();
         assert_eq!(content.matches("exit 3").count(), 1, "{content}");
         assert!(
@@ -687,6 +784,229 @@ mod background_tests {
             .await
             .unwrap();
         assert!(out.flatten().contains("hi"), "{}", out.flatten());
+    }
+
+    async fn started(dir: &std::path::Path) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !dir.join("starts").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the shell started");
+    }
+
+    #[tokio::test]
+    async fn direct_commands_keep_running_past_the_tool_deadline() {
+        for managed in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let sink = Arc::new(Sink::default());
+            let ctx = ctx(dir.path());
+            let shell = if managed {
+                Bash::new(sink.clone())
+            } else {
+                Bash::foreground()
+            };
+            let mut call = tokio::spawn(async move {
+                shell.foreground_result(
+                    "echo ready > starts; while [ ! -f release ]; do sleep 0.01; done; echo done; exit 3",
+                    ".", &ctx,
+                ).await
+            });
+            started(dir.path()).await;
+            tokio::time::pause();
+            tokio::time::advance(tool::limit::MAX_CALL + Duration::from_secs(1)).await;
+            tokio::time::resume();
+            let early = tokio::time::timeout(Duration::from_millis(100), &mut call).await;
+            std::fs::write(dir.path().join("release"), "").unwrap();
+            let result = match early {
+                Ok(result) => result.unwrap(),
+                Err(_) => tokio::time::timeout(Duration::from_secs(5), call)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            }
+            .expect("a direct command has no tool deadline");
+            assert_eq!(result.completion, Completion::Exited(3));
+            assert!(result.content().contains("done"));
+            assert!(
+                sink.said.lock().unwrap().is_empty(),
+                "time alone does not hand off a command"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_calls_keep_their_foreground_deadline() {
+        for managed in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = ctx(dir.path());
+            let shell = if managed {
+                Bash::new(Arc::new(Sink::default()))
+            } else {
+                Bash::foreground()
+            };
+            let call = tokio::spawn(async move {
+                shell
+                    .execute(
+                        json!({"command": "echo ready > starts; echo before; sleep 6000"}),
+                        &ctx,
+                    )
+                    .await
+            });
+            started(dir.path()).await;
+            tokio::time::pause();
+            tokio::time::advance(tool::limit::MAX_CALL + Duration::from_secs(1)).await;
+            tokio::time::resume();
+            let error = tokio::time::timeout(Duration::from_secs(5), call)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            let ToolError::Timeout { ms, printed } = error else {
+                panic!("expected timeout, got {error:?}")
+            };
+            assert_eq!(ms, tool::limit::MAX_CALL.as_millis() as u64);
+            assert!(printed.contains("before"), "{printed}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_requested_handoff_continues_once_with_its_output_and_outlives_the_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        let ctx = ctx(dir.path());
+        assert_eq!(ctx.background_running(), 0, "idle requests are not queued");
+        let call = {
+            let sink = sink.clone();
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                Bash::new(sink)
+                    .execute(json!({"command": "echo start >> starts; echo before; while [ ! -f release ]; do sleep 0.01; done; echo after; echo warning >&2; exit 3"}), &ctx)
+                    .await
+            })
+        };
+        started(dir.path()).await;
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(31)).await;
+        assert!(
+            !call.is_finished(),
+            "elapsed time must not move the command"
+        );
+        assert!(sink.said.lock().unwrap().is_empty());
+        tokio::time::resume();
+        assert_eq!(ctx.background_running(), 1);
+        let out = tokio::time::timeout(Duration::from_secs(5), call)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(out.flatten().contains("command #7"), "{}", out.flatten());
+        assert!(out.preview().contains("[background #7]"));
+        let peek = sink.output.lock().unwrap().clone().expect("watched");
+        assert!(peek.latest().contains("before"), "{}", peek.latest());
+        ctx.cancel.cancel();
+        tokio::time::pause();
+        tokio::time::advance(tool::limit::MAX_CALL + Duration::from_secs(1)).await;
+        tokio::time::resume();
+        assert_eq!(
+            sink.said.lock().unwrap().len(),
+            1,
+            "handoff lifts the foreground deadline"
+        );
+        assert_eq!(
+            ctx.background_running(),
+            0,
+            "the handed-off call no longer listens"
+        );
+        let ended = sink.ended.notified();
+        std::fs::write(dir.path().join("release"), "").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), ended)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("starts")).unwrap(),
+            "start\n"
+        );
+        let said = sink.said.lock().unwrap();
+        assert_eq!(said.len(), 3, "{said:?}");
+        for expected in ["before", "after", "warning", "exited 3"] {
+            assert!(said[1].contains(expected), "{said:?}");
+        }
+        assert_eq!(said[2], "end");
+    }
+
+    #[tokio::test]
+    async fn stopping_before_handoff_cancels_without_registering_a_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        let ctx = ctx(dir.path());
+        let call = {
+            let sink = sink.clone();
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                Bash::new(sink)
+                    .execute(json!({"command": "echo start > starts; sleep 60"}), &ctx)
+                    .await
+            })
+        };
+        started(dir.path()).await;
+        ctx.cancel.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(5), call)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(error, ToolError::Cancelled), "{error:?}");
+        assert!(sink.said.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_host_can_stop_a_command_after_requested_handoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        let ctx = ctx(dir.path());
+        let call = {
+            let sink = sink.clone();
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                Bash::new(sink)
+                    .execute(json!({"command": "echo $$ > starts; sleep 60"}), &ctx)
+                    .await
+            })
+        };
+        started(dir.path()).await;
+        let pid: i32 = std::fs::read_to_string(dir.path().join("starts"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(ctx.background_running(), 1);
+        tokio::time::timeout(Duration::from_secs(5), call)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        sink.stop
+            .lock()
+            .unwrap()
+            .take()
+            .expect("registered")
+            .cancel();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            // SAFETY: signal 0 only checks whether this process still exists.
+            while unsafe { libc::kill(pid, 0) } == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the host stopped the command");
+        assert_eq!(
+            sink.said.lock().unwrap().len(),
+            1,
+            "stops do not report a result"
+        );
     }
 
     #[cfg(unix)]

@@ -12,27 +12,31 @@ pub struct Bashed {
     pub text: String,
     /// Actual output lines, without placeholders or execution diagnostics.
     pub output: Vec<String>,
-    pub code: i32,
+    pub completion: toolbox::bash::Completion,
 }
 
 /// Run what `!` named to completion; `ctx` carries its cancellation token.
 ///
 /// Free of `Core` so the surface can spawn it: holding `&mut Core` across the
 /// await pinned the whole loop.
-pub async fn run_bash(ctx: &tool::Ctx, command: &str) -> Result<Bashed, ToolError> {
-    let out = toolbox::bash::foreground_result(command, ".", ctx).await?;
+pub async fn run_bash(
+    ctx: &tool::Ctx,
+    command: &str,
+    shell: &toolbox::bash::Bash,
+) -> Result<Bashed, ToolError> {
+    let out = shell.foreground_result(command, ".", ctx).await?;
     let output = out
         .content()
         .lines()
         .filter(|line| !is_stream_tag(line))
         .map(str::to_string)
         .collect();
-    let code = out.ran.code;
+    let completion = out.completion;
     let out = out.into_output();
     let body = out.flatten();
     Ok(Bashed {
         output,
-        code,
+        completion,
         // The command as typed: rtk's rewrite is a transparent proxy, and the
         // journal keeps how it actually ran.
         text: format!(

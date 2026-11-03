@@ -120,7 +120,10 @@ impl Ui {
         let layers = self.layers(running);
         let last = self.last_press.take();
         let prev = last
-            .filter(|l| now.duration_since(l.at) < self.pair_window_after(l.press))
+            .filter(|l| {
+                l.surface == layers.surface
+                    && now.duration_since(l.at) < self.pair_window_after(l.press)
+            })
             .map(|l| l.press);
         let hit = self.keys.hit(prev, press, layers);
         if let Some(h) = hit
@@ -135,6 +138,7 @@ impl Ui {
             // A finished pair starts none: `g g g` is a pair and a `g`.
             self.last_press = Some(LastPress {
                 press,
+                surface: layers.surface,
                 at: now,
                 typed: false,
                 opens: self.keys.opens_pair(press, layers),
@@ -145,6 +149,14 @@ impl Ui {
         match action {
             Some(Action::AppCancel) => return self.cancel(view, running),
             Some(Action::AppQuit) => return Asked::Core(Intent::Builtin(Builtin::Quit)),
+            Some(Action::RunBackground) => {
+                self.disarm();
+                return Asked::Own(if layers.surface == Surface::Completion {
+                    Deed::Nothing
+                } else {
+                    Deed::Background
+                });
+            }
             _ => {}
         }
         if let Some(asked) = self.background_key(key) {
@@ -481,6 +493,9 @@ impl Ui {
     }
 
     fn menu_accept(&mut self, view: &mut View) {
+        // Accepting an item may close the menu. Its key must not start a
+        // pair that the next press completes outside the menu.
+        self.disarm();
         match self.highlighted() {
             Some(MenuEntry::Completion(c)) => self.apply_completion(c),
             Some(MenuEntry::File {

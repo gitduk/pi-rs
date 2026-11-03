@@ -37,6 +37,6 @@ tree-sitter-md = "0.5"
 libc = "0.2"
 
 [dev-dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
 filetime = "0.2"

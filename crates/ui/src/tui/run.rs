@@ -168,8 +168,11 @@ impl Tui {
         self.arm_view(Doing::Bash);
 
         let done = done.clone();
+        let shell = toolbox::bash::Bash::new(std::sync::Arc::new(
+            pi_core::driver::background::Commands::new(self.drivers.background()),
+        ));
         tokio::spawn(async move {
-            let _ = done.send(execution::bash(request, carried, ctx, command).await);
+            let _ = done.send(execution::bash(request, carried, ctx, command, shell).await);
         });
         self.core.lane_mut().begin(cancel);
     }
@@ -452,7 +455,9 @@ impl Tui {
         let unsend = self.core.lanes[lane].finish();
 
         match done.kind {
-            Kind::Turn | Kind::Bash { .. } => self.settle_run(lane, done, unsend).await,
+            Kind::Turn | Kind::Bash { .. } | Kind::BashBackground { .. } => {
+                self.settle_run(lane, done, unsend).await
+            }
             Kind::Compact(_) => self.settle_compact(lane, done).await,
         }
         if let Some(completion) = completion {
@@ -468,7 +473,7 @@ impl Tui {
         // Only a turn is a request the model was working on, and only a turn's
         // ending is worth telling it about.
         let was_turn = matches!(kind, Kind::Turn);
-        let was_bash = matches!(kind, Kind::Bash { .. });
+        let was_bash = matches!(kind, Kind::Bash { .. } | Kind::BashBackground { .. });
 
         // Only a run that came back says why it ended; the archive rebuild
         // below has the same transcript and knows nothing about the run.

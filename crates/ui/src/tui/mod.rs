@@ -99,6 +99,7 @@ pub(crate) enum Deed {
     Rewind,
     // Stop the run: from esc, or from the phone's `/stop`.
     Interrupt,
+    Background,
     // Esc caught a prompt on its way out: stop the run, then unsend it.
     Unsend,
     RecallQueued(Vec<pi_core::execution::Request>),
@@ -130,6 +131,7 @@ impl Deed {
             Deed::Nothing
             | Deed::External
             | Deed::Interrupt
+            | Deed::Background
             | Deed::Unsend
             | Deed::RecallQueued(_)
             | Deed::ReadCommand(_)
@@ -151,6 +153,7 @@ impl Deed {
             Deed::External
             | Deed::Rewind
             | Deed::Interrupt
+            | Deed::Background
             | Deed::Unsend
             | Deed::ReadCommand(_)
             | Deed::ToggleCommand(_)
@@ -516,6 +519,14 @@ impl Tui {
         match deed {
             Deed::Nothing => {}
             Deed::Interrupt => self.stop_current(false),
+            Deed::Background => {
+                let count = self.core.lane().ctx().background_running();
+                self.ui.flash(if count == 0 {
+                    "no foreground command can move to the background"
+                } else {
+                    "moving foreground commands to the background"
+                });
+            }
             Deed::Unsend => self.stop_current(true),
             Deed::RecallQueued(requests) => {
                 for request in requests {

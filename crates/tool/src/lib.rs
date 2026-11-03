@@ -272,6 +272,9 @@ pub struct Ctx {
     spill_root: std::path::PathBuf,
     // Where a running call says how far it has got; set per call by the loop.
     progress: Option<Progress>,
+    // Only calls already listening receive a request; an idle request must
+    // never change how the next call runs.
+    background: tokio::sync::broadcast::Sender<()>,
 }
 
 /// Takes a running call's latest word on its progress, replacing the last.
@@ -304,11 +307,23 @@ impl Ctx {
             session: None,
             spill_root: spill::temp(),
             progress: None,
+            background: tokio::sync::broadcast::channel(1).0,
         }
     }
 }
 
 impl Ctx {
+    /// Ask currently listening calls to continue in the background. Returns
+    /// the number notified; a call without background support does not listen.
+    pub fn background_running(&self) -> usize {
+        self.background.send(()).unwrap_or(0)
+    }
+
+    /// Listen for a request to hand this call to its background runtime.
+    pub fn background_requests(&self) -> tokio::sync::broadcast::Receiver<()> {
+        self.background.subscribe()
+    }
+
     /// Swap in a cancellation token. A caller that runs many turns wants a
     /// fresh one each time while the shared handles carry over.
     pub fn with_cancel(mut self, cancel: tokio_util::sync::CancellationToken) -> Self {
