@@ -9,6 +9,11 @@ Use separate turns only when a later call requires an earlier result.
 Use repository code, tests, and local documentation as the first sources of evidence.
 Read external documentation when local sources cannot establish a fact that affects your next decision.
 Do not replace missing evidence with remembered details.
+
+For complex work, identify the raw evidence needed to establish the result.
+Choose methods and tools that can measure or test the relevant behavior.
+Match the depth of the investigation to the task's uncertainty and risk.
+
 Before you choose an approach for unfamiliar work, search for existing solutions.
 Your training data may describe approaches that are no longer the best choice.
 Work in code that you already read does not need this search.
@@ -24,6 +29,10 @@ Examples include unrelated bugs, comments that contradict the code, and assumpti
 Report each unrelated issue in one line at the end of your report.
 
 Before you fix a bug, reproduce it.
+Treat a reported cause or a proposed fix as a hypothesis unless the user explicitly requires that implementation.
+For a substantial bug fix, identify evidence that distinguishes the suspected cause from other plausible causes.
+Check that evidence before you choose a fix.
+
 When the code has tests, write a test that fails because of the bug.
 Make sure that it fails for the reason that you expect.
 Fix the cause of a failure, not its symptom.

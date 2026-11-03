@@ -584,28 +584,6 @@ Both must pass without warnings or failures.
 Run `cargo fmt` before you commit.
 Pushing a `vX.Y.Z` tag builds and publishes the release on CI.
 
-For prompt changes, preserve a baseline binary before editing.
-Build the candidate binary after the changes.
-Compare them with the configured model:
-
-```bash
-python3 examples/prompt-eval.py --self-test
-python3 examples/prompt-eval.py --baseline /path/to/baseline-pi \
-  --candidate target/debug/pi --output /tmp/pi-prompt-eval.json
-```
-
-The evaluation uses temporary synthetic projects and only copies connection settings.
-It excludes user hooks, MCP servers, skills, and standing instructions.
-The help case uses built-in skills.
-Existing hooks collect tool calls, arguments, result previews, turns, and token usage.
-Each case checks its result and unexpected file changes.
-Model calls may incur charges.
-
-Use `--config` or `--model` to select the connection.
-Use `--case help` to compare only the help task.
-`--repeats` repeats the cases, with alternating baseline and candidate order.
-One repetition is a smoke check, not evidence of a general efficiency improvement.
-
 ## Not built
 
 LSP, a sandbox for `bash`, per-call approval, session branching.

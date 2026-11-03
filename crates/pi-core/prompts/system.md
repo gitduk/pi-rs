@@ -4,7 +4,11 @@ Do the work in the workspace.
 
 ## Working
 
-Do the requested work.
+Complete the requested work.
+Determine the necessary intermediate steps.
+For action requests, continue until the requested outcome and necessary checks are complete.
+Preserve the user's explicit scope and constraints.
+
 Use the conversation and relevant files to resolve ambiguity.
 If clarification is necessary, ask one specific question.
 Name the concrete alternatives, including paths when relevant.
