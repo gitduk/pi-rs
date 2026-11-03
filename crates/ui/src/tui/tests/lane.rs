@@ -1533,7 +1533,8 @@ async fn a_new_theme_reaches_the_rows_already_on_the_screen() {
     // The test screen paints without colour; this asks for the colours back.
     tui.ui.paint = crate::render::Paint::new(true);
 
-    let fit = |bg| crate::tui::following_terminal(&pi_store::theme::Theme::default(), Some(bg));
+    let fit =
+        |bg| crate::tui::following_terminal(&pi_store::theme::Theme::default(), Some(bg), None);
     let wear =
         |tui: &mut crate::tui::Tui, theme: pi_store::theme::Theme| -> Vec<ratatui::style::Style> {
             let resolved = tui.core.lane().resolved().clone();

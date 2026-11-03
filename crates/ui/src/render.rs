@@ -76,10 +76,9 @@ impl Paint {
         self
     }
 
-    /// Dim the terminal's own foreground once. Explicitly reset the colour so
-    /// Markdown syntax colours do not carry into transcript reasoning.
+    /// Give reasoning its own secondary foreground so syntax colours cannot carry over.
     pub fn reasoning_style(&self) -> Style {
-        Style::dimmed()
+        crate::theme::secondary_text(self.foreground, self.background)
     }
 
     /// A tool's existing display text, coloured without changing its wording.
@@ -484,6 +483,7 @@ pub(crate) fn render_coded_at(text: &str, paint: &Paint, width: Option<usize>) -
         crate::markdown::options(
             paint.theme.clone(),
             crate::theme::table_separator(paint.foreground, paint.background),
+            paint.background,
         )
     });
     let parsed = options.render(&marked, width);
@@ -501,7 +501,11 @@ pub(crate) fn render_coded_at(text: &str, paint: &Paint, width: Option<usize>) -
                 .spans
                 .into_iter()
                 .map(|span| {
-                    let style = crate::markdown::inline(line_style.patch(span.style), &paint.theme);
+                    let style = crate::markdown::inline(
+                        line_style.patch(span.style),
+                        &paint.theme,
+                        paint.background,
+                    );
                     Span::styled(span.content.into_owned(), style)
                 })
                 .collect();

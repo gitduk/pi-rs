@@ -162,6 +162,7 @@ pub(super) struct Sheet {
     headings: [Style; 6],
     table_header: Style,
     table_border: Style,
+    background: Option<(u8, u8, u8)>,
 }
 
 impl StyleSheet for Sheet {
@@ -174,7 +175,7 @@ impl StyleSheet for Sheet {
     }
 
     fn code(&self) -> Style {
-        style_to_ratatui(&self.theme.code)
+        crate::theme::readable(style_to_ratatui(&self.theme.code), self.background)
     }
 
     fn code_block_fence(&self) -> &str {
@@ -182,15 +183,15 @@ impl StyleSheet for Sheet {
     }
 
     fn link(&self) -> Style {
-        style_to_ratatui(&self.theme.link)
+        crate::theme::readable(style_to_ratatui(&self.theme.link), self.background)
     }
 
     fn blockquote(&self) -> Style {
-        style_to_ratatui(&self.theme.quote)
+        crate::theme::readable(style_to_ratatui(&self.theme.quote), self.background)
     }
 
     fn heading_meta(&self) -> Style {
-        style_to_ratatui(&self.theme.muted)
+        crate::theme::readable(style_to_ratatui(&self.theme.muted), self.background)
     }
 
     fn table_header(&self) -> Style {
@@ -202,7 +203,7 @@ impl StyleSheet for Sheet {
     }
 
     fn image_alt(&self) -> Style {
-        style_to_ratatui(&self.theme.muted)
+        crate::theme::readable(style_to_ratatui(&self.theme.muted), self.background)
     }
 
     fn alert(&self, kind: tui_markdown::AlertKind) -> Style {
@@ -214,7 +215,7 @@ impl StyleSheet for Sheet {
             AlertKind::Warning => &self.theme.status.warn,
             AlertKind::Caution => &self.theme.status.err,
         };
-        style_to_ratatui(style)
+        crate::theme::readable(style_to_ratatui(style), self.background)
     }
 }
 
@@ -230,21 +231,29 @@ impl Format {
     }
 }
 
-pub(super) fn options(theme: Arc<Theme>, table_border: Style) -> Format {
+pub(super) fn options(
+    theme: Arc<Theme>,
+    table_border: Style,
+    background: Option<(u8, u8, u8)>,
+) -> Format {
     let palette = Palette::get(theme.syntax);
     // The generic heading style also labels content outside Markdown headings.
     let override_heading = crate::theme::configured_heading(&theme).map(style_to_ratatui);
-    let headings = palette
-        .headings
-        .map(|style| override_heading.map_or(style, |custom| style.patch(custom)));
+    let headings = palette.headings.map(|style| {
+        crate::theme::readable(
+            override_heading.map_or(style, |custom| style.patch(custom)),
+            background,
+        )
+    });
     let table_header = palette
         .table_header
         .unwrap_or_else(|| style_to_ratatui(&theme.strong));
     let sheet = Sheet {
         theme,
         headings,
-        table_header,
+        table_header: crate::theme::readable(table_header, background),
         table_border,
+        background,
     };
     Format {
         options: Options::new(sheet.clone()).code_theme(palette.code.clone()),
@@ -255,7 +264,7 @@ pub(super) fn options(theme: Arc<Theme>, table_border: Style) -> Format {
 /// The renderer exposes bold/italic attributes but no hooks for their colours.
 /// Colour only otherwise uncoloured spans, leaving headings, links and syntax
 /// tokens in their own styles.
-pub(super) fn inline(style: Style, theme: &Theme) -> Style {
+pub(super) fn inline(style: Style, theme: &Theme, background: Option<(u8, u8, u8)>) -> Style {
     if style.fg.is_some() {
         return style;
     }
@@ -266,7 +275,7 @@ pub(super) fn inline(style: Style, theme: &Theme) -> Style {
     if style.add_modifier.contains(Modifier::BOLD) {
         base = base.patch(style_to_ratatui(&theme.strong));
     }
-    base.patch(style)
+    crate::theme::readable(base.patch(style), background)
 }
 
 #[cfg(test)]
@@ -279,8 +288,12 @@ mod tests {
     #[test]
     fn each_heading_level_keeps_a_colour_of_its_own() {
         for bg in [(255, 255, 255), (13, 17, 23)] {
-            let theme = crate::theme::following_terminal(&Theme::default(), Some(bg));
-            let format = options(Arc::new(theme), crate::theme::table_separator(None, None));
+            let theme = crate::theme::following_terminal(&Theme::default(), Some(bg), None);
+            let format = options(
+                Arc::new(theme),
+                crate::theme::table_separator(None, None),
+                Some(bg),
+            );
             let mut seen: Vec<_> = (1..=6).map(|l| format.sheet.heading(l).fg).collect();
             let found = seen.len();
             seen.sort_by_key(|c| format!("{c:?}"));
@@ -299,8 +312,12 @@ mod tests {
         let named = pi_store::theme::Color::Rgb(1, 2, 3);
         let mut theme = Theme::default();
         theme.heading = pi_store::theme::Style::color(named.clone());
-        let theme = crate::theme::following_terminal(&theme, Some((255, 255, 255)));
-        let format = options(Arc::new(theme), crate::theme::table_separator(None, None));
+        let theme = crate::theme::following_terminal(&theme, Some((255, 255, 255)), None);
+        let format = options(
+            Arc::new(theme),
+            crate::theme::table_separator(None, None),
+            None,
+        );
         for level in 1..=6 {
             assert_eq!(format.sheet.heading(level).fg, Some(Color::Rgb(1, 2, 3)));
         }

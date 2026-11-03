@@ -218,7 +218,7 @@ impl Tui {
         let answer = tty::background();
         let paint = Paint::with_theme(
             true,
-            Arc::new(following_terminal(&core.config.theme, answer.bg)),
+            Arc::new(following_terminal(&core.config.theme, answer.bg, answer.fg)),
         )
         .with_background(answer.bg)
         .with_foreground(answer.fg);

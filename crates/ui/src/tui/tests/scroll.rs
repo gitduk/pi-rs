@@ -325,22 +325,22 @@ fn a_stream_after_tools_keeps_its_scrolled_position_when_it_lands() {
 fn a_configured_band_outlives_the_terminals() {
     let bg = Some((13, 17, 23));
     let mut theme = Theme::default();
-    let derived = following_terminal(&theme, bg);
+    let derived = following_terminal(&theme, bg, None);
     assert_ne!(derived.prompt.panel.input, theme.prompt.panel.input);
     assert_eq!(
-        following_terminal(&theme, None),
+        following_terminal(&theme, None, None),
         theme,
         "no answer, no lift"
     );
 
     theme.prompt.panel.said = Color::Rgb(1, 2, 3);
-    let mixed = following_terminal(&theme, bg);
+    let mixed = following_terminal(&theme, bg, None);
     assert_eq!(mixed.prompt.panel.said, Color::Rgb(1, 2, 3));
     assert_ne!(mixed.prompt.panel.input, theme.prompt.panel.input);
 }
 
 #[test]
-fn the_editor_and_submitted_text_paint_the_same_background() {
+fn the_editor_and_submitted_text_paint_their_own_backgrounds() {
     use ratatui::style::Color as RColor;
     use std::sync::Arc;
 
@@ -353,10 +353,22 @@ fn the_editor_and_submitted_text_paint_the_same_background() {
     ] {
         let mut ui = test_ui(24, 16);
         let mut view = View::default();
-        let theme = following_terminal(&Theme::default(), bg);
-        let expected = ui.paint.band(&theme.prompt.panel.said).unwrap().bg.unwrap();
+        let theme = following_terminal(&Theme::default(), bg, None);
+        let history_bg = ui.paint.band(&theme.prompt.panel.said).unwrap().bg.unwrap();
+        let editor_bg = ui
+            .paint
+            .band(&theme.prompt.panel.input)
+            .unwrap()
+            .bg
+            .unwrap();
         if bg.is_none() {
-            assert_eq!(expected, RColor::Rgb(30, 30, 30));
+            assert_eq!(history_bg, RColor::Rgb(30, 30, 30));
+            assert_eq!(editor_bg, history_bg);
+        } else {
+            assert_ne!(
+                editor_bg, history_bg,
+                "known backgrounds distinguish the two fills"
+            );
         }
         let text = "same text wraps across several rows\nsecond line";
         ui.editor.insert_str(text);
@@ -369,13 +381,13 @@ fn the_editor_and_submitted_text_paint_the_same_background() {
         for y in ui.regions.history.y..ui.regions.history.bottom() {
             if !ui.drawn[y as usize].is_empty() {
                 for x in 0..ui.regions.history.width {
-                    assert_eq!(buffer[(x, y)].bg, expected, "history {bg:?} at {x},{y}");
+                    assert_eq!(buffer[(x, y)].bg, history_bg, "history {bg:?} at {x},{y}");
                 }
             }
         }
         for y in ui.regions.editor.y..ui.regions.editor.bottom() {
             for x in 0..ui.regions.editor.width {
-                assert_eq!(buffer[(x, y)].bg, expected, "editor {bg:?} at {x},{y}");
+                assert_eq!(buffer[(x, y)].bg, editor_bg, "editor {bg:?} at {x},{y}");
             }
         }
     }

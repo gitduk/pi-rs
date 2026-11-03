@@ -414,7 +414,7 @@ impl Ui {
         self.choices = core.choices();
         // The theme takes the view it was painted into — the opening block is
         // painted in it — and every copy takes the terminal's band.
-        let theme = crate::theme::following_terminal(&core.config.theme, self.tty_bg);
+        let theme = crate::theme::following_terminal(&core.config.theme, self.tty_bg, self.tty_fg);
         if self.paint.theme.as_ref() != &theme {
             self.set_theme(view, core.lane().resolved(), Arc::new(theme));
         }
