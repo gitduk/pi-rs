@@ -119,7 +119,7 @@ impl Tui {
                     && !self.core.lane().is_running()
                     && let Some(said) = self.drivers.unstarted(request)
                 {
-                    self.say_of(self.core.current, super::by_pi(&said));
+                    self.say_notice_of(self.core.current, &said);
                 }
             }
             Action::Quit => {
@@ -128,7 +128,7 @@ impl Tui {
             }
         }
         if !starts_turn && let Some(said) = self.drivers.unstarted(request) {
-            self.say_of(self.core.current, super::by_pi(&said));
+            self.say_notice_of(self.core.current, &said);
         }
         false
     }
@@ -260,7 +260,7 @@ impl Tui {
                 if at == self.core.current {
                     self.land_notice(text);
                 } else if !text.is_empty() {
-                    self.say_of(at, super::by_pi(&text));
+                    self.say_notice_of(at, &text);
                 }
             }
             Output::Listing(rows) => {

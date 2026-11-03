@@ -79,8 +79,8 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
             }
             // Not content: it is the record that produced this call.
             Entry::Compaction { .. } => {}
-            // Not content either, and never was: the screen alone reads it.
-            Entry::Screen { .. } => {}
+            // Reports retained for the user carry no model context.
+            Entry::Plain { .. } | Entry::Notice { .. } | Entry::Tally { .. } => {}
         }
     }
 

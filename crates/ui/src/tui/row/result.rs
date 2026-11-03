@@ -26,7 +26,12 @@ pub(super) struct ToolOut {
     hovered: bool,
     // Caches the last clip, keyed by width: painting the whole result
     // per row made redraws quadratic in the diff's size.
-    painted: RefCell<Option<(usize, Vec<Line<'static>>)>>,
+    painted: RefCell<Option<Painted>>,
+}
+
+struct Painted {
+    width: usize,
+    rows: Vec<(Line<'static>, Option<Line<'static>>)>,
 }
 
 impl ToolOut {
@@ -56,16 +61,21 @@ impl ToolOut {
         }
     }
 
-    pub(super) fn line(&self, i: usize, paint: &Paint, width: usize) -> Line<'static> {
+    pub(super) fn line(
+        &self,
+        i: usize,
+        paint: &Paint,
+        width: usize,
+    ) -> (Line<'static>, Option<Line<'static>>) {
         let mut painted = self.painted.borrow_mut();
         let rows = match &mut *painted {
-            Some((w, rows)) if *w == width => rows,
+            Some(painted) if painted.width == width => &mut painted.rows,
             slot => {
                 let mut finished = self.finished();
                 if !self.expanded {
                     finished.preview = self.preview.lines().next().unwrap_or_default();
                 }
-                let mut rows = render::result_rows(
+                let mut rows = render::result_parts(
                     &finished,
                     render::Shown::Open,
                     self.hovered,
@@ -74,7 +84,7 @@ impl ToolOut {
                 );
                 // The viewport owns the footer.
                 rows.truncate(self.len());
-                &mut slot.insert((width, rows)).1
+                &mut slot.insert(Painted { width, rows }).rows
             }
         };
         rows.get(i).cloned().unwrap_or_default()
@@ -100,6 +110,12 @@ impl ToolOut {
 }
 
 impl Fold for ToolOut {
+    fn more_border(&self, _heading: usize, paint: &Paint, width: usize) -> Option<Line<'static>> {
+        self.line(usize::from(self.preview_lines > 1), paint, width)
+            .1
+            .map(|first| render::Prefix::hanging(first).rest)
+    }
+
     fn is_open(&self) -> bool {
         self.expanded
     }
@@ -132,14 +148,16 @@ impl Fold for ToolOut {
 
     // The whole preview, uncut: a page wraps what the row would clip.
     fn opened(&self, _i: usize, paint: &Paint) -> Option<Opened> {
-        let rows = render::result_rows(
+        let rows = render::result_parts(
             &self.finished(),
             render::Shown::Page,
             false,
             paint,
             usize::MAX,
         );
-        let rows = rows.into_iter().map(|row| (PageLine::from(row), None));
+        let rows = rows
+            .into_iter()
+            .map(|(line, border)| (PageLine::from(line), border));
         Some(rows.collect::<Opened>()).filter(|rows| !rows.is_empty())
     }
 }

@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use agent::session::Entry as LogEntry;
 use llm::message::{AssistantContent, ReasoningContent};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 
 use super::call::push_tool_row;
 use super::row::{Row, Step};
@@ -332,16 +332,10 @@ impl screen::Piece for Piece<'_> {
                 width,
                 separator,
             } => {
+                let continuation = row.continuation(line, paint, width);
                 let (line, border) = row.line(line, paint, width);
-                let continuation = row.continuation();
-                let mut pieces =
+                let pieces =
                     screen::wrap_continued(border.as_ref(), continuation.as_ref(), &line, width);
-                if let Some(border) = border.as_ref().filter(|b| row.hangs() && width > b.width()) {
-                    let (lead, blank) = (border.spans.len(), " ".repeat(border.width()));
-                    for piece in pieces.iter_mut().skip(1) {
-                        piece.spans.splice(..lead, [Span::raw(blank.clone())]);
-                    }
-                }
                 // After the wrap, so every screen row a said line spans gets
                 // the band whole and the padding never wraps a row of its own.
                 let mut pieces = match row.band(paint) {
@@ -668,12 +662,9 @@ pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
         // Machine prose, not the user's line: muted, under the note mark
         // rather than the prompt sigil.
         LogEntry::Note { note, .. } => Some(Row::note_lines(note)),
-        // Screen-only rows — a tally line, a turn warning — as plain notices,
-        // so the rebuild reuses the text the surface already worded.
-        LogEntry::Screen { text, tally, .. } => Some(match tally {
-            true => Row::tally_lines(text, paint),
-            false => Row::notice_lines(text, paint),
-        }),
+        LogEntry::Plain { text, .. } => Some(Row::notice_lines(text, paint)),
+        LogEntry::Notice { text, .. } => Some(Row::report_lines(text, paint)),
+        LogEntry::Tally { text, .. } => Some(Row::tally_lines(text, paint)),
         LogEntry::Tool {
             result: r,
             preview,

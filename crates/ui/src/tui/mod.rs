@@ -22,7 +22,6 @@ mod select;
 mod selection;
 mod slash;
 mod stream;
-use stream::by_pi;
 mod term;
 mod ui;
 mod view;
@@ -271,7 +270,7 @@ impl Tui {
     fn restarted(&mut self, line: &str) {
         let lane = self.core.lane_mut();
         let view = view::opened(&mut self.views, lane, &self.ui.paint);
-        self.ui.say_kept(lane, view, &by_pi(line));
+        self.ui.say_notice_kept(lane, view, line);
     }
 
     // A surface on an in-memory screen, for tests driving the loop's
@@ -571,8 +570,13 @@ impl Tui {
             }
             Said::Transcript(line) => self
                 .ui
-                .say(front_view(&mut self.views, self.core.lane()), by_pi(&line)),
+                .say_notice(front_view(&mut self.views, self.core.lane()), &line),
         }
+    }
+
+    fn say_notice_of(&mut self, lane: usize, text: &str) {
+        let view = view::opened(&mut self.views, &self.core.lanes[lane], &self.ui.paint);
+        self.ui.say_notice(view, text);
     }
 
     // The one gate every input passes, so two ways of asking the same
@@ -697,7 +701,7 @@ impl Tui {
             let core = &self.core;
             for said in self.drivers.retain(|t| core.position_of(t).is_some()) {
                 self.ui
-                    .say(front_view(&mut self.views, self.core.lane()), by_pi(&said));
+                    .say_notice(front_view(&mut self.views, self.core.lane()), &said);
             }
             // What changed on disk is taken up within a second: settings
             // resolve the lane again, a skill's word starts to answer. Not on

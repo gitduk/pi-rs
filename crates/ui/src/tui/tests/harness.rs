@@ -55,7 +55,14 @@ pub(super) fn frame(
 ) -> Vec<String> {
     let lines = content.iter().enumerate().map(|(n, s)| {
         let line = Line::from(s.clone());
-        (screen::Ready { line, width: 80 }, n)
+        (
+            screen::Ready {
+                line,
+                width: 80,
+                prefix: None,
+            },
+            n,
+        )
     });
     let at = top.map(|t| (move |n: &usize| n.cmp(&t), 0));
     let (rows, s) = screen::window_tagged(lines, room, *scroll, at, usize::MAX);

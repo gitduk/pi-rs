@@ -134,8 +134,21 @@ impl Transcript {
 }
 
 enum Held {
-    Screen { text: String, tally: bool },
+    Plain(String),
+    Notice(String),
+    Tally(String),
     Note(String),
+}
+
+impl Held {
+    fn file(self, session: &mut Session) -> EntryId {
+        match self {
+            Self::Plain(text) => session.push_plain(text),
+            Self::Notice(text) => session.push_notice(text),
+            Self::Tally(text) => session.push_tally(text),
+            Self::Note(text) => session.push_note(text),
+        }
+    }
 }
 
 /// The notes filed while a run has the transcript, for that run to take
@@ -648,11 +661,7 @@ impl Lane {
         let held = std::mem::take(&mut *held.lock().unwrap());
         for held in held {
             self.talk.filed = true;
-            match held {
-                Held::Screen { text, tally: true } => session.push_tally(text),
-                Held::Screen { text, tally: false } => session.push_screen(text),
-                Held::Note(text) => session.push_note(text),
-            };
+            held.file(&mut session);
         }
         self.talk.transcript = Transcript::Home(session);
     }
@@ -680,49 +689,37 @@ impl Lane {
     /// A line pi filed rather than the model: a command's note, read back
     /// with the rest of the transcript; held when a run has the transcript.
     ///
-    /// Returns the id as `push_screen` does; `None` for a held note.
+    /// Returns the id as `push_plain` does; `None` for a held note.
     pub fn push_note(&mut self, note: &str) -> Option<EntryId> {
-        match &mut self.talk.transcript {
-            Transcript::Home(session) => {
-                self.talk.filed = true;
-                Some(session.push_note(note))
-            }
-            Transcript::Lent(held) => {
-                held.lock().unwrap().push(Held::Note(note.to_string()));
-                None
-            }
-        }
+        self.file(Held::Note(note.to_string()))
     }
 
-    /// A row for this lane's screen and nothing else, filed so a rebuild
-    /// from the transcript draws it too; held when a run has the transcript.
+    /// Plain text retained for the user, held when a run owns the transcript.
     ///
     /// Returns the id so a surface can tell it from what it has yet to show;
     /// `None` for a held row, filed later.
-    pub fn push_screen(&mut self, text: &str) -> Option<EntryId> {
-        self.screen(text, false)
+    pub fn push_plain(&mut self, text: &str) -> Option<EntryId> {
+        self.file(Held::Plain(text.to_string()))
     }
 
-    /// `push_screen` for a run's own figures, which are drawn as figures
-    /// rather than as the prose a warning is.
+    /// Keeps an agent report for the user without presentation markup.
+    pub fn push_notice(&mut self, text: &str) -> Option<EntryId> {
+        self.file(Held::Notice(text.to_string()))
+    }
+
+    /// Keeps a run's figures separately from plain text and reports.
     pub fn push_tally(&mut self, text: &str) -> Option<EntryId> {
-        self.screen(text, true)
+        self.file(Held::Tally(text.to_string()))
     }
 
-    fn screen(&mut self, text: &str, tally: bool) -> Option<EntryId> {
+    fn file(&mut self, entry: Held) -> Option<EntryId> {
         match &mut self.talk.transcript {
             Transcript::Home(session) => {
                 self.talk.filed = true;
-                Some(match tally {
-                    true => session.push_tally(text),
-                    false => session.push_screen(text),
-                })
+                Some(entry.file(session))
             }
             Transcript::Lent(held) => {
-                held.lock().unwrap().push(Held::Screen {
-                    text: text.to_string(),
-                    tally,
-                });
+                held.lock().unwrap().push(entry);
                 None
             }
         }
@@ -1224,7 +1221,7 @@ mod tests {
         );
         let session = core.lane_mut().take_session().unwrap();
         let notes = core.lane().notes().unwrap();
-        core.lane_mut().push_screen("a row");
+        core.lane_mut().push_plain("a row");
         core.lane_mut().push_note("taken");
         core.lane_mut().push_note("left");
         assert_eq!(notes.take().as_deref(), Some("taken"));
@@ -1232,7 +1229,7 @@ mod tests {
         let filed: Vec<_> = (core.lane().session().unwrap().entries().iter())
             .filter_map(|e| match e {
                 agent::session::Entry::Note { note, .. } => Some(note.as_str()),
-                agent::session::Entry::Screen { text, .. } => Some(text.as_str()),
+                agent::session::Entry::Plain { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect();
@@ -1437,37 +1434,37 @@ mod tests {
         );
     }
 
-    // Screen rows filed while a run holds the transcript wait rather than
-    // drop — a rebuild reads only the transcript; `/resume` would lose them.
+    // Reports must survive while a run owns the transcript.
     #[test]
     fn a_row_filed_while_a_run_holds_the_transcript_lands_with_it() {
         let mut lane = a_lane("s");
-        // A lane with a transcript at all: the test lane is built for
-        // `/settings` and carries none.
+        // Test lanes start without a transcript.
         lane.return_session(agent::session::Session::default());
         let held = lane.take_session().expect("the run has it");
 
         lane.push_tally("3s · 1.2k/340 · $0.01");
-        lane.push_screen("! the reply came back short");
-        lane.push_screen("! settled");
+        lane.push_plain("! the reply came back short");
+        lane.push_notice("settled");
         lane.return_session(held);
 
-        let filed: Vec<(&str, bool)> = lane
+        let filed: Vec<_> = lane
             .session()
             .expect("the run gave it back")
             .entries()
             .iter()
             .filter_map(|e| match e {
-                agent::session::Entry::Screen { text, tally, .. } => Some((text.as_str(), *tally)),
+                agent::session::Entry::Tally { text, .. } => Some((text.as_str(), "tally")),
+                agent::session::Entry::Plain { text, .. } => Some((text.as_str(), "plain")),
+                agent::session::Entry::Notice { text, .. } => Some((text.as_str(), "notice")),
                 _ => None,
             })
             .collect();
         assert_eq!(
             filed,
             [
-                ("3s · 1.2k/340 · $0.01", true),
-                ("! the reply came back short", false),
-                ("! settled", false)
+                ("3s · 1.2k/340 · $0.01", "tally"),
+                ("! the reply came back short", "plain"),
+                ("settled", "notice")
             ],
             "in the order they were drawn, each still knowing what it is"
         );

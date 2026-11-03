@@ -18,6 +18,7 @@ mod diff;
 
 use crate::markdown::FENCE;
 use crate::sgr::{band_to_ratatui, style_to_ratatui};
+#[cfg(test)]
 use diff::rows as sketch_rows;
 use pi_store::icons;
 use pi_store::text::{RESET, clip};
@@ -386,7 +387,7 @@ pub struct Rendered {
 
 /// Equal-width first and continuation prefixes keep list markers on the first
 /// screen row and quote rules on every screen row.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Prefix {
     pub first: Line<'static>,
     pub rest: Line<'static>,
@@ -395,6 +396,15 @@ pub struct Prefix {
 }
 
 impl Prefix {
+    /// A marker occupies its own column and leaves an equal-width continuation margin.
+    pub(crate) fn hanging(first: Line<'static>) -> Self {
+        Self {
+            rest: Line::from(" ".repeat(first.width())),
+            first,
+            rule: false,
+        }
+    }
+
     pub fn fit_body(&self, mut line: Line<'static>, width: usize) -> Line<'static> {
         if self.rule {
             let room = width
@@ -588,6 +598,25 @@ pub fn result_rows(
     p: &Paint,
     width: usize,
 ) -> Vec<ratatui::text::Line<'static>> {
+    result_parts(call, shown, hovered, p, width)
+        .into_iter()
+        .map(|(line, border)| {
+            let mut spans = border.map_or_else(Vec::new, |b| b.spans);
+            spans.extend(line.spans);
+            Line::from(spans).style(line.style)
+        })
+        .collect()
+}
+
+pub(crate) const RESULT_INDENT: &str = "  ";
+
+pub(crate) fn result_parts(
+    call: &Finished,
+    shown: Shown,
+    hovered: bool,
+    p: &Paint,
+    width: usize,
+) -> Vec<(Line<'static>, Option<Line<'static>>)> {
     let room = result_room(width);
     let (mark_style, mark) = (
         outcome_style(call.outcome, &p.theme),
@@ -598,17 +627,17 @@ pub fn result_rows(
     // are kept whole, the command gives way to them.
     let placed = placed(call.place) + &ran_for(call.took);
     let fits = title_room(room, Line::raw(format!("{}  ", call.name)).width(), &placed);
-    let mut spans = vec![p.span(mark_style, mark), Span::raw(" ")];
-    spans.extend(p.tool_call(
+    let border = Line::from(vec![p.span(mark_style, mark), Span::raw(" ")]);
+    let mut spans = p.tool_call(
         call.name,
         &format!("{} {}", call.name, clip(head, fits)),
         hovered,
-    ));
+    );
     spans.push(p.span_hovered(hovered, &p.theme.muted, placed));
-    let mut out = vec![Line::from(spans)];
+    let mut out = vec![(Line::from(spans), Some(border))];
     let diff_lines: Vec<&str> = rest.lines().collect();
     let (rows, footer) = sketched(&diff_lines, shown);
-    let mut sketch = sketch_rows(
+    let mut sketch = diff::content(
         rows,
         head.rsplit_once(" +").map_or(head, |(path, _)| path),
         p,
@@ -623,8 +652,17 @@ pub fn result_rows(
             }
         }
     }
-    out.extend(sketch);
-    out.extend(footer.map(|text| Line::from(p.action_hint(hovered, text))));
+    out.extend(
+        sketch
+            .into_iter()
+            .map(|line| (line, Some(Line::from(RESULT_INDENT)))),
+    );
+    out.extend(footer.map(|text| {
+        (
+            Line::from(p.action_hint(hovered, text.trim_start())),
+            Some(Line::from(RESULT_INDENT)),
+        )
+    }));
     out
 }
 

@@ -256,17 +256,23 @@ pub enum Entry {
         at: u64,
         record: Compaction,
     },
-    // A row the screen shows and the model never reads: a tally line, a
-    // turn warning. Kept so a rebuild draws the same screen the live path did.
-    Screen {
+    /// Plain text retained for the user and excluded from model input.
+    Plain {
         id: EntryId,
         at: u64,
         text: String,
-        /// The run's own tally rather than prose about it. Recorded by
-        /// whoever wrote the line, because only the writer knows which it
-        /// is; a reader left to guess from the text gets prose wrong.
-        #[serde(default)]
-        tally: bool,
+    },
+    /// An agent report intended for the user, without presentation markup.
+    Notice {
+        id: EntryId,
+        at: u64,
+        text: String,
+    },
+    /// Usage and elapsed-time figures for a run, excluded from model input.
+    Tally {
+        id: EntryId,
+        at: u64,
+        text: String,
     },
 }
 
@@ -279,7 +285,9 @@ impl Entry {
             | Entry::Tool { id, .. }
             | Entry::Note { id, .. }
             | Entry::Compaction { id, .. }
-            | Entry::Screen { id, .. } => *id,
+            | Entry::Plain { id, .. }
+            | Entry::Notice { id, .. }
+            | Entry::Tally { id, .. } => *id,
         }
     }
 
@@ -291,7 +299,9 @@ impl Entry {
             | Entry::Tool { at, .. }
             | Entry::Note { at, .. }
             | Entry::Compaction { at, .. }
-            | Entry::Screen { at, .. } => *at,
+            | Entry::Plain { at, .. }
+            | Entry::Notice { at, .. }
+            | Entry::Tally { at, .. } => *at,
         }
     }
 
@@ -304,7 +314,9 @@ impl Entry {
             Entry::Tool { .. }
             | Entry::Note { .. }
             | Entry::Compaction { .. }
-            | Entry::Screen { .. } => Author::Agent,
+            | Entry::Plain { .. }
+            | Entry::Notice { .. }
+            | Entry::Tally { .. } => Author::Agent,
         }
     }
 
@@ -497,10 +509,12 @@ pub fn is_stopped_call(r: &ToolResult) -> bool {
 const STOPPED_UNKNOWN: &str = "The previous run ended before it finished. The cause is unknown. \
      Its request remains unresolved. Act on the message below.";
 
-// What the model reads. Everything else in the list is there for a view: the
-// record of a compaction pass, and a row only the screen ever knew.
+// Compaction records and messages retained for the user stay out of model input.
 fn is_content(entry: &Entry) -> bool {
-    !matches!(entry, Entry::Compaction { .. } | Entry::Screen { .. })
+    !matches!(
+        entry,
+        Entry::Compaction { .. } | Entry::Plain { .. } | Entry::Notice { .. } | Entry::Tally { .. }
+    )
 }
 
 fn stopped_note(err: Option<&str>) -> String {
@@ -629,27 +643,35 @@ impl Session {
         id
     }
 
-    /// A line shown to the user alone: a run's tally, a warning about the
-    /// turn. Never content on the wire — the model is told what it needs in
-    /// prose it can act on, and a tally is not that. Kept so a rebuilt
-    /// session shows what the live one showed.
-    pub fn push_screen(&mut self, text: impl Into<String>) -> EntryId {
-        self.screen(text, false)
-    }
-
-    /// A run's own figures, kept as `push_screen` keeps a warning, and marked
-    /// as the tally it is.
-    pub fn push_tally(&mut self, text: impl Into<String>) -> EntryId {
-        self.screen(text, true)
-    }
-
-    fn screen(&mut self, text: impl Into<String>, tally: bool) -> EntryId {
+    /// Plain text retained for the user and excluded from model input.
+    pub fn push_plain(&mut self, text: impl Into<String>) -> EntryId {
         let (id, at) = self.mint();
-        self.entries.push(Entry::Screen {
+        self.entries.push(Entry::Plain {
             id,
             at,
             text: text.into(),
-            tally,
+        });
+        id
+    }
+
+    /// An agent report for the user, kept as unformatted text.
+    pub fn push_notice(&mut self, text: impl Into<String>) -> EntryId {
+        let (id, at) = self.mint();
+        self.entries.push(Entry::Notice {
+            id,
+            at,
+            text: text.into(),
+        });
+        id
+    }
+
+    /// A run's figures, recorded separately from plain text and agent reports.
+    pub fn push_tally(&mut self, text: impl Into<String>) -> EntryId {
+        let (id, at) = self.mint();
+        self.entries.push(Entry::Tally {
+            id,
+            at,
+            text: text.into(),
         });
         id
     }
@@ -1458,16 +1480,21 @@ mod tests {
     fn a_screen_row_is_kept_and_never_read() {
         let mut s = Session::new();
         s.prompt("go");
-        let id = s.push_screen("12s · 1.2k/340 · $0.0123");
-
-        assert!(
-            s.entries().iter().any(|e| e.id() == id),
-            "the row is part of what happened"
-        );
-        assert!(
-            !s.view().iter().any(|seen| seen.id() == id),
-            "and not part of what the model is told"
-        );
+        let ids = [
+            s.push_plain("plain text"),
+            s.push_notice("report\nnext paragraph"),
+            s.push_tally("12s · 1.2k/340 · $0.0123"),
+        ];
+        for id in ids {
+            assert!(
+                s.entries().iter().any(|e| e.id() == id),
+                "the row is part of what happened"
+            );
+            assert!(
+                !s.view().iter().any(|seen| seen.id() == id),
+                "user-only records must not enter model input"
+            );
+        }
         // And it travels with the archive, so a rebuild after a resume has it.
         let json = serde_json::to_string(&s).unwrap();
         let back: Session = serde_json::from_str(&json).unwrap();

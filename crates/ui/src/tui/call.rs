@@ -80,7 +80,12 @@ impl RunTool {
 
 // The call's line in the live block: mark, text, elapsed time. Mark leads,
 // matching the row this call lands as once folded.
-pub(super) fn pending_line(now: Instant, tick: usize, t: &RunTool, paint: &Paint) -> Line<'static> {
+pub(super) fn pending_line(
+    now: Instant,
+    tick: usize,
+    t: &RunTool,
+    paint: &Paint,
+) -> (Line<'static>, Line<'static>) {
     let stage = t.stage();
     let named = named(&t.name, &t.summary);
     let (mark, out) = match &t.run {
@@ -92,13 +97,13 @@ pub(super) fn pending_line(now: Instant, tick: usize, t: &RunTool, paint: &Paint
             row::out_for(stage.progress(), t.out_secs(now)),
         ),
     };
-    let mut spans = vec![paint.span(&paint.theme.muted, format!("{} ", mark.glyph()))];
-    spans.extend(paint.tool_call(&t.name, &named, false));
+    let border = Line::from(paint.span(&paint.theme.muted, format!("{} ", mark.glyph())));
+    let mut spans = paint.tool_call(&t.name, &named, false);
     spans.push(paint.span(
         &paint.theme.muted,
         crate::render::placed(t.place.as_deref()) + &out,
     ));
-    Line::from(spans)
+    (Line::from(spans), border)
 }
 
 // Foldable calls, shown from when they are queued so the row doesn't jump
@@ -178,22 +183,37 @@ fn background_head(
     hovered: bool,
     paint: &Paint,
 ) -> Vec<Span<'static>> {
+    let (body, border) = background_parts(execution, head, hovered, paint);
+    let mut spans = border.map_or_else(Vec::new, |border| border.spans);
+    spans.extend(body.spans);
+    spans
+}
+
+fn background_parts(
+    execution: &BackgroundCommand,
+    head: &str,
+    hovered: bool,
+    paint: &Paint,
+) -> (Line<'static>, Option<Line<'static>>) {
     let id = format!("#{} ", execution.id);
     let Some(rest) = head.strip_prefix(&id) else {
-        return vec![paint.span_hovered(hovered, &paint.theme.muted, head)];
+        return (
+            Line::from(paint.span_hovered(hovered, &paint.theme.muted, head)),
+            None,
+        );
     };
     let title = execution.invocation.title();
     let (description, progress) = match rest.strip_prefix(title.as_ref()) {
         Some(progress) => (title.as_ref(), progress),
         None => (rest, ""),
     };
-    let mut spans = vec![paint.span_hovered(hovered, &paint.theme.muted, id)];
-    spans.extend(match execution.invocation.as_ref() {
+    let border = Line::from(paint.span_hovered(hovered, &paint.theme.muted, id));
+    let mut spans = match execution.invocation.as_ref() {
         Invocation::Shell { .. } => paint.shell(description, hovered),
         Invocation::Tool { name, .. } => paint.tool_call(name, description, hovered),
-    });
+    };
     spans.push(paint.span_hovered(hovered, &paint.theme.muted, progress));
-    spans
+    (Line::from(spans), Some(border))
 }
 
 // Under an open execution: the last this many rows of what it printed.
@@ -247,11 +267,14 @@ pub(super) fn background_page(
     paint: &Paint,
 ) -> Vec<PageLine> {
     let (head, tail) = background_text(execution);
-    let mut spans = background_head(execution, &head, false, paint);
-    spans.push(paint.span(&paint.theme.muted, tail));
-    let head = Line::from(spans);
+    let (mut head, border) = background_parts(execution, &head, false, paint);
+    head.spans.push(paint.span(&paint.theme.muted, tail));
+    let mut head = PageLine::from(head);
+    if let Some(border) = border {
+        head.prepend(crate::render::Prefix::hanging(border));
+    }
     let said = said(body).into_iter().map(|l| Line::from(l).into());
-    std::iter::once(head.into()).chain(said).collect()
+    std::iter::once(head).chain(said).collect()
 }
 
 // Finished executions can accumulate while a turn holds their delivery.
@@ -350,11 +373,17 @@ pub(super) fn background_lines(
         let shine = hovered == Some(CommandRow::BackgroundCommand(execution.id));
         let rows = if let Some(OpenCommand { body, .. }) = open.filter(|o| o.id == execution.id) {
             let (head, tail) = background_text(execution);
-            let mut spans = background_head(execution, &head, shine, paint);
-            spans.push(paint.span_hovered(shine, &paint.theme.muted, tail));
-            let row = Line::from(spans);
+            let (mut row, border) = background_parts(execution, &head, shine, paint);
+            row.spans
+                .push(paint.span_hovered(shine, &paint.theme.muted, tail));
+            let prefix = border.map(crate::render::Prefix::hanging);
             let (from, tail) = tail_rows(&said(body), room);
-            let mut rows = super::screen::fit(&row, room);
+            let mut rows = super::screen::wrap_continued(
+                prefix.as_ref().map(|p| &p.first),
+                prefix.as_ref().map(|p| &p.rest),
+                &row,
+                room,
+            );
             ids.extend(std::iter::repeat_n(
                 CommandRow::BackgroundCommand(execution.id),
                 rows.len(),

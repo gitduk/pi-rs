@@ -59,7 +59,7 @@ fn source_text(text: &str) -> String {
         .collect()
 }
 
-pub(super) fn rows(
+pub(super) fn content(
     text: &[&str],
     path: &str,
     p: &Paint,
@@ -68,10 +68,7 @@ pub(super) fn rows(
 ) -> Vec<Line<'static>> {
     let text: Vec<_> = text.iter().map(|line| source_text(line)).collect();
     if !p.color {
-        return text
-            .iter()
-            .map(|row| Line::from(format!("  {}", clip(row, room))))
-            .collect();
+        return text.iter().map(|row| Line::from(clip(row, room))).collect();
     }
     let mut rows: Vec<_> = text.iter().map(|text| Row::parse(text)).collect();
     if emphasize_changes {
@@ -82,6 +79,24 @@ pub(super) fn rows(
         .map(|row| {
             let tokens = streams.line(row.source, path, p.theme.syntax);
             draw(row, tokens, p, room)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+pub(super) fn rows(
+    text: &[&str],
+    path: &str,
+    p: &Paint,
+    room: usize,
+    emphasize_changes: bool,
+) -> Vec<Line<'static>> {
+    content(text, path, p, room, emphasize_changes)
+        .into_iter()
+        .map(|line| {
+            let mut spans = vec![Span::raw(super::RESULT_INDENT)];
+            spans.extend(line.spans);
+            Line::from(spans).style(line.style)
         })
         .collect()
 }
@@ -158,7 +173,7 @@ fn draw(row: &Row<'_>, tokens: Vec<Span<'static>>, p: &Paint, room: usize) -> Li
     let visible = clip(row.text, room);
     let muted = super::style_to_ratatui(&p.theme.muted);
     let Some(source) = row.source else {
-        return Line::from(vec![Span::raw("  "), Span::styled(visible, muted)]);
+        return Line::from(vec![Span::styled(visible, muted)]);
     };
     let base = match source.mark {
         '+' | '-' => Style::new().bg(background(source.mark == '+', false, p)),
@@ -170,10 +185,7 @@ fn draw(row: &Row<'_>, tokens: Vec<Span<'static>>, p: &Paint, room: usize) -> Li
         _ => muted,
     };
     if !visible.starts_with(source.head) {
-        return Line::from(vec![
-            Span::raw("  "),
-            Span::styled(visible, base.patch(marker)),
-        ]);
+        return Line::from(vec![Span::styled(visible, base.patch(marker))]);
     }
     let body = &visible[source.head.len()..];
     let cut = visible != row.text;
@@ -184,10 +196,7 @@ fn draw(row: &Row<'_>, tokens: Vec<Span<'static>>, p: &Paint, room: usize) -> Li
     } else {
         body.len()
     };
-    let mut spans = vec![
-        Span::raw("  "),
-        Span::styled(source.head.to_string(), marker),
-    ];
+    let mut spans = vec![Span::styled(source.head.to_string(), marker)];
     spans.extend(body_spans(
         tokens,
         end,
@@ -197,7 +206,7 @@ fn draw(row: &Row<'_>, tokens: Vec<Span<'static>>, p: &Paint, room: usize) -> Li
     if cut {
         spans.push(Span::raw("…"));
     }
-    for span in spans.iter_mut().skip(1) {
+    for span in &mut spans {
         span.style = base.patch(span.style);
     }
     Line::from(spans)

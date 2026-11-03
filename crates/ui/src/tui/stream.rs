@@ -11,19 +11,8 @@ use crate::status;
 use agent::Event;
 use agent::session::Entry as LogEntry;
 use pi_core::core::lane::Lane;
-use pi_store::icons;
 use ratatui::text::{Line, Text};
 use std::time::{Duration, Instant};
-
-// `text` as pi's own word: the mark before its first line, that width blank
-// before the rest. In the text, so a kept line redraws with it.
-pub(super) fn by_pi(text: &str) -> String {
-    let (mark, blank) = (icons::bar(icons::PI_MARK), icons::under_bar(icons::PI_MARK));
-    (text.lines().enumerate())
-        .map(|(i, line)| format!("{}{line}", if i == 0 { &mark } else { &blank }))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
 
 impl Ui {
     // Rows the screen alone draws, gone on a rebuild or a tidy: a string
@@ -34,6 +23,15 @@ impl Ui {
             lines
                 .into_iter()
                 .map(|line| Row::aside(line.patch_style(style)))
+                .collect(),
+        );
+    }
+
+    pub(super) fn say_notice(&self, view: &mut View, text: &str) {
+        view.surface.scrollback.append(
+            Row::report_lines(text, &self.paint)
+                .into_iter()
+                .map(Row::into_aside)
                 .collect(),
         );
     }
@@ -160,7 +158,7 @@ impl Ui {
             // it, since it is about that reply and stays true of it.
             Event::Warning(w) => {
                 self.close(view);
-                self.say_kept(lane, view, &by_pi(w));
+                self.say_notice_kept(lane, view, w);
             }
             // State, not rows: the usage line marks it, `/status` says why.
             Event::Refit(_) => {}
@@ -169,7 +167,7 @@ impl Ui {
             Event::Compacted(r) => {
                 self.close(view);
                 let line = pi_core::core::meter::compaction_line(r);
-                self.say_kept(lane, view, &by_pi(&line));
+                self.say_notice_kept(lane, view, &line);
             }
             // A call's events are one line here: queued takes a place in the
             // group or live region, start sets its clock, end settles it,
@@ -236,7 +234,7 @@ impl Ui {
                         until: Instant::now() + Duration::from_millis(*delay_ms),
                     });
                 }
-                self.say(view, self.paint.muted(&by_pi(reason)));
+                self.say_notice(view, reason);
             }
             _ => {
                 self.close(view);
@@ -267,20 +265,17 @@ impl Ui {
             .fold_previous(&mut view.surface.scrollback);
     }
 
-    // `say`, kept in the transcript (an `Entry::Screen`) so a rebuild draws
-    // it too; the tail moves here so a later adopt won't draw it twice.
-    pub(super) fn say_kept(&self, lane: &mut Lane, view: &mut View, line: &str) {
-        let kept = lane.push_screen(line);
-        self.draw_kept(view, Row::notice_lines(line, &self.paint), kept);
+    // Filed here so the next adopt does not draw the same entry twice.
+    pub(super) fn say_notice_kept(&self, lane: &mut Lane, view: &mut View, text: &str) {
+        let kept = lane.push_notice(text);
+        self.draw_kept(view, Row::report_lines(text, &self.paint), kept);
     }
 
-    // `say_kept` for a run's own figures, which are drawn as figures.
     pub(super) fn say_tally(&self, lane: &mut Lane, view: &mut View, line: &str) {
         let kept = lane.push_tally(line);
         self.draw_kept(view, Row::tally_lines(line, &self.paint), kept);
     }
 
-    // `say_kept` as a note, which the model reads before it next speaks.
     pub(super) fn say_note(&self, lane: &mut Lane, view: &mut View, line: &str) {
         let kept = lane.push_note(line);
         self.draw_kept(view, Row::note_lines(line), kept);

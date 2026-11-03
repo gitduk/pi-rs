@@ -131,7 +131,7 @@ impl Ui {
                 .chain(
                     text.iter()
                         .enumerate()
-                        .map(|(n, l)| Laid::of(Spot::Text(n), screen::fit(l, width))),
+                        .map(|(n, l)| Laid::of(Spot::Text(n), screen::Piece::pieces(l.clone()))),
                 )
                 .collect();
             self.search_answer(view, &laid);
@@ -178,7 +178,7 @@ impl Ui {
             input.into_iter().skip(editor_top).take(editor_h).collect();
         let caret_in_view = (caret.0 as usize).saturating_sub(editor_top);
         let hist_view = regions.history.height as usize;
-        let most = self.most(&text, hist_view, width);
+        let most = self.most(&text, hist_view);
         self.search_land(view, &regions);
         if let Some(at) = rewind {
             self.land_at(view, at, &regions);
@@ -194,11 +194,11 @@ impl Ui {
         let bold = lit.filter(|_| self.paint.color);
         let text_stream = text.into_iter().enumerate().map(move |(at, mut line)| {
             if bold == Some(at) {
-                for span in &mut line.spans {
+                for span in &mut line.line.spans {
                     span.style = render::Paint::lit(span.style);
                 }
             }
-            (Piece::Live(screen::Ready { line, width }), Target::Text(at))
+            (Piece::Live(line), Target::Text(at))
         });
         let scrollback = ScrollbackRows::new(&view.surface.scrollback, &self.paint, width)
             .indexed()
@@ -217,6 +217,7 @@ impl Ui {
                 Piece::Live(screen::Ready {
                     line: s.clone(),
                     width,
+                    prefix: None,
                 }),
                 target,
             )
@@ -499,7 +500,7 @@ impl Ui {
                     Target::Scrollback(idx, line)
                         if self.row_of.get(at) == Some(&0)
                             && view.surface.scrollback[*idx]
-                                .has_page(*line, self.screen.width()) =>
+                                .has_more(*line, self.screen.width()) =>
                     {
                         let (text, border) = view.surface.scrollback[*idx].line(
                             *line,
@@ -673,18 +674,20 @@ impl Ui {
     }
 
     // The page's own lines, without what a click on one copies.
-    fn page_lines(&self) -> Vec<Line<'static>> {
-        (self.page().unwrap_or_default().iter())
-            .map(|l| l.line.clone())
+    fn page_lines(&self) -> Vec<screen::Ready<'static>> {
+        self.page()
+            .unwrap_or_default()
+            .iter()
+            .map(|line| line.ready(self.screen.width()))
             .collect()
     }
 
     // How far back the window may go. A page's stops at its head: the
     // transcript under it is only what it was opened over.
-    fn most(&self, text: &[Line], hist_view: usize, width: usize) -> usize {
+    fn most(&self, text: &[screen::Ready<'static>], hist_view: usize) -> usize {
         match self.page() {
             Some(_) => {
-                let rows: usize = text.iter().map(|l| screen::rows(l, width)).sum();
+                let rows: usize = text.iter().map(screen::Piece::height).sum();
                 rows.saturating_sub(hist_view.saturating_sub(1))
             }
             None => usize::MAX,
@@ -737,10 +740,10 @@ impl Ui {
             } else {
                 String::new()
             };
-            let mut line = pending_line(now, self.spinner, t, &self.paint);
+            let (mut line, border) = pending_line(now, self.spinner, t, &self.paint);
             line.spans
                 .push(self.paint.span(&self.paint.theme.muted, extra));
-            pending.push(line);
+            pending.push((line, border));
         }
         let previous = view
             .surface
@@ -751,11 +754,10 @@ impl Ui {
         if !pending.is_empty() && previous.is_some_and(Row::is_prose) {
             rows.push(Line::default());
         }
-        rows.extend(
-            pending
-                .into_iter()
-                .flat_map(|line| screen::fit(&line, width)),
-        );
+        rows.extend(pending.into_iter().flat_map(|(line, border)| {
+            let prefix = render::Prefix::hanging(border);
+            screen::wrap_continued(Some(&prefix.first), Some(&prefix.rest), &line, width)
+        }));
         // The draw tags screen rows by index, and a long summary wraps:
         // count the rows the block takes, not the lines before they did.
         let pending_rows = rows.len();
@@ -814,12 +816,17 @@ impl Ui {
                     && self.status.contains(&pi_store::status::Segment::Elapsed))
             {
                 let line = parts.join(icons::PART_SEP);
-                let mut painted = status::painted(&line, &self.paint);
+                let painted = status::painted(&line, &self.paint);
                 let marker = status::breath_style(self.spinner, self.paint.theme.syntax);
-                painted
-                    .spans
-                    .insert(0, self.paint.span(&marker, format!("{} ", icons::PI_MARK)));
-                rows.extend(screen::fit(&painted, width));
+                let prefix = render::Prefix::hanging(Line::from(
+                    self.paint.span(&marker, format!("{} ", icons::PI_MARK)),
+                ));
+                rows.extend(screen::wrap_continued(
+                    Some(&prefix.first),
+                    Some(&prefix.rest),
+                    &painted,
+                    width,
+                ));
             }
         }
         // Typed lines precede execution results to match delivery priority.
@@ -830,9 +837,14 @@ impl Ui {
             } else {
                 ""
             };
-            let text = format!("{}{first}{more}", icons::bar(mark));
-            let muted = Line::from(self.paint.span(&self.paint.theme.muted, text));
-            screen::fit(&muted, width)
+            let prefix = render::Prefix::hanging(Line::from(
+                self.paint.span(&self.paint.theme.muted, icons::bar(mark)),
+            ));
+            let muted = Line::from(
+                self.paint
+                    .span(&self.paint.theme.muted, format!("{first}{more}")),
+            );
+            screen::wrap_continued(Some(&prefix.first), Some(&prefix.rest), &muted, width)
         };
         rows.extend(
             view.queued

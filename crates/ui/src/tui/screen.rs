@@ -42,20 +42,30 @@ pub trait Piece {
     fn pieces(self) -> Vec<Line<'static>>;
 }
 
-/// A line in hand, sized by wrapping at the width it was built for —
-/// live-block text with no said-row border to repeat.
+/// A line with optional first-row and continuation prefixes, measured at one width.
+#[derive(Clone)]
 pub struct Ready<'a> {
     pub line: Line<'a>,
     pub width: usize,
+    pub prefix: Option<Box<crate::render::Prefix>>,
 }
 
 impl Piece for Ready<'_> {
     fn height(&self) -> usize {
-        rows(&self.line, self.width)
+        wrap_rows(
+            self.prefix.as_ref().map(|p| &p.first),
+            &self.line,
+            self.width,
+        )
     }
 
     fn pieces(self) -> Vec<Line<'static>> {
-        fit(&self.line, self.width)
+        wrap_continued(
+            self.prefix.as_ref().map(|p| &p.first),
+            self.prefix.as_ref().map(|p| &p.rest),
+            &self.line,
+            self.width,
+        )
     }
 }
 
@@ -171,7 +181,16 @@ pub fn window<'a>(
     room: usize,
     scroll: usize,
 ) -> (Vec<Line<'static>>, usize) {
-    let lines = lines.map(move |line| (Ready { line, width }, ()));
+    let lines = lines.map(move |line| {
+        (
+            Ready {
+                line,
+                width,
+                prefix: None,
+            },
+            (),
+        )
+    });
     let none = None::<(fn(&()) -> Ordering, isize)>;
     let (rows, scroll) = window_tagged(lines, room, scroll, none, usize::MAX);
     (rows.into_iter().map(|(r, (), _)| r).collect(), scroll)

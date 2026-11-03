@@ -8,7 +8,6 @@ use ratatui::text::{Line, Span};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
-use super::stream::by_pi;
 use super::term::{Deafened, EXIT_GRACE, external_editor, scratch_file};
 use super::view::{Doing, Work, front_view, tail_of, view_at};
 use super::{NO_TRANSCRIPT, Tui};
@@ -269,7 +268,7 @@ impl Tui {
             && let Some(at) = self.core.position_of(token)
             && let Some(said) = self.drivers.unstarted(request)
         {
-            self.say_of(at, by_pi(&said));
+            self.say_notice_of(at, &said);
         }
     }
 
@@ -344,9 +343,9 @@ impl Tui {
         let (ran, resumed) = self.in_editor(&path).await;
         let unchanged = pi_core::core::resolve::unseed(&path);
         if let Err(e) = resumed {
-            self.say_of(
+            self.say_notice_of(
                 self.core.current,
-                by_pi(&format!("the screen did not come back: {e}")),
+                &format!("the screen did not come back: {e}"),
             );
         }
         let said = match ran {
@@ -430,7 +429,7 @@ impl Tui {
         // in the scrollback, where a flash's going cannot take it.
         if let Some(line) = said {
             if keep {
-                self.say_of(self.core.current, by_pi(&line));
+                self.say_notice_of(self.core.current, &line);
             } else {
                 self.notice(line);
             }
@@ -560,7 +559,7 @@ impl Tui {
         // Last, and outside the split: a rewind rebuilds the whole surface, and
         // a row landed before it would go with the old drawing.
         if let Some(ended) = ended {
-            self.say_of(lane, by_pi(&ended));
+            self.say_notice_of(lane, &ended);
         }
     }
 
@@ -598,21 +597,19 @@ impl Tui {
         match pi_store::session::Store::read(&path) {
             Ok(stored) => {
                 self.core.lanes[lane].return_session(stored.into_session());
-                self.say_of(
+                self.say_notice_of(
                     lane,
-                    by_pi(&format!(
-                        "the {verb} did not finish — back to the transcript as last saved"
-                    )),
+                    &format!("the {verb} did not finish — back to the transcript as last saved"),
                 );
                 true
             }
             Err(why) => {
-                self.say_of(
+                self.say_notice_of(
                     lane,
-                    by_pi(&format!(
+                    &format!(
                         "the {verb} did not finish and its transcript could not be read back \
                          ({why}) — /new or /resume to use this checkout again"
-                    )),
+                    ),
                 );
                 false
             }

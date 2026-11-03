@@ -35,6 +35,14 @@ impl Ui {
 
     // The columns a drawn row's border takes before its text.
     pub(super) fn lead(&self, view: &View, at: usize) -> usize {
+        if let Some(Target::Text(n)) = self.row_targets.get(at) {
+            return self
+                .page()
+                .and_then(|page| page.get(*n))
+                .and_then(|line| line.prefix.as_ref())
+                .filter(|prefix| prefix.first.width() < self.screen.width())
+                .map_or(0, |p| p.first.width());
+        }
         let Some(Target::Scrollback(idx, line)) = self.row_targets.get(at) else {
             return 0;
         };
@@ -43,6 +51,7 @@ impl Ui {
             .scrollback
             .get(*idx)
             .and_then(|r| r.line(*line, &self.paint, width).1)
+            .filter(|border| border.width() < width)
             .map_or(0, |b| b.width())
     }
 
@@ -166,10 +175,16 @@ impl Ui {
         // Excludes the empty rest of the row past the text: the row pointed
         // at, not the line it toggles, which may be narrower.
         let (text, border) = row.line(clicked, &self.paint, width);
-        let start = border.map_or(0, |b| b.width());
-        ((start..start + pi_store::text::width(&screen::plain(&text))).contains(&(col as usize))
-            || on_more)
-            .then_some((idx, line))
+        let lead = border
+            .filter(|b| b.width() < width)
+            .map_or(0, |b| b.width());
+        let start = if below_top == 0 {
+            row.click_start(clicked, &self.paint, width)
+        } else {
+            lead
+        };
+        let end = lead + pi_store::text::width(&screen::plain(&text));
+        ((start..end).contains(&(col as usize)) || on_more).then_some((idx, line))
     }
 
     pub(super) fn on_mouse_move(&mut self, view: &mut View, col: u16, row: u16) {
@@ -381,7 +396,11 @@ impl Ui {
             }
             Target::Text(n) => {
                 let page = self.page()?.get(*n)?;
-                (page.line.clone(), None, page.units.clone())
+                (
+                    page.line.clone(),
+                    page.prefix.as_ref().map(|p| p.first.clone()),
+                    page.units.clone(),
+                )
             }
             _ => return None,
         };
@@ -390,6 +409,7 @@ impl Ui {
         }
         let lead = border
             .as_ref()
+            .filter(|border| border.width() < width)
             .map_or(0, |b| pi_store::text::width(&screen::plain(b)));
         // Read off the rows as laid, tabs as spaces and escapes gone, so the
         // columns counted and the text taken are the same characters.

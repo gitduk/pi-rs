@@ -46,10 +46,16 @@ impl Relayed {
         width: usize,
     ) -> (Line<'static>, Option<Line<'static>>) {
         if i == 0 && !self.open {
-            return (self.head(self.hovered, paint, width), None);
+            let (line, border) = self.head(self.hovered, paint, width);
+            return (line, Some(border));
         }
-        let (page, indent) = self.opened_line(i, self.hovered && i == 0, paint);
-        (page.line, indent)
+        let (mut page, indent) = self.opened_line(i, self.hovered && i == 0, paint);
+        page.prepend(render::Prefix::hanging(indent.unwrap_or_default()));
+        let first = page.prefix.as_ref().map(|p| p.first.clone());
+        if let Some(prefix) = &page.prefix {
+            page.line = prefix.fit_body(page.line, width);
+        }
+        (page.line, first)
     }
 
     // Line `i` opened, whole, as the row draws it and a page reads it: its
@@ -61,7 +67,8 @@ impl Relayed {
         paint: &Paint,
     ) -> (PageLine, Option<Line<'static>>) {
         let Some(j) = i.checked_sub(1) else {
-            return (self.head(hovered, paint, usize::MAX).into(), None);
+            let (line, border) = self.head(hovered, paint, usize::MAX);
+            return (line.into(), Some(border));
         };
         let Some(r) = self.body.get(j) else {
             return (Line::default().into(), Some(Line::from(STEP_INDENT)));
@@ -74,12 +81,13 @@ impl Relayed {
         // Not `PageLine::from`: a code line's indent rides in the border here,
         // so a wrap keeps it.
         let page = PageLine {
-            line: r.full_line(),
+            line: r.line.clone(),
             copies: match &r.coded {
                 render::Coded::Badge(code) => Some(code.clone()),
                 _ => None,
             },
-            units: r.full_units(),
+            units: r.units.clone(),
+            prefix: r.prefix.clone().map(Box::new),
         };
         (page, Some(Line::from(indent)))
     }
@@ -87,7 +95,7 @@ impl Relayed {
     // What in line `i` reads as one; its own line holds nothing such.
     pub(super) fn units(&self, i: usize) -> crate::unit::Units {
         let body = i.checked_sub(1).and_then(|i| self.body.get(i));
-        body.map_or_else(Vec::new, render::Rendered::full_units)
+        body.map_or_else(Vec::new, |row| row.units.clone())
     }
 
     pub(super) fn hover(&mut self, hovered: bool) {
@@ -95,7 +103,7 @@ impl Relayed {
     }
 
     // Its own line: the label, how much opening it shows, when it came in.
-    fn head(&self, hovered: bool, paint: &Paint, width: usize) -> Line<'static> {
+    fn head(&self, hovered: bool, paint: &Paint, width: usize) -> (Line<'static>, Line<'static>) {
         let lines = match self.body.len() {
             0 => String::new(),
             n => format!("{}{}", icons::PART_SEP, count(n, "line")),
@@ -103,17 +111,33 @@ impl Relayed {
         let now = agent::session::now();
         let time = format!("{}{}", icons::PART_SEP, render::clock(self.at, now));
         let tail = format!("{lines}{time}");
-        let text = clip_beside(&self.label, 2, &tail, width);
-        Line::from(vec![
+        let border = Line::from(vec![
             paint.span_hovered(hovered, &paint.theme.prompt.color, icons::RELAYED_MARK),
-            paint.span_hovered(hovered, &paint.theme.muted, format!(" {text}")),
-            paint.action_hint(hovered, lines),
-            paint.span_hovered(hovered, &paint.theme.muted, time),
-        ])
+            " ".into(),
+        ]);
+        let text = clip_beside(&self.label, border.width(), &tail, width);
+        (
+            Line::from(vec![
+                paint.span_hovered(hovered, &paint.theme.muted, text),
+                paint.action_hint(hovered, lines),
+                paint.span_hovered(hovered, &paint.theme.muted, time),
+            ]),
+            border,
+        )
     }
 }
 
 impl Fold for Relayed {
+    fn continuation(&self, i: usize, paint: &Paint, _width: usize) -> Option<Line<'static>> {
+        let (mut page, border) = self.opened_line(i, false, paint);
+        page.prepend(render::Prefix::hanging(border.unwrap_or_default()));
+        page.prefix.map(|p| p.rest)
+    }
+
+    fn more_border(&self, _heading: usize, _paint: &Paint, _width: usize) -> Option<Line<'static>> {
+        Some(Line::from(STEP_INDENT))
+    }
+
     fn is_open(&self) -> bool {
         self.open
     }

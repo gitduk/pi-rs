@@ -90,6 +90,10 @@ impl Note {
 }
 
 impl Fold for Note {
+    fn more_border(&self, _heading: usize, paint: &Paint, _width: usize) -> Option<Line<'static>> {
+        Some(self.lead(1, paint))
+    }
+
     fn is_open(&self) -> bool {
         self.open
     }

@@ -101,7 +101,7 @@ async fn consecutive_restart_confirmations_fold_across_resume_and_live_updates()
     let mut session = agent::session::Session::default();
     let line = "restarted into a new build of v2.8.8";
     for _ in 0..2 {
-        session.push_screen(crate::tui::stream::by_pi(line));
+        session.push_notice(line);
     }
     tui.core.lane_mut().return_session(session);
     tui.core.lane_mut().finish();

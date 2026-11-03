@@ -44,6 +44,7 @@ pub(super) struct PageLine {
     pub(super) line: Line<'static>,
     pub(super) copies: Option<String>,
     pub(super) units: crate::unit::Units,
+    pub(super) prefix: Option<Box<crate::render::Prefix>>,
 }
 
 impl From<Line<'static>> for PageLine {
@@ -52,6 +53,30 @@ impl From<Line<'static>> for PageLine {
             line,
             copies: None,
             units: Vec::new(),
+            prefix: None,
+        }
+    }
+}
+
+impl PageLine {
+    pub(super) fn prepend(&mut self, mut prefix: crate::render::Prefix) {
+        if let Some(inside) = self.prefix.take() {
+            prefix.first.spans.extend(inside.first.spans);
+            prefix.rest.spans.extend(inside.rest.spans);
+            prefix.rule = inside.rule;
+        }
+        self.prefix = Some(Box::new(prefix));
+    }
+
+    pub(super) fn ready(&self, width: usize) -> super::screen::Ready<'static> {
+        let line = self.prefix.as_ref().map_or_else(
+            || self.line.clone(),
+            |p| p.fit_body(self.line.clone(), width),
+        );
+        super::screen::Ready {
+            line,
+            width,
+            prefix: self.prefix.clone(),
         }
     }
 }
