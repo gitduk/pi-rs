@@ -21,6 +21,7 @@ mod search;
 mod select;
 mod selection;
 mod slash;
+mod spacing;
 mod stream;
 mod term;
 mod ui;

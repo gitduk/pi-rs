@@ -258,7 +258,6 @@ impl Ui {
     }
 
     fn submit_rows(&self, view: &mut View, rows: impl IntoIterator<Item = Row>) {
-        super::scrollback::open_turn(&mut view.surface.scrollback);
         view.surface.scrollback.extend(rows);
         view.surface
             .folds

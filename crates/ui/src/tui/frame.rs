@@ -745,23 +745,16 @@ impl Ui {
                 .push(self.paint.span(&self.paint.theme.muted, extra));
             pending.push((line, border));
         }
-        let previous = view
-            .surface
-            .scrollback
-            .iter()
-            .rev()
-            .find(|row| row.len() > 0);
-        if !pending.is_empty() && previous.is_some_and(Row::is_prose) {
+        let mut spacing = super::spacing::Spacing::after(&view.surface.scrollback);
+        if !pending.is_empty() && spacing.push(super::spacing::Block::Tools) {
             rows.push(Line::default());
         }
         rows.extend(pending.into_iter().flat_map(|(line, border)| {
             let prefix = render::Prefix::hanging(border);
             screen::wrap_continued(Some(&prefix.first), Some(&prefix.rest), &line, width)
         }));
-        // The draw tags screen rows by index, and a long summary wraps:
-        // count the rows the block takes, not the lines before they did.
+        // Target indices include wrapped tool rows and their leading gap.
         let pending_rows = rows.len();
-
         let body = |text: &str| {
             body(
                 &view.surface.folds,
@@ -781,7 +774,7 @@ impl Ui {
         };
         if !thinking
             && content.first().is_some_and(|line| !line.spans.is_empty())
-            && (pending_rows > 0 || previous.is_some_and(Row::is_tool_area))
+            && spacing.push(super::spacing::Block::Prose)
         {
             rows.push(Line::default());
         }

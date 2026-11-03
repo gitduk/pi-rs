@@ -339,7 +339,7 @@ impl Row {
         ))
     }
 
-    /// The blank line a turn after the first opens on.
+    /// A blank line within rendered content.
     pub fn gap() -> Self {
         Self::new(Kind::Answer(Line::default(), Vec::new()))
     }
@@ -1115,25 +1115,18 @@ impl Row {
         }
     }
 
-    pub fn is_tool_area(&self) -> bool {
-        match &self.0 {
-            Kind::Result(_) => true,
-            Kind::Steps(group) => group.has_tools(),
-            _ => false,
-        }
-    }
+    pub(super) fn block(&self) -> super::spacing::Block {
+        use super::spacing::Block;
 
-    pub fn is_prose(&self) -> bool {
         match &self.0 {
-            Kind::Answer(line, _) => !line.spans.is_empty() || self.2.is_some(),
-            Kind::CodeLine(_) | Kind::Code(_) | Kind::Block(_) => true,
-            _ => false,
+            Kind::Said { at: Some(_), .. } => Block::Prompt,
+            Kind::Relayed(_) => Block::Relayed,
+            Kind::Result(_) => Block::Tools,
+            Kind::Steps(group) if group.has_tools() => Block::Tools,
+            Kind::Answer(line, _) if !line.spans.is_empty() || self.2.is_some() => Block::Prose,
+            Kind::CodeLine(_) | Kind::Code(_) | Kind::Block(_) => Block::Prose,
+            _ => Block::Other,
         }
-    }
-
-    /// One blank row at a boundary, without changing either group's contents.
-    pub fn separates(&self, next: &Row) -> bool {
-        self.is_tool_area() && next.is_prose() || self.is_prose() && next.is_tool_area()
     }
 
     /// Whether this row is the group holding reasoning block `id`.

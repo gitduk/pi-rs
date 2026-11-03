@@ -378,9 +378,11 @@ impl<'a> ScrollbackRows<'a> {
         let lens: Vec<usize> = rows.iter().map(Row::len).collect();
         let mut separators = vec![false; rows.len()];
         let mut previous: Option<usize> = None;
+        let mut spacing = super::spacing::Spacing::default();
         for (idx, row) in rows.iter().enumerate().filter(|(idx, _)| lens[*idx] > 0) {
+            let gap = spacing.push(row.block());
             if let Some(prev) = previous {
-                separators[prev] = rows[prev].separates(row);
+                separators[prev] = gap;
             }
             previous = Some(idx);
         }
@@ -622,9 +624,6 @@ pub(super) fn scrollback_from(
                             push_tool_row(&mut out, folds, r.at(place.clone()), &asked, result);
                         }
                     } else {
-                        if matches!(other, LogEntry::Ask { .. } | LogEntry::Bash { .. }) {
-                            open_turn(&mut out);
-                        }
                         out.append(rows);
                     }
                 }
@@ -632,14 +631,6 @@ pub(super) fn scrollback_from(
         }
     }
     out
-}
-
-/// Space a turn off from the one before it, so turns read apart; the
-/// first has nothing above it to be set off from.
-pub(super) fn open_turn(rows: &mut Scrollback) {
-    if rows.iter().rev().any(Row::opens_turn) {
-        rows.push(Row::gap());
-    }
 }
 
 /// One entry's rows, as both the rebuild and a fresh adoption draw them.
