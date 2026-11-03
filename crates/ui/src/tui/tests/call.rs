@@ -277,7 +277,7 @@ fn a_batch_in_flight_hands_its_remainder_to_the_row_that_opens() {
     assert!(drawn_rows(&view).is_empty(), "nothing has landed yet");
 
     // The first lands. Its row opens where the batch was drawn, and takes
-    // the call still out with it — no second line, and none to jump up.
+    // the call still out with it. Each call keeps its own line.
     read_landed(&mut ui, &mut lane, &mut view, 7, "a", "a.rs");
     ui.flush(&lane, &mut view);
     assert_eq!(
@@ -286,12 +286,9 @@ fn a_batch_in_flight_hands_its_remainder_to_the_row_that_opens() {
         "the row took it rather than leaving a line under it"
     );
     let rows = drawn_rows(&view);
-    assert_eq!(rows.len(), 1, "one row, not two: {rows:?}");
-    assert!(
-        rows[0].ends_with(&format!("read b.rs{}1 more", icons::PART_SEP)),
-        "got: {}",
-        rows[0]
-    );
+    assert_eq!(rows.len(), 2, "each call has its own line: {rows:?}");
+    assert!(rows[0].ends_with("read a.rs"), "{rows:?}");
+    assert!(rows[1].ends_with("read b.rs"), "{rows:?}");
 }
 
 // An edit's result is a row of its own, so its line sits where that row

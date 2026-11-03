@@ -61,6 +61,7 @@ enum PreviewLine {
 enum More {
     Page(usize),
     Steps,
+    CollapseSteps,
 }
 
 impl PreviewLine {
@@ -72,7 +73,7 @@ impl PreviewLine {
                 ..
             } => heading,
             Self::More {
-                target: More::Steps,
+                target: More::Steps | More::CollapseSteps,
                 ..
             } => 0,
         }
@@ -539,7 +540,7 @@ impl Row {
     /// Toggle the row's own line, returning true if toggled.
     #[cfg(test)]
     pub fn toggle_expand(&mut self) -> bool {
-        self.toggle_at(0, 0)
+        self.toggle_at(0, 80)
     }
 
     fn preview_line(&self, i: usize) -> Option<PreviewLine> {
@@ -589,12 +590,12 @@ impl Row {
         if matches!(
             self.preview_line(i),
             Some(PreviewLine::More {
-                target: More::Steps,
+                target: More::Steps | More::CollapseSteps,
                 ..
             })
         ) && let Kind::Steps(group) = &mut self.0
         {
-            group.all = true;
+            group.all = !group.all;
             self.1.clear();
             return true;
         }
@@ -896,31 +897,29 @@ impl Row {
             budget,
             lines: Vec::new(),
         };
-        if let Kind::Steps(group) = &self.0
-            && let Some(sections) = group.sections(paint, width)
-        {
-            let total: usize = sections.iter().map(|(_, rows)| rows).sum();
-            let mut available = if group.all {
-                usize::MAX
-            } else if total > budget {
-                budget - 1
-            } else {
-                total
-            };
+        if let Kind::Steps(group) = &self.0 {
+            // Keep the start for context and the newest steps for live progress.
+            const FIRST: usize = 2;
+            const LAST: usize = 3;
+            let sections = group.sections();
             let count = sections.len();
-            let mut hidden = None;
-            for (index, (range, rows)) in sections.into_iter().enumerate() {
-                if rows > available {
-                    hidden = Some(count - index.max(1));
-                    break;
+            let hidden = count.saturating_sub(FIRST + LAST);
+            for (index, range) in sections.into_iter().enumerate() {
+                if hidden > 0 && !group.all && (FIRST..count - LAST).contains(&index) {
+                    if index == FIRST {
+                        preview.lines.push(PreviewLine::More {
+                            target: More::Steps,
+                            remaining: hidden,
+                        });
+                    }
+                    continue;
                 }
-                available -= rows;
                 preview.extend(range, &heights);
             }
-            if let Some(remaining) = hidden {
+            if hidden > 0 && group.all {
                 preview.lines.push(PreviewLine::More {
-                    target: More::Steps,
-                    remaining,
+                    target: More::CollapseSteps,
+                    remaining: hidden,
                 });
             }
         } else {
@@ -953,16 +952,23 @@ impl Row {
             Some(PreviewLine::More { target, remaining }) => {
                 let heading = match target {
                     More::Page(heading) => heading,
-                    More::Steps => 0,
+                    More::Steps | More::CollapseSteps => 0,
                 };
-                let border = self
-                    .fold()
-                    .and_then(|fold| fold.more_border(heading, paint, width))
-                    .filter(|border| border.width() < width);
+                let border = match target {
+                    More::Steps | More::CollapseSteps => Some(Line::from(steps::STEP_INDENT)),
+                    More::Page(_) => self
+                        .fold()
+                        .and_then(|fold| fold.more_border(heading, paint, width)),
+                }
+                .filter(|border| border.width() < width);
                 let room = width - border.as_ref().map_or(0, Line::width);
                 let line = Line::from(paint.action_hint(
                     self.1.hovered.get().map(|line| line.get() - 1) == Some(i),
-                    format!("{remaining} more"),
+                    match (target, remaining) {
+                        (More::CollapseSteps, _) => "collapse".to_string(),
+                        (More::Steps, _) => format!("{} {remaining} more", icons::ELLIPSIS),
+                        (More::Page(_), _) => format!("{remaining} more"),
+                    },
                 ));
                 (screen::clip_line(&line, room), border)
             }
@@ -1145,10 +1151,7 @@ impl Row {
 
     pub fn set_folded(&mut self, to: bool) {
         if let Kind::Steps(g) = &mut self.0 {
-            g.folded = to;
-            if to {
-                g.all = false;
-            }
+            g.set_folded(to);
             self.1.clear();
         }
     }
