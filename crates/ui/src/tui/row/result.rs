@@ -36,18 +36,19 @@ struct Painted {
 
 impl ToolOut {
     pub(super) fn new(outcome: render::Outcome, name: String, preview: String) -> Self {
+        let preview_lines = preview.lines().count();
         Self {
             outcome,
             name,
             place: None,
             took: None,
-            preview_lines: preview.lines().count(),
+            preview_lines,
             widest: (preview.lines())
                 .map(pi_store::text::width)
                 .max()
                 .unwrap_or(0),
             preview,
-            expanded: false,
+            expanded: preview_lines > 1,
             hovered: false,
             painted: RefCell::new(None),
         }

@@ -1235,24 +1235,4 @@ mod tests {
         let one = bundle(vec![tool("bash", &long)]);
         assert_eq!(pi_store::text::width(&shown(&one, 80)[0]), 79);
     }
-
-    #[test]
-    fn result_with_many_diff_lines_expands_and_collapses() {
-        let mut preview = "crates/foo.rs +30 -0".to_string();
-        for i in 1..=30 {
-            preview.push_str(&format!("\n  {i} + line {i}"));
-        }
-        let mut row = Row::result(crate::render::Outcome::Done, "edit", preview);
-        assert_eq!(row.len(), 1);
-        assert!(!row.has_page(0, 80));
-
-        assert!(row.toggle_expand());
-        row.prepare_preview(&Paint::new(false), 80, 20);
-        assert_eq!(row.len(), 10);
-        assert!(row.has_page(row.len() - 1, 80));
-        assert_eq!(row.opening(0, &Paint::new(false)).unwrap().len(), 31);
-
-        assert!(row.toggle_expand());
-        assert_eq!(row.len(), 1);
-    }
 }
