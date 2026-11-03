@@ -334,8 +334,8 @@ impl Row {
         Line::from(paint.span(&paint.reasoning_style(), line))
     }
 
-    /// A whole assistant text block, for a caller that has one. Its mermaid
-    /// blocks are rows of their own, drawn at whatever width they get.
+    /// A whole assistant text block, for a caller that has one. Diagrams and
+    /// tables retain their source so each width gets its own layout.
     pub fn answer(text: &str, paint: &Paint) -> Vec<Self> {
         let markdown = |text: &str| {
             render::render_coded(text, paint).into_iter().map(|r| {
@@ -359,7 +359,16 @@ impl Row {
         let blank = Self::gap;
         let is_blank = |row: &Self| matches!(row, Self(Kind::Answer(l, _), _, _, _) if l.spans.is_empty() && row.2.is_none());
         let mut rows: Vec<Self> = Vec::new();
-        for piece in block::pieces(text) {
+        let pieces = block::pieces(text);
+        let references = if pieces
+            .iter()
+            .any(|piece| matches!(piece, block::Piece::Block(block::Form::Table, _)))
+        {
+            block::references(text)
+        } else {
+            String::new()
+        };
+        for piece in pieces {
             match piece {
                 block::Piece::Text(text) => rows.extend(markdown(text)),
                 block::Piece::Block(form, source) => {
@@ -367,6 +376,11 @@ impl Row {
                         rows.push(blank());
                     }
                     let source = source.trim_end().to_string();
+                    let source = if form == block::Form::Table && !references.is_empty() {
+                        format!("{source}\n\n{references}")
+                    } else {
+                        source
+                    };
                     rows.push(Self::new(Kind::Block(Block::new(form, source))));
                     rows.push(blank());
                 }
@@ -767,6 +781,25 @@ impl Row {
             Kind::Relayed(r) => r.units(i),
             Kind::Steps(g) => g.units(i, paint),
             Kind::Block(b) => b.units(paint, width),
+            _ => Vec::new(),
+        }
+    }
+
+    pub(super) fn cell(
+        &self,
+        paint: &Paint,
+        width: usize,
+        col: usize,
+    ) -> Option<(usize, std::sync::Arc<str>, crate::unit::Units)> {
+        match &self.0 {
+            Kind::Block(block) => block.cell(paint, width, col),
+            _ => None,
+        }
+    }
+
+    pub(super) fn cell_ranges(&self, paint: &Paint, width: usize, id: usize) -> crate::unit::Units {
+        match &self.0 {
+            Kind::Block(block) => block.cell_ranges(paint, width, id),
             _ => Vec::new(),
         }
     }

@@ -15,6 +15,7 @@ use tui_markdown::{CodeTheme, Options, StyleSheet};
 use crate::sgr::style_to_ratatui;
 
 mod document;
+mod table;
 
 pub(super) fn background(syntax: Syntax) -> (u8, u8, u8) {
     let color = Palette::get(syntax)
@@ -84,6 +85,7 @@ struct Palette {
     code: CodeTheme,
     tokens: syntect::highlighting::Theme,
     headings: [Style; 6],
+    table_header: Option<Style>,
 }
 
 impl Palette {
@@ -91,18 +93,18 @@ impl Palette {
         let tokens = ThemeSet::load_from_reader(&mut Cursor::new(source))
             .expect("embedded syntax theme must be valid");
         let highlighter = Highlighter::new(&tokens);
+        let foreground = |name: &str| {
+            let scope = Scope::new(name).expect("fixed theme scope must be valid");
+            highlighter
+                .style_mod_for_stack(&[scope])
+                .foreground
+                .map(|c| Style::new().fg(Color::Rgb(c.r, c.g, c.b)))
+        };
         let headings = std::array::from_fn(|i| {
             // The scope the embedded themes name their heading colours by.
             // `markup.heading.N.markdown` matches only the first two levels,
             // leaving the rest to the terminal's own foreground.
-            let scope = Scope::new(&format!("heading.{}.markdown", i + 1))
-                .expect("fixed heading scope must be valid");
-            let style = highlighter
-                .style_mod_for_stack(&[scope])
-                .foreground
-                .map_or_else(Style::default, |c| {
-                    Style::new().fg(Color::Rgb(c.r, c.g, c.b))
-                });
+            let style = foreground(&format!("heading.{}.markdown", i + 1)).unwrap_or_default();
             let modifiers = match i {
                 0 => Modifier::BOLD | Modifier::UNDERLINED,
                 1 => Modifier::BOLD,
@@ -111,10 +113,14 @@ impl Palette {
             };
             style.add_modifier(modifiers)
         });
+        let table_header = ["entity.name.type", "support.type", "variable"]
+            .into_iter()
+            .find_map(foreground);
         Self {
             code: CodeTheme::from_textmate(source).expect("embedded syntax theme must be valid"),
             tokens,
             headings,
+            table_header,
         }
     }
 
@@ -154,6 +160,8 @@ pub(super) fn shell(text: &str, syntax: Syntax) -> Vec<Span<'static>> {
 pub(super) struct Sheet {
     theme: Arc<Theme>,
     headings: [Style; 6],
+    table_header: Style,
+    table_border: Style,
 }
 
 impl StyleSheet for Sheet {
@@ -186,11 +194,11 @@ impl StyleSheet for Sheet {
     }
 
     fn table_header(&self) -> Style {
-        style_to_ratatui(&self.theme.heading)
+        self.table_header
     }
 
     fn table_border(&self) -> Style {
-        style_to_ratatui(&self.theme.muted)
+        self.table_border
     }
 
     fn image_alt(&self) -> Style {
@@ -222,14 +230,22 @@ impl Format {
     }
 }
 
-pub(super) fn options(theme: Arc<Theme>) -> Format {
+pub(super) fn options(theme: Arc<Theme>, table_border: Style) -> Format {
     let palette = Palette::get(theme.syntax);
     // The generic heading style also labels content outside Markdown headings.
     let override_heading = crate::theme::configured_heading(&theme).map(style_to_ratatui);
     let headings = palette
         .headings
         .map(|style| override_heading.map_or(style, |custom| style.patch(custom)));
-    let sheet = Sheet { theme, headings };
+    let table_header = palette
+        .table_header
+        .unwrap_or_else(|| style_to_ratatui(&theme.strong));
+    let sheet = Sheet {
+        theme,
+        headings,
+        table_header,
+        table_border,
+    };
     Format {
         options: Options::new(sheet.clone()).code_theme(palette.code.clone()),
         sheet,
@@ -264,7 +280,7 @@ mod tests {
     fn each_heading_level_keeps_a_colour_of_its_own() {
         for bg in [(255, 255, 255), (13, 17, 23)] {
             let theme = crate::theme::following_terminal(&Theme::default(), Some(bg));
-            let format = options(Arc::new(theme));
+            let format = options(Arc::new(theme), crate::theme::table_separator(None, None));
             let mut seen: Vec<_> = (1..=6).map(|l| format.sheet.heading(l).fg).collect();
             let found = seen.len();
             seen.sort_by_key(|c| format!("{c:?}"));
@@ -284,7 +300,7 @@ mod tests {
         let mut theme = Theme::default();
         theme.heading = pi_store::theme::Style::color(named.clone());
         let theme = crate::theme::following_terminal(&theme, Some((255, 255, 255)));
-        let format = options(Arc::new(theme));
+        let format = options(Arc::new(theme), crate::theme::table_separator(None, None));
         for level in 1..=6 {
             assert_eq!(format.sheet.heading(level).fg, Some(Color::Rgb(1, 2, 3)));
         }

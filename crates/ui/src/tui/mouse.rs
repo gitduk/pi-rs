@@ -334,6 +334,8 @@ impl Ui {
         }
         if press.moved {
             self.selection = Some(Selection {
+                source: None,
+                fragments: Vec::new(),
                 anchor: press.at,
                 head,
             });
@@ -357,6 +359,8 @@ impl Ui {
         let text = self.drawn.get(at.row)?;
         let (from, to) = select::word_at(text, at.col);
         Some(Selection {
+            source: None,
+            fragments: Vec::new(),
             anchor: Point { col: from, ..at },
             head: Point {
                 col: to.saturating_sub(1),
@@ -396,7 +400,19 @@ impl Ui {
         let k = *self.row_of.get(at.row)?;
         let col = rows.iter().take(k).sum::<usize>() + at.col.checked_sub(lead)?;
         let unit = crate::unit::at(&units, col)?;
-        let text = select::cols(&drawn.concat(), unit.start, unit.end);
+        let cell = match self.row_targets.get(at.row)? {
+            Target::Scrollback(idx, _) => {
+                view.surface
+                    .scrollback
+                    .get(*idx)?
+                    .cell(&self.paint, width, col)
+            }
+            _ => None,
+        };
+        let text = cell
+            .as_ref()
+            .map(|(_, text, _)| text.to_string())
+            .unwrap_or_else(|| select::cols(&drawn.concat(), unit.start, unit.end));
         // Cell `c` of the line where it is drawn: which of its rows, what column.
         let place = |mut c: usize| {
             let mut j = 0;
@@ -420,7 +436,44 @@ impl Ui {
                 col: usize::MAX - 1,
             },
         );
-        Some((Selection { anchor, head }, text))
+        let mut fragments = Vec::new();
+        if let Some((_, _, ranges)) = &cell {
+            for range in ranges {
+                let (first_row, first_col) = place(range.start);
+                let (last_row, last_col) = place(range.end - 1);
+                for (j, row_width) in rows.iter().enumerate().take(last_row + 1).skip(first_row) {
+                    if let Some(row) = (at.row + j).checked_sub(k).filter(|row| *row <= last) {
+                        let start = if j == first_row { first_col } else { lead };
+                        let end = if j == last_row {
+                            last_col + 1
+                        } else {
+                            row_width + lead
+                        };
+                        fragments.push((row, start..end));
+                    }
+                }
+            }
+        }
+        let anchor = fragments.first().map_or(anchor, |(row, range)| Point {
+            row: *row,
+            col: range.start,
+        });
+        let head = fragments.last().map_or(head, |(row, range)| Point {
+            row: *row,
+            col: range.end - 1,
+        });
+        Some((
+            Selection {
+                anchor,
+                head,
+                source: cell.and_then(|(id, _, _)| {
+                    super::search::Spot::of(*self.row_targets.get(at.row)?)
+                        .map(|at| select::Source::Cell { at, id })
+                }),
+                fragments,
+            },
+            text,
+        ))
     }
 
     // Whether drawn rows `a` and `b` are wraps of one logical line.
@@ -434,6 +487,8 @@ impl Ui {
     // The whole logical line under `at`: every row wrapped from it.
     fn line_selection(&self, at: Point) -> Option<Selection> {
         let whole = Selection {
+            source: None,
+            fragments: Vec::new(),
             anchor: Point {
                 row: at.row,
                 col: 0,
@@ -456,6 +511,8 @@ impl Ui {
             last += 1;
         }
         Some(Selection {
+            source: None,
+            fragments: Vec::new(),
             anchor: Point { row: first, col: 0 },
             head: Point {
                 row: last,
@@ -466,7 +523,7 @@ impl Ui {
 
     // The selection to the clipboard.
     fn copy_selection(&mut self, view: &View) {
-        let Some(sel) = self.selection else {
+        let Some(sel) = self.selection.as_ref() else {
             return;
         };
         let width = self.screen.width();
@@ -480,7 +537,7 @@ impl Ui {
                 lead: self.lead(view, at),
             })
             .collect();
-        self.copy_text(&select::text(&sel, &rows, width));
+        self.copy_text(&select::text(sel, &rows, width));
     }
 
     // `text` to the clipboard, the bar saying how much went.

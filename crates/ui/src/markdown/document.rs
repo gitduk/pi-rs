@@ -3,24 +3,29 @@
 
 use std::ops::Range;
 
-use pulldown_cmark::{
-    Alignment, BlockQuoteKind, CodeBlockKind, Event, Parser, Tag, TextMergeWithOffset,
-};
+use pulldown_cmark::{BlockQuoteKind, CodeBlockKind, Event, Parser, Tag, TextMergeWithOffset};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use tui_markdown::{AlertKind, StyleSheet};
 
-use super::Format;
+use super::{Format, table};
 use crate::render::Prefix;
 
 pub(crate) struct Row {
     pub line: Line<'static>,
     pub prefix: Option<Prefix>,
+    pub units: crate::unit::Units,
+    pub cells: Vec<crate::unit::CellFragment>,
 }
 
 impl From<Line<'static>> for Row {
     fn from(line: Line<'static>) -> Self {
-        Self { line, prefix: None }
+        Self {
+            line,
+            prefix: None,
+            units: Vec::new(),
+            cells: Vec::new(),
+        }
     }
 }
 
@@ -52,18 +57,11 @@ fn tree<'a>(events: &mut impl Iterator<Item = (Event<'a>, Range<usize>)>) -> Vec
 
 pub(super) fn render(text: &str, format: &Format, width: Option<usize>) -> Vec<Row> {
     let parser = Parser::new_ext(text, crate::unit::options());
-    let references = parser
-        .reference_definitions()
-        .iter()
-        .map(|(_, def)| text[def.span.clone()].to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
     let nodes = tree(&mut TextMergeWithOffset::new(parser.into_offset_iter()));
     Document {
         text,
         format,
-        width: width.unwrap_or(80),
-        references,
+        width,
     }
     .blocks(&nodes, 0)
 }
@@ -71,11 +69,18 @@ pub(super) fn render(text: &str, format: &Format, width: Option<usize>) -> Vec<R
 struct Document<'a> {
     text: &'a str,
     format: &'a Format,
-    width: usize,
-    references: String,
+    width: Option<usize>,
 }
 
 impl Document<'_> {
+    fn indented(&self, columns: usize) -> Document<'_> {
+        Document {
+            text: self.text,
+            format: self.format,
+            width: self.width.map(|width| width.saturating_sub(columns).max(1)),
+        }
+    }
+
     fn blocks(&self, nodes: &[Node<'_>], depth: usize) -> Vec<Row> {
         let mut rows = Vec::new();
         let mut inline_start = 0;
@@ -186,7 +191,9 @@ impl Document<'_> {
                             |n| format!("{}. ", n.saturating_add(i as u64)),
                         ),
                     };
-                    let mut body = self.blocks(&item.children, depth + 1);
+                    let mut body = self
+                        .indented(pi_store::text::width(&marker))
+                        .blocks(&item.children, depth + 1);
                     if body.is_empty() {
                         body.push(Line::default().into());
                     }
@@ -200,7 +207,7 @@ impl Document<'_> {
                 rows
             }
             Event::Start(Tag::BlockQuote(kind)) => {
-                let mut rows = self.blocks(&node.children, depth);
+                let mut rows = self.indented(2).blocks(&node.children, depth);
                 let style = match kind {
                     None => sheet.blockquote(),
                     Some(kind) => {
@@ -235,13 +242,15 @@ impl Document<'_> {
                 self.inline(&node.children, sheet.definition_term(), true, depth)
             }
             Event::Start(Tag::DefinitionListDefinition) => {
-                let mut rows = self.blocks(&node.children, depth);
+                let mut rows = self.indented(2).blocks(&node.children, depth);
                 prefix(&mut rows, Line::from("  "), Line::from("  "));
                 rows
             }
             Event::Start(Tag::FootnoteDefinition(label)) => {
-                let mut rows = self.blocks(&node.children, depth);
                 let marker = format!("[{label}]: ");
+                let mut rows = self
+                    .indented(pi_store::text::width(&marker))
+                    .blocks(&node.children, depth);
                 let rest = " ".repeat(pi_store::text::width(&marker));
                 prefix(
                     &mut rows,
@@ -262,28 +271,45 @@ impl Document<'_> {
                 self.delegate(&format!("{fence}{info}\n{body}{newline}{fence}"))
             }
             Event::Start(Tag::Table(alignments)) => {
-                // Row ranges exclude enclosing quote and list markers;
-                // the table's continuous source range includes them.
-                let mut source = String::new();
+                let mut header = Vec::new();
+                let mut body = Vec::new();
+                let mut spillover = Vec::new();
                 for row in &node.children {
-                    source.push_str(self.text[row.range.clone()].trim_end_matches(['\r', '\n']));
-                    source.push('\n');
+                    let source = self.text[row.range.clone()].trim();
+                    // Lenient table parsing can absorb the following paragraph.
+                    if alignments.len() > 1
+                        && !source.starts_with('|')
+                        && !source.ends_with('|')
+                        && crate::block::cells(source).len() == 1
+                    {
+                        spillover.extend(self.inline(&row.children, Style::default(), true, depth));
+                        continue;
+                    }
+                    let cells = row
+                        .children
+                        .iter()
+                        .map(|cell| {
+                            table::Cell::new(
+                                self.inline(&cell.children, Style::default(), true, depth)
+                                    .into_iter()
+                                    .map(|row| row.line)
+                                    .collect(),
+                                cell.range.start,
+                            )
+                        })
+                        .collect();
                     if matches!(row.event, Event::Start(Tag::TableHead)) {
-                        source.push('|');
-                        for alignment in alignments {
-                            source.push_str(match alignment {
-                                Alignment::None => "---|",
-                                Alignment::Left => ":---|",
-                                Alignment::Center => ":---:|",
-                                Alignment::Right => "---:|",
-                            });
-                        }
-                        source.push('\n');
+                        header = cells;
+                    } else {
+                        body.push(cells);
                     }
                 }
-                source.push('\n');
-                source.push_str(&self.references);
-                self.delegate(&source)
+                let mut rows = table::render(header, body, alignments, self.width, sheet);
+                if !spillover.is_empty() {
+                    rows.push(Line::default().into());
+                }
+                rows.extend(spillover);
+                rows
             }
             Event::Start(Tag::MetadataBlock(_)) => self.delegate(&self.text[node.range.clone()]),
             Event::Start(Tag::HtmlBlock) => plain(&node.children)
@@ -292,7 +318,7 @@ impl Document<'_> {
                 .collect(),
             Event::Rule => vec![Row {
                 line: Line::from(Span::styled(
-                    "─".repeat(self.width.clamp(1, 80)),
+                    "─".repeat(self.width.unwrap_or(80).clamp(1, 80)),
                     sheet.table_border(),
                 )),
                 prefix: Some(Prefix {
@@ -300,6 +326,8 @@ impl Document<'_> {
                     rest: Line::default(),
                     rule: true,
                 }),
+                units: Vec::new(),
+                cells: Vec::new(),
             }],
             _ => self.inline(&node.children, Style::default(), true, depth),
         }
@@ -563,7 +591,7 @@ mod tests {
         ] {
             let references = "\n\n[ref]: https://example.com";
             let plain = lines(&format!("{table}{references}"));
-            assert!(plain[0].starts_with('┌'), "{plain:?}");
+            assert!(plain.iter().any(|line| line.contains('━')), "{plain:?}");
             for (first, rest, first_out, rest_out) in [
                 ("> ", "> ", "│ ", "│ "),
                 ("> > ", "> > ", "│ │ ", "│ │ "),

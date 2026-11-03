@@ -14,3 +14,4 @@ pub mod theme;
 pub mod tty;
 pub mod tui;
 pub mod unit;
+mod wrap;

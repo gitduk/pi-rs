@@ -28,6 +28,7 @@ const MENU_PADDING: usize = 2;
 
 impl Ui {
     pub(super) fn flush(&mut self, lane: &Lane, view: &mut View) {
+        self.pin_selection(view);
         self.repaint(view, lane);
         if self.background_focus.is_some() && (self.reading() || !self.menu().is_empty()) {
             self.leave_background();
@@ -302,6 +303,9 @@ impl Ui {
         self.drawn.extend(executions.iter().map(plain));
         self.drawn.resize(bar_base, String::new());
         self.drawn.extend(bar.iter().map(plain));
+        self.regions = regions;
+        self.reflow_selection(view, width);
+        self.drawn_width = width;
         let stamps = self.sent_stamps(view, regions.history);
         let (rows, executions, bar) = match &self.selection {
             Some(sel) => (
@@ -346,7 +350,7 @@ impl Ui {
             .and_then(|_| self.paint.band(&self.paint.theme.prompt.panel.input))
             .map(|band| band.patch(self.rat_style(&self.paint.theme.menu.selected)))
             .unwrap_or_default();
-        self.regions = regions;
+
         self.more_hits = self.more_actions(view, regions);
         let flash_body = self.flash_hit.as_ref().and_then(|(at, hit)| {
             if *at >= regions.bar.height as usize {

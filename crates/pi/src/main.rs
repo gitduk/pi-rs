@@ -87,7 +87,7 @@ fn updated(from: Option<&str>) -> Option<String> {
     let now = env!("CARGO_PKG_VERSION");
     Some(match from? {
         was if was == now => format!("restarted into a new build of v{now}"),
-        was => format!("updated to v{now} from v{was}"),
+        _ => format!("updated to v{now}"),
     })
 }
 

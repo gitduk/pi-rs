@@ -27,6 +27,35 @@ pub(crate) fn configured_heading(theme: &Theme) -> Option<&Style> {
     (theme.heading != default && theme.heading != light).then_some(&theme.heading)
 }
 
+pub(crate) fn blend(
+    foreground: (u8, u8, u8),
+    background: (u8, u8, u8),
+    weight: u16,
+) -> (u8, u8, u8) {
+    let channel =
+        |fg: u8, bg: u8| ((u16::from(fg) * weight + u16::from(bg) * (100 - weight)) / 100) as u8;
+    (
+        channel(foreground.0, background.0),
+        channel(foreground.1, background.1),
+        channel(foreground.2, background.2),
+    )
+}
+
+/// Decorative rules retain only 20% of the text's contrast against the canvas.
+pub(crate) fn table_separator(
+    foreground: Option<(u8, u8, u8)>,
+    background: Option<(u8, u8, u8)>,
+) -> ratatui::style::Style {
+    use ratatui::style::{Color, Modifier, Style};
+    match foreground.zip(background) {
+        Some((fg, bg)) => {
+            let (r, g, b) = blend(fg, bg, 20);
+            Style::new().fg(Color::Rgb(r, g, b))
+        }
+        None => Style::new().add_modifier(Modifier::DIM),
+    }
+}
+
 fn for_background(theme: &Theme, bg: (u8, u8, u8)) -> Theme {
     let mut theme = theme.clone();
     let defaults = Theme::default();

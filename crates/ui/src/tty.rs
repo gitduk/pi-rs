@@ -1,6 +1,5 @@
-//! Asks the terminal once for its background colour via `OSC 11`, the only
-//! way to know it, so a band can read as a lift of the canvas rather than a
-//! block on top of it.
+//! Asks once for terminal foreground and background via `OSC 10` and `OSC 11`,
+//! so decorative colours follow the canvas and the text drawn on it.
 //!
 //! The reply has no newline, so it is read as raw bytes before the keyboard
 //! reader starts; anything typed meanwhile is captured here, not lost.
@@ -30,11 +29,15 @@ const REPLY_LIMIT: usize = 256;
 // What a reply opens with, before the colour it carries — the same marker the
 // query is written with. The bytes are matched against it one at a time.
 #[cfg(unix)]
-const OPENING: &str = "\x1b]11;";
+const BACKGROUND_OPENING: &str = "\x1b]11;";
+#[cfg(unix)]
+const FOREGROUND_OPENING: &str = "\x1b]10;";
 
 /// What the terminal said about itself, and what asking it took from the user.
 #[derive(Default)]
 pub struct Answer {
+    /// The terminal's own foreground, when it answered.
+    pub fg: Option<(u8, u8, u8)>,
     /// The terminal's own background, when it answered.
     pub bg: Option<(u8, u8, u8)>,
     /// What the user typed while the question was out. The asking read it, so
@@ -42,7 +45,7 @@ pub struct Answer {
     pub typed: String,
 }
 
-/// The terminal's own background, when it answers.
+/// The terminal's own foreground and background, when it answers.
 ///
 /// Raw mode has to be up already: the reply ends in `BEL` or `ST`, never in a
 /// newline, so a cooked read would wait for one that is not coming.
@@ -50,7 +53,7 @@ pub struct Answer {
 pub fn background() -> Answer {
     let mut out = std::io::stdout();
     // The opening back with a `?` on it: what a terminal answers in.
-    let ask = format!("{OPENING}?\x1b\\");
+    let ask = format!("{FOREGROUND_OPENING}?\x1b\\{BACKGROUND_OPENING}?\x1b\\");
     if out.write_all(ask.as_bytes()).is_err() || out.flush().is_err() {
         // A terminal that cannot be written to has no answer either.
         return Answer::default();
@@ -73,7 +76,7 @@ fn read_answer(fd: RawFd) -> Answer {
     let mut asked = Answer::default();
     let mut held: Vec<u8> = Vec::new();
     let mut typed: Vec<u8> = Vec::new();
-    let opening = OPENING.as_bytes();
+    let openings = [FOREGROUND_OPENING.as_bytes(), BACKGROUND_OPENING.as_bytes()];
     loop {
         // A reply already in hand is waited out: its bytes are on their way,
         // and what is left of it must not be left for the keyboard reader.
@@ -88,7 +91,7 @@ fn read_answer(fd: RawFd) -> Answer {
         // Text is what the user typed; the one byte a reply opens with is
         // held, and the next bytes say whether it was one.
         if held.is_empty() {
-            if byte == opening[0] {
+            if byte == 0x1b {
                 held.push(byte);
             } else {
                 typed.push(byte);
@@ -96,10 +99,10 @@ fn read_answer(fd: RawFd) -> Answer {
             continue;
         }
         held.push(byte);
-        if opening.starts_with(&held) {
+        if openings.iter().any(|opening| opening.starts_with(&held)) {
             continue;
         }
-        if !held.starts_with(opening) {
+        if !openings.iter().any(|opening| held.starts_with(opening)) {
             // Not a reply after all: a keystroke's escape sequence is eaten to
             // its end, so no fragment of a key arrives later as a letter.
             let key = matches!(held.as_slice(), [0x1b, b'[' | b'O', ..]);
@@ -120,20 +123,32 @@ fn read_answer(fd: RawFd) -> Answer {
         if !matches!(byte, b'\x07' | 0x1b) {
             continue;
         }
-        if let Some(bg) = parse(&held) {
-            // A reply ended in `ST` is `ESC` and one more byte, and that byte
-            // is not part of the colour: it must not be left behind either.
-            if byte == 0x1b {
-                let _ = read_byte(fd, TAIL);
-            }
-            asked.bg = Some(bg);
-            held.clear();
+        // Consume the rest of ST even for an echoed query or malformed colour.
+        if byte == 0x1b {
+            let _ = read_byte(fd, TAIL);
+        }
+        asked.receive(&held);
+        held.clear();
+        if asked.fg.is_some() && asked.bg.is_some() {
             break;
         }
-        held.clear();
     }
     asked.typed = text_of(&typed);
     asked
+}
+
+#[cfg(unix)]
+impl Answer {
+    fn receive(&mut self, bytes: &[u8]) {
+        for (opening, field) in [
+            (FOREGROUND_OPENING, &mut self.fg),
+            (BACKGROUND_OPENING, &mut self.bg),
+        ] {
+            if let Some(color) = parse(bytes, opening) {
+                *field = Some(color);
+            }
+        }
+    }
 }
 
 // The rest of a keystroke that opened with `ESC [ ` or `ESC O`, final byte
@@ -194,16 +209,16 @@ fn text_of(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// The background an answer names, if one is in there. Found, not matched
+/// The colour an answer names, if one is in there. Found, not matched
 /// whole, since the query itself may precede the answer.
 ///
 /// Forms: `rgb:RRRR/GGGG/BBBB` or `#rrggbb`; the high byte of each
 /// component is the colour.
 #[cfg(unix)]
-fn parse(bytes: &[u8]) -> Option<(u8, u8, u8)> {
+fn parse(bytes: &[u8], opening: &str) -> Option<(u8, u8, u8)> {
     let text = String::from_utf8_lossy(bytes);
-    text.match_indices(OPENING)
-        .find_map(|(at, _)| colour(&text[at + OPENING.len()..]))
+    text.match_indices(opening)
+        .find_map(|(at, _)| colour(&text[at + opening.len()..]))
 }
 
 // The colour one answer names, as the rest of the buffer from its marker.
@@ -262,7 +277,11 @@ mod tests {
             ("\x1b]11;rgb:f/f/f\x07", (0xff, 0xff, 0xff)),
             ("\x1b]11;#f0f\x07", (0xff, 0x00, 0xff)),
         ] {
-            assert_eq!(parse(reply.as_bytes()), Some(want), "for {reply:?}");
+            assert_eq!(
+                parse(reply.as_bytes(), BACKGROUND_OPENING),
+                Some(want),
+                "for {reply:?}"
+            );
         }
     }
 
@@ -271,8 +290,11 @@ mod tests {
     #[test]
     fn a_query_in_front_of_the_answer_is_not_a_colour() {
         let both = "\x1b]11;?\x1b\\\x1b]11;rgb:0d0d/1111/1717\x07";
-        assert_eq!(parse(both.as_bytes()), Some((0x0d, 0x11, 0x17)));
-        assert_eq!(parse(b"\x1b]11;?\x1b\\"), None);
+        assert_eq!(
+            parse(both.as_bytes(), BACKGROUND_OPENING),
+            Some((0x0d, 0x11, 0x17))
+        );
+        assert_eq!(parse(b"\x1b]11;?\x1b\\", BACKGROUND_OPENING), None);
     }
 
     // A partial read is what the next poll will complete; a colour guessed
@@ -288,10 +310,14 @@ mod tests {
             "\x1b]11;#0d111",
             "\x1b]11;#0d1",
         ] {
-            assert_eq!(parse(partial.as_bytes()), None, "for {partial:?}");
+            assert_eq!(
+                parse(partial.as_bytes(), BACKGROUND_OPENING),
+                None,
+                "for {partial:?}"
+            );
         }
         // What a keystroke looks like on the way past: a word, not a colour.
-        assert_eq!(parse(b"fix the bug\n"), None);
+        assert_eq!(parse(b"fix the bug\n", BACKGROUND_OPENING), None);
     }
 
     // Multi-byte text is kept whole; control bytes are dropped as keys.
@@ -344,7 +370,7 @@ mod tests {
     // for the keyboard reader — the answer is where the asking ends.
     #[test]
     fn what_is_typed_around_the_answer_is_kept() {
-        let (asked, left) = answer(b"ls\x1b]11;#0d1117\x07 -a");
+        let (asked, left) = answer(b"ls\x1b]10;#ffffff\x07\x1b]11;#0d1117\x07 -a");
         assert_eq!(asked.bg, Some((0x0d, 0x11, 0x17)));
         assert_eq!(asked.typed, "ls");
         assert_eq!(left, " -a");
@@ -366,5 +392,32 @@ mod tests {
         assert_eq!(asked.bg, None);
         assert_eq!(asked.typed, "hello");
         assert_eq!(left, "");
+    }
+
+    #[test]
+    fn terminal_colors_are_read_in_either_order_without_consuming_later_typing() {
+        let foreground = "\x1b]10;rgb:cccc/dddd/eeee\x1b\\";
+        let background = "\x1b]11;#101820\x07";
+        for replies in [
+            format!("{foreground}hi{background}"),
+            format!("{background}hi{foreground}"),
+        ] {
+            let (asked, left) = answer(format!("before{replies}after").as_bytes());
+            assert_eq!(asked.fg, Some((0xcc, 0xdd, 0xee)));
+            assert_eq!(asked.bg, Some((0x10, 0x18, 0x20)));
+            assert_eq!(asked.typed, "beforehi");
+            assert_eq!(left, "after");
+        }
+    }
+
+    #[test]
+    fn an_unsupported_or_malformed_foreground_keeps_the_background_and_typing() {
+        for foreground in ["", "\x1b]10;?\x1b\\", "\x1b]10;#zzzzzz\x07"] {
+            let (asked, left) = answer(format!("{foreground}\x1b]11;#101820\x07hello").as_bytes());
+            assert_eq!(asked.fg, None);
+            assert_eq!(asked.bg, Some((0x10, 0x18, 0x20)));
+            assert_eq!(asked.typed, "hello");
+            assert_eq!(left, "");
+        }
     }
 }

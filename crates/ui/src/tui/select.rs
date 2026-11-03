@@ -13,10 +13,29 @@ pub(super) struct Point {
 }
 
 /// From where the press landed to where the pointer is, either way round.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct Selection {
+    pub(super) source: Option<Source>,
+    pub(super) fragments: Vec<(usize, std::ops::Range<usize>)>,
     pub(super) anchor: Point,
     pub(super) head: Point,
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum Source {
+    Rendered {
+        region: Option<usize>,
+        text: String,
+        occurrence: usize,
+    },
+    Text {
+        anchor: (super::search::Spot, usize),
+        head: (super::search::Spot, usize),
+    },
+    Cell {
+        at: super::search::Spot,
+        id: usize,
+    },
 }
 
 impl Selection {
@@ -176,9 +195,18 @@ pub(super) fn highlight(
 ) -> Vec<Line<'static>> {
     rows.into_iter()
         .enumerate()
-        .map(|(at, line)| match sel.cols(from + at) {
-            Some((from, to)) => reversed(line, from.max(lead(at)), to),
-            None => line,
+        .map(|(at, mut line)| {
+            if !sel.fragments.is_empty() || sel.source.is_some() {
+                for (_, range) in sel.fragments.iter().filter(|(row, _)| *row == from + at) {
+                    line = reversed(line, range.start.max(lead(at)), range.end);
+                }
+                line
+            } else {
+                match sel.cols(from + at) {
+                    Some((from, to)) => reversed(line, from.max(lead(at)), to),
+                    None => line,
+                }
+            }
         })
         .collect()
 }
@@ -197,6 +225,8 @@ mod tests {
 
     fn sel(a: (usize, usize), b: (usize, usize)) -> Selection {
         Selection {
+            source: None,
+            fragments: Vec::new(),
             anchor: Point { row: a.0, col: a.1 },
             head: Point { row: b.0, col: b.1 },
         }

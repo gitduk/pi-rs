@@ -38,6 +38,8 @@ pub(super) struct Ui {
     // The terminal's own background, asked for once at startup: the prompt's
     // bands are a lift of it, and a terminal that will not say leaves both be.
     pub(super) tty_bg: Option<(u8, u8, u8)>,
+    // The terminal text colour, used to blend decorative rules toward the background.
+    pub(super) tty_fg: Option<(u8, u8, u8)>,
     // The same sigil for a `!` line, where the bang takes the icon's place.
     // One sigil per bang count: `!` then `!!`.
     pub(super) bang_prompts: [Span<'static>; 2],
@@ -121,6 +123,7 @@ pub(super) struct Ui {
     // The rows as last drawn, in plain text: what a selection reads. The
     // history's, row for row with `row_targets`, then the bar's under them.
     pub(super) drawn: Vec<String>,
+    pub(super) drawn_width: usize,
     // What the mouse has selected, drawn reversed until the next press.
     pub(super) selection: Option<super::select::Selection>,
     // The last press: where, when, how many in a row there, and whether the
@@ -244,6 +247,7 @@ impl Ui {
             prompt,
             band,
             tty_bg: None,
+            tty_fg: None,
             bang_prompts,
             list: List::default(),
             questions: Vec::new(),
@@ -281,6 +285,7 @@ impl Ui {
             row_targets: Vec::new(),
             row_of: Vec::new(),
             drawn: Vec::new(),
+            drawn_width: 0,
             selection: None,
             press: None,
             live_tools_shown: false,
@@ -355,7 +360,9 @@ impl Ui {
         resolved: &Resolved,
         theme: Arc<pi_store::theme::Theme>,
     ) {
-        self.paint = Paint::with_theme(self.paint.color, theme).with_background(self.tty_bg);
+        self.paint = Paint::with_theme(self.paint.color, theme)
+            .with_background(self.tty_bg)
+            .with_foreground(self.tty_fg);
         self.bang_prompts = Self::bang_prompts(&self.paint);
         self.tab_sep = Self::paint_sep(&self.paint);
         self.band = self.paint.band(&self.paint.theme.prompt.panel.input);

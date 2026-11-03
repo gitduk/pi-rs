@@ -19,6 +19,7 @@ mod screen;
 mod scrollback;
 mod search;
 mod select;
+mod selection;
 mod slash;
 mod stream;
 use stream::by_pi;
@@ -208,7 +209,7 @@ pub struct Tui {
 impl Tui {
     /// `last` is kept as a screen row at the end of the resumed transcript.
     pub fn new(mut core: Core, drivers: Drivers, last: Option<String>) -> Result<Self> {
-        // The screen first, for raw mode: the answer to the background query
+        // The screen first, for raw mode: the answers to the colour queries
         // carries no newline, so a cooked read would wait for one forever.
         let screen = Screen::new()?;
         let answer = tty::background();
@@ -216,7 +217,8 @@ impl Tui {
             true,
             Arc::new(following_terminal(&core.config.theme, answer.bg)),
         )
-        .with_background(answer.bg);
+        .with_background(answer.bg)
+        .with_foreground(answer.fg);
         let mut ui = Ui::new(
             screen,
             core.config.key_table.clone(),
@@ -227,6 +229,7 @@ impl Tui {
         );
         ui.lists.pinned = core.pinned.clone();
         ui.tty_bg = answer.bg;
+        ui.tty_fg = answer.fg;
         // Asking the terminal read it, so it is typed in here: the keyboard
         // reader would never see those bytes again.
         ui.editor.insert_str(&answer.typed);

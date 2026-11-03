@@ -43,6 +43,7 @@ pub(crate) fn title_room(width: usize, lead: usize, tail: &str) -> usize {
 pub struct Paint {
     pub color: bool,
     pub theme: Arc<Theme>,
+    foreground: Option<(u8, u8, u8)>,
     background: Option<(u8, u8, u8)>,
     // Parsing an embedded theme is startup work, never per streaming delta.
     markdown: OnceLock<crate::markdown::Format>,
@@ -58,6 +59,7 @@ impl Paint {
         Self {
             color,
             theme,
+            foreground: None,
             background: None,
             markdown: OnceLock::new(),
         }
@@ -65,6 +67,11 @@ impl Paint {
 
     pub(crate) fn with_background(mut self, background: Option<(u8, u8, u8)>) -> Self {
         self.background = background;
+        self
+    }
+
+    pub(crate) fn with_foreground(mut self, foreground: Option<(u8, u8, u8)>) -> Self {
+        self.foreground = foreground;
         self
     }
 
@@ -290,13 +297,20 @@ fn badge_with(
 // A code block's opening fence becomes its badge, carrying the block's text;
 // the rest of its info string is the note, and the closing fence goes.
 fn fenced(
-    lines: Vec<(Line<'static>, crate::unit::Units, Option<Prefix>)>,
+    lines: Vec<Rendered>,
     badge: ratatui::style::Style,
     muted: ratatui::style::Style,
 ) -> Vec<Rendered> {
     let mut open: Option<(usize, Vec<String>)> = None;
     let mut out: Vec<Rendered> = Vec::with_capacity(lines.len());
-    for (line, units, prefix) in lines {
+    for Rendered {
+        line,
+        units,
+        prefix,
+        cells,
+        ..
+    } in lines
+    {
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         let Some(lang) = text.strip_prefix(FENCE) else {
             let coded = match &mut open {
@@ -311,6 +325,7 @@ fn fenced(
                 coded,
                 units,
                 prefix,
+                cells,
             });
             continue;
         };
@@ -323,6 +338,7 @@ fn fenced(
                     line: badge_with(lang, note.trim(), badge, muted),
                     coded: Coded::Badge(String::new()),
                     units: Vec::new(),
+                    cells: Vec::new(),
                     prefix,
                 });
             }
@@ -364,6 +380,7 @@ pub struct Rendered {
     pub line: Line<'static>,
     pub coded: Coded,
     pub units: crate::unit::Units,
+    pub cells: Vec<crate::unit::CellFragment>,
     pub prefix: Option<Prefix>,
 }
 
@@ -423,6 +440,13 @@ pub fn render_markdown(text: &str, paint: &Paint) -> Vec<ratatui::text::Line<'st
 /// The same lines, each with what it is to a code block and what in it
 /// reads as one.
 pub fn render_coded(text: &str, paint: &Paint) -> Vec<Rendered> {
+    let width = crossterm::terminal::size()
+        .ok()
+        .map(|(w, _)| usize::from(w));
+    render_coded_at(text, paint, width)
+}
+
+pub(crate) fn render_coded_at(text: &str, paint: &Paint, width: Option<usize>) -> Vec<Rendered> {
     if text.is_empty() {
         return Vec::new();
     }
@@ -434,28 +458,33 @@ pub fn render_coded(text: &str, paint: &Paint) -> Vec<Rendered> {
                 line: Line::from(l.to_string()),
                 coded: Coded::Text,
                 units: Vec::new(),
+                cells: Vec::new(),
                 prefix: None,
             })
             .collect();
     }
     let trimmed = trim_partial_fences(text);
-    // Drawn for the terminal as it is now; a narrower one gets the source.
-    let width = crossterm::terminal::size()
-        .ok()
-        .map(|(w, _)| usize::from(w));
+    // Diagrams share the width budget of the surrounding Markdown.
     let drawn = crate::block::drawn(trimmed, width);
     let marked = crate::unit::mark(&drawn);
     let badge =
         style_to_ratatui(&paint.theme.code).patch(band_to_ratatui(&paint.theme.prompt.panel.said));
     let muted = style_to_ratatui(&paint.theme.muted);
-    let options = paint
-        .markdown
-        .get_or_init(|| crate::markdown::options(paint.theme.clone()));
+    let options = paint.markdown.get_or_init(|| {
+        crate::markdown::options(
+            paint.theme.clone(),
+            crate::theme::table_separator(paint.foreground, paint.background),
+        )
+    });
     let parsed = options.render(&marked, width);
     // Flatten block and inline styles onto the owned spans before measuring.
+    let mut table_units = Vec::with_capacity(parsed.len());
+    let mut table_cells = Vec::with_capacity(parsed.len());
     let (lines, prefixes): (Vec<_>, Vec<_>) = parsed
         .into_iter()
         .map(|row| {
+            table_units.push(row.units);
+            table_cells.push(row.cells);
             let line = row.line;
             let line_style = line.style;
             let spans: Vec<Span<'static>> = line
@@ -473,10 +502,25 @@ pub fn render_coded(text: &str, paint: &Paint) -> Vec<Rendered> {
         Cow::Owned(_) => crate::unit::strip(lines),
         Cow::Borrowed(_) => lines.into_iter().map(|l| (l, Vec::new())).collect(),
     };
+    let lines: Vec<_> = lines
+        .into_iter()
+        .zip(table_units)
+        .zip(prefixes)
+        .map(|(((line, mut units), table_units), prefix)| {
+            units.extend(table_units);
+            (line, units, prefix)
+        })
+        .collect();
     let lines = lines
         .into_iter()
-        .zip(prefixes)
-        .map(|((line, units), prefix)| (line, units, prefix))
+        .zip(table_cells)
+        .map(|((line, units, prefix), cells)| Rendered {
+            line,
+            units,
+            prefix,
+            cells,
+            coded: Coded::Text,
+        })
         .collect();
     fenced(lines, badge, muted)
 }

@@ -1,9 +1,9 @@
 //! The stretches of a rendered answer that read as one — inline code, a
 //! link's text, its destination — so a double click takes each whole.
 //!
-//! The markdown renderer keeps no positions, so the stretches are marked in
-//! the source first, by a pair of private-use chars around each, and found
-//! again in the lines it draws, where the marks are taken out.
+//! Inline stretches are marked in the source by a pair of private-use chars,
+//! then recovered from the rendered lines as the marks are taken out.
+//! Tables attach their cell ranges during layout.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -14,12 +14,20 @@ use ratatui::text::{Line, Span};
 /// The cell ranges of a line that read as one.
 pub type Units = Vec<Range<usize>>;
 
+/// One displayed fragment and the complete cell it copies.
+#[derive(Debug, Clone)]
+pub struct CellFragment {
+    pub id: usize,
+    pub range: Range<usize>,
+    pub text: std::sync::Arc<str>,
+}
+
 // Private-use chars no model writes, as the code fence's stand-in is.
 const OPEN: char = '\u{E001}';
 const CLOSE: char = '\u{E002}';
 
 /// `text` with every stretch that reads as one between `OPEN` and `CLOSE`;
-/// none in a table, whose columns the renderer sizes marks and all.
+/// tables supply their own cell ranges after layout.
 pub fn mark(text: &str) -> Cow<'_, str> {
     // Skip parsing when there is no code or link to mark. Text holding the
     // marks already (an icon font's glyph) is left as is.
@@ -266,8 +274,12 @@ mod tests {
     #[test]
     fn a_table_keeps_no_marks() {
         let got = units("| a | b |\n|---|---|\n| `x` | y |\n");
-        assert!(got.iter().all(|(_, u)| u.is_empty()), "{got:?}");
         assert!(got.iter().all(|(t, _)| !t.contains([OPEN, CLOSE])));
+        let cells: Vec<_> = got
+            .iter()
+            .flat_map(|(text, ranges)| taken(text, ranges))
+            .collect();
+        assert_eq!(cells, ["a", "b", "x", "y"]);
     }
 
     #[test]

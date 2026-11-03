@@ -150,14 +150,8 @@ fn background(added: bool, strong: bool, p: &Paint) -> Color {
         (229, 115, 115)
     };
     let weight = if strong { 32 } else { 12 };
-    let mix = |base: u8, tint: u8| {
-        ((u16::from(base) * (100 - weight) + u16::from(tint) * weight) / 100) as u8
-    };
-    Color::Rgb(
-        mix(base.0, tint.0),
-        mix(base.1, tint.1),
-        mix(base.2, tint.2),
-    )
+    let (r, g, b) = crate::theme::blend(tint, base, weight);
+    Color::Rgb(r, g, b)
 }
 
 fn draw(row: &Row<'_>, tokens: Vec<Span<'static>>, p: &Paint, room: usize) -> Line<'static> {

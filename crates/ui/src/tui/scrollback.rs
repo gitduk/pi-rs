@@ -508,7 +508,7 @@ pub(super) fn body(
     } else {
         // Code lines indented, as they will land.
         let indent = Line::from(super::row::CODE_INDENT);
-        render::render_coded(partial, paint)
+        render::render_coded_at(partial, paint, Some(width))
             .into_iter()
             .flat_map(|r| {
                 let mut border = r.prefix.as_ref().map(|p| p.first.clone());

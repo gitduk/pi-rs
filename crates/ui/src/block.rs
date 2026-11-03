@@ -1,7 +1,10 @@
 //! Blocks of an answer drawn for the width they are shown at — a closed
-//! ```` ```mermaid ```` block, a table — or, too wide for it, shown as source.
+//! ```` ```mermaid ```` block, or a table with its enclosing containers.
 
 use std::borrow::Cow;
+use std::ops::Range;
+
+use pulldown_cmark::{Event, Parser, Tag};
 
 /// A stretch of an answer: markdown, or a block drawn per width.
 pub enum Piece<'a> {
@@ -19,6 +22,30 @@ pub enum Form {
 /// `text` cut at its closed mermaid blocks and its tables. An unclosed
 /// mermaid block (still streaming) stays text, as does all of other code.
 pub fn pieces(text: &str) -> Vec<Piece<'_>> {
+    // Keep the enclosing list or quote together: its prefixes affect the
+    // table's width, and its Markdown structure must survive a redraw.
+    let mut tables = Vec::new();
+    let (mut depth, mut outer, mut has_table) = (0, 0, false);
+    for (event, range) in Parser::new_ext(text, crate::unit::options()).into_offset_iter() {
+        match event {
+            Event::Start(tag) => {
+                if depth == 0 {
+                    outer = range.start;
+                    has_table = false;
+                }
+                depth += 1;
+                has_table |= matches!(tag, Tag::Table(_));
+            }
+            Event::End(_) => {
+                depth -= 1;
+                if depth == 0 && has_table {
+                    tables.push(outer..range.end);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut tables = tables.into_iter().peekable();
     let mut lines = Vec::new();
     let mut at = 0;
     for line in text.split_inclusive('\n') {
@@ -32,6 +59,21 @@ pub fn pieces(text: &str) -> Vec<Piece<'_>> {
     let mut i = 0;
     while i < lines.len() {
         let (at, line) = lines[i];
+        if tables
+            .peek()
+            .is_some_and(|range| range.start < end(i) && range.end > at)
+        {
+            let Range { end: stop, .. } = tables.next().expect("checked above");
+            if at > start {
+                out.push(Piece::Text(&text[start..at]));
+            }
+            out.push(Piece::Block(Form::Table, &text[at..stop]));
+            while i < lines.len() && lines[i].0 < stop {
+                i += 1;
+            }
+            start = stop;
+            continue;
+        }
         let t = line.trim();
         if code || (t.starts_with("```") && t != "```mermaid") {
             code = code != t.starts_with("```");
@@ -43,12 +85,6 @@ pub fn pieces(text: &str) -> Vec<Piece<'_>> {
                 break;
             };
             Some((Form::Mermaid, &text[end(i)..lines[close].0], close + 1))
-        } else if t.starts_with('|') && lines.get(i + 1).is_some_and(|(_, l)| delimiter(l)) {
-            let last = (i + 2..lines.len())
-                .take_while(|&k| lines[k].1.trim().starts_with('|'))
-                .last()
-                .unwrap_or(i + 1);
-            Some((Form::Table, &text[at..end(last)], last + 1))
         } else {
             None
         };
@@ -70,18 +106,13 @@ pub fn pieces(text: &str) -> Vec<Piece<'_>> {
     out
 }
 
-/// A table's second line: `|---|:--:|`, each cell dashes with optional colons.
-fn delimiter(line: &str) -> bool {
-    let t = line.trim();
-    let t = t.strip_prefix('|').unwrap_or(t);
-    let t = t.strip_suffix('|').unwrap_or(t);
-    t.contains('-')
-        && t.split('|').all(|cell| {
-            let c = cell.trim();
-            let c = c.strip_prefix(':').unwrap_or(c);
-            let c = c.strip_suffix(':').unwrap_or(c);
-            !c.is_empty() && c.chars().all(|ch| ch == '-')
-        })
+pub(crate) fn references(text: &str) -> String {
+    Parser::new_ext(text, crate::unit::options())
+        .reference_definitions()
+        .iter()
+        .map(|(_, definition)| &text[definition.span.clone()])
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The cells of a table row, by the bytes of each one's text, the spaces
@@ -185,7 +216,7 @@ fn squeeze(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cells, delimiter};
+    use super::cells;
 
     // A cell split wrong colours the wrong text, and nobody would notice.
     #[test]
@@ -198,7 +229,6 @@ mod tests {
         assert_eq!(texts("| x \\| y | z |"), ["x \\| y", "z"]);
         assert_eq!(texts("|  | z |"), ["", "z"]);
         assert_eq!(texts("  | a |  "), ["a"]);
-        assert!(delimiter("|---|:--:|") && !delimiter("| a | b |"));
     }
 
     // `squeeze` is only right while mermaid-text pads wide chars; once it
