@@ -113,10 +113,12 @@ pub fn restart(
     out
 }
 
-/// The flags that outrank the config for the whole run, and so are applied
-/// again over every reload: all the core ever reads of the command line.
+/// The startup choices that outrank the config for the whole run, and so are applied
+/// again over every reload, including the caller's built-in skills.
 #[derive(Debug, Clone, Default)]
 pub struct Pinned {
+    /// Built-in skills supplied by the caller, retained across reloads.
+    pub skills: Vec<skills::Skill>,
     pub config: Option<String>,
     pub base_url: Option<String>,
     pub context: Option<u32>,
@@ -132,6 +134,8 @@ impl Pinned {
     /// a field added here and not passed on fails to compile.
     pub fn args(&self) -> Vec<String> {
         let Self {
+            // The caller supplies these again at startup.
+            skills: _,
             config,
             base_url,
             context,
@@ -173,6 +177,7 @@ impl Args {
 
     pub fn pinned(&self) -> Pinned {
         Pinned {
+            skills: Vec::new(),
             config: self.config.clone(),
             base_url: self.base_url.clone(),
             context: self.context,

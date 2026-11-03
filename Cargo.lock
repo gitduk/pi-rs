@@ -3523,6 +3523,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "skills",
  "syntect",
  "tempfile",
  "tokio",

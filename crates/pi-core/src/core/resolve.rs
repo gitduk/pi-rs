@@ -289,6 +289,7 @@ pub fn resolve(
                 .into_iter()
                 .filter_map(skills::Skill::builtin)
                 .chain([tool_creator(), skill_creator(), super::help::skill()])
+                .chain(pinned.skills.iter().cloned())
                 .fold(shelf, skills::Shelf::with_builtin),
         )
     });
@@ -937,6 +938,9 @@ mod tests {
         for no_skills in [false, true] {
             let pinned = crate::args::Pinned {
                 no_skills,
+                skills: vec![skills::Skill::builtin(
+                    "---\nname: caller-skill\ndescription: Instructions supplied by the caller.\n---\n",
+                ).unwrap().with_files(vec![("example.txt".into(), "example")])],
                 no_context_files: true,
                 ..Default::default()
             };
@@ -951,7 +955,25 @@ mod tests {
             .unwrap();
             let loader = resolved.brief.registry.get(skills::Load::NAME);
             assert_eq!(loader.is_some(), !no_skills);
-            for name in ["tool-creator", "skill-creator", "mcp-setup", "architecture"] {
+            if let Some(shelf) = &resolved.shelf {
+                let found = shelf.now().0;
+                let supplied = found
+                    .skills
+                    .iter()
+                    .find(|s| s.name == "caller-skill")
+                    .unwrap();
+                assert_eq!(
+                    supplied.builtin_files,
+                    vec![("example.txt".into(), "example")]
+                );
+            }
+            for name in [
+                "tool-creator",
+                "skill-creator",
+                "mcp-setup",
+                "architecture",
+                "caller-skill",
+            ] {
                 assert_eq!(
                     resolved
                         .commands

@@ -9,6 +9,7 @@ pub mod listing;
 mod markdown;
 pub mod render;
 pub mod sgr;
+pub mod skills;
 pub mod status;
 pub mod theme;
 pub mod tty;

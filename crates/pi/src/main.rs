@@ -212,7 +212,8 @@ fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
             settings.project_sets("model").is_some(),
         )
         .ok_or_else(|| no_model(&args))?;
-    let pinned = args.pinned();
+    let mut pinned = args.pinned();
+    pinned.skills = ui::skills::builtins();
     let dialled = dial(&pinned, &config, &named, named_by)?;
 
     // Only the terminal answers its own words; a one-shot run has none.

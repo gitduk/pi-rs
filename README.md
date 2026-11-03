@@ -83,53 +83,8 @@ pi still appends the run's workspace, permissions, standing instructions, and me
 It also shows each system block's source, size, and diagnostic fingerprint.
 Fingerprints identify content changes, not authenticity.
 
-The cargo script `~/.pi/bar.rs` defines the bar under the input line.
-It runs with `cargo +nightly -Zscript`.
-It reads pi's state as JSON on stdin and prints a layout.
-The state fields are `model`, `effort`, `tier`, `running`, `root`, `worktree`, `ctx`, `spent`, `alerts`, `update`, and `released`.
-Use [`examples/bar.rs`](examples/bar.rs) as a starting example.
-
-Without this file, the bar shows `tabs`, `model`, and `spent` on the left.
-It shows `update` and `flash` on the right.
-pi runs the script again whenever its state changes.
-If you set `refresh`, pi also runs it every `refresh` seconds.
-
-A layout contains `lines`.
-Each line has `left` and `right` items and an optional `sep`.
-The default separator is a muted ` · `.
-Use one of these item formats:
-
-- A part's name.
-- `{"part", "style"}` to style a part.
-- `{"text", "style"}` for the script's text.
-- `{"group": [...]}` for adjacent items without separators.
-  pi omits the entire group when all its parts are empty.
-
-A style can use a theme name: `muted`, `heading`, `emphasis`, `code`, `input`, `ok`, `err`, `add`, or `del`.
-It can also use the format from `[theme]`.
-pi omits an empty part and its preceding separator.
-
-| Part        | Shows                                                     |
-| ----------- | --------------------------------------------------------- |
-| `tabs`      | the checkouts, folded to the room the row leaves          |
-| `flash`     | the answer to the last key, for a moment                  |
-| `model`     | the model                                                 |
-| `effort`    | the thinking effort, omitted when off                     |
-| `tier`      | the tool tier                                             |
-| `update`    | a newer release or an installation that replaces the running pi |
-| `spent`     | what the session has cost so far                          |
-| `cost`      | what the last run cost                                    |
-| `elapsed`   | how long the last run took                                |
-| `in_out`    | its tokens in and out                                     |
-| `speed`     | its output tokens per second                              |
-| `cache`     | how much input the provider cached                        |
-| `ctx`       | the context used, against the window                      |
-| `compacted` | how often pi compacted the session                        |
-| `queued`    | lines waiting for the run to end                          |
-| `worktree`  | the worktree in front                                     |
-
-The parts from `cost` through `worktree` also appear in the status line.
-They describe the active run or the last completed run.
+To customize the bar, use the built-in `bar-creator` skill.
+It includes the `bar.rs` example, input and layout formats, styles, and refresh behavior.
 
 The default colours use the cool colours from Codex's Catppuccin palettes:
 Mocha on dark terminal backgrounds and Latte on light ones.
