@@ -677,10 +677,28 @@ async fn removing_a_lane_terminates_its_queued_requests() {
     submit(&mut tui, execution.as_ref(), "!true").await;
     let (id, event) = response(&mut rx);
     assert_eq!(event, Response::Queued);
+    let (done, _) = unbounded_channel();
+    tui.deliver_prompt(
+        crate::tui::clipboard::prompt("new direction".into(), None, &[]),
+        Origin::Typed,
+        Some("new direction".into()),
+        &done,
+    );
+    let queue = crate::tui::front_view(&mut tui.views, tui.core.lane())
+        .queued
+        .clone();
+    let pending: Vec<_> = queue.lock().iter().map(|q| q.request).collect();
+    assert_eq!(pending.len(), 2);
     switch_to(&mut tui, running_lane(other.path()));
     tui.core.lanes.remove(0);
     tui.core.current = 0;
-    for request in crate::tui::view::prune_views(&tui.core, &mut tui.views) {
+    let removed = crate::tui::view::prune_views(&tui.core, &mut tui.views);
+    assert_eq!(
+        removed, pending,
+        "both queues are cancelled with their lane"
+    );
+    assert!(queue.is_empty());
+    for request in removed {
         tui.cancel_queued(request, "its session was removed");
     }
     assert_eq!(

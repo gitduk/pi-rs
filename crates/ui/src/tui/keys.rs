@@ -577,26 +577,19 @@ impl Ui {
     // Up from the bottom of recall takes back the typed lines still queued,
     // oldest first and the draft after them, before reaching history.
     fn history_older(&mut self, view: &mut View) -> Vec<pi_core::execution::Request> {
-        let mut queued = view.queued.lock();
-        let mut cancelled = Vec::new();
-        if self.editor.recalls_next() && queued.iter().any(|q| q.line.is_some()) {
-            let mut lines = Vec::new();
-            queued.retain_mut(|q| match q.line.take() {
-                Some(line) => {
-                    lines.push(line);
-                    cancelled.push(q.request);
-                    false
+        if self.editor.recalls_next() {
+            let recalled = view.queued.lock().recall();
+            if !recalled.is_empty() {
+                let (cancelled, mut lines): (Vec<_>, Vec<_>) = recalled.into_iter().unzip();
+                if !self.editor.is_empty() {
+                    lines.push(self.editor.text().to_string());
                 }
-                None => true,
-            });
-            if !self.editor.is_empty() {
-                lines.push(self.editor.text().to_string());
+                self.editor.set_line(&lines.join("\n"));
+                return cancelled;
             }
-            self.editor.set_line(&lines.join("\n"));
-            return cancelled;
         }
         self.editor.up();
-        cancelled
+        Vec::new()
     }
 
     // Submit `line` as typed: kept in history if it can be recalled, then read.

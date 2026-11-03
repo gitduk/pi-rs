@@ -197,14 +197,85 @@ pub(super) enum Pending {
     Prompt(agent::session::Prompt),
 }
 
-/// The one queue of a lane's screen. Its model run shares it, and takes the
-/// typed prompts at its front between requests; whatever stands first that
-/// it can't take waits for the run to end, and so does everything behind it.
+/// A lane's pending input, shared with its run. Typed prompts have their own
+/// queue so operations waiting for the run to end cannot block steering.
 #[derive(Clone, Default)]
-pub(super) struct Queue(std::sync::Arc<std::sync::Mutex<Vec<Queued>>>);
+pub(super) struct Queue(std::sync::Arc<std::sync::Mutex<Queues>>);
+
+#[derive(Default)]
+pub(super) struct Queues {
+    steering: std::collections::VecDeque<Queued>,
+    waiting: std::collections::VecDeque<Queued>,
+}
+
+impl Queues {
+    // Display and recall retain submission order across both queues. Request
+    // ids increase at submission and survive an operation waiting or restarting.
+    pub(super) fn iter(&self) -> impl Iterator<Item = &Queued> {
+        in_submission_order(self.steering.iter(), self.waiting.iter())
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.steering.len() + self.waiting.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn push(&mut self, queued: Queued) {
+        if matches!(&queued.input, Pending::Prompt(_)) && queued.request.origin == Origin::Typed {
+            self.steering.push_back(queued);
+        } else {
+            self.waiting.push_back(queued);
+        }
+    }
+
+    // Take recalled lines in submission order, preserving remote input and
+    // everything else without an editable line in its original queue.
+    pub(super) fn recall(&mut self) -> Vec<(Request, String)> {
+        let pending: Vec<_> = self.drain().collect();
+        let mut recalled = Vec::new();
+        for mut queued in pending {
+            if let Some(line) = queued.line.take() {
+                recalled.push((queued.request, line));
+            } else {
+                self.push(queued);
+            }
+        }
+        recalled
+    }
+
+    fn drain(&mut self) -> impl Iterator<Item = Queued> {
+        in_submission_order(self.steering.drain(..), self.waiting.drain(..))
+    }
+}
+
+// Both queues are already ordered. Merge borrowed entries for display or
+// owned entries for recall and cleanup without allocating or sorting again.
+fn in_submission_order<T: std::borrow::Borrow<Queued>>(
+    steering: impl Iterator<Item = T>,
+    waiting: impl Iterator<Item = T>,
+) -> impl Iterator<Item = T> {
+    let mut steering = steering.peekable();
+    let mut waiting = waiting.peekable();
+    std::iter::from_fn(move || {
+        let first = steering.peek().map(|q| q.borrow());
+        let second = waiting.peek().map(|q| q.borrow());
+        if steering_first(first, second) {
+            steering.next()
+        } else {
+            waiting.next()
+        }
+    })
+}
+
+fn steering_first(steering: Option<&Queued>, waiting: Option<&Queued>) -> bool {
+    steering.is_some_and(|a| waiting.is_none_or(|b| a.request.id < b.request.id))
+}
 
 impl Queue {
-    pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Queued>> {
+    pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, Queues> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -219,27 +290,22 @@ impl Queue {
     }
 
     pub(super) fn pop_front(&self) -> Option<Queued> {
-        let mut queue = self.lock();
-        (!queue.is_empty()).then(|| queue.remove(0))
+        let mut queues = self.lock();
+        // Once idle, unconsumed steering and waiting operations resume in
+        // submission order, including after the preceding run was cancelled.
+        if steering_first(queues.steering.front(), queues.waiting.front()) {
+            queues.steering.pop_front()
+        } else {
+            queues.waiting.pop_front()
+        }
     }
 
-    // The front, if a running model may read it.
+    // Only typed prompts enter the running conversation. This never takes an
+    // operation or remote input from the queue waiting for the run to end.
     pub(super) fn take_prompt(&self) -> Option<agent::session::Prompt> {
-        let mut queue = self.lock();
-        match queue.first() {
-            Some(Queued {
-                input: Pending::Prompt(_),
-                request:
-                    Request {
-                        origin: Origin::Typed,
-                        ..
-                    },
-                ..
-            }) => match queue.remove(0).input {
-                Pending::Prompt(ask) => Some(ask),
-                Pending::Intent(_) => unreachable!("the front was a prompt"),
-            },
-            _ => None,
+        match self.lock().steering.pop_front()?.input {
+            Pending::Prompt(ask) => Some(ask),
+            Pending::Intent(_) => unreachable!("only prompts enter the steering queue"),
         }
     }
 }
@@ -281,7 +347,7 @@ pub(super) fn prune_views(core: &Core, views: &mut Views) -> Vec<Request> {
         if core.position_of(*token).is_some() {
             true
         } else {
-            cancelled.extend(view.queued.lock().drain(..).map(|queued| queued.request));
+            cancelled.extend(view.queued.lock().drain().map(|queued| queued.request));
             false
         }
     });

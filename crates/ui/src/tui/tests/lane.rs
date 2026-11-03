@@ -1112,6 +1112,11 @@ async fn a_typed_followup_waits_for_the_run_and_survives_cancellation() {
     let dir = tempfile::tempdir().unwrap();
     let mut tui = surface(dir.path());
     let token = tui.core.lane().token();
+    tui.admit(
+        Asked::Core(Intent::Bash("echo first".into())),
+        Origin::Typed,
+        Some("!echo first".into()),
+    );
     let wake = tui.admit(
         Asked::Core(Intent::Prompt("new direction".into())),
         Origin::Typed,
@@ -1148,6 +1153,14 @@ async fn a_typed_followup_waits_for_the_run_and_survives_cancellation() {
     })
     .await;
 
+    assert!(matches!(
+        view_at(&mut tui.views, token)
+            .queued
+            .pop_front()
+            .unwrap()
+            .input,
+        crate::tui::view::Pending::Intent(Intent::Bash(_))
+    ));
     let queued = view_at(&mut tui.views, token).queued.pop_front().unwrap();
     assert!(view_at(&mut tui.views, token).queued.is_empty());
     assert_eq!(queued.line.as_deref(), Some("new direction"));
@@ -1164,11 +1177,10 @@ async fn a_typed_followup_waits_for_the_run_and_survives_cancellation() {
     assert_eq!(tui.core.lane().session().unwrap().last_prompt(), Some(&ask));
 }
 
-// One queue per screen, shared with its run: a typed follow-up is drawn and
-// can be taken back while it waits, the run reads it only from the front, and
-// another lane's queue is not this run's.
+// Steering can pass waiting operations, preserves its own order and prompt
+// content, and never consumes another lane's messages or remote input.
 #[test]
-fn a_followup_does_not_pass_an_earlier_queued_command_or_enter_another_lane() {
+fn followups_pass_waiting_commands_and_remote_input_without_entering_another_lane() {
     let dir = tempfile::tempdir().unwrap();
     let mut tui = surface(dir.path());
     let queue = front_view(&mut tui.views, tui.core.lane()).queued.clone();
@@ -1178,14 +1190,23 @@ fn a_followup_does_not_pass_an_earlier_queued_command_or_enter_another_lane() {
         Origin::Typed,
         Some("! echo first".into()),
     );
+    tui.admit(
+        Asked::Core(Intent::Prompt("remote input".into())),
+        Origin::Input(1),
+        None,
+    );
+    let mut ask = crate::tui::clipboard::prompt("after bash".into(), None, &[]);
+    ask.images.push(llm::message::Image::Url {
+        url: "https://example.test/image.png".into(),
+    });
+    tui.deliver_prompt(ask.clone(), Origin::Typed, Some("after bash".into()), &done);
     tui.deliver_prompt(
-        crate::tui::clipboard::prompt("after bash".into(), None, &[]),
+        crate::tui::clipboard::prompt("second direction".into(), None, &[]),
         Origin::Typed,
-        Some("after bash".into()),
+        Some("second direction".into()),
         &done,
     );
-    assert_eq!(queue.lock().len(), 2);
-    assert!(queue.take_prompt().is_none(), "the command came first");
+    assert_eq!(queue.lock().len(), 4);
 
     switch_to(&mut tui, running_lane(dir.path()));
     tui.deliver_prompt(
@@ -1202,8 +1223,131 @@ fn a_followup_does_not_pass_an_earlier_queued_command_or_enter_another_lane() {
         1
     );
 
-    queue.pop_front();
-    assert_eq!(queue.take_prompt().unwrap().text, "after bash");
+    assert_eq!(queue.take_prompt(), Some(ask));
+    assert_eq!(queue.take_prompt().unwrap().text, "second direction");
+    assert!(
+        queue.take_prompt().is_none(),
+        "remote input is not steering"
+    );
+    assert!(matches!(
+        queue.pop_front().unwrap().input,
+        crate::tui::view::Pending::Intent(Intent::Bash(_))
+    ));
+    assert_eq!(queue.pop_front().unwrap().request.origin, Origin::Input(1));
+    assert!(queue.is_empty());
+    assert_eq!(
+        front_view(&mut tui.views, tui.core.lane())
+            .queued
+            .take_prompt()
+            .unwrap()
+            .text,
+        "another lane"
+    );
+}
+
+#[tokio::test]
+async fn up_inside_a_multiline_draft_keeps_steering_and_waiting_commands() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut tui = surface(dir.path());
+    let (done, _) = tokio::sync::mpsc::unbounded_channel();
+    tui.admit(
+        Asked::Core(Intent::Bash("echo first".into())),
+        Origin::Typed,
+        Some("!echo first".into()),
+    );
+    tui.deliver_prompt(
+        crate::tui::clipboard::prompt("new direction".into(), None, &[]),
+        Origin::Typed,
+        Some("new direction".into()),
+        &done,
+    );
+    let queue = front_view(&mut tui.views, tui.core.lane()).queued.clone();
+    tui.ui.editor.set_line("first line\nsecond line");
+    let asked = tui.ui.key(
+        tui.core.lane(),
+        front_view(&mut tui.views, tui.core.lane()),
+        crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+        true,
+    );
+    assert!(matches!(asked, Asked::Own(Deed::Nothing)));
+    assert_eq!(tui.ui.editor.text(), "first line\nsecond line");
+    assert!(
+        tui.ui.editor.recalls_next(),
+        "the caret moved to the first line"
+    );
+    assert_eq!(queue.lock().len(), 2, "neither queue was recalled");
+    assert_eq!(queue.take_prompt().unwrap().text, "new direction");
+    assert!(matches!(
+        queue.pop_front().unwrap().input,
+        crate::tui::view::Pending::Intent(Intent::Bash(_))
+    ));
+}
+
+#[tokio::test]
+async fn recalling_steering_and_waiting_commands_keeps_submission_order_and_remote_input() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut tui = surface(dir.path());
+    let (done, _) = tokio::sync::mpsc::unbounded_channel();
+    tui.admit(
+        Asked::Core(Intent::Bash("echo first".into())),
+        Origin::Typed,
+        Some("!echo first".into()),
+    );
+    tui.deliver_prompt(
+        crate::tui::clipboard::prompt("first direction".into(), None, &[]),
+        Origin::Typed,
+        Some("first direction".into()),
+        &done,
+    );
+    tui.admit(
+        Asked::Core(Intent::Prompt("remote input".into())),
+        Origin::Input(1),
+        None,
+    );
+    tui.admit(
+        Asked::Core(Intent::Bash("echo second".into())),
+        Origin::Typed,
+        Some("!echo second".into()),
+    );
+    tui.deliver_prompt(
+        crate::tui::clipboard::prompt("second direction".into(), None, &[]),
+        Origin::Typed,
+        Some("second direction".into()),
+        &done,
+    );
+    let queue = front_view(&mut tui.views, tui.core.lane()).queued.clone();
+    let ids: Vec<_> = queue
+        .lock()
+        .iter()
+        .filter(|q| q.line.is_some())
+        .map(|q| q.request)
+        .collect();
+    tui.ui.editor.set_line("draft");
+    let asked = tui.ui.key(
+        tui.core.lane(),
+        front_view(&mut tui.views, tui.core.lane()),
+        crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+        true,
+    );
+    let Asked::Own(Deed::RecallQueued(recalled)) = asked else {
+        panic!("both kinds of pending typed input can be recalled");
+    };
+    assert_eq!(recalled, ids);
+    tui.carry(Deed::RecallQueued(recalled)).await;
+    assert_eq!(
+        tui.ui.editor.text(),
+        "!echo first\nfirst direction\n!echo second\nsecond direction\ndraft"
+    );
+    assert!(tui.core.lane().is_running());
+    assert!(
+        queue.take_prompt().is_none(),
+        "recalled steering cannot be consumed"
+    );
+    assert_eq!(queue.pop_front().unwrap().request.origin, Origin::Input(1));
     assert!(queue.is_empty());
 }
 
