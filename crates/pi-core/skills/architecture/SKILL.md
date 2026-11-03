@@ -1,20 +1,25 @@
 ---
 name: architecture
-description: Review, design, or change the structure of code. Use when you review or evaluate a project's architecture, add a feature that does not fit the current structure, define or change data types, split or merge modules, parse external input, share mutable state, persist data, or make an operation that can be retried.
+description: Review, design, or change code structure, data types, module boundaries, or dependencies. Also covers external input, shared mutable state, persistence, and retryable operations.
 ---
 
 # Architecture
 
 To change code, design the structure first.
-Then build it in steps that you can verify.
+Then build it in steps that you can check.
 When the user asks only for a design, stop after the plan and report it.
 When the user asks for a review, follow Review and do not change files.
+Match the depth of the analysis to the scope and the cost of reversing the change.
 
 ## Review
 
 1. Map the current structure as in step 2 of Process.
 2. Compare the structure with each section of Principles.
-3. For each problem, report the principle that it breaks, the evidence as file paths and line numbers, the effect on later changes, and a recommended fix.
+3. For each problem, report:
+   - The principle that it breaks.
+   - The evidence, with file paths and line numbers.
+   - The effect on later changes.
+   - A recommended fix.
 4. Order the problems by their effect, the largest first.
 5. Report the parts that follow the principles in one short list.
    Do not report a principle that you could not check as a pass.
@@ -27,8 +32,8 @@ When the user asks for a review, follow Review and do not change files.
 3. Find where the requirement does not fit.
    Special cases, flag parameters, and copied branches are signs of a misfit.
 4. Design the data shape before the logic.
-   Ask what you would build if the requirement had existed from the start.
-5. Compare two or three options.
+   Consider how the design would include this requirement from the start.
+5. Compare two or three options when the choice has meaningful tradeoffs.
    For each option, state which errors it makes impossible, which later changes it makes expensive, and how much it costs to undo.
    Choose one and give the reason.
 6. Plan the change as a sequence of steps.
@@ -38,11 +43,13 @@ When the user asks for a review, follow Review and do not change files.
 7. Build the steps in order.
    Check each step before you start the next.
 
-Report the chosen design, the options that you rejected and why, and the steps.
+Report the chosen design and the steps.
+If you compared options, explain why you rejected the alternatives.
 
 ## Restructuring
 
-- Before you move or reshape code, pin its current behavior with tests.
+- Before you move or reshape code, identify the tests that cover its current behavior.
+  Add tests when the existing checks leave meaningful behavior unprotected.
 - Change the structure in a separate step from a change in behavior.
 - After the change, run the same tests to prove that the behavior did not change.
 - When a change repeats across many places, make one change by hand.
@@ -86,7 +93,7 @@ Report the chosen design, the options that you rejected and why, and the steps.
 ### Subtract before you add
 
 - Remove complexity that the new design makes unnecessary before you add new parts.
-- Delete code that nothing uses.
+- Remove code that nothing uses.
 
 ### Reversibility
 

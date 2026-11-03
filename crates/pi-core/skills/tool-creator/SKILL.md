@@ -3,7 +3,7 @@ name: tool-creator
 description: Create or fix reusable tools for pi, including their script interfaces and background events. Use when the model needs a named interface for direct calls. Ordinary task scripts do not need this skill.
 ---
 
-# Creating a tool
+# Create or fix a tool
 
 A script is a code file that an interpreter or runtime executes.
 A tool is a named interface that the model can call directly.
@@ -23,10 +23,22 @@ A new or updated tool becomes available on the next turn.
 You do not need to restart pi.
 Use the tools currently offered to determine which capabilities are available.
 
+## Read the relevant references
+
+Read these files through `skill(name: "tool-creator", file: "<file>")`:
+
+- `interface.md`: before writing a tool's header, arguments, or output.
+- `writing.md`: before writing descriptions or error messages.
+- `background.md`: when a tool must continue after its call.
+- `events.md`: when a script must report progress, deliver results, or ask the user a question.
+
+If an instruction or implementation method is unclear, read the relevant reference before searching elsewhere.
+The references include interface rules and examples.
+
 ## Implement a tool with a script
 
 Choose the tool directory before creating the file.
-The `<project_tools>` and `<pi_home>` blocks name the tool directories in the system instructions.
+The `<project_tools>` and `<pi_home>` blocks identify the tool directories in the system instructions.
 These blocks specify which directory to use for each tool.
 In the examples below, `<tools-dir>` means the directory you chose.
 
@@ -66,7 +78,7 @@ It skips the home tool and reports the conflict.
 # [required]
 # file = "Path of the file to count, relative to the workspace."
 # ---
-# Every declared argument is also an environment variable of its name.
+# This example reads the file argument from its environment variable.
 wc -l < "$file" || { echo "cannot read $file" >&2; exit 1; }
 ```
 
@@ -92,13 +104,6 @@ fn main() {
     }
 }
 ```
-
-## Read more
-
-Read `interface.md` before you write a tool's header, arguments, or output.
-Read `background.md` for a tool that continues after its call.
-Read `events.md` for a script that reports progress, delivers results, or asks the person a question.
-Read `writing.md` before you write the tool's description, argument descriptions, or error messages.
 
 ## Add and check a tool
 

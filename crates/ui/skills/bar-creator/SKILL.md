@@ -5,19 +5,29 @@ description: Create, edit, or troubleshoot pi's bar.rs script to customize the b
 
 # Customize the bar
 
-The cargo script `bar.rs` in pi's home defines the bar under the input line.
-Use the `<pi_home>` block for the home directory: `$PI_HOME` when set, otherwise `~/.pi`.
-It runs with `cargo +nightly -Zscript`.
-It reads pi's state as JSON on stdin and prints a layout.
+The cargo script `<pi_home>/bar.rs` defines the bar under the input line.
+Use the directory in the `<pi_home>` block.
+This directory is `$PI_HOME` when set, otherwise `~/.pi`.
+pi runs the script with `cargo +nightly -Zscript`.
+The script reads pi's state as JSON on stdin and prints a JSON layout.
 The state fields are `model`, `effort`, `tier`, `running`, `root`, `worktree`, `ctx`, `spent`, `alerts`, `update`, and `released`.
-Read `bar.rs` from this skill as a starting example.
-Use `skill` with `name: "bar-creator"` and `file: "bar.rs"` to read it.
-When updating an existing script, read that file before editing it.
+
+## Read the script and example
+
+Before editing an existing script, read `<pi_home>/bar.rs`.
+Before creating a new script, read this skill's `bar.rs` example.
+If any instruction or customization method is unclear, read the example before searching elsewhere.
+This also applies when the user already has a script.
+To read the example, call `skill` with `{"name": "bar-creator", "file": "bar.rs"}`.
+This skill and its example describe the interface for ordinary customization.
+pi's source code is not required.
 
 Without this file, the bar shows `tabs`, `model`, and `spent` on the left.
 It shows `update` and `flash` on the right.
 pi runs the script again whenever its state changes.
 If you set `refresh`, pi also runs it every `refresh` seconds.
+
+## Define the layout
 
 A layout contains `lines`.
 Each line has `left` and `right` items and an optional `sep`.
@@ -28,7 +38,13 @@ Use one of these item formats:
 - `{"part": "model", "style": "heading"}` to style a part.
 - `{"text": "custom text", "style": "muted"}` for the script's text.
 - `{"group": [...]}` for adjacent items without separators.
-  pi omits the entire group when all its parts are empty.
+
+A group can contain text and parts other than `tabs`.
+Groups cannot nest.
+If a group contains parts, pi hides the entire group when all those parts are empty.
+This also hides the group's fixed text, icons, and spaces.
+Fixed text does not keep such a group visible.
+A group containing only text shows that text normally.
 
 A style can use a theme name: `muted`, `heading`, `emphasis`, `code`, `input`, `ok`, `err`, `add`, or `del`.
 It can also use an explicit style, such as `{"color": "#e5c07b", "sgr": ["bold"]}`.
@@ -56,9 +72,31 @@ pi omits an empty part and its preceding separator.
 The parts from `cost` through `worktree` also appear in the status line.
 They describe the active run or the last completed run.
 
+## Add a label or icon to a part
+
+Put the text and part in one group so they appear and disappear together:
+
+```json
+{"group": [
+  {"text": "⚡ ", "style": "muted"},
+  {"part": "flash", "style": "muted"}
+]}
+```
+
+When the `flash` slot has content, pi shows the icon, a space, and the content.
+When the slot is empty, pi hides the entire group.
+pi supplies part content when it draws the bar.
+The script specifies the part's position and style.
+The script does not need `flash` content on stdin.
+The script does not need a conditional to hide this icon.
+Use the same pattern for a label before `spent` or `effort`.
+Use the user's chosen icon or one consistent with the existing script.
+Investigate fonts or terminal configuration only when the user reports a glyph rendering problem.
+
 ## Check the script
 
-Print only the JSON layout to stdout; send diagnostics to stderr.
+Print only the JSON layout to stdout.
+Send diagnostics to stderr.
 Run the script with representative JSON on stdin before installing it.
 For the supplied example:
 
@@ -68,7 +106,8 @@ printf '%s\n' '{"root":"/tmp/project","running":false}' | cargo +nightly -Zscrip
 
 Also check `running: true` when the script changes its layout during a run.
 Use `refresh` for facts outside pi, such as a clock or repository status.
-Omit it or set it to `null` when only pi's state is needed.
-If execution fails or the output is not a valid layout, pi restores the default layout and retries later.
-An existing script is rerun when its modification time changes.
-If you create the file after pi has started without one, restart pi to discover it.
+Omit `refresh` or set it to `null` when the script uses only pi's state.
+If execution fails or the output is invalid, pi restores the default layout.
+pi retries the script later.
+pi reruns an existing script when its modification time changes.
+If pi started without a script, restart pi after creating the file.
