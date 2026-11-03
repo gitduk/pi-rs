@@ -16,12 +16,14 @@ use crate::tui::screen;
 use pi_core::core::resolve::Resolved;
 use pi_store::icons;
 
+mod banner;
 mod code;
 mod note;
 mod relayed;
 mod result;
 mod steps;
 
+use banner::Banner;
 use code::{Block, Code};
 use note::Note;
 use relayed::Relayed;
@@ -180,8 +182,8 @@ enum Kind {
     CodeLine(Line<'static>),
     Code(Code),
     Block(Block),
-    // A painted line the screen alone knows: banner, command output,
-    // warning. `times` collapses an identical repeat into one row+count.
+    // A painted line the screen alone knows: command output or a warning.
+    // `times` collapses identical repeats into one row and a count.
     Notice {
         text: Line<'static>,
         times: usize,
@@ -189,7 +191,8 @@ enum Kind {
         aside: bool,
     },
     Note(Note),
-    // The banner is replaced whole; an empty group marks a removed row.
+    Banner(Banner),
+    // An empty group marks a removed row.
     Lines(Vec<(Line<'static>, Option<Line<'static>>)>),
     Result(ToolOut),
     Relayed(Relayed),
@@ -861,6 +864,7 @@ impl Row {
             | Kind::Block(_)
             | Kind::Notice { .. }
             | Kind::Said { .. } => 1,
+            Kind::Banner(banner) => banner.len(),
             Kind::Lines(lines) => lines.len(),
             Kind::Result(r) => r.len(),
             Kind::Relayed(r) => r.len(),
@@ -869,8 +873,14 @@ impl Row {
         }
     }
 
-    /// Apply a history-height budget to each open fold and its nested steps.
+    /// Prepare startup spacing and height budgets for open folds.
     pub(super) fn prepare_preview(&self, paint: &Paint, width: usize, height: usize) {
+        if let Kind::Banner(banner) = &self.0 {
+            if banner.prepare(height) {
+                self.1.clear();
+            }
+            return;
+        }
         // Keep a title and footer when possible, even in a very short window.
         let budget = (height / 2).max(2).min(height.max(1));
         if self
@@ -1004,6 +1014,7 @@ impl Row {
         let (line, border) = match &self.0 {
             Kind::Said { border, body, .. } => (body.clone(), Some(border.clone())),
             Kind::Answer(text, _) => (text.clone(), None),
+            Kind::Banner(banner) => (banner.line(i, paint, width), None),
             Kind::Lines(lines) => lines[i].clone(),
             Kind::CodeLine(line) => (line.clone(), Some(Line::from(CODE_INDENT))),
             Kind::Note(n) => n.line(i, paint, width),
@@ -1169,60 +1180,10 @@ impl Row {
         }
     }
 
-    /// What the screen opens with: what the prompt stands on, departures
-    /// from the defaults, and what startup had to say. Built fresh, so a
-    /// reload theme change repaints it.
+    /// A width-aware startup signature, followed by notices from resolution.
+    /// Configuration details belong in the explicit listings.
     pub fn banner(resolved: &Resolved, paint: &Paint) -> Self {
-        let mut facts = Vec::new();
-        if let Some(system) = &resolved.system {
-            facts.push(("system prompt", tilde(system)));
-        }
-        if !resolved.instructions.is_empty() {
-            facts.push(("instructions", resolved.instructions.join(", ")));
-        }
-        // By topic, a handful at most: the paths are in `/status`.
-        const TOPICS: usize = 5;
-        let topics: Vec<&str> = resolved
-            .memory
-            .iter()
-            .filter_map(|p| std::path::Path::new(p).file_stem()?.to_str())
-            .collect();
-        if !topics.is_empty() {
-            let mut shown = topics[..topics.len().min(TOPICS)].join(", ");
-            if topics.len() > TOPICS {
-                shown.push_str(&format!(", +{}", topics.len() - TOPICS));
-            }
-            facts.push(("memory", shown));
-        }
-        if !resolved.mcp.is_empty() {
-            facts.push(("mcp", resolved.mcp.join(", ")));
-        }
-        if resolved.ceiling != tool::Tier::Exec {
-            facts.push(("tier", format!("{:?}", resolved.ceiling).to_lowercase()));
-        }
-        // What the project file sets is a fact like the rest; which file
-        // said it is not worth a line of its own.
-        facts.extend(
-            resolved
-                .project
-                .iter()
-                .map(|(key, value)| (key.as_str(), value.clone())),
-        );
-        let width = pi_store::text::widest(facts.iter().map(|(label, _)| *label));
-        let muted = |line: &str| Line::from(paint.span(&paint.theme.muted, line));
-        let fact = |label: &str, value: &str| {
-            (
-                muted(value),
-                Some(muted(&format!("{}  ", pi_store::text::pad(label, width)))),
-            )
-        };
-        Self::new(Kind::Lines(
-            std::iter::once((muted(&icons::version_banner()), None))
-                .chain(facts.iter().map(|(label, value)| fact(label, value)))
-                .chain((!resolved.notes.is_empty()).then(|| (muted(""), None)))
-                .chain(resolved.notes.iter().map(|note| (muted(note), None)))
-                .collect(),
-        ))
+        Self::new(Kind::Banner(Banner::new(&resolved.notes, paint)))
     }
 }
 
@@ -1236,16 +1197,6 @@ pub(super) use llm::figures::count;
 fn clip_beside(text: &str, lead: usize, tail: &str, width: usize) -> String {
     let room = render::title_room(width, lead, &format!("{tail} "));
     pi_store::text::clip(text, room.max(8))
-}
-
-// The home directory as `~`: the banner has no workspace to shorten against.
-fn tilde(path: &std::path::Path) -> String {
-    match pi_core::core::instructions::home()
-        .and_then(|h| Some(path.strip_prefix(h).ok()?.to_owned()))
-    {
-        Some(rel) => format!("~/{}", rel.display()),
-        None => path.display().to_string(),
-    }
 }
 
 // A badge copies its block, as an answer's does; a block's line is

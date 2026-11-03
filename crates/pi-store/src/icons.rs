@@ -26,11 +26,6 @@ pub fn under_bar(icon: &str) -> String {
 
 pub const SAID_RULE: &str = PROMPT_BAR; // prefix beside a line the user said
 pub const PI_MARK: &str = "π"; // what pi itself says, and the banner it opens on
-
-/// The version line that opens the scrollback.
-pub fn version_banner() -> String {
-    format!("{PI_MARK} {}", env!("CARGO_PKG_VERSION"))
-}
 pub const PENDING_MARK: &str = "○"; // a call started, on a progress line that cannot animate
 pub const STOPPED_MARK: &str = "✘"; // a call made and never answered: stopped before it landed
 // A call in flight: a different turn from reasoning's, so the two never read

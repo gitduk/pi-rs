@@ -67,7 +67,7 @@ fn notice_folding_keeps_persistence_styles_blocks_and_prose_separate() {
 fn banner_height_tracks_wrapping_after_resizing() {
     use crate::tui::screen::{Piece, plain};
 
-    let paint = Paint::new(false);
+    let paint = Paint::new(true);
     let mut resolved = (*pi_core::core::lane::a_resolved("")).clone();
     resolved.instructions = vec!["~/.pi/AGENTS.md".into()];
     resolved.project = vec![
@@ -79,9 +79,9 @@ fn banner_height_tracks_wrapping_after_resizing() {
     ];
     resolved.notes = vec!["startup note".into()];
     let history = vec![Row::banner(&resolved, &paint)];
-    let mut heights = Vec::new();
+    let mut at_forty = Vec::new();
 
-    for width in [40, 60, 100, 40] {
+    for width in [1, 8, 16, 24, 40, 60, 100, 240, 40] {
         let pieces: Vec<_> = ScrollbackRows::new(&history, &paint, width).collect();
         let measured: usize = pieces.iter().map(Piece::height).sum();
         let rows: Vec<String> = pieces
@@ -91,10 +91,32 @@ fn banner_height_tracks_wrapping_after_resizing() {
             .collect();
         assert_eq!(measured, rows.len(), "width {width}");
         assert!(rows.iter().all(|line| pi_store::text::width(line) <= width));
+        if width == 40 {
+            at_forty.push(rows);
+        }
+    }
+    assert_eq!(
+        at_forty[0], at_forty[1],
+        "resizing back restores the layout"
+    );
+}
+
+#[test]
+fn banner_height_changes_invalidate_measurements() {
+    let paint = Paint::new(true);
+    let resolved = pi_core::core::lane::a_resolved("");
+    let row = Row::banner(&resolved, &paint);
+    let width = 80;
+    let mut heights = Vec::new();
+    for height in [40, 8, 40] {
+        row.prepare_preview(&paint, width, height);
+        let (line, border) = row.line(0, &paint, width);
+        let actual = crate::tui::screen::wrap_rows(border.as_ref(), &line, width);
+        let measured = row.line_height(0, &paint, width);
+        assert_eq!(measured, actual, "history height {height}");
         heights.push(measured);
     }
-    assert!(heights[0] > heights[2]);
-    assert_eq!(heights[0], heights[3]);
+    assert_eq!(heights[0], heights[2]);
 }
 
 #[test]

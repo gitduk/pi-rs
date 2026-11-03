@@ -258,6 +258,9 @@ impl Ui {
     }
 
     fn submit_rows(&self, view: &mut View, rows: impl IntoIterator<Item = Row>) {
+        if std::mem::take(&mut view.surface.opened) {
+            view.surface.scrollback[0] = Row::lines(Vec::new());
+        }
         view.surface.scrollback.extend(rows);
         view.surface
             .folds
