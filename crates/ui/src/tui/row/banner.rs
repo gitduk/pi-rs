@@ -10,8 +10,14 @@ use ratatui::text::{Line, Span};
 
 use crate::render::Paint;
 use pi_store::icons;
+use pi_store::theme::{PaletteColor, Style};
 
 static SEED: LazyLock<u64> = LazyLock::new(|| RandomState::new().hash_one("banner"));
+const DIGIT_STRENGTH: u16 = 55;
+const RULE_MIN_STRENGTH: usize = 45;
+const RULE_MAX_STRENGTH: usize = 100;
+const MIN_SOURCE_CELLS: usize = 64;
+const MAX_SOURCE_CELLS: usize = 80;
 
 // Including the leading 3. A version absent from this prefix is written out.
 const DIGITS: &str = concat!(
@@ -49,11 +55,7 @@ impl Banner {
     }
 
     pub(super) fn len(&self) -> usize {
-        1 + if self.notes.is_empty() {
-            0
-        } else {
-            1 + self.notes.len()
-        }
+        2 + self.notes.len()
     }
 
     pub(super) fn prepare(&self, height: usize) -> bool {
@@ -101,13 +103,33 @@ enum Role {
 struct Cell {
     ch: char,
     role: Role,
+    strength: u16,
 }
 
 impl Cell {
     const SPACE: Self = Self {
         ch: ' ',
         role: Role::Space,
+        strength: 100,
     };
+
+    fn new(ch: char, role: Role) -> Self {
+        Self {
+            ch,
+            role,
+            strength: DIGIT_STRENGTH,
+        }
+    }
+}
+
+fn fade_tail(cells: &mut [Cell]) {
+    let count = cells.len().min(6);
+    let start = cells.len() - count;
+    for (i, cell) in cells[start..].iter_mut().enumerate() {
+        if cell.role == Role::Digit {
+            cell.strength = DIGIT_STRENGTH - (DIGIT_STRENGTH - 8) * (i + 1) as u16 / count as u16;
+        }
+    }
 }
 
 struct Source {
@@ -136,32 +158,80 @@ impl Source {
             parts.push(start + point..end + point);
             cursor = end + 1;
         }
-        let end = (cursor + 5)
-            .max(width.saturating_sub(12).min(256))
-            .min(DIGITS.len());
+        let budget = width.clamp(MIN_SOURCE_CELLS, MAX_SOURCE_CELLS);
+        let end = (cursor + 5).max(budget - 2).min(DIGITS.len());
         let mut cells: Vec<_> = DIGITS[..end]
             .chars()
-            .map(|ch| Cell {
-                ch,
-                role: Role::Digit,
-            })
+            .map(|ch| Cell::new(ch, Role::Digit))
             .collect();
-        cells.insert(
-            1,
-            Cell {
-                ch: '.',
-                role: Role::Digit,
-            },
-        );
+        cells.insert(1, Cell::new('.', Role::Digit));
         for part in &parts {
             for cell in &mut cells[part.clone()] {
                 cell.role = Role::Version;
             }
         }
-        cells.push(Cell {
-            ch: '…',
-            role: Role::Digit,
-        });
+        Self { cells, parts }.compact(budget)
+    }
+
+    fn compact(mut self, budget: usize) -> Option<Self> {
+        let ellipsis = Cell::new(icons::ELLIPSIS.chars().next()?, Role::Digit);
+        if self.cells.len() < budget {
+            self.cells.push(ellipsis);
+            fade_tail(&mut self.cells);
+            return Some(self);
+        }
+        let mut keep = vec![false; self.cells.len()];
+        let prefix = keep.len().min(8);
+        keep[..prefix].fill(true);
+        for part in &self.parts {
+            keep[part.clone()].fill(true);
+        }
+        let size = |keep: &[bool]| {
+            keep.iter().filter(|&&kept| kept).count()
+                + usize::from(keep[0])
+                + keep.windows(2).filter(|pair| !pair[0] && pair[1]).count()
+        };
+        if size(&keep) > budget {
+            return None;
+        }
+        loop {
+            let neighbors: Vec<_> = (0..keep.len())
+                .filter(|&i| {
+                    !keep[i] && (i > 0 && keep[i - 1] || i + 1 < keep.len() && keep[i + 1])
+                })
+                .collect();
+            let mut grew = false;
+            for i in neighbors {
+                keep[i] = true;
+                if size(&keep) <= budget {
+                    grew = true;
+                } else {
+                    keep[i] = false;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        let mut cells = Vec::with_capacity(budget);
+        let mut parts = Vec::new();
+        let mut skipped = false;
+        for (i, cell) in self.cells.into_iter().enumerate() {
+            if !keep[i] {
+                skipped = true;
+                continue;
+            }
+            if skipped {
+                cells.push(ellipsis);
+                skipped = false;
+            }
+            if let Some(part) = self.parts.iter().find(|part| part.start == i) {
+                parts.push(cells.len()..cells.len() + part.len());
+            }
+            cells.push(cell);
+        }
+        cells.push(ellipsis);
+        fade_tail(&mut cells);
         Some(Self { cells, parts })
     }
 
@@ -189,19 +259,39 @@ struct Layout(Vec<Vec<Cell>>);
 
 impl Layout {
     fn text(text: &str, role: Role) -> Self {
-        Self(vec![text.chars().map(|ch| Cell { ch, role }).collect()])
+        let mut cells: Vec<_> = text.chars().map(|ch| Cell::new(ch, role)).collect();
+        if role == Role::Digit {
+            fade_tail(&mut cells);
+        }
+        Self(vec![cells])
     }
 
     fn rule(length: usize, axis: Axis) -> Self {
+        let range = RULE_MAX_STRENGTH - RULE_MIN_STRENGTH;
+        let cells: Vec<_> = (0..length)
+            .map(|i| {
+                let (ch, strength) = match axis {
+                    Axis::Across => (
+                        '─',
+                        RULE_MIN_STRENGTH
+                            + range * (length - 1 - (i * 2).abs_diff(length - 1))
+                                / length.saturating_sub(1).max(1),
+                    ),
+                    Axis::Down => (
+                        '│',
+                        RULE_MAX_STRENGTH - range * i / length.saturating_sub(1).max(1),
+                    ),
+                };
+                Cell {
+                    ch,
+                    role: Role::Rule,
+                    strength: strength as u16,
+                }
+            })
+            .collect();
         match axis {
-            Axis::Across => Self::text(&"─".repeat(length), Role::Rule),
-            Axis::Down => Self(vec![
-                vec![Cell {
-                    ch: '│',
-                    role: Role::Rule
-                }];
-                length
-            ]),
+            Axis::Across => Self(vec![cells]),
+            Axis::Down => Self(cells.into_iter().map(|cell| vec![cell]).collect()),
         }
     }
 
@@ -245,6 +335,10 @@ impl Layout {
     }
 
     fn painted(self, paint: &Paint, width: usize) -> Line<'static> {
+        let syntax = paint.theme.syntax;
+        let blue = Style::color(PaletteColor::Blue.color(syntax));
+        let version = Style::color(PaletteColor::Ice.color(syntax));
+        let digit = Style::color(PaletteColor::Steel.color(syntax));
         let left = self
             .0
             .iter()
@@ -269,17 +363,24 @@ impl Layout {
             }
             spans.push(Span::raw(" ".repeat(indent)));
             for cell in &row[left..end] {
-                let style = match cell.role {
-                    Role::Mark => &paint.theme.heading,
-                    Role::Version => &paint.theme.strong,
-                    Role::Digit | Role::Rule | Role::Space => &paint.theme.muted,
+                let span = match cell.role {
+                    Role::Mark => paint.readable_span(&blue, cell.ch.to_string()),
+                    Role::Version => paint.readable_span(&version, cell.ch.to_string()),
+                    Role::Digit => {
+                        Span::styled(cell.ch.to_string(), paint.faded(&digit, cell.strength))
+                    }
+                    Role::Rule => {
+                        Span::styled(cell.ch.to_string(), paint.faded(&blue, cell.strength))
+                    }
+                    Role::Space => Span::raw(cell.ch.to_string()),
                 };
-                let span = paint.span(style, cell.ch.to_string());
-                spans.push(if cell.role == Role::Version && paint.color {
-                    ratatui::style::Stylize::bold(span)
-                } else {
-                    span
-                });
+                spans.push(
+                    if matches!(cell.role, Role::Mark | Role::Version) && paint.color {
+                        ratatui::style::Stylize::bold(span)
+                    } else {
+                        span
+                    },
+                );
             }
         }
         Line::from(spans)
@@ -483,7 +584,9 @@ mod tests {
 
     #[test]
     fn version_parts_are_matched_without_lighting_the_decimal_point() {
-        for version in ["3.0.0", "31.4.15", "2.10.0", "1.0.0", "2.9.10"] {
+        for version in [
+            "3.0.0", "31.4.15", "2.10.0", "1.0.0", "2.9.10", "2.9.11", "2.9.12", "2.9.100",
+        ] {
             let source = Source::new(version, 80).expect("these version parts occur in pi");
             let parts: Vec<String> = source
                 .parts
@@ -495,6 +598,41 @@ mod tests {
                 !source.parts.iter().any(|part| part.contains(&1)),
                 "{version}"
             );
+        }
+    }
+
+    #[test]
+    fn distant_version_parts_fit_the_budget_without_fabricating_pi_digits() {
+        let pi = format!("3.{}", &DIGITS[1..]);
+        for version in ["2.9.10", "2.9.11", "2.9.12", "2.9.13", "2.9.100"] {
+            for width in [24, 64, 80, 120, 320] {
+                let source = Source::new(version, width).expect("these version parts occur in pi");
+                assert!(
+                    source.cells.len() <= width.clamp(MIN_SOURCE_CELLS, MAX_SOURCE_CELLS),
+                    "{version} at width {width}"
+                );
+                let text: String = source.cells.iter().map(|cell| cell.ch).collect();
+                let mut cursor = 0;
+                for fragment in text
+                    .split(icons::ELLIPSIS)
+                    .filter(|fragment| !fragment.is_empty())
+                {
+                    let offset = pi[cursor..].find(fragment).unwrap_or_else(|| {
+                        panic!("{version}: fabricated or reordered fragment {fragment}")
+                    });
+                    cursor += offset + fragment.len();
+                }
+                for part in &source.parts {
+                    assert!(
+                        source.cells[part.clone()]
+                            .iter()
+                            .all(|cell| cell.role == Role::Version)
+                    );
+                    for cut in part.start + 1..part.end {
+                        assert!(!source.can_cut(cut), "{version}: split version part");
+                    }
+                }
+            }
         }
     }
 }

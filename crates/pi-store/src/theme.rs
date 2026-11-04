@@ -393,6 +393,8 @@ palette! {
     Yellow => ((249, 226, 175), (223, 142, 29)),
     Mauve => ((203, 166, 247), (136, 57, 239)),
     Pink => ((245, 194, 231), (234, 118, 203)),
+    Ice => ((226, 245, 255), (23, 57, 77)),
+    Steel => ((112, 136, 157), (89, 113, 129)),
 }
 
 const GREEN: Color = PaletteColor::Green.color(Syntax::CatppuccinMocha);

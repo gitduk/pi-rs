@@ -137,6 +137,37 @@ impl Paint {
         }
     }
 
+    /// Keep explicit foregrounds legible against the terminal background.
+    pub(crate) fn readable_span(&self, style: &Style, body: impl Into<String>) -> Span<'static> {
+        let mut span = self.span(style, body);
+        if self.color {
+            span.style = crate::theme::readable(span.style, self.background);
+        }
+        span
+    }
+
+    /// Blend decorative foregrounds into the measured terminal background.
+    pub(crate) fn faded(&self, style: &Style, strength: u16) -> ratatui::style::Style {
+        use ratatui::style::{Color, Modifier, Style as RStyle};
+
+        if !self.color {
+            return RStyle::default();
+        }
+        let style = style_to_ratatui(style);
+        let foreground = match style.fg {
+            Some(Color::Rgb(r, g, b)) => Some((r, g, b)),
+            None | Some(Color::Reset) => self.foreground,
+            _ => None,
+        };
+        match foreground.zip(self.background) {
+            Some((foreground, background)) => {
+                let (r, g, b) = crate::theme::blend(foreground, background, strength.min(100));
+                style.fg(Color::Rgb(r, g, b)).remove_modifier(Modifier::DIM)
+            }
+            None => style.add_modifier(Modifier::DIM),
+        }
+    }
+
     /// `body` in the muted voice, a line per line it holds.
     pub fn muted(&self, body: &str) -> ratatui::text::Text<'static> {
         (body.lines())
