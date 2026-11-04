@@ -1131,6 +1131,7 @@ impl Row {
 
         match &self.0 {
             Kind::Said { at: Some(_), .. } => Block::Prompt,
+            Kind::Said { at: None, .. } => Block::PromptContinuation,
             Kind::Relayed(_) => Block::Relayed,
             Kind::Result(_) => Block::Tools,
             Kind::Steps(group) if group.has_tools() => Block::Tools,

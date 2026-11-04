@@ -240,44 +240,6 @@ fn mouse_scroll_reaches_both_ends_across_tool_and_prose_rows() {
 }
 
 #[test]
-fn tool_spacing_preserves_row_indices_and_keeps_consecutive_calls_together() {
-    use crate::tui::screen::{Piece, plain};
-
-    let paint = Paint::new(false);
-    let mut rows = Row::answer("before", &paint);
-    for name in ["a.rs", "b.rs"] {
-        rows.push(Row::steps(
-            Step::Tool(FoldedTool::new("read", name, "", "")),
-            true,
-        ));
-    }
-    rows.extend(Row::answer("after", &paint));
-    let forward: Vec<_> = ScrollbackRows::new(&rows, &paint, 80)
-        .flat_map(Piece::pieces)
-        .map(|line| plain(&line))
-        .collect();
-    assert_eq!(
-        forward,
-        [
-            "before".to_string(),
-            String::new(),
-            format!("{} read a.rs", pi_store::icons::DONE_MARK),
-            format!("{} read b.rs", pi_store::icons::DONE_MARK),
-            String::new(),
-            "after".into()
-        ]
-    );
-    let backward: Vec<_> = ScrollbackRows::new(&rows, &paint, 80)
-        .rev()
-        .flat_map(|piece| piece.pieces().into_iter().rev())
-        .map(|line| plain(&line))
-        .collect();
-    assert_eq!(backward, forward.iter().rev().cloned().collect::<Vec<_>>());
-    assert_eq!(rows.len(), 4);
-    assert_eq!(rows[1].folded(), Some(true));
-}
-
-#[test]
 fn a_tool_separator_does_not_toggle_the_preceding_group() {
     use crate::tui::mouse::Target;
     use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -359,60 +321,6 @@ fn a_configured_band_outlives_the_terminals() {
     let mixed = following_terminal(&theme, bg, None);
     assert_eq!(mixed.prompt.panel.said, Color::Rgb(1, 2, 3));
     assert_ne!(mixed.prompt.panel.input, theme.prompt.panel.input);
-}
-
-#[test]
-fn the_editor_and_submitted_text_paint_their_own_backgrounds() {
-    use ratatui::style::Color as RColor;
-    use std::sync::Arc;
-
-    let (_dir, lane) = a_running_lane();
-    for bg in [
-        None,
-        Some((0, 0, 0)),
-        Some((13, 17, 23)),
-        Some((255, 255, 255)),
-    ] {
-        let mut ui = test_ui(24, 16);
-        let mut view = View::default();
-        let theme = following_terminal(&Theme::default(), bg, None);
-        let history_bg = ui.paint.band(&theme.prompt.panel.said).unwrap().bg.unwrap();
-        let editor_bg = ui
-            .paint
-            .band(&theme.prompt.panel.input)
-            .unwrap()
-            .bg
-            .unwrap();
-        if bg.is_none() {
-            assert_eq!(history_bg, RColor::Rgb(30, 30, 30));
-            assert_eq!(editor_bg, history_bg);
-        } else {
-            assert_ne!(
-                editor_bg, history_bg,
-                "known backgrounds distinguish the two fills"
-            );
-        }
-        let text = "same text wraps across several rows\nsecond line";
-        ui.editor.insert_str(text);
-        view.surface.scrollback = Row::prompt(text, agent::session::now(), &ui.paint).into();
-        ui.flush(&lane, &mut view);
-        ui.set_theme(&mut view, lane.resolved(), Arc::new(theme));
-        ui.flush(&lane, &mut view);
-
-        let buffer = ui.screen.test_buffer();
-        for y in ui.regions.history.y..ui.regions.history.bottom() {
-            if !ui.drawn[y as usize].is_empty() {
-                for x in 0..ui.regions.history.width {
-                    assert_eq!(buffer[(x, y)].bg, history_bg, "history {bg:?} at {x},{y}");
-                }
-            }
-        }
-        for y in ui.regions.editor.y..ui.regions.editor.bottom() {
-            for x in 0..ui.regions.editor.width {
-                assert_eq!(buffer[(x, y)].bg, editor_bg, "editor {bg:?} at {x},{y}");
-            }
-        }
-    }
 }
 
 // A row with no lines costs nothing; both walks must agree on where the

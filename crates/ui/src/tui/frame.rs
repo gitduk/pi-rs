@@ -808,6 +808,9 @@ impl Ui {
                 || (view.state.work.is_some()
                     && self.status.contains(&pi_store::status::Segment::Elapsed))
             {
+                if spacing.push(super::spacing::Block::Status) {
+                    rows.push(Line::default());
+                }
                 let line = parts.join(icons::PART_SEP);
                 let painted = status::painted(&line, &self.paint);
                 let marker = status::breath_style(self.spinner, self.paint.theme.syntax);
