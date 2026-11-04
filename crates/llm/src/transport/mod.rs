@@ -15,6 +15,18 @@ pub mod anthropic;
 pub mod chat;
 pub mod openai;
 
+/// A request with the connection's extra headers on it, added before the wire's
+/// own: a name the wire also sets is sent twice rather than replaced.
+pub(crate) fn extra_headers(
+    mut call: reqwest::RequestBuilder,
+    spec: &ModelSpec,
+) -> reqwest::RequestBuilder {
+    for (name, value) in &spec.headers {
+        call = call.header(name, value);
+    }
+    call
+}
+
 // The one thing the OpenAI-shaped wires cannot say: a tool result there has no
 // `is_error`, so a failure not marked in its text reads to the model as a result.
 const FAILED: &str = "[tool error]";

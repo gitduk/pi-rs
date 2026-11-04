@@ -520,7 +520,7 @@ impl Transport for OpenAi {
         check_format(spec)?;
         let body = build_body(spec, req);
         let url = format!("{}/responses", spec.base_url.trim_end_matches('/'));
-        let mut call = self.http.post(&url);
+        let mut call = super::extra_headers(self.http.post(&url), spec);
         if let Some(key) = &self.api_key {
             call = call.bearer_auth(key);
         }

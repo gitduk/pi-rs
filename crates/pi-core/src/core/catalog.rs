@@ -26,8 +26,11 @@ pub struct Generation(u64);
 #[derive(Clone, PartialEq)]
 struct Source {
     name: String,
+    /// The connection, without what only authorizes it: a rotated key or a new
+    /// header still names the same host, and the facts read from it still hold.
     provider: Provider,
     key: Option<String>,
+    headers: Vec<(String, String)>,
 }
 
 impl Source {
@@ -38,6 +41,9 @@ impl Source {
             .map(|(name, provider)| {
                 let key = provider.key();
                 let mut provider = provider.clone();
+                let headers = provider.headers();
+                provider.api_key = None;
+                provider.headers.clear();
                 if let Some(url) = &pinned.base_url {
                     provider.base_url = config::expand_base_url(url);
                 }
@@ -45,9 +51,15 @@ impl Source {
                     name: name.clone(),
                     provider,
                     key,
+                    headers,
                 }
             })
             .collect()
+    }
+
+    /// Whether both name the same connection; the credential is not part of it.
+    fn same_connection(&self, other: &Source) -> bool {
+        self.name == other.name && self.provider == other.provider
     }
 
     fn url(&self) -> String {
@@ -76,6 +88,9 @@ impl Source {
             url.query_pairs_mut().append_pair("after_id", cursor);
         }
         let mut request = client.get(url);
+        for (name, value) in &self.headers {
+            request = request.header(name, value);
+        }
         if matches!(self.provider.wire_format(), Format::Anthropic { .. }) {
             request = request.header("anthropic-version", llm::transport::anthropic::API_VERSION);
             if let Some(key) = &self.key {
@@ -200,7 +215,11 @@ impl Catalog {
     pub fn enrich(&self, settings: &Settings, pinned: &Pinned, config: Config) -> Result<Config> {
         let mut models = toml::Table::new();
         for source in Source::configured(pinned, &config) {
-            if let Some(cached) = self.known.get(&source.name).filter(|c| c.source == source) {
+            if let Some(cached) = self
+                .known
+                .get(&source.name)
+                .filter(|cached| cached.source.same_connection(&source))
+            {
                 for (id, facts) in &cached.models {
                     models.insert(format!("{}/{id}", source.name), facts.clone());
                 }
@@ -377,6 +396,8 @@ models_path = "result.models"
 id = "name"
 context_window = "limit.context"
 max_output_tokens = "limit.output"
+[provider.test.headers]
+x-opencode-session = "test-session"
 [models."test/a"]
 max_output_tokens = 2048
 "#
@@ -548,6 +569,12 @@ context_window = 128000
                 .to_ascii_lowercase()
                 .contains("authorization: bearer test-credential")
         );
+        assert!(
+            first
+                .to_ascii_lowercase()
+                .contains("x-opencode-session: test-session"),
+            "{first}"
+        );
         let second = requests.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(
             second.starts_with("GET /v1/models?after_id=a%2Fb "),
@@ -637,5 +664,58 @@ format = "chat"
             "removed facts are gone"
         );
         assert_eq!(config.find("test/b").unwrap().context_window, 300000);
+    }
+
+    #[tokio::test]
+    async fn a_rotated_credential_keeps_the_facts_read_from_the_same_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.toml");
+        let (url, _) = server(vec![(
+            200,
+            json!({"data": [{"id": "m", "context_window": 200000}]}),
+        )]);
+        let body = |key: &str| {
+            format!(
+                "[provider.local]\nbase_url = \"{url}\"\nformat = \"chat\"\napi_key = \"{key}\"\n\
+                 [models.\"local/m\"]\nmax_output_tokens = 2048\n"
+            )
+        };
+        std::fs::write(&file, body("first-key")).unwrap();
+        let mut core = two_lanes(dir.path(), &file, true).await;
+        assert_eq!(core.lane().agent().spec().context_window, 200000);
+
+        std::fs::write(&file, body("second-key")).unwrap();
+        core.try_reload().unwrap();
+        assert_eq!(
+            core.lane().agent().spec().context_window,
+            200000,
+            "a new key is not a new connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lane_opened_after_discovery_is_already_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.toml");
+        let (url, _) = server(vec![(
+            200,
+            json!({"data": [{"id": "m", "context_window": 100000}]}),
+        )]);
+        std::fs::write(
+            &file,
+            format!("[provider.local]\nbase_url = \"{url}\"\nformat = \"chat\"\n"),
+        )
+        .unwrap();
+        let mut core = two_lanes(dir.path(), &file, true).await;
+        assert_ne!(core.catalog.generation(), Generation::default());
+
+        let root = dir.path().join("three");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        core.open_lane(tool::Workspace::new(root).unwrap(), None, 0)
+            .unwrap();
+        let resolved = core.lane().resolved();
+        assert!(resolved.notes.is_empty(), "{:?}", resolved.notes);
+        assert_eq!(resolved.catalog_generation, core.catalog.generation());
+        assert!(core.refresh_model_config().is_none());
     }
 }

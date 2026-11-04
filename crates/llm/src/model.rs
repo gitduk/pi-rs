@@ -74,6 +74,10 @@ pub struct ModelSpec {
     pub wire_id: Option<String>,
     pub base_url: String,
     pub format: Format,
+    /// Extra headers the provider's connection asks for. They go on before the
+    /// wire's own, so auth and protocol headers stay the transport's to set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<(String, String)>,
     pub context_window: u32,
     pub max_output_tokens: u32,
     pub vision: bool,
@@ -116,6 +120,7 @@ impl ModelSpec {
             model: "test-model".into(),
             wire_id: None,
             base_url: "http://localhost".into(),
+            headers: Vec::new(),
             format: Format::Anthropic {
                 cache_control: CacheControl::Off,
             },

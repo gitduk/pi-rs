@@ -237,7 +237,7 @@ impl McpServer {
     }
 }
 
-fn expanded(map: &BTreeMap<String, String>) -> Vec<(String, String)> {
+pub(crate) fn expanded(map: &BTreeMap<String, String>) -> Vec<(String, String)> {
     map.iter()
         .filter_map(|(k, v)| Some((k.clone(), expand_key(v)?)))
         .collect()
@@ -410,6 +410,7 @@ impl Config {
             }),
             base_url: provider.base_url.clone(),
             format: provider.wire_format(),
+            headers: provider.headers(),
             context_window: model.window(),
             max_output_tokens: model.output(),
             vision: model.vision,
@@ -734,7 +735,7 @@ pub fn reaching(tree: &toml::Value) -> Vec<(String, String)> {
         .into_iter()
         .flatten()
     {
-        for field in ["base_url", "api_key", "models_url"] {
+        for field in ["base_url", "api_key", "models_url", "headers"] {
             if let Some(value) = entry.get(field) {
                 out.push((format!("provider.{name}.{field}"), shown(field, value)));
             }
@@ -964,6 +965,19 @@ context_window = 200000
         assert!(
             c.find("shared").is_err(),
             "several providers require an identity"
+        );
+    }
+
+    #[test]
+    fn a_provider_hands_its_headers_to_every_model() {
+        let c = parse(
+            "[provider.local]\nbase_url = \":3425/v1\"\nformat = \"chat\"\n\
+             [provider.local.headers]\nx-session = \"s1\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            c.find("m").unwrap().headers,
+            [("x-session".to_string(), "s1".to_string())]
         );
     }
 

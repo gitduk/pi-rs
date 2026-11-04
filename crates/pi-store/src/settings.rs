@@ -24,8 +24,8 @@ fn overlay(base: &mut toml::Value, over: &toml::Value) {
     }
 }
 
-// A credential inherited from another configuration layer belongs to that
-// layer's connection. A replacement target needs its own explicit credential.
+// A credential or header inherited from another layer belongs to that
+// layer's host. A replacement target needs its own.
 fn clear_replaced_credentials(base: &mut toml::Value, over: &toml::Value) {
     let Some(providers) = base.get_mut("provider").and_then(toml::Value::as_table_mut) else {
         return;
@@ -40,8 +40,11 @@ fn clear_replaced_credentials(base: &mut toml::Value, over: &toml::Value) {
                 .get(field)
                 .is_some_and(|value| provider.get(field) != Some(value))
         });
-        if replaced && patch.get("api_key").is_none() {
+        if replaced {
+            // Overlay re-adds what the patch states; a table would otherwise
+            // keep entries written for the old host.
             provider.remove("api_key");
+            provider.remove("headers");
         }
     }
 }
@@ -172,6 +175,60 @@ api_key = "original-key"
     }
 
     #[test]
+    fn provider_address_overrides_do_not_inherit_headers() {
+        let user: toml::Value = toml::from_str(
+            r#"
+[provider.local]
+base_url = "https://original.example/v1"
+format = "chat"
+[provider.local.headers]
+authorization = "Bearer original"
+"#,
+        )
+        .unwrap();
+        let project = |body: &str| {
+            Some((
+                PathBuf::from("/repo/.pi/settings.toml"),
+                toml::from_str(body).unwrap(),
+            ))
+        };
+        let moved = Settings::new(
+            user.clone(),
+            project("[provider.local]\nbase_url = \"https://other.example/v1\"\n"),
+        )
+        .config()
+        .unwrap();
+        assert!(
+            moved.provider["local"].headers.is_empty(),
+            "a header for one host must not travel to another"
+        );
+
+        let kept = Settings::new(
+            user,
+            project(
+                "[provider.local]\nbase_url = \"https://other.example/v1\"\n\
+                 [provider.local.headers]\nx-session = \"s2\"\n",
+            ),
+        )
+        .config()
+        .unwrap();
+        assert!(
+            kept.provider["local"]
+                .headers
+                .get("authorization")
+                .is_none(),
+            "a header written for the original host is not inherited"
+        );
+        assert_eq!(
+            kept.provider["local"]
+                .headers
+                .get("x-session")
+                .map(String::as_str),
+            Some("s2")
+        );
+    }
+
+    #[test]
     fn provider_mapping_overrides_keep_the_original_connection_credential() {
         let config = with_provider_patch(
             "[provider.local]\nmodels_path = \"models\"\ncontext_window = \"limit.context\"\n",
@@ -234,6 +291,35 @@ api_key = "original-key"
         );
         assert_eq!(s.project_sets("model"), None);
         assert!(s.sets("model") && !s.sets("effort"));
+    }
+
+    #[test]
+    fn discovered_capabilities_reach_the_model_spec() {
+        let s = Settings::new(
+            toml::from_str("[provider.local]\nbase_url = \":3425/v1\"\nformat = \"chat\"\n")
+                .unwrap(),
+            None,
+        );
+        let models = toml::from_str(
+            r#"
+["local/a"]
+vision = true
+accepts_temperature = false
+effort = "unsupported"
+["local/a".pricing]
+input_per_mtok = 0.15
+"#,
+        )
+        .unwrap();
+        let spec = s
+            .config_with_models(&models)
+            .unwrap()
+            .find("local/a")
+            .unwrap();
+        assert!(spec.vision);
+        assert!(!spec.accepts_temperature);
+        assert!(!spec.accepts_effort);
+        assert_eq!(spec.pricing.input_per_mtok, 0.15);
     }
 
     #[test]

@@ -54,7 +54,8 @@ that contain no `/`. With no model selected by a flag, resumed session or the
 top-level `model` setting, pi starts on the first discovered name in alphabetical order.
 
 The default response mapping reads the `data` array and each item's `id`,
-`context_window` and `max_output_tokens`. Override only the paths that differ:
+`context_window` and `max_output_tokens`. Capability and price facts are read
+only where a path is given. Override only the paths that differ:
 
 ```toml
 [provider.go]
@@ -65,15 +66,39 @@ models_path = "data"           # default; could be "models" or "result.models"
 id = "id"                     # default; relative to each item
 context_window = "limit.context"
 max_output_tokens = "limit.output"
+vision = "modalities.input"              # a bool, or input types where any `image/*` counts
+accepts_temperature = "capabilities.temperature"
+reasoning = "capabilities.reasoning.supported"   # false means no effort levels
+
+[provider.go.pricing]
+input_per_mtok = "cost.text.input.price"
+output_per_mtok = "cost.text.output.price"
 ```
+
+Rates are per million tokens unless the pricing table says `unit = "token"`,
+which rescales a catalog that quotes a per-token figure.
 
 `api_key = "$NAME"` reads an environment variable; another string is a literal
 key. Set `api_key` explicitly to use a credential, including one from the
 environment. Anthropic's `cache_control` setting also belongs in its provider table.
 
+`[provider.<name>.headers]` sends a header with every request that connection
+makes, catalog reads included:
+
+```toml
+[provider.local.headers]
+x-opencode-session = "$OPENCODE_SESSION"   # an unset variable leaves it out
+```
+
+A header name is a token, and a value is printable ASCII. The wire sets its own
+`authorization`, `x-api-key` and `anthropic-version`, so a header of the same
+name is sent twice rather than replacing them.
+
 Paths use dot-separated object fields. An empty `models_path` selects an array
 at the response root; an empty `id` selects a string item itself.
 `models_url` can specify a separate, complete catalog URL.
+A row without an ID is skipped, and a fact the catalog states unreadably leaves
+that fact unset; a path that selects no ID at all is an error.
 Missing token limits use the existing defaults: a 128,000-token window and
 8,192 output tokens. `[models."provider/model-id"]` contains limit, capability
 and price overrides:
@@ -96,11 +121,11 @@ refused at load.
 A `.pi/settings.toml` between the workspace and repository root can override any
 of these keys. Files merge before required provider fields are checked, so a
 project can change only a field mapping. If a project changes a provider's
-`base_url` or `models_url`, it must also set `api_key` to use a credential;
-the original connection's key is not inherited for the new target.
+`base_url` or `models_url`, it must also set `api_key` and `headers` for that
+target: neither the original connection's key nor its headers are inherited.
 At startup, pi lists keys that affect resources outside the checkout under the banner.
 These include `mcp`, `hooks`, `keep_days`, and each provider's `base_url`,
-`models_url` and `api_key`.
+`models_url`, `api_key` and `headers`.
 pi also lists the checkout's script tools.
 Inspect both lists before you run pi in a checkout you did not write.
 

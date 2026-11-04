@@ -10,6 +10,7 @@ pub fn spec() -> ModelSpec {
         model: "test-wire-id".into(),
         wire_id: None,
         base_url: "http://localhost".into(),
+        headers: Vec::new(),
         format: Format::Anthropic {
             cache_control: CacheControl::Off,
         },
