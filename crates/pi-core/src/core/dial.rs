@@ -71,14 +71,26 @@ pub fn dial(
         spec.context_window = window;
     }
 
-    // A passed-through model is a guess. Saying which guess lets the user
-    // correct the one that matters instead of debugging a 400 later.
-    let assumed = (!config.is_written(&spec.model)).then(|| {
-        format!(
-            "assuming a {}-token window, {} max output and no pricing for `{}`. \
-             Set --context if the server's window differs.",
-            spec.context_window, spec.max_output_tokens, spec.model
-        )
+    // Every fact nobody stated is a guess. Naming them lets the user correct
+    // the one that matters instead of debugging a 400 later.
+    let entry = config.entry(&spec.model);
+    let mut guessed: Vec<String> = Vec::new();
+    let window_guessed = entry.context_window.is_none() && pinned.context.is_none();
+    if window_guessed {
+        guessed.push(format!("a {}-token window", spec.context_window));
+    }
+    if entry.max_output_tokens.is_none() {
+        guessed.push(format!("{} max output", spec.max_output_tokens));
+    }
+    if entry.pricing == llm::model::Pricing::default() {
+        guessed.push("no pricing".into());
+    }
+    let assumed = (!guessed.is_empty()).then(|| {
+        let hint = match window_guessed {
+            true => ". Set --context if the server's window differs.",
+            false => ".",
+        };
+        format!("assuming {} for `{}`{hint}", joined(&guessed), spec.model)
     });
     let key = config.key_for(model);
     let warning = config
@@ -101,6 +113,15 @@ pub fn dial(
     })
 }
 
+// The facts as one list: `a`, `b` and `c`.
+fn joined(facts: &[String]) -> String {
+    match facts.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
 /// The summarizer's own connection, when the config names a model for it: a
 /// second dial, because a summary is a model call like any other and a cheaper
 /// model for it is the point of the setting.
@@ -115,5 +136,71 @@ pub fn summary_writer(
             Ok(Some((summarizer.transport, summarizer.spec)))
         }
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(body: &str) -> config::Config {
+        config::Config::in_force(toml::from_str(body).expect("a tree")).expect("a config")
+    }
+
+    fn assumed(config: &config::Config, model: &str) -> Option<String> {
+        dial(
+            &Pinned::default(),
+            config,
+            model,
+            config::ModelOrigin::Command,
+        )
+        .expect("a model")
+        .assumed
+    }
+
+    // Discovery states an ID and whatever limits the endpoint listed; the rest
+    // falls back to built-in numbers, which must not read as measured.
+    #[test]
+    fn the_facts_nobody_stated_are_named_as_guesses() {
+        let bare = config("[provider.local]\nbase_url = \":1/v1\"\nformat = \"chat\"\n");
+        assert_eq!(
+            assumed(&bare, "local/m").as_deref(),
+            Some(
+                "assuming a 128000-token window, 8192 max output and no pricing for `local/m`. \
+                 Set --context if the server's window differs."
+            )
+        );
+
+        let window_stated = config(
+            "[provider.local]\nbase_url = \":1/v1\"\nformat = \"chat\"\n\
+             [models.\"local/m\"]\ncontext_window = 500_000\n",
+        );
+        assert_eq!(
+            assumed(&window_stated, "local/m").as_deref(),
+            Some("assuming 8192 max output and no pricing for `local/m`.")
+        );
+
+        let stated = config(
+            "[provider.local]\nbase_url = \":1/v1\"\nformat = \"chat\"\n\
+             [models.\"local/m\"]\ncontext_window = 500_000\nmax_output_tokens = 4096\n\
+             pricing = { input_per_mtok = 1.0 }\n",
+        );
+        assert_eq!(assumed(&stated, "local/m"), None);
+    }
+
+    // A window the flag states is not a guess, whatever the files say.
+    #[test]
+    fn a_flagged_window_is_not_assumed() {
+        let bare = config("[provider.local]\nbase_url = \":1/v1\"\nformat = \"chat\"\n");
+        let pinned = Pinned {
+            context: Some(12_345),
+            ..Pinned::default()
+        };
+        let dialled = dial(&pinned, &bare, "local/m", config::ModelOrigin::Command).unwrap();
+        assert_eq!(dialled.spec.context_window, 12_345);
+        assert_eq!(
+            dialled.assumed.as_deref(),
+            Some("assuming 8192 max output and no pricing for `local/m`.")
+        );
     }
 }

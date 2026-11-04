@@ -346,13 +346,15 @@ fn yes() -> bool {
 }
 
 /// One model. Every field here travels with the model whoever serves it.
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelEntry {
-    #[serde(default = "default_context")]
-    pub context_window: u32,
-    #[serde(default = "default_output")]
-    pub max_output_tokens: u32,
+    /// `None` when neither the files nor discovery stated it: the spec then
+    /// carries a built-in guess, and saying which is a guess is `dial`'s job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
     #[serde(default)]
     pub vision: bool,
     /// `unsupported` for a model that cannot think; no level belongs here.
@@ -368,19 +370,31 @@ pub struct ModelEntry {
     pub pricing: Pricing,
 }
 
-// Written out rather than derived: `derive(Default)` would zero the
-// window, a budget of nothing rather than a stated guess.
+// Written out rather than derived: `derive(Default)` would leave both
+// capabilities off, refusing temperature and forced tools on every model.
 impl Default for ModelEntry {
     fn default() -> Self {
         Self {
-            context_window: default_context(),
-            max_output_tokens: default_output(),
+            context_window: None,
+            max_output_tokens: None,
             vision: false,
             effort: None,
             accepts_temperature: true,
             can_force_tool: true,
             pricing: Pricing::default(),
         }
+    }
+}
+
+impl ModelEntry {
+    /// The window in force: what a file or the endpoint stated, else the guess.
+    pub fn window(&self) -> u32 {
+        self.context_window.unwrap_or_else(default_context)
+    }
+
+    /// The output budget in force, guessed the same way.
+    pub fn output(&self) -> u32 {
+        self.max_output_tokens.unwrap_or_else(default_output)
     }
 }
 
@@ -396,8 +410,8 @@ impl Config {
             }),
             base_url: provider.base_url.clone(),
             format: provider.wire_format(),
-            context_window: model.context_window,
-            max_output_tokens: model.max_output_tokens,
+            context_window: model.window(),
+            max_output_tokens: model.output(),
             vision: model.vision,
             accepts_effort: model.effort != Some(EffortArg::Unsupported),
             accepts_temperature: model.accepts_temperature,
@@ -493,10 +507,14 @@ impl Config {
         bail!("model {name:?} needs a provider prefix: use provider/model")
     }
 
-    /// Whether the file actually describes this model, as against one passed
-    /// through with default numbers.
-    pub fn is_written(&self, name: &str) -> bool {
-        self.models.contains_key(name)
+    /// The entry in force for `name`, defaulted when nothing names it. A
+    /// discovered model has one: the endpoint stated its ID, not its facts.
+    pub fn entry(&self, name: &str) -> ModelEntry {
+        self.locate(name)
+            .map(|(identity, _)| identity)
+            .ok()
+            .and_then(|identity| self.models.get(&identity).cloned())
+            .unwrap_or_default()
     }
 
     pub fn names(&self) -> Vec<String> {

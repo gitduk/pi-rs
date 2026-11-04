@@ -275,7 +275,7 @@ impl Core {
                     name: name.clone(),
                     note: summary(
                         format.map(|f| f.name()).unwrap_or_default(),
-                        entry.context_window,
+                        entry.window(),
                         &entry.pricing,
                     ),
                 }
