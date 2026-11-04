@@ -339,7 +339,23 @@ fn values(source: Values, head: &str, typed: &str, sources: &Sources<'_>) -> Vec
         {
             Vec::new()
         }
-        Values::Models => offer(sources.models, head, typed),
+        Values::Models => {
+            let mut choices: Vec<_> = sources
+                .models
+                .iter()
+                .filter(|c| pi_store::text::matches(&c.name, typed))
+                .collect();
+            choices.sort_by_key(|c| {
+                if c.name == typed {
+                    0
+                } else if c.name.rsplit_once('/').is_some_and(|(_, id)| id == typed) {
+                    1
+                } else {
+                    2
+                }
+            });
+            choices.into_iter().map(|c| c.candidate(head)).collect()
+        }
         Values::Worktrees => offer(sources.worktrees.map_or(&[], |f| f()), head, typed),
         Values::LinkedWorktrees => {
             let trees: &[Choice] = sources.worktrees.map_or(&[], |f| f());

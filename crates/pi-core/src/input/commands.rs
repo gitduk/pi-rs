@@ -318,6 +318,19 @@ pub struct Choice {
     pub note: String,
 }
 
+impl Choice {
+    fn candidate(&self, head: &str) -> Candidate {
+        Candidate {
+            show: self.name.clone(),
+            line: format!("{head}{}", self.name),
+            help: self.note.clone(),
+            accept: Acceptance::Run,
+            more: false,
+            picked_only: false,
+        }
+    }
+}
+
 /// One thing the line could still become.
 ///
 /// Owned rather than borrowed from the table, because half the candidates come
@@ -350,14 +363,7 @@ fn offer(choices: &[Choice], head: &str, typed: &str) -> Vec<Candidate> {
     choices
         .iter()
         .filter(|c| c.name.starts_with(typed) && c.name != typed)
-        .map(|c| Candidate {
-            show: c.name.clone(),
-            line: format!("{head}{}", c.name),
-            help: c.note.clone(),
-            accept: Acceptance::Run,
-            more: false,
-            picked_only: false,
-        })
+        .map(|c| c.candidate(head))
         .collect()
 }
 
