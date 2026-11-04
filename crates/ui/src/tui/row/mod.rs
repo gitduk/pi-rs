@@ -975,7 +975,7 @@ impl Row {
                 let line = Line::from(paint.action_hint(
                     self.1.hovered.get().map(|line| line.get() - 1) == Some(i),
                     match (target, remaining) {
-                        (More::CollapseSteps, _) => "collapse".to_string(),
+                        (More::CollapseSteps, _) => "less".to_string(),
                         (More::Steps, _) => format!("{} {remaining} more", icons::ELLIPSIS),
                         (More::Page(_), _) => format!("{remaining} more"),
                     },

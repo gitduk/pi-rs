@@ -709,7 +709,7 @@ pub fn sketched<T>(under: &[T], shown: Shown) -> (&[T], Option<String>) {
             &under[..SKETCH_LIMIT],
             Some(format!("  {} more", under.len() - SKETCH_LIMIT)),
         ),
-        Shown::Open if folds(1 + under.len()) => (under, Some("  click to collapse".into())),
+        Shown::Open if folds(1 + under.len()) => (under, Some("  click for less".into())),
         _ => (under, None),
     }
 }

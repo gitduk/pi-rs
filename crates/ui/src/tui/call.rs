@@ -297,7 +297,7 @@ pub(super) fn background_results(
         icons::RELAYED_MARK,
         row::count(count, "execution result"),
         icons::PART_SEP,
-        if open { "collapse" } else { "expand" },
+        if open { "less" } else { "expand" },
     );
     let shine = matches!(hovered, Some(Target::BackgroundResults(_)));
     let mut spans = vec![paint.action_hint(shine, within(&text, room))];
@@ -410,7 +410,7 @@ pub(super) fn background_lines(
     }
     if folds {
         let fold = match all {
-            true => "click to collapse".to_string(),
+            true => "click for less".to_string(),
             false => format!("{} more", executions.len() - BACKGROUND_SHOWN),
         };
         let shine = hovered == Some(CommandRow::Fold);
