@@ -89,6 +89,8 @@ pub enum Part {
     Tabs,
     /// The answer to the last keypress, for a second.
     Flash,
+    /// The model, as its endpoint names it; the provider prefix only
+    /// addresses it.
     Model,
     /// Absent while thinking is off.
     Effort,

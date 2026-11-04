@@ -36,7 +36,8 @@ pub struct Snapshot {
     /// The run had to resend smaller than its estimate allowed.
     pub refit: bool,
     pub queued: usize,
-    pub model: String,
+    /// The model as its endpoint names it, as a line draws it.
+    pub model_name: String,
     /// The worktree the session is working in, or None in the repository's own
     /// checkout.
     pub worktree: Option<String>,
@@ -135,7 +136,7 @@ impl Tally {
     /// number the run reports.
     pub fn snapshot(
         &self,
-        model: &str,
+        model_name: &str,
         worktree: Option<&str>,
         elapsed: Option<Duration>,
         queued: usize,
@@ -152,7 +153,7 @@ impl Tally {
             compactions: self.compactions,
             refit: !self.refits.is_empty(),
             queued,
-            model: model.to_string(),
+            model_name: model_name.to_string(),
             worktree: worktree.map(str::to_string),
         }
     }
@@ -387,7 +388,7 @@ mod tests {
     #[test]
     fn a_snapshot_asks_for_what_no_event_states() {
         let s = Tally::default().snapshot("sonnet", Some("f1"), Some(Duration::from_secs(3)), 2);
-        assert_eq!(s.model, "sonnet");
+        assert_eq!(s.model_name, "sonnet");
         assert_eq!(s.worktree.as_deref(), Some("f1"));
         assert_eq!(s.elapsed, Some(Duration::from_secs(3)));
         assert_eq!(s.queued, 2);

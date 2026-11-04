@@ -588,6 +588,12 @@ impl Lane {
         &self.checkout.agent.spec().model
     }
 
+    /// The model as its endpoint names it, for a line to draw: the identity
+    /// without the local provider prefix that only addresses it.
+    pub fn model_name(&self) -> &str {
+        self.checkout.agent.spec().wire_model()
+    }
+
     /// The agent these runs go through, for what only it knows.
     pub fn agent(&self) -> &Agent {
         &self.checkout.agent

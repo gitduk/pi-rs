@@ -6,6 +6,7 @@ use super::harness::*;
 fn facts(model: &str) -> crate::tui::bar::Facts {
     crate::tui::bar::Facts {
         model: model.into(),
+        identity: format!("provider/{model}"),
         effort: llm::request::Effort::Off,
         tier: pi_store::args::TierArg::Exec,
         running: false,

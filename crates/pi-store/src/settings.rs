@@ -219,10 +219,7 @@ authorization = "Bearer original"
         .config()
         .unwrap();
         assert!(
-            kept.provider["local"]
-                .headers
-                .get("authorization")
-                .is_none(),
+            !kept.provider["local"].headers.contains_key("authorization"),
             "a header written for the original host is not inherited"
         );
         assert_eq!(

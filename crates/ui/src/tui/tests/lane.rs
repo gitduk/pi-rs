@@ -1583,3 +1583,15 @@ async fn a_new_theme_reaches_the_rows_already_on_the_screen() {
     let light = wear(&mut tui, fit((255, 255, 255)));
     assert_ne!(dark, light, "the old rows kept the old theme");
 }
+
+// A line draws the model as its endpoint names it; the identity that
+// addresses the provider stays in the bar's input for a script that needs it.
+#[test]
+fn a_line_draws_the_models_name_and_the_input_keeps_its_identity() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let tui = surface(dir.path());
+    let facts = crate::tui::bar::Facts::of(tui.core.lane());
+    assert_eq!(facts.model, "m", "the bar draws the endpoint's name");
+    assert_eq!(facts.identity, "local/m", "the identity still addresses it");
+    assert_eq!(tui.core.lane().model(), "local/m", "/status names it whole");
+}

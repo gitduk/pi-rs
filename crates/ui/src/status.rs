@@ -62,8 +62,8 @@ pub fn render(segment: Segment, s: &Snapshot, running: bool) -> Option<String> {
         Segment::Compacted => return compacted(s.compactions),
         Segment::Queued if s.queued == 0 => return None,
         Segment::Queued => format!("{} queued", s.queued),
-        Segment::Model if s.model.is_empty() => return None,
-        Segment::Model => s.model.clone(),
+        Segment::Model if s.model_name.is_empty() => return None,
+        Segment::Model => s.model_name.clone(),
         // Absent in the repository's own checkout, so the line reads as it
         // always did for anyone not using worktrees.
         Segment::Worktree => s.worktree.clone()?,

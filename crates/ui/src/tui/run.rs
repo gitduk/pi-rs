@@ -121,8 +121,8 @@ impl Tui {
         self.arm_view(Doing::Turn { committed: false });
         // Read while the agent is still reachable: `/model` may replace it
         // while this run works, and the run keeps the one it started on.
-        front_view(&mut self.views, self.core.lane()).model =
-            self.core.lane_mut().model().to_string();
+        front_view(&mut self.views, self.core.lane()).model_name =
+            self.core.lane_mut().model_name().to_string();
 
         let agent = self.core.lane_mut().agent().clone();
         let sent = self.core.lane_mut().sender().clone();

@@ -98,12 +98,12 @@ fn paint(
     quiet: bool,
     theme: std::sync::Arc<pi_store::theme::Theme>,
     status: Vec<pi_store::status::Segment>,
-    model: String,
+    model_name: String,
     pricing: llm::model::Pricing,
     worktree: Option<String>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut r = render::Renderer::new(quiet, theme, status, model, pricing, worktree);
+        let mut r = render::Renderer::new(quiet, theme, status, model_name, pricing, worktree);
         while let Some(event) = rx.recv().await {
             r.on(event);
         }
@@ -498,7 +498,7 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         args.quiet,
         Arc::new(config.theme.clone()),
         config.status.to_vec(),
-        model_id.clone(),
+        ag.spec().wire_model().to_string(),
         ag.spec().pricing,
         worktree,
     );

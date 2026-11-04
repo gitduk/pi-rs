@@ -101,8 +101,8 @@ pub(super) fn running_lane(dir: &std::path::Path) -> Lane {
     }
     let ws = tool::Workspace::new(dir).expect("a workspace");
     let spec = llm::model::ModelSpec {
-        model: "m".into(),
-        wire_id: None,
+        model: "local/m".into(),
+        wire_id: Some("m".into()),
         base_url: "http://localhost".into(),
         headers: Vec::new(),
         session_header: None,

@@ -248,7 +248,7 @@ impl Tui {
         let mut views = Views::new();
         for lane in &core.lanes {
             let view = view::opened(&mut views, lane, &ui.paint);
-            view.model = lane.model().to_string();
+            view.model_name = lane.model_name().to_string();
             // A resumed session shows its transcript from the start: the whole
             // screen is rebuildable now, so there is no reason to hide it.
             if let Some(session) = lane.session().filter(|s| !s.is_empty()) {

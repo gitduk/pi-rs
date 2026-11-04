@@ -28,7 +28,10 @@ const RETRY: Duration = Duration::from_secs(5);
 /// What the bar reads off the lane in front, and what the script is told.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(super) struct Facts {
+    /// The model as its endpoint names it: what a line draws.
     pub model: String,
+    /// The selection identity that addresses it, provider prefix included.
+    pub identity: String,
     pub effort: Effort,
     pub tier: TierArg,
     pub running: bool,
@@ -50,7 +53,8 @@ pub(super) struct Facts {
 impl Facts {
     pub(super) fn of(lane: &Lane) -> Self {
         Self {
-            model: lane.model().to_string(),
+            model: lane.model_name().to_string(),
+            identity: lane.model().to_string(),
             // A model that takes no effort thinks at no level the run sets.
             effort: match lane.agent().spec().accepts_effort {
                 true => lane.agent().brief.effort,

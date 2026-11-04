@@ -10,7 +10,8 @@ Use the directory in the `<pi_home>` block.
 This directory is `$PI_HOME` when set, otherwise `~/.pi`.
 pi runs the script with `cargo +nightly -Zscript`.
 The script reads pi's state as JSON on stdin and prints a JSON layout.
-The state fields are `model`, `effort`, `tier`, `running`, `root`, `worktree`, `ctx`, `spent`, `alerts`, `update`, and `released`.
+The state fields are `model`, `identity`, `effort`, `tier`, `running`, `root`, `worktree`, `ctx`, `spent`, `alerts`, `update`, and `released`.
+`model` is the model as its endpoint names it; `identity` is the same model with the provider prefix that `/model` takes, for a script that has to address it.
 
 ## Read the script and example
 
@@ -54,7 +55,7 @@ pi omits an empty part and its preceding separator.
 | ----------- | --------------------------------------------------------- |
 | `tabs`      | the checkouts, folded to the room the row leaves          |
 | `flash`     | the answer to the last key, for a moment                  |
-| `model`     | the model                                                 |
+| `model`     | the model, as its endpoint names it                       |
 | `effort`    | the thinking effort, omitted when off                     |
 | `tier`      | the tool tier                                             |
 | `update`    | a newer release or an installation that replaces the running pi |

@@ -33,9 +33,9 @@ pub struct View {
     // Whether the opening banner has been drawn; drawing it twice would
     // stack two banners on one lane.
     pub(super) drawn: bool,
-    // The model in force. Copied in before the run borrows the agent, which
-    // is what puts it out of reach for the rest of the turn.
-    pub(super) model: String,
+    // The model in force, as a line draws it. Copied in before the run borrows
+    // the agent, which is what puts it out of reach for the rest of the turn.
+    pub(super) model_name: String,
     // The half-typed line parked when the surface last left this lane,
     // waiting in the view to come back to the editor with it.
     pub(super) draft: String,
@@ -323,7 +323,7 @@ pub(super) fn view_at(views: &mut Views, token: u64) -> &mut View {
 // under the status line already, so only the unseen rest is counted.
 pub(super) fn snapshot(lane: &Lane, view: &View) -> Snapshot {
     lane.snapshot(
-        &view.model,
+        &view.model_name,
         view.state.work.as_ref().map(|w| w.since.elapsed()),
         view.queued
             .lock()

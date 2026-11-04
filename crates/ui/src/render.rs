@@ -817,7 +817,7 @@ pub struct Renderer {
     // Read off the same events the terminal reads, so a one-shot run ends on
     // the line the terminal would have shown it.
     tally: pi_core::core::meter::Tally,
-    model: String,
+    model_name: String,
 
     // The worktree this run is working in, for the segment that names it.
     worktree: Option<String>,
@@ -833,7 +833,7 @@ impl Renderer {
         quiet: bool,
         theme: Arc<Theme>,
         status: Vec<pi_store::status::Segment>,
-        model: String,
+        model_name: String,
         pricing: Pricing,
         worktree: Option<String>,
     ) -> Self {
@@ -846,7 +846,7 @@ impl Renderer {
             quiet,
             status,
             tally,
-            model,
+            model_name,
             worktree,
             thinking: false,
             out_dirty: false,
@@ -884,7 +884,7 @@ impl Renderer {
                 self.settle();
                 let snap = self
                     .tally
-                    .snapshot(&self.model, self.worktree.as_deref(), None, 0);
+                    .snapshot(&self.model_name, self.worktree.as_deref(), None, 0);
                 let line = crate::status::line(&self.status, &snap);
                 if !line.is_empty() {
                     let painted = crate::status::painted(&line, &self.paint);

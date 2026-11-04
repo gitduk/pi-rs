@@ -256,12 +256,12 @@ impl Provider {
                 );
             }
         }
-        if let Some(header) = &self.session_header {
-            if !header_name_ok(header) {
-                bail!(
-                    "provider.{name}.session_header: a header name is letters, digits or !#$%&'*+-.^_`|~"
-                );
-            }
+        if let Some(header) = &self.session_header
+            && !header_name_ok(header)
+        {
+            bail!(
+                "provider.{name}.session_header: a header name is letters, digits or !#$%&'*+-.^_`|~"
+            );
         }
         Ok(())
     }
