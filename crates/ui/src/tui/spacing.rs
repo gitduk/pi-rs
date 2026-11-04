@@ -29,12 +29,12 @@ impl Spacing {
     /// Whether this block needs a blank row before it. Streaming continuations
     /// stay inside their block and must not pass through here again.
     pub(super) fn push(&mut self, next: Block) -> bool {
-        let gap = match next {
-            Block::Prompt => self.has_turn,
-            Block::Tools => matches!(self.previous, Some(Block::Prose)),
-            Block::Prose => matches!(self.previous, Some(Block::Tools)),
-            Block::Relayed | Block::Other => false,
-        };
+        let gap = matches!(self.previous, Some(Block::Prompt))
+            || match next {
+                Block::Prompt => self.has_turn,
+                Block::Prose => matches!(self.previous, Some(Block::Tools)),
+                Block::Tools | Block::Relayed | Block::Other => false,
+            };
         self.has_turn |= matches!(next, Block::Prompt | Block::Relayed);
         self.previous = Some(next);
         gap

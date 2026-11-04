@@ -154,21 +154,33 @@ fn is_light((r, g, b): (u8, u8, u8)) -> bool {
     0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b) > 127.5
 }
 
-/// Neutral fills distinguish the editor and submitted text from the terminal canvas.
 fn bands_for(bg: (u8, u8, u8)) -> Bands {
-    // Light surfaces need only a hint of black; dark surfaces lift toward white.
-    let (overlay, input_weight, said_weight) = if is_light(bg) {
-        ((0, 0, 0), 4, 2)
-    } else {
-        ((255, 255, 255), 12, 16)
-    };
-    let fill = |weight| {
-        let (r, g, b) = blend(overlay, bg, weight);
-        Color::Rgb(r, g, b)
+    let (r, g, b) = (f64::from(bg.0), f64::from(bg.1), f64::from(bg.2));
+    let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    let dark = lum <= 127.5;
+    let band = {
+        let factor = 3.0 / 12.0;
+        let scaled = if dark && lum >= 10.0 {
+            let ratio = (lum + (255.0 - lum) * factor * 0.4) / lum;
+            (r * ratio, g * ratio, b * ratio)
+        } else if dark {
+            // So close to black that scaling it would leave it black: the
+            // band is the lift alone, with no hue of its own to keep.
+            let v = factor * 0.4 * 255.0;
+            (v, v, v)
+        } else if lum > 245.0 {
+            let v = 255.0 - factor * 0.4 * 255.0;
+            (v, v, v)
+        } else {
+            let ratio = 1.0 - factor * 0.4;
+            (r * ratio, g * ratio, b * ratio)
+        };
+        let byte = |v: f64| v.clamp(0.0, 255.0).floor() as u8;
+        Color::Rgb(byte(scaled.0), byte(scaled.1), byte(scaled.2))
     };
     Bands {
-        input: fill(input_weight),
-        said: fill(said_weight),
+        input: band.clone(),
+        said: band,
     }
 }
 
@@ -177,25 +189,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn neutral_fills_soften_tinted_backgrounds_and_preserve_configured_bands() {
+    fn configured_bands_survive_terminal_adaptation() {
         for bg in [(13, 17, 23), (240, 245, 250)] {
-            let fitted = following_terminal(&Theme::default(), Some(bg), None);
-            for color in [&fitted.prompt.panel.input, &fitted.prompt.panel.said] {
-                let Color::Rgb(r, g, b) = *color else {
-                    panic!("a known background should produce an RGB fill");
-                };
-                assert!(
-                    b - r <= bg.2 - bg.0,
-                    "neutral mixing must not amplify the tint"
-                );
-                for (value, original) in [(r, bg.0), (g, bg.1), (b, bg.2)] {
-                    if is_light(bg) {
-                        assert!(value < original, "light fills darken the canvas gently");
-                    } else {
-                        assert!(value > original, "dark fills lift off the canvas");
-                    }
-                }
-            }
             let mut configured = Theme::default();
             configured.prompt.panel.input = Color::Rgb(1, 2, 3);
             configured.prompt.panel.said = Color::Rgb(4, 5, 6);
