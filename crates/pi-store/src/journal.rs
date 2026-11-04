@@ -602,6 +602,7 @@ pub fn opening(
         workspace = %root.display(),
         config = %config_path.map_or_else(|| "-".into(), |p| p.display().to_string()),
         models = config.names().len(),
+        discovered_models = config.discovered.len(),
         rebound_keys = config.keys.len(),
         model = config.model.as_deref().unwrap_or("-"),
         project = %project.map_or("-".into(), |p| p.display().to_string()),

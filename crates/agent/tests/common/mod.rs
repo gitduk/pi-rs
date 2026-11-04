@@ -26,6 +26,7 @@ pub fn compacting(agent: &mut agent::Agent, writer: Option<(Arc<dyn Transport>, 
 pub fn spec() -> ModelSpec {
     ModelSpec {
         model: "test-wire-id".into(),
+        wire_id: None,
         base_url: "http://localhost".into(),
         format: Format::Anthropic {
             cache_control: CacheControl::Off,

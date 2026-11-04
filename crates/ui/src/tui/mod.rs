@@ -391,6 +391,11 @@ impl Tui {
             let view = front_view(&mut self.views, self.core.lane());
             self.ui.adopt_config(&self.core, view);
         }
+        if let Some(said) = self.core.refresh_models() {
+            notes.extend(said);
+            let view = front_view(&mut self.views, self.core.lane());
+            self.ui.adopt_config(&self.core, view);
+        }
         if self.core.refresh_prompts() {
             self.ui.commands = self.core.commands.clone();
         }

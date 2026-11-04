@@ -27,18 +27,17 @@ The bar shows a newer release as `vX.Y.Z available`.
 
 ## Configure
 
-There is no built-in model list. `~/.pi/settings.toml` names one endpoint and
-the models on it:
+Configure a provider in `~/.pi/settings.toml`; pi discovers its models:
 
 ```toml
-base_url = "https://api.anthropic.com"
-format   = "anthropic"          # anthropic | openai | chat
-api_key  = "$ANTHROPIC_API_KEY" # a leading `$` reads the environment
-
-[models."claude-sonnet-5"]
-context_window    = 200_000
-max_output_tokens = 64_000
+[provider.local]
+base_url = ":3425/v1"          # http://127.0.0.1:3425/v1
+format = "chat"               # anthropic | openai | chat
+# api_key = "$PROVIDER_API_KEY"
 ```
+
+Connection settings belong in `[provider.<name>]`. `format` selects the API
+protocol for that connection:
 
 | `format`    | API              | pi appends          |
 | ----------- | ---------------- | ------------------- |
@@ -46,28 +45,70 @@ max_output_tokens = 64_000
 | `openai`    | Responses        | `/responses`        |
 | `chat`      | Chat Completions | `/chat/completions` |
 
-A model can specify another endpoint in its own entry.
-Other models use the file's endpoint:
+pi reads `<base_url>/models` (`<base_url>/v1/models` for `anthropic`).
+`/model` lists the discovered models and offers them for completion.
+Select one with `/model local/model-id` or start with `pi -m local/model-id`.
+The provider prefix distinguishes identical IDs on different hosts; only the
+original model ID is sent to the server. A sole provider also accepts bare IDs
+that contain no `/`. With no model selected by a flag, resumed session or the
+top-level `model` setting, pi starts on the first discovered name in alphabetical order.
+
+The default response mapping reads the `data` array and each item's `id`,
+`context_window` and `max_output_tokens`. Override only the paths that differ:
 
 ```toml
-[models."gpt-5"]
-base_url = "https://api.openai.com/v1"
-format   = "openai"
-api_key  = "$OPENAI_API_KEY"   # never the file's key: that one is for its host
+[provider.go]
+base_url = "https://opencode.ai/zen/go/v1"
+format = "chat"
+api_key = "$OPENCODE_API_KEY"
+models_path = "data"           # default; could be "models" or "result.models"
+id = "id"                     # default; relative to each item
+context_window = "limit.context"
+max_output_tokens = "limit.output"
 ```
+
+`api_key = "$NAME"` reads an environment variable; another string is a literal
+key. Set `api_key` explicitly to use a credential, including one from the
+environment. Anthropic's `cache_control` setting also belongs in its provider table.
+
+Paths use dot-separated object fields. An empty `models_path` selects an array
+at the response root; an empty `id` selects a string item itself.
+`models_url` can specify a separate, complete catalog URL.
+Missing token limits use the existing defaults: a 128,000-token window and
+8,192 output tokens. `[models."provider/model-id"]` contains limit, capability
+and price overrides:
+
+```toml
+[models."local/model-id"]
+context_window = 200_000
+vision = true
+```
+
+Explicit fields override discovered values. Discovery never writes the settings
+file. Catalogs refresh in the background every five minutes and when `/model`
+is used without a name. Each discovery attempt has a five-second timeout;
+failed refreshes keep the last successful list. Responses with `has_more` and
+`last_id` are paginated using `after_id`.
 
 [`examples/pi.toml`](examples/pi.toml) lists every key. An unknown key is
 refused at load.
 
-A `.pi.toml` between the workspace and repository root can override any of these keys.
+A `.pi/settings.toml` between the workspace and repository root can override any
+of these keys. Files merge before required provider fields are checked, so a
+project can change only a field mapping. If a project changes a provider's
+`base_url` or `models_url`, it must also set `api_key` to use a credential;
+the original connection's key is not inherited for the new target.
 At startup, pi lists keys that affect resources outside the checkout under the banner.
-These include `mcp`, `hooks`, `keep_days`, `base_url`, `api_key`, and each model's own `base_url` or `api_key`.
+These include `mcp`, `hooks`, `keep_days`, and each provider's `base_url`,
+`models_url` and `api_key`.
 pi also lists the checkout's script tools.
 Inspect both lists before you run pi in a checkout you did not write.
 
 You do not need to restart pi after a settings change.
 Within a second of a save, pi rebuilds the active lane from the settings.
 If the file does not parse, pi reports it once and keeps the old configuration.
+Other lanes apply refreshed model facts and their own project settings when
+they become active or start a turn.
 
 pi reads system prompts, replacement prompts in `~/.pi/prompts/`, `AGENTS.md`, and memory again at the next session or compaction.
 A prompt change during a session would contradict text the model already read.
@@ -511,7 +552,7 @@ A skill with the same name on disk replaces the built-in.
 An image pasted with `ctrl+v` accompanies the message.
 The message text includes its path.
 `read` also opens PNG, JPEG, GIF, and WebP files as images.
-The model receives images only with `vision = true` in its `[models]` entry.
+The model receives images only with `vision = true` in its `[models."provider/model-id"]` entry.
 Otherwise, pi replaces each image with a line that explains the omission.
 
 `fetch` supports HTTP and HTTPS.
@@ -552,7 +593,7 @@ Subagents and runs with `--tier read`, `--tier net`, or `--no-context-files` nev
 
 | Path                                     | Holds                                      |
 | ---------------------------------------- | ------------------------------------------ |
-| `~/.pi/settings.toml`                    | endpoint, models, `[keys]`, `[theme]`      |
+| `~/.pi/settings.toml`                    | providers, models, `[keys]`, `[theme]`     |
 | `~/.pi/SYSTEM.md`                        | replaces the built-in system prompt        |
 | `~/.pi/prompts/summarize.md`             | replaces the compaction summary prompt     |
 | `~/.pi/prompts/subagent.md`              | replaces a subagent's own prompt           |

@@ -446,8 +446,9 @@ impl Core {
         // said — the lane coming to the front says where you are.
         if let Some(i) = self.lane_at(ws.root()) {
             self.current = i;
+            let notes = self.refresh_config().unwrap_or_default();
             self.in_force();
-            return Ok(Step::Handled(Listing::default()));
+            return Ok(Step::Handled(Listing::say(notes)));
         }
         self.open_lane(ws, (!tree.main).then(|| tree.name.clone()), self.current)?;
         let said = self.take_up_latest();

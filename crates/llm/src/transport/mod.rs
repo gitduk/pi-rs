@@ -516,4 +516,30 @@ mod tests {
                 .is_none()
         );
     }
+
+    #[test]
+    fn every_wire_sends_the_endpoint_id_instead_of_the_local_selection_name() {
+        let req = Request::default();
+        let spec = |format| crate::model::ModelSpec {
+            model: "provider/auto/shared".into(),
+            wire_id: Some("auto/shared".into()),
+            format,
+            ..crate::model::ModelSpec::test()
+        };
+        let anthropic = spec(crate::model::Format::Anthropic {
+            cache_control: Default::default(),
+        });
+        assert_eq!(
+            anthropic::build_body(&anthropic, &req)["model"],
+            "auto/shared"
+        );
+        assert_eq!(
+            openai::build_body(&spec(crate::model::Format::OpenAi), &req)["model"],
+            "auto/shared"
+        );
+        assert_eq!(
+            chat::build_body(&spec(crate::model::Format::Chat), &req)["model"],
+            "auto/shared"
+        );
+    }
 }

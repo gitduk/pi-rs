@@ -13,7 +13,8 @@ use crate::model::{CacheControl, Format, ModelSpec};
 use crate::request::{Request, ToolChoice};
 use crate::stream::{BlockKind, StopReason, StreamEvent, Usage};
 
-const API_VERSION: &str = "2023-06-01";
+/// API version shared by Messages requests and model discovery.
+pub const API_VERSION: &str = "2023-06-01";
 
 pub struct Anthropic {
     http: reqwest::Client,
@@ -180,7 +181,7 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
         .min(spec.max_output_tokens);
 
     let mut body = json!({
-        "model": spec.model,
+        "model": spec.wire_model(),
         "max_tokens": max_tokens,
         "stream": true,
         "messages": encode_messages(&req.messages, spec),

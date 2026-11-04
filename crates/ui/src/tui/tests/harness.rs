@@ -102,6 +102,7 @@ pub(super) fn running_lane(dir: &std::path::Path) -> Lane {
     let ws = tool::Workspace::new(dir).expect("a workspace");
     let spec = llm::model::ModelSpec {
         model: "m".into(),
+        wire_id: None,
         base_url: "http://localhost".into(),
         format: llm::model::Format::Anthropic {
             cache_control: llm::model::CacheControl::Off,
@@ -130,6 +131,7 @@ pub(super) fn running_lane(dir: &std::path::Path) -> Lane {
 pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
     let core = Core {
         store: Store::new(dir.join("state")),
+        catalog: Default::default(),
         config: std::sync::Arc::new(pi_store::config::Config::default()),
         pinned: pi_core::args::Pinned::default(),
         commands: commands(),

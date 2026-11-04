@@ -10,20 +10,11 @@ use llm::transport::{Transport, anthropic::Anthropic, chat::ChatCompletions, ope
 use crate::args::Pinned;
 use pi_store::config;
 
-// Falls back from config `api_key` to `OPENAI_API_KEY` (both OpenAI-family
-// wires) or `ANTHROPIC_API_KEY`; a key is never required.
 fn transport_for(spec: &ModelSpec, configured: Option<String>) -> Arc<dyn Transport> {
-    let key = configured.or_else(|| {
-        let var = match spec.format {
-            Format::Chat | Format::OpenAi => "OPENAI_API_KEY",
-            Format::Anthropic { .. } => "ANTHROPIC_API_KEY",
-        };
-        std::env::var(var).ok()
-    });
     match spec.format {
-        Format::Anthropic { .. } => Arc::new(Anthropic::new(key)),
-        Format::OpenAi => Arc::new(OpenAi::new(key)),
-        Format::Chat => Arc::new(ChatCompletions::new(key)),
+        Format::Anthropic { .. } => Arc::new(Anthropic::new(configured)),
+        Format::OpenAi => Arc::new(OpenAi::new(configured)),
+        Format::Chat => Arc::new(ChatCompletions::new(configured)),
     }
 }
 
@@ -40,8 +31,7 @@ pub struct Dialled {
     pub warning: Option<String>,
 }
 
-// Every name resolves now (unlisted ones pass through with defaults), so
-// this only fires for a config with no endpoint — naming who asked helps.
+// A missing provider or incomplete connection names who selected the model.
 fn unknown(model: &str, named_by: config::ModelOrigin) -> String {
     format!(
         "`{model}`, named by {}, cannot be reached — see examples/pi.toml",
@@ -56,9 +46,10 @@ fn said_by(origin: config::ModelOrigin) -> &'static str {
         O::Flag => "-m",
         O::Command => "/model",
         O::Resumed => "the resumed session",
-        O::Project => "`model` in the project's .pi.toml",
+        O::Project => "`model` in the project's .pi/settings.toml",
         O::Global => "`model` in ~/.pi/settings.toml",
         O::OnlyModel => "the only model in ~/.pi/settings.toml",
+        O::Discovered => "the endpoint's model list",
     }
 }
 
@@ -82,7 +73,7 @@ pub fn dial(
 
     // A passed-through model is a guess. Saying which guess lets the user
     // correct the one that matters instead of debugging a 400 later.
-    let assumed = (!config.is_written(model)).then(|| {
+    let assumed = (!config.is_written(&spec.model)).then(|| {
         format!(
             "assuming a {}-token window, {} max output and no pricing for `{}`. \
              Set --context if the server's window differs.",
@@ -116,10 +107,9 @@ pub fn dial(
 pub fn summary_writer(
     pinned: &Pinned,
     config: &config::Config,
-    working: &str,
 ) -> Result<Option<(Arc<dyn Transport>, ModelSpec)>> {
     match &config.summarize_model {
-        Some(name) if name != working => {
+        Some(name) => {
             let summarizer = dial(pinned, config, name, config::ModelOrigin::Global)
                 .with_context(|| format!("summarize_model = \"{name}\""))?;
             Ok(Some((summarizer.transport, summarizer.spec)))

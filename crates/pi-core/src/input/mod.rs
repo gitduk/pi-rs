@@ -51,7 +51,7 @@ pub enum Builtin {
     Worktree(String),
     // The directory this conversation carries on in, or empty to say the one now.
     Mv(String),
-    // Bare `/settings`: the project's `.pi.toml` in `$EDITOR`. An argument
+    // Bare `/settings`: the project's `.pi/settings.toml` in `$EDITOR`. An argument
     // after the word is refused.
     Settings(String),
     // A file the model is given, by the name `/edit` lists it under, or

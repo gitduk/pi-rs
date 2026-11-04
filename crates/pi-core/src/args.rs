@@ -23,8 +23,8 @@ pub struct Args {
     #[arg(long, value_name = "FILE", env = "PI_CONFIG")]
     pub config: Option<String>,
 
-    /// What the endpoint calls the model. A name ~/.pi/settings.toml does not
-    /// describe is passed through with default numbers. Defaults to the
+    /// A model ID, or provider/model-id for a named connection. An unlisted
+    /// name is passed through with default numbers. Defaults to the
     /// resumed session's model, else the config's.
     #[arg(short, long)]
     pub model: Option<String>,

@@ -15,7 +15,7 @@ Read the existing configuration before editing it.
 ## Choose the configuration file
 
 `<pi_home>/settings.toml` applies to every checkout.
-A project's `.pi.toml` adds servers for that checkout alone.
+A project's `.pi/settings.toml` adds servers for that checkout alone.
 pi reports the project's servers at startup.
 Add the server section to the file that matches the requested scope.
 Preserve unrelated settings and servers.

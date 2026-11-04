@@ -8,36 +8,27 @@
 //! Providers own the connection, models own themselves: the endpoint is
 //! written once and every model under it hangs off that one entry.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use llm::model::{CacheControl, Format, ModelSpec, Pricing};
+use llm::model::{ModelSpec, Pricing};
 use serde::{Deserialize, Serialize};
 
-use crate::args::{EffortArg, FormatArg, TierArg};
+use crate::args::{EffortArg, TierArg};
+use crate::provider::Provider;
+
+/// The settings path relative to a project directory.
+pub const PROJECT_FILE: &str = ".pi/settings.toml";
 
 /// A config file: the user's `~/.pi/settings.toml`, or a repository's
-/// `.pi.toml` laid over it key by key.
+/// `.pi/settings.toml` laid over it key by key.
 #[derive(Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// The endpoint this machine talks to: pi talks to one at a time, so this
-    /// is one field, not a map keyed by provider.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<FormatArg>,
-    /// `$NAME` reads that environment variable; anything else is the key
-    /// itself. A key that genuinely begins with `$` cannot be written literally
-    /// — put it in a variable.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-    /// Anthropic only, and off unless someone measured it: an unknown top-level
-    /// field is a 400 on some servers.
-    #[serde(default)]
-    pub cache_control: CacheControl,
-
+    /// Named connections whose model lists are discovered at runtime.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider: BTreeMap<String, Provider>,
     /// The model to run, as the endpoint names it: `deepseek-v4-flash`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -57,6 +48,9 @@ pub struct Config {
     /// it differs — and needs none at all to be usable.
     #[serde(default)]
     pub models: BTreeMap<String, ModelEntry>,
+    /// Endpoint-supplied entries; never persisted as user configuration.
+    #[serde(skip)]
+    pub discovered: BTreeSet<String>,
     /// Key actions, each mapped to the presses that trigger it. An entry
     /// replaces that action's defaults rather than adding to them.
     #[serde(default)]
@@ -355,26 +349,10 @@ fn yes() -> bool {
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelEntry {
-    /// This model's own endpoint, over the file's `base_url`. A model that
-    /// names one does not inherit the file's `api_key`: a key is the host's.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
-    /// This model's wire, over the file's `format`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub format: Option<FormatArg>,
-    /// This model's credential; a leading `$` reads the environment.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
     #[serde(default = "default_context")]
     pub context_window: u32,
     #[serde(default = "default_output")]
     pub max_output_tokens: u32,
-    // Read and dropped: `effort` now says thinking on every wire, and a file
-    // written before that must still load.
-    #[serde(default, skip_serializing)]
-    thinking: Option<toml::Value>,
-    #[serde(default, skip_serializing)]
-    replay_thinking: Option<toml::Value>,
     #[serde(default)]
     pub vision: bool,
     /// `unsupported` for a model that cannot think; no level belongs here.
@@ -395,13 +373,8 @@ pub struct ModelEntry {
 impl Default for ModelEntry {
     fn default() -> Self {
         Self {
-            base_url: None,
-            format: None,
-            api_key: None,
             context_window: default_context(),
             max_output_tokens: default_output(),
-            thinking: None,
-            replay_thinking: None,
             vision: false,
             effort: None,
             accepts_temperature: true,
@@ -412,46 +385,17 @@ impl Default for ModelEntry {
 }
 
 impl Config {
-    // The endpoint's shape, refused rather than guessed: naming the wrong one
-    // is a 400 on the first turn, and neither is a safer bet than the other.
-    fn format(&self, model: &ModelEntry) -> Result<Format> {
-        let named = model
-            .format
-            .or(self.format)
-            .context("`format` is required: \"anthropic\", \"openai\" or \"chat\"")?;
-        Ok(match named {
-            FormatArg::Anthropic => Format::Anthropic {
-                cache_control: self.cache_control,
-            },
-            FormatArg::Openai => Format::OpenAi,
-            FormatArg::Chat => Format::Chat,
-        })
-    }
-
-    fn spec(&self, name: &str, model: &ModelEntry) -> Result<ModelSpec> {
-        let format = self.format(model)?;
-        // The file's `cache_control` speaks for the file's own wire; a model
-        // on another wire of its own does not inherit it.
-        let own_wire = model.format.is_some_and(|f| Some(f) != self.format);
-        if !own_wire
-            && !matches!(format, Format::Anthropic { .. })
-            && self.cache_control != CacheControl::Off
-        {
-            bail!(
-                "cache_control is an Anthropic field; the openai format caches by \
-                 default and naming it here can only turn that off"
-            );
-        }
-        let base_url = model
-            .base_url
-            .as_deref()
-            .map(|url| expand_base_url(url.trim()))
-            .or_else(|| self.base_url.clone())
-            .context("`base_url` is required to reach a model")?;
-        Ok(ModelSpec {
+    fn spec(&self, name: &str, model: &ModelEntry, provider: &Provider) -> ModelSpec {
+        ModelSpec {
             model: name.to_string(),
-            base_url,
-            format,
+            wire_id: Some({
+                name.split_once('/')
+                    .expect("provider identity includes a separator")
+                    .1
+                    .to_string()
+            }),
+            base_url: provider.base_url.clone(),
+            format: provider.wire_format(),
             context_window: model.context_window,
             max_output_tokens: model.max_output_tokens,
             vision: model.vision,
@@ -459,14 +403,13 @@ impl Config {
             accepts_temperature: model.accepts_temperature,
             can_force_tool: model.can_force_tool,
             pricing: model.pricing,
-        })
+        }
     }
 
     // A `$NAME` that names nothing is a typo now and a missing key much later,
     // pointing at the endpoint rather than at the file.
     fn check_key(&self) -> Result<()> {
-        let keys = std::iter::once(self.api_key.as_deref())
-            .chain(self.models.values().map(|m| m.api_key.as_deref()));
+        let keys = self.provider.values().map(|p| p.api_key.as_deref());
         for name in keys.flatten().filter_map(|k| k.strip_prefix('$')) {
             if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                 bail!(
@@ -492,6 +435,7 @@ pub enum ModelOrigin {
     Project,
     Global,
     OnlyModel,
+    Discovered,
 }
 
 /// What the flags said, so the chain below can be resolved in one place.
@@ -511,13 +455,42 @@ impl Config {
     /// The spec for a model name. Every name resolves: an entry only ever
     /// supplies facts the defaults get wrong.
     ///
-    /// Probing the endpoint for its catalog would cost a round trip and still
-    /// not answer the one thing that matters — how wide the window is.
+    /// A provider prefix selects that connection; a sole provider also accepts
+    /// bare IDs that contain no provider separator.
     pub fn find(&self, name: &str) -> Result<ModelSpec> {
-        match self.models.get(name) {
-            Some(model) => self.spec(name, model),
-            None => self.spec(name, &ModelEntry::default()),
+        let (identity, provider) = self.locate(name)?;
+        Ok(
+            match self.models.get(name).or_else(|| self.models.get(&identity)) {
+                Some(model) => self.spec(&identity, model, provider),
+                None => self.spec(&identity, &ModelEntry::default(), provider),
+            },
+        )
+    }
+
+    fn locate(&self, name: &str) -> Result<(String, &Provider)> {
+        if let Some((prefix, id)) = name.split_once('/')
+            && let Some(provider) = self.provider.get(prefix)
+        {
+            if id.is_empty() {
+                bail!("a model ID is required after provider {prefix:?}");
+            }
+            return Ok((name.into(), provider));
         }
+        if self.provider.is_empty() {
+            bail!("no provider is configured to reach model {name:?}");
+        }
+        if let Some((prefix, _)) = name.split_once('/') {
+            bail!("unknown provider {prefix:?} in model {name:?}");
+        }
+        if let Some((prefix, provider)) = self
+            .provider
+            .iter()
+            .next()
+            .filter(|_| self.provider.len() == 1)
+        {
+            return Ok((format!("{prefix}/{name}"), provider));
+        }
+        bail!("model {name:?} needs a provider prefix: use provider/model")
     }
 
     /// Whether the file actually describes this model, as against one passed
@@ -530,44 +503,15 @@ impl Config {
         self.models.keys().cloned().collect()
     }
 
-    /// The key as written for `model`: its own, or the file's while it is
-    /// on the file's endpoint. A model sent elsewhere never carries the
-    /// file's key there.
+    /// The selected provider's credential as written, before environment expansion.
     pub fn written_key(&self, model: &str) -> Option<&str> {
-        match self.models.get(model) {
-            Some(m) if m.api_key.is_some() => m.api_key.as_deref(),
-            Some(m) if m.base_url.is_some() => None,
-            _ => self.api_key.as_deref(),
-        }
+        self.locate(model).ok()?.1.api_key.as_deref()
     }
 
     /// [`Config::written_key`], `$NAME` read: the credential to send, or None
     /// when the endpoint wants none. The shape is checked at load.
     pub fn key_for(&self, model: &str) -> Option<String> {
         self.written_key(model).and_then(expand_key)
-    }
-
-    fn apply_env(&mut self) {
-        self.apply_env_with(|k| std::env::var(k).ok());
-    }
-
-    fn apply_env_with<F>(&mut self, mut lookup: F)
-    where
-        F: FnMut(&str) -> Option<String>,
-    {
-        let Some((var, url)) = endpoint_var(&mut lookup) else {
-            return;
-        };
-        let (format, cache) = match var {
-            ANTHROPIC_BASE_URL => (FormatArg::Anthropic, None),
-            _ => (FormatArg::Openai, Some(CacheControl::Off)),
-        };
-
-        self.base_url = Some(expand_base_url(url.trim()));
-        self.format = Some(format);
-        if let Some(c) = cache {
-            self.cache_control = c;
-        }
     }
 
     /// Flag > the files > the built-in default.
@@ -604,30 +548,15 @@ impl Config {
         if let [only] = self.names().as_slice() {
             return Some((only.clone(), ModelOrigin::OnlyModel));
         }
-        None
+        self.discovered
+            .first()
+            .map(|name| (name.clone(), ModelOrigin::Discovered))
     }
-}
-
-const ANTHROPIC_BASE_URL: &str = "ANTHROPIC_BASE_URL";
-const OPENAI_BASE_URL: &str = "OPENAI_BASE_URL";
-
-fn endpoint_var<F>(lookup: &mut F) -> Option<(&'static str, String)>
-where
-    F: FnMut(&str) -> Option<String>,
-{
-    [ANTHROPIC_BASE_URL, OPENAI_BASE_URL]
-        .into_iter()
-        .find_map(|var| Some((var, lookup(var).filter(|s| !s.trim().is_empty())?)))
-}
-
-/// The environment variable `base_url` is taken from, if any.
-pub fn endpoint_env() -> Option<&'static str> {
-    endpoint_var(&mut |k| std::env::var(k).ok()).map(|(var, _)| var)
 }
 
 /// `$NAME` reads that environment variable; anything else is the key itself.
 /// The one spelling of the credential contract, for every key in the file.
-fn expand_key(raw: &str) -> Option<String> {
+pub(crate) fn expand_key(raw: &str) -> Option<String> {
     match raw.strip_prefix('$') {
         None => Some(raw.to_string()),
         Some(name) => std::env::var(name).ok(),
@@ -672,10 +601,10 @@ pub fn prompt_file(name: &str) -> Option<PathBuf> {
 }
 
 /// The nearest project file at or above `start`, stopping at the repo root.
-/// `home` is never searched: a `.pi.toml` there applies outside any repo.
+/// `home` is never treated as a project directory.
 fn project_path(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
     nearest(start, home, |dir| {
-        Some(dir.join(".pi.toml")).filter(|p| p.is_file())
+        Some(dir.join(PROJECT_FILE)).filter(|p| p.is_file())
     })
 }
 
@@ -726,7 +655,7 @@ fn nearest(
 
 /// Where settings for `workspace` are written: the project file in force, else a
 /// new one at the repository root, or in the workspace outside a repository.
-/// `None` in `$HOME` itself, whose `.pi.toml` is never read.
+/// `None` in `$HOME` itself, which is not a project directory.
 pub fn project_target(workspace: &Path) -> Option<PathBuf> {
     let home = home();
     if let Some(found) = project_path(workspace, home.as_deref()) {
@@ -737,11 +666,11 @@ pub fn project_target(workspace: &Path) -> Option<PathBuf> {
         .take_while(|dir| home.as_deref() != Some(*dir))
         .find(|dir| dir.join(".git").exists())
         .unwrap_or(workspace);
-    (home.as_deref() != Some(dir)).then(|| dir.join(".pi.toml"))
+    (home.as_deref() != Some(dir)).then(|| dir.join(PROJECT_FILE))
 }
 
-/// A config file's tree, checked as a config on its own so an error names the
-/// file it is in. A missing file is `None` unless it was asked for by name.
+/// A file's partial tree. Schema validation follows the settings merge, when
+/// inherited fields are present. A named file must exist.
 fn read_tree(path: &Path, required: bool) -> Result<Option<toml::Value>> {
     let body = match std::fs::read_to_string(path) {
         Ok(body) => body,
@@ -749,7 +678,6 @@ fn read_tree(path: &Path, required: bool) -> Result<Option<toml::Value>> {
         Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
     };
     let tree: toml::Value = toml::from_str(&body).with_context(|| format!("{}", path.display()))?;
-    Config::from_tree(tree.clone()).with_context(|| format!("{}", path.display()))?;
     Ok(Some(tree))
 }
 
@@ -766,14 +694,14 @@ pub fn load_tree(explicit: Option<&str>) -> Result<toml::Value> {
     Ok(found.unwrap_or_else(|| toml::Value::Table(Default::default())))
 }
 
-/// The nearest `.pi.toml` at or above `workspace`, if there is one.
+/// The nearest `.pi/settings.toml` at or above `workspace`, if there is one.
 pub fn project_file(workspace: &Path) -> Option<PathBuf> {
     project_path(workspace, home().as_deref())
 }
 
 /// Keys a project file may set that reach past its checkout: they start
 /// programs, delete sessions, widen writes, or choose where a key is sent.
-const REACHING: &[&str] = &["mcp", "hooks", "keep_days", "base_url", "api_key"];
+const REACHING: &[&str] = &["mcp", "hooks", "keep_days"];
 
 /// The keys of a project `tree` that reach past its checkout, as spelled
 /// there, each with its value as shown when it loads.
@@ -782,11 +710,15 @@ pub fn reaching(tree: &toml::Value) -> Vec<(String, String)> {
         .iter()
         .filter_map(|key| Some((key.to_string(), shown(key, tree.get(*key)?))))
         .collect();
-    let models = tree.get("models").and_then(toml::Value::as_table);
-    for (name, entry) in models.into_iter().flatten() {
-        for field in ["base_url", "api_key"] {
+    for (name, entry) in tree
+        .get("provider")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flatten()
+    {
+        for field in ["base_url", "api_key", "models_url"] {
             if let Some(value) = entry.get(field) {
-                out.push((format!("models.{name}.{field}"), shown(field, value)));
+                out.push((format!("provider.{name}.{field}"), shown(field, value)));
             }
         }
     }
@@ -815,7 +747,7 @@ fn shown(key: &str, value: &toml::Value) -> String {
     }
 }
 
-/// The nearest `.pi.toml` at or above `workspace`, and its tree.
+/// The nearest `.pi/settings.toml` at or above `workspace`, and its tree.
 pub fn load_project(workspace: &Path) -> Result<Option<(PathBuf, toml::Value)>> {
     let Some(path) = project_file(workspace) else {
         return Ok(None);
@@ -828,7 +760,14 @@ impl Config {
     /// a typo in a model you are not running today is still a typo.
     pub fn from_tree(tree: toml::Value) -> Result<Config> {
         let mut config: Config = serde_path_to_error::deserialize(tree)?;
-        config.base_url = config.base_url.map(|url| expand_base_url(url.trim()));
+        for (name, provider) in &mut config.provider {
+            provider.base_url = expand_base_url(provider.base_url.trim());
+            provider.models_url = provider
+                .models_url
+                .take()
+                .map(|url| expand_base_url(url.trim()));
+            provider.check(name)?;
+        }
         config.check_key()?;
         for (name, server) in &config.mcp {
             server.check(name)?;
@@ -843,24 +782,41 @@ impl Config {
                      a level is set by the top-level `effort` key"
                 );
             }
-            let reachable = config.base_url.is_some() || entry.base_url.is_some();
-            if reachable && (config.format.is_some() || entry.format.is_some()) {
-                config.spec(model, entry)?;
+            if !config.provider.is_empty() {
+                config.find(model)?;
             }
         }
         config.key_table = std::sync::Arc::new(config.key_map()?);
         Ok(config)
     }
 
-    /// The config a run uses: the tree, the environment's endpoint over it,
-    /// and every model checked against the endpoint it ends up with. Startup,
+    /// The config a run uses, with model names resolved to their providers. Startup,
     /// a reload and an edit all come through here, so none of them
     /// accepts what another would refuse.
     pub fn in_force(tree: toml::Value) -> Result<Config> {
         let mut config = Self::from_tree(tree)?;
-        config.apply_env();
-        for (model, entry) in &config.models {
-            config.spec(model, entry)?;
+        let identities = config
+            .models
+            .keys()
+            .map(|name| {
+                config
+                    .locate(name)
+                    .map(|(identity, _)| (name.clone(), identity))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut entries = std::mem::take(&mut config.models);
+        for (name, identity) in identities {
+            let entry = entries
+                .remove(&name)
+                .expect("identity came from this model table");
+            if config.models.insert(identity.clone(), entry).is_some() {
+                bail!(
+                    "multiple model entries resolve to {identity:?}; use its full provider/model identity once"
+                );
+            }
+        }
+        for model in config.models.keys() {
+            config.find(model)?;
         }
         Ok(config)
     }
@@ -914,10 +870,12 @@ mod tests {
     fn a_project_file_may_set_anything_and_what_reaches_past_it_is_named() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
-        let body = "keep_days = 1\ntier = \"read\"\napi_key = \"sk-literal\"\n\
+        std::fs::create_dir(dir.path().join(".pi")).unwrap();
+        let body = "keep_days = 1\ntier = \"read\"\n\
                     [mcp.docs]\ncommand = \"x\"\n\
-                    [models.home]\nbase_url = \"https://elsewhere\"\ncontext_window = 1000\n";
-        std::fs::write(dir.path().join(".pi.toml"), body).unwrap();
+                    [provider.home]\nbase_url = \"https://elsewhere\"\nformat = \"chat\"\napi_key = \"sk-literal\"\n\
+                    [models.\"home/model\"]\ncontext_window = 1000\n";
+        std::fs::write(dir.path().join(".pi/settings.toml"), body).unwrap();
         let (_, tree) = load_project(dir.path()).unwrap().unwrap();
         let said = |k: &str, v: &str| (k.to_string(), v.to_string());
         assert_eq!(
@@ -925,8 +883,8 @@ mod tests {
             [
                 said("mcp", "docs"),
                 said("keep_days", "1"),
-                said("api_key", "(hidden)"),
-                said("models.home.base_url", "https://elsewhere"),
+                said("provider.home.base_url", "https://elsewhere"),
+                said("provider.home.api_key", "(hidden)"),
             ],
             "tier and the numbers stay within the checkout"
         );
@@ -939,86 +897,152 @@ mod tests {
         assert!(config.is_ok(), "{:?}", config.err());
     }
 
+    #[test]
+    fn old_connection_schema_is_refused() {
+        for body in [
+            "base_url = \"http://localhost/v1\"\n",
+            "format = \"chat\"\n",
+            "api_key = \"test-key\"\n",
+            "cache_control = \"standard\"\n",
+            "[models.a]\nbase_url = \"http://localhost/v1\"\n",
+            "[models.a]\nformat = \"chat\"\n",
+            "[models.a]\napi_key = \"test-key\"\n",
+            "[models.a]\nthinking = true\n",
+            "[models.a]\nreplay_thinking = true\n",
+        ] {
+            assert!(
+                parse(body).is_err(),
+                "retired configuration accepted: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_identity_is_distinct_from_the_model_sent_on_the_wire() {
+        let c = parse(
+            r#"
+[provider.first]
+base_url = ":3425/v1"
+format = "chat"
+api_key = "first-key"
+[provider.second]
+base_url = ":3426/v1"
+format = "openai"
+api_key = "second-key"
+[models."first/auto/shared"]
+context_window = 200000
+"#,
+        )
+        .unwrap();
+        let first = c.find("first/auto/shared").unwrap();
+        let second = c.find("second/auto/shared").unwrap();
+        assert_eq!(first.model, "first/auto/shared");
+        assert_eq!(first.wire_model(), "auto/shared");
+        assert_eq!(second.wire_model(), "auto/shared");
+        assert_ne!(first.base_url, second.base_url);
+        assert_eq!(first.context_window, 200000);
+        assert_eq!(c.key_for(&first.model).as_deref(), Some("first-key"));
+        assert_eq!(c.key_for(&second.model).as_deref(), Some("second-key"));
+        assert!(
+            c.find("shared").is_err(),
+            "several providers require an identity"
+        );
+    }
+
+    #[test]
+    fn a_sole_provider_accepts_bare_ids() {
+        let c = parse(
+            r#"
+[provider.local]
+base_url = ":3425/v1"
+format = "chat"
+"#,
+        )
+        .unwrap();
+        let spec = c.find("new-model").unwrap();
+        assert_eq!(spec.model, "local/new-model");
+        assert_eq!(spec.wire_model(), "new-model");
+        assert!(c.key_for("new-model").is_none());
+        assert!(
+            c.find("removed/new-model").is_err(),
+            "a removed provider is not a model ID"
+        );
+    }
+
     const SAMPLE: &str = r#"
+model = "local/flash"
+effort = "medium"
+
+[provider.local]
 base_url = "http://localhost:7896/v1"
 format = "openai"
 api_key = "x"
-model = "flash"
-effort = "medium"
 
-[models.flash]
+[models."local/flash"]
 context_window = 1_000_000
 max_output_tokens = 384_000
 
-[models.flash.pricing]
+[models."local/flash".pricing]
 input_per_mtok = 0.14
 # An integer where a float is wanted, which TOML distinguishes and serde does not.
 output_per_mtok = 0
 "#;
 
-    #[test]
-    fn the_environment_endpoint_beats_the_files() {
-        let mut c = parse("base_url = \"http://file\"\nformat = \"openai\"\n").unwrap();
-        c.apply_env_with(|k| match k {
-            "ANTHROPIC_BASE_URL" => Some("https://anthropic.example.com".into()),
-            _ => None,
-        });
-        assert_eq!(c.base_url.as_deref(), Some("https://anthropic.example.com"));
-        assert_eq!(c.format, Some(FormatArg::Anthropic));
-    }
-
     fn parse(body: &str) -> Result<Config> {
         Config::from_tree(toml::from_str(body)?)
     }
 
-    // A model on its own host must never carry the file's key there.
+    // Models on different providers do not share connection credentials.
     #[test]
-    fn a_model_on_its_own_endpoint_keeps_its_own_key() {
+    fn each_provider_keeps_its_own_key_and_protocol() {
         let c = parse(
             r#"
+[provider.home]
 base_url = "https://api.anthropic.com"
 format = "anthropic"
 cache_control = "standard"
 api_key = "file-key"
 
-[models.home]
-
-[models.gpt]
+[provider.gpt]
 base_url = "https://api.openai.com/v1"
 format = "chat"
 
-[models.local]
+[provider.local]
 base_url = ":8080/v1"
 format = "chat"
 api_key = "local-key"
 "#,
         )
         .unwrap();
-        assert_eq!(c.key_for("home").as_deref(), Some("file-key"));
-        assert_eq!(c.key_for("unlisted").as_deref(), Some("file-key"));
-        assert_eq!(c.key_for("gpt"), None, "the file's key stays with its host");
-        assert_eq!(c.key_for("local").as_deref(), Some("local-key"));
+        assert_eq!(c.key_for("home/model").as_deref(), Some("file-key"));
+        assert_eq!(c.key_for("home/unlisted").as_deref(), Some("file-key"));
+        assert_eq!(
+            c.key_for("gpt/model"),
+            None,
+            "another provider's key stays with its host"
+        );
+        assert_eq!(c.key_for("local/model").as_deref(), Some("local-key"));
 
-        let gpt = c.find("gpt").unwrap();
+        let gpt = c.find("gpt/model").unwrap();
         assert_eq!(gpt.base_url, "https://api.openai.com/v1");
         assert!(
-            matches!(gpt.format, Format::Chat),
+            matches!(gpt.format, llm::model::Format::Chat),
             "cache_control is not inherited"
         );
         assert_eq!(
-            c.find("local").unwrap().base_url,
+            c.find("local/model").unwrap().base_url,
             "http://127.0.0.1:8080/v1"
         );
         assert_eq!(
-            c.find("home").unwrap().base_url,
+            c.find("home/model").unwrap().base_url,
             "https://api.anthropic.com"
         );
     }
 
     #[test]
     fn a_port_in_the_file_is_a_local_url() {
-        let c = parse("base_url = \":2/v1\"\n").unwrap();
-        assert_eq!(c.base_url.as_deref(), Some("http://127.0.0.1:2/v1"));
+        let c = parse("[provider.local]\nbase_url = \":2/v1\"\nformat = \"chat\"\n").unwrap();
+        assert_eq!(c.provider["local"].base_url, "http://127.0.0.1:2/v1");
     }
 
     // A file is checked as a whole config: a section that no longer exists
@@ -1052,7 +1076,7 @@ api_key = "local-key"
         );
         assert_eq!(
             c.model(None, None, true),
-            Some(("flash".into(), ModelOrigin::Project))
+            Some(("local/flash".into(), ModelOrigin::Project))
         );
     }
 
@@ -1060,7 +1084,8 @@ api_key = "local-key"
     fn the_home_file_is_never_read_as_a_project_file() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
-        std::fs::write(home.join(".pi.toml"), "").unwrap();
+        std::fs::create_dir(home.join(".pi")).unwrap();
+        std::fs::write(home.join(".pi/settings.toml"), "").unwrap();
         let deep = home.join("notes/today");
         std::fs::create_dir_all(&deep).unwrap();
         // Walking up from a directory under $HOME must stop at $HOME, or every
@@ -1072,7 +1097,8 @@ api_key = "local-key"
     fn the_search_stops_at_the_repository_root() {
         let tmp = tempfile::tempdir().unwrap();
         let outside = tmp.path();
-        std::fs::write(outside.join(".pi.toml"), "").unwrap();
+        std::fs::create_dir(outside.join(".pi")).unwrap();
+        std::fs::write(outside.join(".pi/settings.toml"), "").unwrap();
         let repo = outside.join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         let deep = repo.join("packages/web");
@@ -1080,7 +1106,8 @@ api_key = "local-key"
         assert_eq!(project_path(&deep, None), None, "leaked past the repo root");
 
         // One inside the repo is found from any depth below it.
-        let inside = repo.join(".pi.toml");
+        let inside = repo.join(".pi/settings.toml");
+        std::fs::create_dir(repo.join(".pi")).unwrap();
         std::fs::write(&inside, "").unwrap();
         assert_eq!(project_path(&deep, None), Some(inside));
     }

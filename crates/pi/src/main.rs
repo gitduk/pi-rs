@@ -142,7 +142,7 @@ fn drive(run: impl std::future::Future<Output = Result<Ended>>) -> Result<Ended>
 async fn run(updated_from: Option<String>) -> Result<Ended> {
     let args = Arc::new(Args::parse());
     let prompt = read_prompt(&args)?;
-    let start = start(args, prompt.is_none())?;
+    let start = start(args, prompt.is_none()).await?;
     match prompt {
         None => interactive(start, updated_from).await,
         Some(prompt) => once(start, prompt).await,
@@ -154,6 +154,7 @@ struct Start {
     args: Arc<Args>,
     settings: Settings,
     config: Arc<pi_store::config::Config>,
+    catalog: core::catalog::Catalog,
     pinned: pi_core::args::Pinned,
     store: session::Store,
     workspace: tool::Workspace,
@@ -179,7 +180,7 @@ struct Start {
 // Everything up to the first turn. Each step that can refuse to start comes
 // before the journal and the session directory are made, so a refused start
 // leaves neither.
-fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
+async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
     let (workspace, settings, config) = open_workspace(&args)?;
 
     let store = session::Store::default();
@@ -205,20 +206,36 @@ fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
         claim = Some(store.claim(workspace.root(), &id)?);
     }
 
+    let mut pinned = args.pinned();
+    pinned.skills = ui::skills::builtins();
+    let mut catalog = core::catalog::Catalog::default();
+    let discovery_notes = catalog.load(&pinned, &config).await;
+    let config = Arc::new(catalog.enrich(&settings, &pinned, config)?);
     let (named, named_by) = config
         .model(
             args.model.as_deref(),
             prior.as_ref().map(|p| p.model.as_str()),
             settings.project_sets("model").is_some(),
         )
-        .ok_or_else(|| no_model(&args))?;
-    let mut pinned = args.pinned();
-    pinned.skills = ui::skills::builtins();
+        .ok_or_else(|| {
+            if discovery_notes.is_empty() {
+                no_model(&args)
+            } else {
+                no_model(&args).context(discovery_notes.join("; "))
+            }
+        })?;
     let dialled = dial(&pinned, &config, &named, named_by)?;
 
     // Only the terminal answers its own words; a one-shot run has none.
     let words: &'static [_] = if interactive { tui::WORDS } else { &[] };
     let mut resolved = resolve(&pinned, &workspace, &config, &settings, None, words)?;
+    resolved.catalog_generation = catalog.generation();
+    resolved.notes.extend(discovery_notes.iter().cloned());
+    if named_by == pi_store::config::ModelOrigin::Discovered {
+        resolved
+            .notes
+            .push(format!("using {named} from discovered models"));
+    }
     pi_core::core::mcp::sync(&config, workspace.root());
     pi_core::core::warm_rtk();
     if interactive {
@@ -243,7 +260,7 @@ fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
     }
     // Resolved here rather than lazily: a name that does not exist should be a
     // startup error, not a surprise once compaction first needs it.
-    let writer = summary_writer(&pinned, &config, &model_id)?;
+    let writer = summary_writer(&pinned, &config)?;
     // A resumed session shares its journal file across runs. Installed after
     // every step that can refuse to start: a refused start leaves no directory.
     if keeps {
@@ -259,6 +276,9 @@ fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
             workspace.root(),
             prior.as_ref(),
         );
+        for note in &discovery_notes {
+            tracing::warn!(target: "pi::session", reason = %note, "model discovery failed");
+        }
     }
     let retry = core::retry(&config);
     // Installed last: the compactor watches its stream by the idle timeout
@@ -294,6 +314,7 @@ fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
         args,
         settings,
         config,
+        catalog,
         pinned,
         store,
         workspace,
@@ -316,13 +337,11 @@ fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
 
 // The workspace pi was pointed at, fenced by the tier the settings found from
 // it may set: the project file is read between the two steps.
-fn open_workspace(
-    args: &Args,
-) -> Result<(tool::Workspace, Settings, Arc<pi_store::config::Config>)> {
+fn open_workspace(args: &Args) -> Result<(tool::Workspace, Settings, pi_store::config::Config)> {
     let within = || format!("cannot use {} as a workspace", args.cwd);
     let workspace = tool::Workspace::new(&args.cwd).with_context(within)?;
     let settings = Settings::load(args.config.as_deref(), workspace.root())?;
-    let config = Arc::new(settings.config()?);
+    let config = settings.config()?;
     let workspace = fence(workspace, &config, &args.pinned()).with_context(within)?;
     Ok((workspace, settings, config))
 }
@@ -382,6 +401,7 @@ async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended
         args,
         settings,
         config,
+        catalog,
         pinned,
         store,
         workspace,
@@ -410,6 +430,7 @@ async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended
     first.return_session(carried);
     let mut core = Core {
         store,
+        catalog,
         config,
         pinned,
         commands,

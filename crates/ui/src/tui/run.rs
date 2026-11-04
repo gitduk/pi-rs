@@ -85,6 +85,11 @@ impl Tui {
         request: Request,
         done: &UnboundedSender<Done>,
     ) -> bool {
+        if let Some(said) = self.core.refresh_model_config() {
+            let view = front_view(&mut self.views, self.core.lane());
+            self.ui.adopt_config(&self.core, view);
+            self.notice(pi_core::input::notice(said));
+        }
         if let Some(said) = self.core.refresh_prompt_files() {
             self.notice(pi_core::input::notice(said));
         }
@@ -313,6 +318,9 @@ impl Tui {
         let ran = tokio::task::spawn_blocking({
             let path = path.to_path_buf();
             move || {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
                 let mut cmd = std::process::Command::new(program);
                 cmd.args(args).arg(&path);
                 // SIG_IGN is inherited across exec, and an editor installing

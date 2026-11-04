@@ -49,6 +49,7 @@ impl Core {
         // Resolved from the config in force, not the files on disk: their
         // stamps stay as last read, so an edit since is still a reload's to apply.
         resolved.watched = lane.resolved().watched.clone();
+        resolved.catalog_generation = lane.resolved().catalog_generation;
         let model = lane.agent().spec().model.clone();
         self.lane_mut().prompt_files_read(at);
         if unchanged {
@@ -106,6 +107,14 @@ impl Core {
         settings: Option<Settings>,
         prompt_files: Option<std::sync::Arc<resolve::PromptFiles>>,
     ) -> Result<Vec<String>, String> {
+        let config = self
+            .catalog
+            .enrich(
+                settings.as_ref().unwrap_or(&self.settings),
+                &self.pinned,
+                config,
+            )
+            .map_err(|e| format!("nothing reloaded — {}", refused("settings", e)))?;
         let root = workspace.root().to_path_buf();
         let failed = |e| Err(format!("nothing reloaded — {}", refused("reload", e)));
         let mut resolved = match crate::core::resolve::resolve(
@@ -124,6 +133,7 @@ impl Core {
         if settings.is_none() {
             resolved.watched = self.lane().resolved().watched.clone();
         }
+        resolved.catalog_generation = self.catalog.generation();
         // The model stays; its entry is re-read via the same `dial` path.
         // A failed dial keeps the old transport rather than refusing the file.
         let running = self.lane().agent().spec().clone();
@@ -134,11 +144,10 @@ impl Core {
             &running.model,
             config::ModelOrigin::Command,
         ) {
-            Ok(dialled) if dialled.spec != running => {
+            Ok(dialled) => {
                 notes.extend(dialled.warning);
                 Some((dialled.transport, dialled.spec))
             }
-            Ok(_) => None,
             Err(e) => {
                 notes.push(format!("`{}` not re-dialled — {e}", running.model));
                 None
@@ -150,7 +159,7 @@ impl Core {
         // The compactor holds the summarizer's connection, so it's rebuilt
         // here or `summarize_model`/`idle_timeout` never follow a reload.
         let retry = crate::core::retry(&config);
-        let writer = crate::core::dial::summary_writer(&self.pinned, &config, &model)
+        let writer = crate::core::dial::summary_writer(&self.pinned, &config)
             .map_err(|e| format!("nothing reloaded — {}", refused("summarize_model", e)))?;
 
         // Only here, with everything computed, is anything touched — and in
@@ -180,6 +189,7 @@ impl Core {
         tracing::info!(
             target: "pi::session",
             models = self.config.names().len(),
+            discovered_models = self.config.discovered.len(),
             rebound_keys = self.config.keys.len(),
             commands = self.commands.len(),
             effort = ?self.lane().agent().brief.effort,
@@ -190,7 +200,7 @@ impl Core {
     }
     // Recompute the config from the file trees — `settings`', else those in
     // force — and adopt it, saying why when nothing could be adopted.
-    fn rebuilt(&mut self, settings: Option<Settings>) -> Result<Vec<String>, String> {
+    pub(super) fn rebuilt(&mut self, settings: Option<Settings>) -> Result<Vec<String>, String> {
         let config = (settings.as_ref().unwrap_or(&self.settings))
             .config()
             .map_err(|e| format!("nothing reloaded — {}", refused("settings", e)))?;
@@ -222,7 +232,7 @@ impl Core {
     }
 
     /// After `/settings` or `/edit` closed the editor: reload, and name what
-    /// the files now say that a flag or the environment still outranks.
+    /// the files now say that a flag still outranks.
     /// `Err` is why nothing was reloaded.
     pub fn config_edited(&mut self) -> Result<Vec<String>, String> {
         let mut said = self.try_reload()?;
@@ -231,14 +241,8 @@ impl Core {
     }
     // Each key the files set that this run takes from somewhere higher.
     fn shadowed(&self) -> Vec<String> {
-        let env = config::endpoint_env().map(|var| format!("${var}"));
         let flag = |on: bool, name: &str| on.then(|| name.to_string());
-        [
-            (
-                "base_url",
-                flag(self.pinned.base_url.is_some(), "--base-url").or(env.clone()),
-            ),
-            ("format", env),
+        let mut shadowed: Vec<String> = [
             ("effort", flag(self.pinned.effort.is_some(), "--effort")),
             ("tier", flag(self.pinned.tier.is_some(), "--tier")),
         ]
@@ -250,7 +254,15 @@ impl Core {
                 by?
             ))
         })
-        .collect()
+        .collect();
+        if self.pinned.base_url.is_some() {
+            shadowed.extend(self.config.provider.keys().map(|name| {
+                format!(
+                    "provider.{name}.base_url: --base-url outranks the files, so this run keeps it"
+                )
+            }));
+        }
+        shadowed
     }
     /// The models `/model` can reach, with what tells them apart.
     pub fn choices(&self) -> Vec<Choice> {
@@ -258,7 +270,7 @@ impl Core {
             .models
             .iter()
             .map(|(name, entry)| {
-                let format = entry.format.or(self.config.format);
+                let format = self.config.find(name).ok().map(|s| s.format);
                 Choice {
                     name: name.clone(),
                     note: summary(
@@ -280,8 +292,7 @@ impl Core {
         let held = self.lane().model();
         let dialled = crate::core::dial::dial(&self.pinned, &self.config, name, origin)
             .map_err(|e| format!("still on {held} — {}", refused("switch", e)))?;
-        // Compared after resolving: `find` also accepts a `wire_id`, so the
-        // typed name may differ from the id it resolves to.
+        // Bare IDs can resolve to the sole named provider's identity.
         Ok((dialled.spec.model != held).then_some(dialled))
     }
     // Rebuilds the subagent too: it snapshots the agent it was built from,
@@ -378,8 +389,8 @@ impl Core {
         let choices = self.choices();
         if choices.is_empty() {
             return Listing::say([
-                format!("on {here}, and ~/.pi/settings.toml now defines no model to switch to"),
-                "see examples/pi.toml for what a [models.<name>] entry looks like".into(),
+                format!("on {here}, and no other models are known yet"),
+                "model names can be entered directly; provider discovery fills this list".into(),
             ]);
         }
         Listing::of(choices.iter().map(|c| {

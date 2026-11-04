@@ -128,7 +128,7 @@ pub(crate) const BUILTIN: &[Command] = &[
     Command::builtin(
         "/model",
         Args::optional("name", Values::Models),
-        "list the models in ~/.pi/settings.toml, or move this session to one",
+        "list discovered and configured models, or move this session to one",
         |_, rest| Intent::Builtin(Builtin::Model(rest)),
     ),
     Command::builtin(
@@ -186,7 +186,7 @@ pub(crate) const BUILTIN: &[Command] = &[
     Command::builtin(
         "/settings",
         Args::None,
-        "edit the project's .pi.toml, then reload",
+        "edit the project's .pi/settings.toml, then reload",
         |_, rest| Intent::Builtin(Builtin::Settings(rest)),
     ),
     Command::builtin("/exit", Args::None, "leave", |_, _| {

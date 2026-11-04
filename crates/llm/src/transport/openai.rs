@@ -187,7 +187,7 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
         .min(spec.max_output_tokens);
 
     let mut body = json!({
-        "model": spec.model,
+        "model": spec.wire_model(),
         "stream": true,
         "input": encode(&req.messages, spec),
         "max_output_tokens": max_output_tokens,

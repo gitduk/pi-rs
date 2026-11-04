@@ -5,39 +5,23 @@
 # describe reality. What follows was measured against live endpoints on the
 # date in each comment; treat it as a starting point, not as current.
 #
-# pi talks to one endpoint at a time, so the endpoint is this file. A model is
-# named the way that endpoint names it, and nothing else.
-
-# ---------------------------------------------------------------------------
-# The endpoint.
-#
-# `format` is the shape pi speaks, not the vendor: `anthropic` is the Messages
-# API, `openai` the Responses API, `chat` Chat Completions.
-# ---------------------------------------------------------------------------
-base_url = "https://api.anthropic.com"
-format   = "anthropic"           # anthropic | openai | chat
-
-# A `$` reads the environment; anything else is the key itself. A literal key
-# beginning with `$` cannot be written here — put it in a variable.
-api_key  = "$ANTHROPIC_API_KEY"
-
-# Anthropic only, and off unless someone measured it: an unknown top-level
-# field is a 400 on some servers. `standard` is the 5-minute breakpoint,
-# `long_ttl` the 1-hour one.
-cache_control = "standard"
+# Providers own their connections and discover their model lists. A model's
+# selection name is provider/model-id; requests carry only the model ID.
+# Project overrides live in .pi/settings.toml. Changing a provider's base_url
+# or models_url clears an inherited key; set api_key explicitly for that target.
 
 # ---------------------------------------------------------------------------
 # What to run.
 # ---------------------------------------------------------------------------
 
-# What the endpoint calls the model. Omit it when the file describes exactly
-# one model — there is nothing else it could mean.
-model = "claude-sonnet-5"
+# The startup model. When omitted, a resumed session keeps its model; a new
+# session uses the sole configured model or the first discovered name.
+model = "main/claude-sonnet-5"
 
 # Who writes the summary when history is compacted. Big input, small output,
 # little judgement — so it need not be the model doing the work. Defaults to
 # `model`.
-summarize_model = "claude-haiku-4-5"
+summarize_model = "main/claude-haiku-4-5"
 
 # How hard the model thinks, on every wire alike; unset is `high`.
 effort = "medium"                # off | low | medium | high
@@ -94,16 +78,50 @@ idle_timeout = 300
 status = ["elapsed", "in_out", "speed", "cache", "ctx", "cost", "compacted", "queued"]
 
 # ---------------------------------------------------------------------------
-# Facts about a model the defaults get wrong.
+# Provider connections. Put all top-level settings above the first table.
 #
-# Every field below has a default, so a model needs an entry only where it
-# differs — and needs none at all to be usable. An unlisted name is passed
-# through to the endpoint with the defaults: a 128k window, 8k of output and no
-# pricing.
+# `format` is the shape pi speaks: `anthropic` is the Messages API, `openai`
+# the Responses API, and `chat` Chat Completions.
+# ---------------------------------------------------------------------------
+[provider.main]
+base_url = "https://api.anthropic.com"
+format = "anthropic"
+# A `$` reads the environment; anything else is the key itself. A literal key
+# beginning with `$` cannot be written here — put it in a variable.
+# No environment credential is used unless api_key names it here.
+api_key = "$ANTHROPIC_API_KEY"
+# Anthropic only, and off unless measured. `standard` requests 5-minute
+# caching; `long_ttl` requests 1-hour caching.
+cache_control = "standard"
+
+[provider.openai]
+base_url = "https://api.openai.com/v1"
+format = "openai"
+api_key = "$OPENAI_API_KEY"
+
+# A local provider needs only its connection. A leading `:port` means IPv4
+# loopback. Change the field paths only where the catalog differs.
+# [provider.local]
+# base_url = ":3425/v1"
+# format = "chat"
+# api_key = "$LOCAL_API_KEY"
+# models_path = "data"               # default; e.g. "models" or "result.models"
+# id = "id"                         # default; relative to one model item
+# context_window = "context_window"  # default; e.g. "limit.context"
+# max_output_tokens = "max_output_tokens" # default; e.g. "limit.output"
+# models_url = "https://example.com/catalog" # optional complete URL
+
+# ---------------------------------------------------------------------------
+# Model limits, capabilities and prices.
+#
+# Explicit fields override discovered facts. Missing facts use a 128,000-token
+# window, 8,192 output tokens and no pricing. An entry is optional: an unlisted
+# model ID can still be sent through its provider. The connection and key
+# always come from that provider.
 # ---------------------------------------------------------------------------
 
 # Measured 2026-08-14.
-[models."claude-sonnet-5"]
+[models."main/claude-sonnet-5"]
 context_window    = 200_000
 max_output_tokens = 64_000
 vision            = true
@@ -113,24 +131,17 @@ accepts_temperature = false
 pricing = { input_per_mtok = 3.0, output_per_mtok = 15.0, cache_read_per_mtok = 0.3, cache_write_per_mtok = 3.75 }
 
 # Measured 2026-08-14.
-[models."claude-haiku-4-5"]
+[models."main/claude-haiku-4-5"]
 context_window    = 200_000
 max_output_tokens = 32_000
 pricing = { input_per_mtok = 1.0, output_per_mtok = 5.0 }
 
 # A model that cannot think is told nothing of thinking, `off` included: on
 # some endpoints the field alone is a 400.
-[models."gpt-4.1"]
+[models."openai/gpt-4.1"]
 effort = "unsupported"
 
-# A model on another endpoint names its own `base_url`, and `format` and
-# `api_key` when they differ. One that names a `base_url` never inherits the
-# file's `api_key` — the file's key is for the file's host — so without its
-# own it falls back to OPENAI_API_KEY or ANTHROPIC_API_KEY by its format.
-[models."gpt-5"]
-base_url = "https://api.openai.com/v1"
-format   = "openai"
-api_key  = "$OPENAI_API_KEY"
+[models."openai/gpt-5"]
 context_window    = 400_000
 max_output_tokens = 128_000
 

@@ -49,6 +49,8 @@ pub struct Resolved {
     /// the lane is resolved again. Skills and scripts are read live, and the
     /// prompt's files are `prompt_files`, so neither is here.
     pub watched: Vec<Stamp>,
+    /// The catalog snapshot used for this lane's model connection.
+    pub catalog_generation: super::catalog::Generation,
     /// The script directories `brief` reads, for a lane to swap for ones whose
     /// background wrappers are armed: the subagent keeps these.
     pub scripts: Vec<Arc<toolbox::scripts::Dir>>,
@@ -456,6 +458,7 @@ pub fn resolve(
         ceiling: tier,
         commands: std::sync::Arc::new(commands),
         watched: read_from,
+        catalog_generation: Default::default(),
         scripts,
         shelf,
         shelf_seen,
@@ -470,7 +473,7 @@ pub fn resolve(
             .map(|(p, _)| p.clone())
             .collect(),
         prompt_files,
-        endpoint: endpoint(pinned, config, settings, root),
+        endpoint: endpoint(pinned),
         mcp: mcp_names(config, settings),
         project: settings
             .project_reaching()
@@ -698,33 +701,11 @@ fn mcp_names(config: &config::Config, settings: &Settings) -> Vec<String> {
         .collect()
 }
 
-// The url requests go to, and the one source it came from, in the order
-// they rank: the flag, the environment, the files.
-fn endpoint(
-    pinned: &Pinned,
-    config: &config::Config,
-    settings: &Settings,
-    root: &Path,
-) -> Option<String> {
-    let (url, from) = match &pinned.base_url {
-        Some(url) => (config::expand_base_url(url), "--base-url".to_string()),
-        None => {
-            let url = config.base_url.clone()?;
-            let from = if let Some(var) = config::endpoint_env() {
-                format!("${var}")
-            } else if let Some(file) = settings.project_sets("base_url") {
-                instructions::short(file, root)
-            } else {
-                match &pinned.config {
-                    Some(file) => file.clone(),
-                    None => config::global_path()
-                        .map_or_else(|| "settings.toml".into(), |p| instructions::short(&p, root)),
-                }
-            };
-            (url, from)
-        }
-    };
-    Some(format!("endpoint: {url} ({from})"))
+// An explicit URL applies to every provider; otherwise the active model's
+// connection is shown by the caller that owns its resolved specification.
+fn endpoint(pinned: &Pinned) -> Option<String> {
+    let url = config::expand_base_url(pinned.base_url.as_deref()?);
+    Some(format!("endpoint: {url} (--base-url)"))
 }
 
 #[cfg(test)]

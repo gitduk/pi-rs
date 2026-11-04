@@ -15,6 +15,7 @@ pub mod journal;
 pub mod keys;
 pub mod listing;
 pub mod memory;
+pub mod provider;
 pub mod session;
 pub mod settings;
 pub mod status;

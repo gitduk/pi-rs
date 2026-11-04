@@ -7,6 +7,7 @@
 pub mod archive;
 pub mod bar;
 pub mod bash;
+pub mod catalog;
 pub mod content;
 pub mod dial;
 mod help;
@@ -71,6 +72,7 @@ pub fn not_saved(e: &impl std::fmt::Display) -> String {
 /// an intent is answered.
 pub struct Core {
     pub store: Store,
+    pub catalog: catalog::Catalog,
     /// The config in force, as opposed to the one on disk. `/model` picks from
     /// this, so a switch cannot quietly apply an edit a reload has not.
     pub config: std::sync::Arc<config::Config>,
@@ -122,6 +124,20 @@ impl Core {
         true
     }
 
+    fn model_config_changed(&self) -> bool {
+        self.lane().resolved().catalog_generation != self.catalog.generation()
+            || self.settings.project() != config::project_file(self.lane().root()).as_deref()
+    }
+
+    /// Apply model facts or the current lane's configuration source before a run.
+    pub fn refresh_model_config(&mut self) -> Option<Vec<String>> {
+        if self.model_config_changed() {
+            self.refresh_config()
+        } else {
+            None
+        }
+    }
+
     /// Resolve the lane in front again when a file it was built from changed
     /// on disk. `Some` with what to say when it did; nothing to do otherwise.
     pub fn refresh_config(&mut self) -> Option<Vec<String>> {
@@ -129,7 +145,9 @@ impl Core {
         let now = resolve::watched(&self.pinned, lane.root());
         let was = &lane.resolved().watched;
         let token = lane.token();
-        if &now == was || self.refused.get(&token) == Some(&now) {
+        let files_changed = &now != was;
+        let model_config_changed = self.model_config_changed();
+        if (!files_changed && !model_config_changed) || self.refused.get(&token) == Some(&now) {
             return None;
         }
         let root = lane.root().to_path_buf();
@@ -140,16 +158,28 @@ impl Core {
             .map(|(path, ..)| crate::core::instructions::short(path, &root))
             .collect();
         let reloaded = self.try_reload();
-        tracing::info!(
-            target: "pi::session",
-            moved = %moved.join(", "),
-            refused = reloaded.as_ref().err().map(String::as_str),
-            "config changed on disk"
-        );
+        if files_changed {
+            tracing::info!(
+                target: "pi::session", moved = %moved.join(", "),
+                refused = reloaded.as_ref().err().map(String::as_str),
+                "config changed on disk"
+            );
+        } else {
+            tracing::info!(
+                target: "pi::session", model_config_changed,
+                refused = reloaded.as_ref().err().map(String::as_str),
+                "configuration inputs changed"
+            );
+        }
         match reloaded {
             Ok(mut said) => {
                 self.refused.remove(&token);
-                said.insert(0, format!("reloaded — {}", moved.join(", ")));
+                let source = if moved.is_empty() {
+                    "model configuration".into()
+                } else {
+                    moved.join(", ")
+                };
+                said.insert(0, format!("reloaded — {source}"));
                 Some(said)
             }
             Err(why) => {
@@ -406,7 +436,10 @@ impl Core {
             Builtin::Rewind(id) => self.rewind_step(id.trim()),
             Builtin::Name(name) => self.name_step(name),
             Builtin::Compact(focus) => Step::Compact(Some(focus).filter(|f| !f.is_empty())),
-            Builtin::Model(name) if name.is_empty() => Step::Handled(self.listing()),
+            Builtin::Model(name) if name.is_empty() => {
+                self.catalog.refresh();
+                Step::Handled(self.listing())
+            }
             Builtin::Model(name) => Step::Notice(notice(self.switch(&name))),
             Builtin::Mv(dir) => match dir.trim() {
                 "" => Step::Handled(Listing::say([self.lane().root().display().to_string()])),
@@ -472,11 +505,11 @@ impl Core {
     // rather than half-remembered as a verb.
     fn settings_step(&self, rest: &str) -> Step {
         if !rest.is_empty() {
-            return Step::Notice("bare /settings opens the project's .pi.toml".into());
+            return Step::Notice("bare /settings opens the project's .pi/settings.toml".into());
         }
         match pi_store::config::project_target(self.lane().root()) {
             Some(file) => Step::Edit(file),
-            None => Step::Notice("no project here: a .pi.toml in $HOME is never read".into()),
+            None => Step::Notice("no project here: $HOME is not a project directory".into()),
         }
     }
 }
@@ -843,6 +876,7 @@ mod tests {
     pub(super) fn test_spec(model: &str) -> llm::model::ModelSpec {
         llm::model::ModelSpec {
             model: model.into(),
+            wire_id: None,
             base_url: "http://localhost".into(),
             format: llm::model::Format::Anthropic {
                 cache_control: llm::model::CacheControl::Off,
@@ -870,9 +904,17 @@ mod tests {
         let ws = tool::Workspace::new(root).unwrap();
         let mut agent = agent::Agent::new(transport, test_spec(model));
         let store = pi_store::session::Store::new(root.join("state"));
+        let file = root.join("test-settings.toml");
+        std::fs::write(&file, "").unwrap();
+        let pinned = crate::args::Pinned {
+            config: Some(file.display().to_string()),
+            ..Default::default()
+        };
+        let mut resolved = crate::core::lane::a_resolved("standing");
+        std::sync::Arc::make_mut(&mut resolved).watched = super::resolve::watched(&pinned, root);
         let resolved = crate::core::lane::arm(
             &mut agent,
-            crate::core::lane::a_resolved("standing"),
+            resolved,
             super::archive::Filed::armed(
                 pi_store::session::Store::new(root.join("state")),
                 root.to_path_buf(),
@@ -894,8 +936,9 @@ mod tests {
         lane.return_session(agent::session::Session::default());
         crate::core::Core {
             store,
+            catalog: Default::default(),
             config: std::sync::Arc::new(pi_store::config::Config::default()),
-            pinned: crate::args::Pinned::default(),
+            pinned,
             commands,
             prompts_seen: 0,
             settings: pi_store::settings::Settings::new(
@@ -993,7 +1036,10 @@ mod tests {
 
         match settings(" ") {
             Step::Edit(file) => {
-                assert_eq!(file, dir.path().canonicalize().unwrap().join(".pi.toml"))
+                assert_eq!(
+                    file,
+                    dir.path().canonicalize().unwrap().join(".pi/settings.toml")
+                )
             }
             step => panic!("bare, it opens the file: {step:?}"),
         }

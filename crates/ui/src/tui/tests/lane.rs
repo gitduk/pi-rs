@@ -813,6 +813,7 @@ fn normal_capitals_step_the_checkouts_and_the_window() {
 #[tokio::test]
 async fn an_edited_project_file_reaches_the_surface_and_names_what_outranks_it() {
     let dir = tempfile::tempdir().expect("a temp dir");
+    std::fs::create_dir(dir.path().join(".pi")).unwrap();
     let mut tui = surface(dir.path());
     assert!(!tui.ui.status.contains(&Segment::Model));
     // An empty user file of its own, so the reload never reads the real one.
@@ -822,7 +823,7 @@ async fn an_edited_project_file_reaches_the_surface_and_names_what_outranks_it()
     tui.core.pinned.effort = Some(pi_store::args::EffortArg::High);
 
     std::fs::write(
-        dir.path().join(".pi.toml"),
+        dir.path().join(".pi/settings.toml"),
         "effort = \"low\"\nstatus = [\"model\"]\n",
     )
     .expect("the project file");
@@ -914,7 +915,7 @@ fn a_reload_installs_a_new_compactor() {
     let file = dir.path().join("settings.toml");
     std::fs::write(
         &file,
-        "base_url = \"http://127.0.0.1:1/v1\"\nformat = \"openai\"\nsummarize_model = \"cheap\"\n",
+        "summarize_model = \"local/cheap\"\n[provider.local]\nbase_url = \"http://127.0.0.1:1/v1\"\nformat = \"openai\"\n",
     )
     .expect("a settings file");
     tui.core.pinned.config = Some(file.display().to_string());
@@ -933,6 +934,32 @@ fn a_reload_installs_a_new_compactor() {
     );
 }
 
+#[test]
+fn a_key_only_reload_replaces_the_running_connection() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let file = dir.path().join("settings.toml");
+    let settings = |key| {
+        format!(
+            "[provider.local]\nbase_url = \"http://127.0.0.1:1/v1\"\nformat = \"chat\"\napi_key = \"{key}\"\n"
+        )
+    };
+    std::fs::write(&file, settings("old-test-key")).unwrap();
+    tui.core.pinned.config = Some(file.display().to_string());
+    tui.core.try_reload().unwrap();
+    let before = tui.core.lane().agent().model.clone();
+    std::fs::write(&file, settings("new-test-key")).unwrap();
+    tui.core.try_reload().unwrap();
+    assert!(!std::sync::Arc::ptr_eq(
+        &before,
+        &tui.core.lane().agent().model
+    ));
+    assert_eq!(
+        tui.core.config.key_for("local/m").as_deref(),
+        Some("new-test-key")
+    );
+}
+
 // A reload follows the running model's entry: a changed one moves the lane
 // onto it; a broken one keeps the old wire, says so, and the rest still lands.
 #[test]
@@ -942,7 +969,7 @@ fn a_reload_follows_the_running_models_entry_or_says_why_not() {
     let file = dir.path().join("settings.toml");
     std::fs::write(
         &file,
-        "base_url = \"http://127.0.0.1:1/v1\"\nformat = \"openai\"\n",
+        "[provider.local]\nbase_url = \"http://127.0.0.1:1/v1\"\nformat = \"openai\"\n",
     )
     .expect("a settings file");
     tui.core.pinned.config = Some(file.display().to_string());

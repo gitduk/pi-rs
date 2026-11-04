@@ -317,6 +317,7 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
         ceiling: tool::Tier::Exec,
         commands: Arc::new(Vec::new()),
         watched: Vec::new(),
+        catalog_generation: Default::default(),
         scripts: Vec::new(),
         prompt_files: Default::default(),
         shelf: None,
@@ -1014,6 +1015,11 @@ impl Core {
             ..Opening::new(Arc::new(ag), resolved, ctx)
         }));
         self.current = self.lanes.len() - 1;
+        if let Some(notes) = self.refresh_config() {
+            Arc::make_mut(&mut self.lane_mut().checkout.resolved)
+                .notes
+                .extend(notes);
+        }
         self.in_force();
         Ok(())
     }
@@ -1085,6 +1091,7 @@ impl Core {
                 .unwrap_or(usize::MAX)
         });
         self.current = self.position_of(front).unwrap_or(0);
+        said.extend(self.refresh_model_config().unwrap_or_default());
         self.in_force();
         for line in &said {
             tracing::warn!(target: "pi::session", said = %line, "reopen");

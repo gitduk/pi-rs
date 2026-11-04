@@ -66,10 +66,12 @@ pub struct Pricing {
 /// the model itself does.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelSpec {
-    /// The model, as the endpoint names it — `deepseek-v4-flash`. Selection,
-    /// usage attribution, the archive and the request's own `model` field all
-    /// key on this one string; there is no second name for it.
+    /// The selection identity used for history and accounting, including the
+    /// provider when the caller distinguishes several hosts.
     pub model: String,
+    /// The endpoint's model ID when the selection identity includes a provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_id: Option<String>,
     pub base_url: String,
     pub format: Format,
     pub context_window: u32,
@@ -84,6 +86,13 @@ pub struct ModelSpec {
     /// Fable and Mythos reject a forced `tool_choice`; it downgrades to auto.
     pub can_force_tool: bool,
     pub pricing: Pricing,
+}
+
+impl ModelSpec {
+    /// The model ID sent to the endpoint, without a local provider prefix.
+    pub fn wire_model(&self) -> &str {
+        self.wire_id.as_deref().unwrap_or(&self.model)
+    }
 }
 
 impl Pricing {
@@ -105,6 +114,7 @@ impl ModelSpec {
     pub(crate) fn test() -> Self {
         ModelSpec {
             model: "test-model".into(),
+            wire_id: None,
             base_url: "http://localhost".into(),
             format: Format::Anthropic {
                 cache_control: CacheControl::Off,

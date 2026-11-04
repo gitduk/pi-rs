@@ -36,8 +36,8 @@ impl Core {
                 figures::size(spec.context_window.into())
             ),
         ]));
-        // The file's endpoint names its source; a model on its own host
-        // names that host instead, since that is where requests go.
+        // An explicit URL names its flag; otherwise use the active model's
+        // provider identity alongside the host its requests actually reach.
         match &resolved.endpoint {
             Some(endpoint)
                 if endpoint
@@ -48,10 +48,14 @@ impl Core {
                 let endpoint = endpoint.strip_prefix("endpoint: ").unwrap_or(endpoint);
                 rows.push(Row::new(["endpoint", endpoint]));
             }
-            _ => rows.push(Row::new([
-                "endpoint".into(),
-                format!("{} ([models.\"{}\"])", spec.base_url, spec.model),
-            ])),
+            _ => {
+                let provider = spec.model.split_once('/').map(|(name, _)| name);
+                let endpoint = provider.map_or_else(
+                    || spec.base_url.clone(),
+                    |name| format!("{} ([provider.{name}])", spec.base_url),
+                );
+                rows.push(Row::new(["endpoint".into(), endpoint]));
+            }
         }
         // Filed under the reply it cut; gathered here for the whole run.
         let tally = lane.tally();

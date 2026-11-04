@@ -154,7 +154,7 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
     // Without it most hosts send no usage at all; DeepSeek's own sends it
     // either way, on the finishing chunk.
     let mut body = json!({
-        "model": spec.model,
+        "model": spec.wire_model(),
         "stream": true,
         "stream_options": { "include_usage": true },
         "messages": encode(&req.messages),
