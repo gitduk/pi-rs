@@ -385,7 +385,7 @@ impl Transport for Anthropic {
         cache_control(spec)?;
         let body = build_body(spec, req);
         let url = format!("{}/v1/messages", spec.base_url.trim_end_matches('/'));
-        let mut call = self.http.post(&url);
+        let mut call = super::extra_headers(self.http.post(&url), spec);
         if let Some(key) = &self.api_key {
             call = call.header("x-api-key", key);
         }

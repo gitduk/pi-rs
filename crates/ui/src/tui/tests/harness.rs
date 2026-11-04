@@ -104,6 +104,7 @@ pub(super) fn running_lane(dir: &std::path::Path) -> Lane {
         model: "m".into(),
         wire_id: None,
         base_url: "http://localhost".into(),
+        headers: Vec::new(),
         format: llm::model::Format::Anthropic {
             cache_control: llm::model::CacheControl::Off,
         },

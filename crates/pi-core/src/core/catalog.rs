@@ -26,10 +26,11 @@ pub struct Generation(u64);
 #[derive(Clone, PartialEq)]
 struct Source {
     name: String,
-    /// The connection, without its credential: a rotated key still names the
-    /// same host, and the facts read from it still hold.
+    /// The connection, without what only authorizes it: a rotated key or a new
+    /// header still names the same host, and the facts read from it still hold.
     provider: Provider,
     key: Option<String>,
+    headers: Vec<(String, String)>,
 }
 
 impl Source {
@@ -40,7 +41,9 @@ impl Source {
             .map(|(name, provider)| {
                 let key = provider.key();
                 let mut provider = provider.clone();
+                let headers = provider.headers();
                 provider.api_key = None;
+                provider.headers.clear();
                 if let Some(url) = &pinned.base_url {
                     provider.base_url = config::expand_base_url(url);
                 }
@@ -48,6 +51,7 @@ impl Source {
                     name: name.clone(),
                     provider,
                     key,
+                    headers,
                 }
             })
             .collect()
@@ -84,6 +88,9 @@ impl Source {
             url.query_pairs_mut().append_pair("after_id", cursor);
         }
         let mut request = client.get(url);
+        for (name, value) in &self.headers {
+            request = request.header(name, value);
+        }
         if matches!(self.provider.wire_format(), Format::Anthropic { .. }) {
             request = request.header("anthropic-version", llm::transport::anthropic::API_VERSION);
             if let Some(key) = &self.key {
@@ -389,6 +396,8 @@ models_path = "result.models"
 id = "name"
 context_window = "limit.context"
 max_output_tokens = "limit.output"
+[provider.test.headers]
+x-opencode-session = "test-session"
 [models."test/a"]
 max_output_tokens = 2048
 "#
@@ -559,6 +568,12 @@ context_window = 128000
             first
                 .to_ascii_lowercase()
                 .contains("authorization: bearer test-credential")
+        );
+        assert!(
+            first
+                .to_ascii_lowercase()
+                .contains("x-opencode-session: test-session"),
+            "{first}"
         );
         let second = requests.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(

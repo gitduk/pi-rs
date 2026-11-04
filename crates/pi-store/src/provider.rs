@@ -1,5 +1,7 @@
 //! Provider connections and the paths used to read their model catalogs.
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, bail};
 use llm::model::{CacheControl, Format};
 use serde::{Deserialize, Serialize};
@@ -87,6 +89,9 @@ pub struct Provider {
     /// Where the catalog quotes its rates; a pair left unset stays zero.
     #[serde(default, skip_serializing_if = "PricePaths::is_empty")]
     pub pricing: PricePaths,
+    /// Sent with every request; a leading `$` reads the environment.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
 }
 
 impl std::fmt::Debug for Provider {
@@ -147,6 +152,20 @@ fn accepts_images(value: &Value) -> Option<bool> {
     }
 }
 
+// RFC 9110: a field name is a token, and a field value is printable ASCII.
+fn header_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+fn header_value_ok(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| b == b'\t' || (0x20..=0x7e).contains(&b))
+}
+
 fn rate(value: &Value) -> Option<f64> {
     let rate = value.as_f64().or_else(|| value.as_str()?.parse().ok())?;
     (rate.is_finite() && rate >= 0.0).then_some(rate)
@@ -167,6 +186,12 @@ impl Provider {
     /// The credential, with the same environment expansion as model keys.
     pub fn key(&self) -> Option<String> {
         self.api_key.as_deref().and_then(crate::config::expand_key)
+    }
+
+    /// The headers as sent, read the same way: one whose variable is unset is
+    /// left out rather than sent empty.
+    pub fn headers(&self) -> Vec<(String, String)> {
+        crate::config::expanded(&self.headers)
     }
 
     /// Check paths at configuration load, before making any request.
@@ -210,6 +235,22 @@ impl Provider {
         }
         if self.format != FormatArg::Anthropic && self.cache_control != CacheControl::Off {
             bail!("provider.{name}.cache_control requires format = \"anthropic\"");
+        }
+        // Names are checked as written: an unset variable drops the entry, and
+        // would otherwise hide a bad name until the variable exists.
+        for header in self.headers.keys() {
+            if !header_name_ok(header) {
+                bail!(
+                    "provider.{name}.headers.{header:?}: a header name is letters, digits or !#$%&'*+-.^_`|~"
+                );
+            }
+        }
+        for (header, value) in self.headers() {
+            if !header_value_ok(&value) {
+                bail!(
+                    "provider.{name}.headers.{header:?}: a header value is printable ASCII, tabs allowed"
+                );
+            }
         }
         Ok(())
     }
@@ -317,6 +358,32 @@ mod tests {
             "base_url = \":3425/v1\"\nformat = \"chat\"\n{extra}"
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn malformed_headers_are_refused_at_load() {
+        for bad in [
+            "[headers]\n\"x session\" = \"v\"\n",
+            "[headers]\nx-ok = \"line\\nbreak\"\n",
+            "[headers]\nx-ok = \"日本語\"\n",
+            "[headers]\n\"x session\" = \"$PI_TEST_HEADER_UNSET\"\n",
+        ] {
+            assert!(provider(bad).check("local").is_err(), "accepted: {bad}");
+        }
+        assert!(
+            provider("[headers]\nx-session = \"$HOME\"\n")
+                .check("local")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn headers_read_the_environment_and_drop_unset_variables() {
+        let p = provider("[headers]\nx-home = \"$HOME\"\nx-missing = \"$PI_TEST_HEADER_UNSET\"\n");
+        let headers = p.headers();
+        assert_eq!(headers.len(), 1, "{headers:?}");
+        assert_eq!(headers[0].0, "x-home");
+        assert_eq!(headers[0].1, std::env::var("HOME").unwrap());
     }
 
     #[test]
