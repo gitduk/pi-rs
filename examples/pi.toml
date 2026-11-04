@@ -110,6 +110,19 @@ api_key = "$OPENAI_API_KEY"
 # context_window = "context_window"  # default; e.g. "limit.context"
 # max_output_tokens = "max_output_tokens" # default; e.g. "limit.output"
 # models_url = "https://example.com/catalog" # optional complete URL
+#
+# Capabilities are read only where a path is given. `vision` takes a bool, or
+# a list of input types in which any `image/*` counts. `reasoning` takes a bool;
+# false means the model has no effort levels. Rates are per million tokens.
+# vision = "modalities.input"
+# accepts_temperature = "capabilities.temperature"
+# reasoning = "capabilities.reasoning.supported"
+# [provider.local.pricing]
+# unit = "token"                     # only when the catalog quotes per token
+# input_per_mtok = "cost.text.input.price"
+# output_per_mtok = "cost.text.output.price"
+# cache_read_per_mtok = "cost.text.input.cache.read"
+# cache_write_per_mtok = "cost.text.input.cache.write"
 
 # ---------------------------------------------------------------------------
 # Model limits, capabilities and prices.

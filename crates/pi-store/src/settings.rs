@@ -237,6 +237,35 @@ api_key = "original-key"
     }
 
     #[test]
+    fn discovered_capabilities_reach_the_model_spec() {
+        let s = Settings::new(
+            toml::from_str("[provider.local]\nbase_url = \":3425/v1\"\nformat = \"chat\"\n")
+                .unwrap(),
+            None,
+        );
+        let models = toml::from_str(
+            r#"
+["local/a"]
+vision = true
+accepts_temperature = false
+effort = "unsupported"
+["local/a".pricing]
+input_per_mtok = 0.15
+"#,
+        )
+        .unwrap();
+        let spec = s
+            .config_with_models(&models)
+            .unwrap()
+            .find("local/a")
+            .unwrap();
+        assert!(spec.vision);
+        assert!(!spec.accepts_temperature);
+        assert!(!spec.accepts_effort);
+        assert_eq!(spec.pricing.input_per_mtok, 0.15);
+    }
+
+    #[test]
     fn manual_fields_override_discovery_without_erasing_other_facts() {
         let s = Settings::new(
             toml::from_str(
