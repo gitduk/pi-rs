@@ -46,6 +46,9 @@ pub struct Request {
     pub temperature: Option<f64>,
     pub effort: Effort,
     pub tool_choice: ToolChoice,
+    /// Which conversation this request belongs to. Sent only when the model's
+    /// connection names a header for it.
+    pub session_id: Option<String>,
 }
 
 impl Request {

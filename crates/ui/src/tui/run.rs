@@ -294,10 +294,12 @@ impl Tui {
         let cancel = CancellationToken::new();
         self.arm_view(Doing::Compact);
         let agent = self.core.lane().agent().clone();
+        let session_id = Some(self.core.lane().id().to_string());
         let done = done.clone();
         let stop = cancel.clone();
         tokio::spawn(async move {
-            let _ = done.send(execution::compact(request, carried, agent, focus, stop).await);
+            let _ = done
+                .send(execution::compact(request, carried, agent, focus, session_id, stop).await);
         });
         self.core.lane_mut().begin(cancel);
     }

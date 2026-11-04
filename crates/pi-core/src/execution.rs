@@ -297,11 +297,12 @@ pub async fn compact(
     mut session: agent::session::Session,
     agent: agent::Agent,
     focus: Option<String>,
+    session_id: Option<String>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Done {
     let out = guard(async move {
         let ran = tokio::select! {
-            got = agent.compact_now(&mut session, focus.as_deref()) => Ok(got),
+            got = agent.compact_now(&mut session, focus.as_deref(), session_id.as_deref()) => Ok(got),
             _ = cancel.cancelled() => Err(agent::AgentError::Cancelled),
         };
         (session, ran)

@@ -87,12 +87,19 @@ makes, catalog reads included:
 
 ```toml
 [provider.local.headers]
-x-opencode-session = "$OPENCODE_SESSION"   # an unset variable leaves it out
+x-api-version = "2025-01-01"   # an unset variable leaves it out
 ```
 
 A header name is a token, and a value is printable ASCII. The wire sets its own
 `authorization`, `x-api-key` and `anthropic-version`, so a header of the same
 name is sent twice rather than replacing them.
+
+A host that asks each request to name its conversation declares that header
+once; pi fills it with the session's id, which a resumed session keeps:
+
+```toml
+session_header = "x-opencode-session"
+```
 
 Paths use dot-separated object fields. An empty `models_path` selects an array
 at the response root; an empty `id` selects a string item itself.
@@ -121,11 +128,12 @@ refused at load.
 A `.pi/settings.toml` between the workspace and repository root can override any
 of these keys. Files merge before required provider fields are checked, so a
 project can change only a field mapping. If a project changes a provider's
-`base_url` or `models_url`, it must also set `api_key` and `headers` for that
-target: neither the original connection's key nor its headers are inherited.
+`base_url` or `models_url`, it must also set `api_key`, `headers` and
+`session_header` for that target: nothing written for the original connection
+is inherited.
 At startup, pi lists keys that affect resources outside the checkout under the banner.
 These include `mcp`, `hooks`, `keep_days`, and each provider's `base_url`,
-`models_url`, `api_key` and `headers`.
+`models_url`, `api_key`, `headers` and `session_header`.
 pi also lists the checkout's script tools.
 Inspect both lists before you run pi in a checkout you did not write.
 

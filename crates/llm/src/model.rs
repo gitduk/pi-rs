@@ -78,6 +78,10 @@ pub struct ModelSpec {
     /// wire's own, so auth and protocol headers stay the transport's to set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<(String, String)>,
+    /// The header a host takes a conversation id in, when it asks for one. The
+    /// value comes from the request, never from a file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_header: Option<String>,
     pub context_window: u32,
     pub max_output_tokens: u32,
     pub vision: bool,
@@ -121,6 +125,7 @@ impl ModelSpec {
             wire_id: None,
             base_url: "http://localhost".into(),
             headers: Vec::new(),
+            session_header: None,
             format: Format::Anthropic {
                 cache_control: CacheControl::Off,
             },

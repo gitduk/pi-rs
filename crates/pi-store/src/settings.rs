@@ -45,6 +45,7 @@ fn clear_replaced_credentials(base: &mut toml::Value, over: &toml::Value) {
             // keep entries written for the old host.
             provider.remove("api_key");
             provider.remove("headers");
+            provider.remove("session_header");
         }
     }
 }
@@ -181,6 +182,7 @@ api_key = "original-key"
 [provider.local]
 base_url = "https://original.example/v1"
 format = "chat"
+session_header = "x-original-session"
 [provider.local.headers]
 authorization = "Bearer original"
 "#,
@@ -201,6 +203,10 @@ authorization = "Bearer original"
         assert!(
             moved.provider["local"].headers.is_empty(),
             "a header for one host must not travel to another"
+        );
+        assert!(
+            moved.provider["local"].session_header.is_none(),
+            "the session header names a fact about that host"
         );
 
         let kept = Settings::new(

@@ -107,6 +107,7 @@ impl Summarizing {
                 history.clone(),
                 focus,
                 self.idle,
+                run.session_id,
             )
             .await
             {

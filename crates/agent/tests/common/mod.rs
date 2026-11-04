@@ -29,6 +29,7 @@ pub fn spec() -> ModelSpec {
         wire_id: None,
         base_url: "http://localhost".into(),
         headers: Vec::new(),
+        session_header: None,
         format: Format::Anthropic {
             cache_control: CacheControl::Off,
         },

@@ -128,13 +128,22 @@ pub async fn run(
     history: String,
     focus: Option<&str>,
     idle: std::time::Duration,
+    session_id: Option<&str>,
 ) -> llm::Result<(String, Usage)> {
     let body = match focus.map(str::trim).filter(|f| !f.is_empty()) {
         Some(f) => format!("Focus the summary on: {f}\n\n{history}"),
         None => history,
     };
-    let (text, usage, stop) =
-        super::oneshot::ask(transport, spec, prompt, body, MAX_SUMMARY_TOKENS, idle).await?;
+    let (text, usage, stop) = super::oneshot::ask(
+        transport,
+        spec,
+        prompt,
+        body,
+        MAX_SUMMARY_TOKENS,
+        idle,
+        session_id,
+    )
+    .await?;
     // Cut short, it would replace the earlier summary with one missing its
     // tail; failing keeps that one in view instead.
     if stop != StopReason::EndTurn {

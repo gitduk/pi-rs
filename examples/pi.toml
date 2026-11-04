@@ -110,9 +110,12 @@ api_key = "$OPENAI_API_KEY"
 # context_window = "context_window"  # default; e.g. "limit.context"
 # max_output_tokens = "max_output_tokens" # default; e.g. "limit.output"
 # models_url = "https://example.com/catalog" # optional complete URL
+# The header this host takes a conversation id in, when it asks for one: pi
+# fills it with the session's id, which a resumed session keeps.
+# session_header = "x-opencode-session"
 # [provider.local.headers]
-# x-opencode-session = "$OPENCODE_SESSION" # sent with every request; an unset
-#                                         # variable leaves the header out
+# x-api-version = "2025-01-01"       # sent with every request; an unset
+#                                   # variable leaves the header out
 #
 # Capabilities are read only where a path is given. `vision` takes a bool, or
 # a list of input types in which any `image/*` counts. `reasoning` takes a bool;

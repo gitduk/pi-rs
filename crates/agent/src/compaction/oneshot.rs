@@ -21,6 +21,7 @@ pub async fn ask(
     // The same leash `attempt` keeps: a provider that stops sending holds a
     // compaction open exactly as it would hold a turn.
     idle: std::time::Duration,
+    session_id: Option<&str>,
 ) -> llm::Result<(String, Usage, StopReason)> {
     let req = Request {
         system: Some(system.to_string()),
@@ -31,6 +32,7 @@ pub async fn ask(
         // Reasoning about an answer this size costs more than the answer.
         effort: Effort::Off,
         tool_choice: ToolChoice::None,
+        session_id: session_id.map(str::to_string),
     };
 
     let mut acc = Accumulator::new(spec.model.clone());

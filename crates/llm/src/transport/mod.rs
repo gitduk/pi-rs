@@ -15,13 +15,24 @@ pub mod anthropic;
 pub mod chat;
 pub mod openai;
 
+/// The connection's headers, and the conversation id when the host asks for
+/// one. Pure, so a test can read what a call would carry.
+pub(crate) fn headers_for(spec: &ModelSpec, req: &Request) -> Vec<(String, String)> {
+    let mut headers = spec.headers.clone();
+    if let (Some(name), Some(id)) = (&spec.session_header, &req.session_id) {
+        headers.push((name.clone(), id.clone()));
+    }
+    headers
+}
+
 /// A request with the connection's extra headers on it, added before the wire's
 /// own: a name the wire also sets is sent twice rather than replaced.
 pub(crate) fn extra_headers(
     mut call: reqwest::RequestBuilder,
     spec: &ModelSpec,
+    req: &Request,
 ) -> reqwest::RequestBuilder {
-    for (name, value) in &spec.headers {
+    for (name, value) in headers_for(spec, req) {
         call = call.header(name, value);
     }
     call
@@ -348,6 +359,27 @@ impl Gaps {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_conversation_is_named_only_when_the_connection_names_a_header() {
+        let named = |header: Option<&str>, id: Option<&str>| {
+            let spec = ModelSpec {
+                session_header: header.map(str::to_string),
+                ..ModelSpec::test()
+            };
+            let req = Request {
+                session_id: id.map(str::to_string),
+                ..Request::default()
+            };
+            headers_for(&spec, &req)
+        };
+        assert_eq!(
+            named(Some("x-opencode-session"), Some("s1")),
+            [("x-opencode-session".into(), "s1".into())]
+        );
+        assert!(named(None, Some("s1")).is_empty(), "no header was named");
+        assert!(named(Some("x-opencode-session"), None).is_empty(), "no id");
+    }
 
     #[test]
     fn a_long_refusal_is_capped_short_of_a_number_it_would_split() {

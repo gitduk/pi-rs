@@ -1205,6 +1205,21 @@ mod tests {
         assert_eq!(core.lane().spent(), spent, "the saved figure comes back");
     }
 
+    // Every model call names the conversation the lane is on, and a new one
+    // is named afresh: a host that routes by it sees one id per conversation.
+    #[test]
+    fn the_context_names_the_conversation_the_lane_is_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
+        let first = core.lane().id().to_string();
+        assert_eq!(core.lane().ctx().session(), Some(first.as_str()));
+
+        core.fresh_session();
+        let fresh = core.lane().id().to_string();
+        assert_ne!(fresh, first);
+        assert_eq!(core.lane().ctx().session(), Some(fresh.as_str()));
+    }
+
     // A view carried over would let the next session edit unread, and tell
     // it of changes to a file it never saw.
     #[test]

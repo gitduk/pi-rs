@@ -410,7 +410,7 @@ impl Transport for ChatCompletions {
         check_format(spec)?;
         let body = build_body(spec, req);
         let url = format!("{}/chat/completions", spec.base_url.trim_end_matches('/'));
-        let mut call = super::extra_headers(self.http.post(&url), spec);
+        let mut call = super::extra_headers(self.http.post(&url), spec, req);
         if let Some(key) = &self.api_key {
             call = call.bearer_auth(key);
         }

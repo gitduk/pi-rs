@@ -604,7 +604,10 @@ mod budget {
         let before = llm::estimate::tokens(&s.context(), &spec());
         assert!(before < a.budget(), "the automatic pass would decline this");
 
-        let report = a.compact_now(&mut s, None).await.expect("something to do");
+        let report = a
+            .compact_now(&mut s, None, None)
+            .await
+            .expect("something to do");
         assert!(report.touched());
         let after = llm::estimate::tokens(&s.context(), &spec());
         assert!(after < before, "{before} -> {after}");
@@ -632,6 +635,7 @@ mod budget {
             spec: &spec(),
             summarize: agent::compaction::SUMMARIZE,
             retry: None,
+            session_id: None,
         };
         let voice = agent::event::Voice::new(tx, Arc::new(agent::NoHooks));
         let fitted = compactor.compact(&mut s, run, budget, false, &voice).await;
@@ -733,6 +737,7 @@ mod budget {
                 spec: &spec(),
                 summarize: agent::compaction::SUMMARIZE,
                 retry: policy,
+                session_id: None,
             };
             let voice = agent::event::Voice::new(tx, Arc::new(agent::NoHooks));
             assert!(
@@ -821,7 +826,10 @@ mod budget {
             let mut a = agent_with(1_000_000, 32_000);
             crate::common::compacting(&mut a, Some((Arc::new(Summary(stop)), spec())));
             let mut s = bulky_session();
-            let report = a.compact_now(&mut s, None).await.expect("something to do");
+            let report = a
+                .compact_now(&mut s, None, None)
+                .await
+                .expect("something to do");
             assert_eq!(report.summarized, kept, "{stop:?}");
         }
     }
@@ -861,7 +869,7 @@ mod budget {
         assert_eq!(record, agent::session::Compaction::default());
 
         let mut s = Session::with_prompt("hello");
-        assert!(a.compact_now(&mut s, None).await.is_none());
+        assert!(a.compact_now(&mut s, None, None).await.is_none());
     }
 }
 

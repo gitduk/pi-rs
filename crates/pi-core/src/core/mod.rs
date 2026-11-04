@@ -879,6 +879,7 @@ mod tests {
             wire_id: None,
             base_url: "http://localhost".into(),
             headers: Vec::new(),
+            session_header: None,
             format: llm::model::Format::Anthropic {
                 cache_control: llm::model::CacheControl::Off,
             },
@@ -926,13 +927,10 @@ mod tests {
         );
 
         let commands = resolved.commands.clone();
+        let ctx = tool::Ctx::new(ws).with_session("s1", root.join("spill"));
         let mut lane = crate::core::lane::Lane::opened(crate::core::lane::Opening {
             id: "s1".into(),
-            ..crate::core::lane::Opening::new(
-                std::sync::Arc::new(agent),
-                resolved,
-                tool::Ctx::new(ws),
-            )
+            ..crate::core::lane::Opening::new(std::sync::Arc::new(agent), resolved, ctx)
         });
         lane.return_session(agent::session::Session::default());
         crate::core::Core {

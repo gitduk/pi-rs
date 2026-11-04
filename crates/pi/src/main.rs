@@ -503,10 +503,14 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         worktree,
     );
     let mut ctx = tool::Ctx::new(workspace).with_cancel(cancel_on_interrupt());
-    // Without a session the spills land in the temp dir rather than `~/.pi`.
-    if keeps {
-        ctx = ctx.with_session(&id, pi_store::spill_root());
-    }
+    // Every run names its conversation, kept or not; one that keeps nothing
+    // leaves its spills in the temp dir rather than `~/.pi`.
+    let spills = if keeps {
+        pi_store::spill_root()
+    } else {
+        ctx.spill_root().to_path_buf()
+    };
+    ctx = ctx.with_session(&id, spills);
     let stop = ctx.cancel.child_token();
     let _stop = stop.clone().drop_guard();
     ctx = ctx.with_cancel(stop.clone());

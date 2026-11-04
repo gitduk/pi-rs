@@ -92,6 +92,10 @@ pub struct Provider {
     /// Sent with every request; a leading `$` reads the environment.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
+    /// The header this host takes a conversation id in. Absent: no request
+    /// names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_header: Option<String>,
 }
 
 impl std::fmt::Debug for Provider {
@@ -252,6 +256,13 @@ impl Provider {
                 );
             }
         }
+        if let Some(header) = &self.session_header {
+            if !header_name_ok(header) {
+                bail!(
+                    "provider.{name}.session_header: a header name is letters, digits or !#$%&'*+-.^_`|~"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -358,6 +369,20 @@ mod tests {
             "base_url = \":3425/v1\"\nformat = \"chat\"\n{extra}"
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn a_session_header_is_a_header_name_or_nothing() {
+        assert_eq!(
+            provider("session_header = \"x-opencode-session\"\n").session_header,
+            Some("x-opencode-session".into())
+        );
+        assert!(
+            provider("session_header = \"x session\"\n")
+                .check("local")
+                .is_err()
+        );
+        assert!(provider("").session_header.is_none());
     }
 
     #[test]

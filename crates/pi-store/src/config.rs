@@ -411,6 +411,7 @@ impl Config {
             base_url: provider.base_url.clone(),
             format: provider.wire_format(),
             headers: provider.headers(),
+            session_header: provider.session_header.clone(),
             context_window: model.window(),
             max_output_tokens: model.output(),
             vision: model.vision,
@@ -735,7 +736,13 @@ pub fn reaching(tree: &toml::Value) -> Vec<(String, String)> {
         .into_iter()
         .flatten()
     {
-        for field in ["base_url", "api_key", "models_url", "headers"] {
+        for field in [
+            "base_url",
+            "api_key",
+            "models_url",
+            "headers",
+            "session_header",
+        ] {
             if let Some(value) = entry.get(field) {
                 out.push((format!("provider.{name}.{field}"), shown(field, value)));
             }

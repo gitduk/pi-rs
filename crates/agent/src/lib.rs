@@ -279,7 +279,7 @@ impl Agent {
                     _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
                     fitted = self
                         .compactor
-                        .compact(session, self.working(Some(retry)), fit_to, squeezes > 0, voice)
+                        .compact(session, self.working(Some(retry), ctx.session()), fit_to, squeezes > 0, voice)
                         .instrument(span.clone()) => fitted,
                 };
                 totals.add(&fitted.spent);
@@ -314,6 +314,7 @@ impl Agent {
                     temperature: None,
                     effort: self.brief.effort,
                     tool_choice: Default::default(),
+                    session_id: ctx.session().map(str::to_string),
                 };
 
                 match self
@@ -484,11 +485,16 @@ impl Agent {
     /// Targets the same tail the automatic pass protects — "summarize
     /// everything but what I'm in the middle of" — and runs even when the
     /// transcript already fits, since the point is a phase ending, not a budget.
-    pub async fn compact_now(&self, session: &mut Session, focus: Option<&str>) -> Option<Report> {
+    pub async fn compact_now(
+        &self,
+        session: &mut Session,
+        focus: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Option<Report> {
         let budget = self.budget_within(self.window(), self.count_of(session));
         let report = self
             .compactor
-            .compact_now(session, self.working(None), budget, focus)
+            .compact_now(session, self.working(None, session_id), budget, focus)
             .await;
         // No voice to say it through, so journal it as the loop's would be.
         if let Some(r) = report {
@@ -499,12 +505,13 @@ impl Agent {
 
     /// The model and wire for whatever needs both — the compactor writes
     /// its summary with these when it has no writer of its own.
-    fn working<'a>(&'a self, retry: Option<&'a Retry>) -> Working<'a> {
+    fn working<'a>(&'a self, retry: Option<&'a Retry>, session_id: Option<&'a str>) -> Working<'a> {
         Working {
             wire: self.wire(),
             spec: &self.model.spec,
             summarize: &self.brief.summarize,
             retry,
+            session_id,
         }
     }
 

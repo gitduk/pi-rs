@@ -90,6 +90,8 @@ pub struct Working<'a> {
     /// How a summary call that hits a passing fault is retried; `None` tries
     /// it once.
     pub retry: Option<&'a crate::Retry>,
+    /// The conversation the summary call belongs to, as the turn's own does.
+    pub session_id: Option<&'a str>,
 }
 
 /// What a transcript is shrunk by when it outgrows the window.

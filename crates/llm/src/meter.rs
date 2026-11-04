@@ -148,6 +148,7 @@ mod tests {
             temperature: None,
             effort: crate::request::Effort::Off,
             tool_choice: crate::request::ToolChoice::None,
+            session_id: None,
         }
     }
 
