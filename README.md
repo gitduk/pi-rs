@@ -52,6 +52,8 @@ The provider prefix distinguishes identical IDs on different hosts; only the
 original model ID is sent to the server. A sole provider also accepts bare IDs
 that contain no `/`. With no model selected by a flag, resumed session or the
 top-level `model` setting, pi starts on the first discovered name in alphabetical order.
+A resumed session whose model the config no longer reaches starts on the model
+`model` selects now, and says which one it left behind.
 
 The default response mapping reads the `data` array and each item's `id`,
 `context_window` and `max_output_tokens`. Capability and price facts are read

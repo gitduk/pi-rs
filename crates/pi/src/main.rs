@@ -224,13 +224,26 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
                 no_model(&args).context(discovery_notes.join("; "))
             }
         })?;
-    let dialled = dial(&pinned, &config, &named, named_by)?;
+    // A session's model is a preference, not a fact: the connection it named
+    // may be gone since. What `model` selects now stands in, and says so.
+    let (dialled, replaced) = match dial(&pinned, &config, &named, named_by) {
+        Err(why) if named_by == pi_store::config::ModelOrigin::Resumed => {
+            let (other, by) = config
+                .model(None, None, settings.project_sets("model").is_some())
+                .ok_or(why)?;
+            let dialled = dial(&pinned, &config, &other, by)?;
+            let said = format!("no longer reaching `{named}`; on `{other}` instead");
+            (dialled, Some(said))
+        }
+        picked => (picked?, None),
+    };
 
     // Only the terminal answers its own words; a one-shot run has none.
     let words: &'static [_] = if interactive { tui::WORDS } else { &[] };
     let mut resolved = resolve(&pinned, &workspace, &config, &settings, None, words)?;
     resolved.catalog_generation = catalog.generation();
     resolved.notes.extend(discovery_notes.iter().cloned());
+    resolved.notes.extend(replaced.clone());
     if named_by == pi_store::config::ModelOrigin::Discovered {
         resolved
             .notes
@@ -243,9 +256,12 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
         // screen and surface only at exit, after the session they were for.
         let said = dialled.warning.iter().chain(&dialled.assumed).cloned();
         resolved.notes.splice(0..0, said);
-    } else if let Some(warning) = &dialled.warning {
-        // Ahead of the quiet check on purpose: see `Dialled::warning`.
-        eprintln!("\x1b[{}m{warning}\x1b[0m", config.theme.muted.codes());
+    } else {
+        // Ahead of the quiet check on purpose: neither a key's exposure nor
+        // which model runs is progress chatter.
+        for line in dialled.warning.iter().chain(&replaced) {
+            eprintln!("\x1b[{}m{line}\x1b[0m", config.theme.muted.codes());
+        }
     }
     // Captured before the spec and workspace move into the agent and context.
     let root = workspace.root().to_path_buf();

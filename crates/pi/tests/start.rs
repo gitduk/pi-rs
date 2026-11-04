@@ -293,3 +293,33 @@ fn a_resumed_one_shot_is_filed_into_the_session_it_named() {
     assert!(out.status.success(), "{}", said(&out));
     assert_eq!(Store::read(&path).unwrap().name.as_deref(), Some("renamed"));
 }
+
+// A session whose model the config no longer reaches still opens: the model
+// `model` selects now runs it, and the file then names the model that ran.
+#[test]
+fn a_resumed_session_whose_model_is_gone_runs_on_the_configured_one() {
+    let pi = Pi::answering("pong");
+    let mut session = Session::default();
+    session.prompt("before");
+    let header = Header {
+        id: "s1",
+        model: "gone/m",
+        name: None,
+        created: 42,
+        spent: Default::default(),
+    };
+    let path = pi.store().save(&pi.workspace(), header, &session).unwrap();
+
+    let out = pi.run(&["--resume", "s1", "again"]);
+    assert!(out.status.success(), "{}", said(&out));
+    assert!(
+        said(&out).contains("local/m"),
+        "it says what it started on: {}",
+        said(&out)
+    );
+    assert_eq!(
+        Store::read(&path).unwrap().model,
+        "local/m",
+        "saved under the model that ran"
+    );
+}
