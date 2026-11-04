@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use super::{FAILED, Shared, Transport};
 use crate::error::{LlmError, Result};
 use crate::message::{
-    AssistantContent, Image, Message, ToolResult, ToolResultContent, UserContent,
+    AssistantContent, Image, Message, Replay, ToolResult, ToolResultContent, UserContent,
 };
 use crate::model::{Format, ModelSpec};
 use crate::request::{Request, ToolChoice};
@@ -71,14 +71,20 @@ fn encode_tool_result(r: &ToolResult) -> Value {
 
 // One stored assistant turn as the chat wire wants it: content and tool
 // calls on the same message, merged losslessly up to their relative order.
-fn encode_assistant(content: &[AssistantContent], out: &mut Vec<Value>) {
+fn encode_assistant(content: &[AssistantContent], spec: &ModelSpec, out: &mut Vec<Value>) {
     let mut text = String::new();
+    let mut thinking = String::new();
     let mut calls: Vec<Value> = Vec::new();
     for b in content {
         match b {
             AssistantContent::Text(t) => text.push_str(&t.text),
-            // Chat has no signed or encrypted shape, so none ever replays.
-            AssistantContent::Reasoning(_) => {}
+            // DeepSeek's chat wire 400s a tools request whose earlier turns
+            // omit the thinking it streamed, so the author's goes back.
+            AssistantContent::Reasoning(r) => {
+                if let Replay::Prose { text } = r.replay_for(spec) {
+                    thinking.push_str(&text);
+                }
+            }
             AssistantContent::ToolCall(call) => calls.push(json!({
                 "id": call.id,
                 "type": "function",
@@ -89,11 +95,14 @@ fn encode_assistant(content: &[AssistantContent], out: &mut Vec<Value>) {
             })),
         }
     }
-    if !text.is_empty() || !calls.is_empty() {
+    if !text.is_empty() || !thinking.is_empty() || !calls.is_empty() {
         let mut msg = json!({
             "role": "assistant",
             "content": text,
         });
+        if !thinking.is_empty() {
+            msg["reasoning_content"] = json!(thinking);
+        }
         if !calls.is_empty() {
             msg["tool_calls"] = Value::Array(calls);
         }
@@ -103,7 +112,7 @@ fn encode_assistant(content: &[AssistantContent], out: &mut Vec<Value>) {
 
 // The `messages` array. System rides the top-level field; a user turn with a
 // tool result splits into a user message and a `tool` message, in order.
-fn encode(msgs: &[Message]) -> Vec<Value> {
+fn encode(msgs: &[Message], spec: &ModelSpec) -> Vec<Value> {
     let mut out = Vec::new();
     for m in msgs {
         match m {
@@ -139,7 +148,7 @@ fn encode(msgs: &[Message]) -> Vec<Value> {
                     out.push(json!({ "role": "user", "content": blocks }));
                 }
             }
-            Message::Assistant { content } => encode_assistant(content, &mut out),
+            Message::Assistant { content } => encode_assistant(content, spec, &mut out),
         }
     }
     out
@@ -157,7 +166,7 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
         "model": spec.wire_model(),
         "stream": true,
         "stream_options": { "include_usage": true },
-        "messages": encode(&req.messages),
+        "messages": encode(&req.messages, spec),
         "max_tokens": max_output_tokens,
     });
 
@@ -442,7 +451,7 @@ mod tests {
         let msgs = [Message::User {
             content: vec![result("a", true), result("b", false)],
         }];
-        let out = encode(&msgs);
+        let out = encode(&msgs, &ModelSpec::test());
         let roles: Vec<_> = out.iter().map(|m| m["role"].as_str().unwrap()).collect();
         assert_eq!(roles, ["tool", "tool", "user"]);
         assert_eq!(out[2]["content"][0]["text"], "[image from a]");
@@ -452,8 +461,9 @@ mod tests {
         );
     }
 
-    // Text and calls merge into one message in their order; reasoning never
-    // replays, and a turn left with nothing else is not sent at all.
+    // Text and calls merge into one message in their order; a thought the
+    // target did not write never replays, and a turn left with nothing else is
+    // not sent at all.
     #[test]
     fn an_assistant_turn_is_one_message_of_text_and_calls() {
         let text = |t: &str| AssistantContent::Text(crate::message::Text { text: t.into() });
@@ -483,7 +493,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            encode(&msgs),
+            encode(&msgs, &ModelSpec::test()),
             [
                 json!({
                     "role": "assistant",
@@ -496,6 +506,56 @@ mod tests {
                 }),
                 json!({ "role": "assistant", "content": "plain" }),
             ]
+        );
+    }
+
+    // DeepSeek 400s a tools request whose earlier turns omit the thinking it
+    // streamed; a model handed none of it rewrites the question every turn.
+    #[test]
+    fn the_thinking_a_model_streamed_rides_back_as_reasoning_content() {
+        let spec = ModelSpec {
+            model: "local/deepseek".into(),
+            format: Format::Chat,
+            ..ModelSpec::test()
+        };
+        let thought = |by: &str| {
+            AssistantContent::Reasoning(crate::message::Reasoning {
+                id: None,
+                content: vec![crate::message::ReasoningContent::Text {
+                    text: "the plan".into(),
+                    signature: None,
+                }],
+                by: Some(by.into()),
+            })
+        };
+        let call = AssistantContent::ToolCall(crate::message::ToolCall {
+            id: "c1".into(),
+            name: "read".into(),
+            args: json!({}),
+        });
+        let own = [Message::Assistant {
+            content: vec![thought("local/deepseek"), call.clone()],
+        }];
+        let foreign = [Message::Assistant {
+            content: vec![thought("other/host"), call],
+        }];
+
+        let req = Request {
+            messages: own.to_vec(),
+            ..Default::default()
+        };
+        let body = build_body(&spec, &req);
+        assert_eq!(body["messages"][0]["reasoning_content"], "the plan");
+        // What the encoder sends, the estimate pays for.
+        assert!(
+            crate::estimate::tokens(&own, &spec) > crate::estimate::tokens(&foreign, &spec),
+            "a block that rides must cost more than one that does not"
+        );
+        assert!(
+            encode(&foreign, &spec)[0]
+                .get("reasoning_content")
+                .is_none(),
+            "another model's thinking stayed out"
         );
     }
 

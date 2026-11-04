@@ -93,9 +93,12 @@ fn encode_reasoning(r: &Reasoning, spec: &ModelSpec) -> Option<Value> {
             "summary": [],
             "encrypted_content": encrypted,
         })),
-        // No OpenAI spec replays text: the transport is chosen by the same
-        // format `replay_for` reads.
-        Replay::Thinking { .. } | Replay::Redacted { .. } | Replay::Dropped => None,
+        // No OpenAI spec replays text or carries prose thinking: the
+        // transport is chosen by the same format `replay_for` reads.
+        Replay::Thinking { .. }
+        | Replay::Redacted { .. }
+        | Replay::Prose { .. }
+        | Replay::Dropped => None,
     }
 }
 

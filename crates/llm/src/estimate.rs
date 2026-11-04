@@ -163,6 +163,7 @@ fn replayed_reasoning(r: &Reasoning, spec: &ModelSpec) -> usize {
         Replay::Thinking { signature } => text() + signature.map_or(0, of),
         Replay::Encrypted { id, encrypted } => of(id) + of(encrypted),
         Replay::Redacted { data } => of(data),
+        Replay::Prose { text } => of(&text),
         Replay::Dropped => 0,
     }
 }

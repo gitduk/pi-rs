@@ -100,9 +100,9 @@ fn encode_reasoning(r: &Reasoning, spec: &ModelSpec) -> Option<Value> {
             Some(block)
         }
         Replay::Redacted { data } => Some(json!({ "type": "redacted_thinking", "data": data })),
-        // No Anthropic spec ever encrypts one: the transport is chosen by the
-        // same format `replay_for` reads.
-        Replay::Encrypted { .. } | Replay::Dropped => None,
+        // No Anthropic spec ever encrypts one or carries prose thinking: the
+        // transport is chosen by the same format `replay_for` reads.
+        Replay::Encrypted { .. } | Replay::Prose { .. } | Replay::Dropped => None,
     }
 }
 

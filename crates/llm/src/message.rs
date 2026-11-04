@@ -140,6 +140,9 @@ pub enum Replay<'a> {
     // The target's own, sealed by the provider before it reached us: opaque,
     // with no id, and owed back as it came.
     Redacted { data: &'a str },
+    // The target's own, as the chat wire carries thinking: prose beside the
+    // content, unsigned, so only the block its author wrote goes back.
+    Prose { text: String },
     // Nothing leaves.
     Dropped,
 }
@@ -193,9 +196,14 @@ impl Reasoning {
                         return Replay::Encrypted { id, encrypted };
                     }
                 }
-                // Chat has no signed/encrypted shape, so even the model's
-                // own blocks fall through to the policy below.
-                Format::Chat => {}
+                // With tools in play the chat wire requires its thinking back,
+                // or the model loses the thread between sub-turns.
+                Format::Chat => {
+                    let text = self.text();
+                    if !text.is_empty() {
+                        return Replay::Prose { text };
+                    }
+                }
             }
         }
 
