@@ -285,12 +285,12 @@ pub fn resolve(
         .collect();
     let shelf = (!pinned.no_skills).then(|| {
         let shelf = skills::Shelf::new(skill_dirs);
-        let builtins = [MCP_SETUP, ARCHITECTURE];
+        let builtins = [ARCHITECTURE];
         Arc::new(
             builtins
                 .into_iter()
                 .filter_map(skills::Skill::builtin)
-                .chain([tool_creator(), skill_creator(), super::help::skill()])
+                .chain([tool_creator(), skill_creator(), pi_setup()])
                 .chain(pinned.skills.iter().cloned())
                 .fold(shelf, skills::Shelf::with_builtin),
         )
@@ -540,7 +540,35 @@ fn skill_creator() -> skills::Skill {
         .expect("a valid built-in skill")
         .with_files(vec![(WRITING.0.to_string(), WRITING.1)])
 }
-const MCP_SETUP: &str = include_str!("../../skills/mcp-setup/SKILL.md");
+const PI_SETUP: &str = include_str!("../../skills/pi-setup/SKILL.md");
+
+// The field reference travels with the skill: it is the file a user copies,
+// so the model edits the shape that user will read.
+const PI_SETUP_FILES: [(&str, &str); 3] = [
+    (
+        "settings.toml",
+        include_str!("../../../../examples/settings.toml"),
+    ),
+    (
+        "references/provider.md",
+        include_str!("../../skills/pi-setup/references/provider.md"),
+    ),
+    (
+        "references/mcp.md",
+        include_str!("../../skills/pi-setup/references/mcp.md"),
+    ),
+];
+
+fn pi_setup() -> skills::Skill {
+    skills::Skill::builtin(PI_SETUP)
+        .expect("a valid built-in skill")
+        .with_files(
+            PI_SETUP_FILES
+                .iter()
+                .map(|(name, text)| (name.to_string(), *text))
+                .collect(),
+        )
+}
 const ARCHITECTURE: &str = include_str!("../../skills/architecture/SKILL.md");
 
 /// The checkout's directories before the home's, so a name both use is the
@@ -878,11 +906,11 @@ mod tests {
 
     // A built-in skill is dropped without a word when its header does not parse.
     #[test]
-    fn the_skill_creators_and_mcp_instructions_are_builtin_skills() {
+    fn the_skill_creators_and_connection_instructions_are_builtin_skills() {
         for (name, text) in [
             ("tool-creator", super::TOOL_CREATOR),
             ("skill-creator", super::SKILL_CREATOR),
-            ("mcp-setup", super::MCP_SETUP),
+            ("pi-setup", super::PI_SETUP),
             ("architecture", super::ARCHITECTURE),
         ] {
             let skill = skills::Skill::builtin(text).expect("a valid built-in skill");
@@ -893,15 +921,26 @@ mod tests {
     // A file the instructions name but the skill cannot serve fails only when the model asks for it.
     #[test]
     fn the_creators_serve_every_file_their_instructions_name() {
-        for skill in [super::tool_creator(), super::skill_creator()] {
+        for skill in [
+            super::tool_creator(),
+            super::skill_creator(),
+            super::pi_setup(),
+        ] {
             let text = skill.text().unwrap();
-            let named = text
+            // A reference is a `.md` file the instructions list, or a name they
+            // ask for with `file:`. Files an example tells the model to create
+            // are neither.
+            let listed = text
                 .split('`')
                 .skip(1)
                 .step_by(2)
-                .flat_map(|code| code.split('"'))
                 .filter(|word| word.ends_with(".md") && *word != "SKILL.md");
-            for file in named {
+            let asked = text.match_indices("file: \"").filter_map(|(start, asked)| {
+                let rest = &text[start + asked.len()..];
+                let name = &rest[..rest.find('"')?];
+                (!name.is_empty() && !name.contains('<') && name != "SKILL.md").then_some(name)
+            });
+            for file in listed.chain(asked) {
                 assert!(
                     skill.builtin_files.iter().any(|(name, _)| name == file),
                     "{} names {file}",
@@ -951,7 +990,7 @@ mod tests {
             for name in [
                 "tool-creator",
                 "skill-creator",
-                "mcp-setup",
+                "pi-setup",
                 "architecture",
                 "caller-skill",
             ] {
@@ -1009,87 +1048,5 @@ mod tests {
             assert_eq!(schema["required"], serde_json::json!(["file"]));
             assert_eq!(schema["properties"]["file"]["type"], "string");
         }
-    }
-
-    #[test]
-    fn pi_help_is_a_builtin_skill() {
-        let help = super::super::help::skill();
-        assert_eq!(help.name, "pi-help");
-    }
-
-    // `pi-help` answers from the README, so what the code has and the README
-    // leaves out is something the model will deny exists.
-    fn missing(
-        names: impl IntoIterator<Item = String>,
-        said: &[&str],
-        forms: &[&str],
-    ) -> Vec<String> {
-        // Aligned columns (`tier   = "exec"`) read as one space.
-        let said: Vec<String> = said.iter().map(|t| pi_store::text::collapsed(t)).collect();
-        names
-            .into_iter()
-            .filter(|name| {
-                !said.iter().any(|text| {
-                    forms
-                        .iter()
-                        .any(|form| text.contains(&form.replace("{}", name)))
-                })
-            })
-            .collect()
-    }
-
-    #[test]
-    fn the_readme_names_every_command() {
-        let words = crate::input::commands::BUILTIN
-            .iter()
-            .map(|c| c.word.to_string());
-        let gone = missing(
-            words,
-            &[super::super::help::README],
-            &["`{}`", "`{} ", "`{}["],
-        );
-        assert!(gone.is_empty(), "README.md lacks {gone:?}");
-    }
-
-    #[test]
-    fn the_readme_names_every_tool() {
-        let mut names = toolbox::builtin().names();
-        names.extend(
-            [
-                toolbox::bash::Bash::NAME,
-                skills::Load::NAME,
-                subagent::Subagent::NAME,
-            ]
-            .map(String::from),
-        );
-        let gone = missing(names, &[super::super::help::README], &["`{}`"]);
-        assert!(gone.is_empty(), "README.md lacks {gone:?}");
-    }
-
-    // Every top-level key, read off the refusal of one that is not: serde
-    // lists the fields it expected, so a new one cannot be left off here.
-    #[test]
-    fn the_readme_or_the_example_names_every_setting() {
-        let refused = toml::from_str::<pi_store::config::Config>("not_a_setting = 1")
-            .expect_err("an unknown key is refused")
-            .to_string();
-        let keys: Vec<String> = refused
-            .split_once("expected one of ")
-            .expect("serde names the fields")
-            .1
-            .split(", ")
-            .map(|k| k.trim().trim_matches('`').to_string())
-            .collect();
-        assert!(keys.len() > 10, "{refused}");
-        let example = include_str!("../../../../examples/pi.toml");
-        let gone = missing(
-            keys,
-            &[super::super::help::README, example],
-            &["{} =", "[{}", "`{}`"],
-        );
-        assert!(
-            gone.is_empty(),
-            "README.md and examples/pi.toml lack {gone:?}"
-        );
     }
 }

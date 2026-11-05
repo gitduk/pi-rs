@@ -425,7 +425,7 @@ fn no_model(args: &Args) -> anyhow::Error {
     );
     let example = concat!(
         env!("CARGO_PKG_REPOSITORY"),
-        "/blob/master/examples/pi.toml"
+        "/blob/master/examples/settings.toml"
     );
     anyhow::anyhow!("no model to run. Define one in {file} — see {example}")
 }

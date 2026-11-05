@@ -10,7 +10,6 @@ pub mod bash;
 pub mod catalog;
 pub mod content;
 pub mod dial;
-mod help;
 pub mod hooks;
 pub mod instructions;
 pub mod lane;

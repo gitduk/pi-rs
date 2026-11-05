@@ -34,7 +34,7 @@ pub struct Dialled {
 // A missing provider or incomplete connection names who selected the model.
 fn unknown(model: &str, named_by: config::ModelOrigin) -> String {
     format!(
-        "`{model}`, named by {}, cannot be reached — see examples/pi.toml",
+        "`{model}`, named by {}, cannot be reached — see examples/settings.toml",
         said_by(named_by)
     )
 }

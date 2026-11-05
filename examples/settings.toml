@@ -1,4 +1,7 @@
-# ~/.pi/settings.toml — copy what you need and delete the rest.
+# ~/.pi/settings.toml — copy this file, fill in the keys at the top, run pi.
+#
+# Only the first section is live; everything after it is commented out and
+# kept as the field reference. Uncomment a line when you need it.
 #
 # There is no built-in list of models. One would go stale the week a vendor
 # ships something, and nothing in it would tell you which entries still
@@ -9,29 +12,43 @@
 # selection name is provider/model-id; requests carry only the model ID.
 # Project overrides live in .pi/settings.toml. Changing a provider's base_url
 # or models_url clears an inherited key; set api_key explicitly for that target.
+#
+# To change more than these keys, ask pi: the built-in `pi-setup` skill reads
+# this file as its field reference.
 
 # ---------------------------------------------------------------------------
-# What to run.
+# What to run. Fill in the key below, then `pi`.
+# ---------------------------------------------------------------------------
+
+model = "main/claude-sonnet-5"
+
+[provider.main]
+base_url = "https://api.anthropic.com"
+format   = "anthropic"          # anthropic | openai | chat
+api_key  = "$ANTHROPIC_API_KEY" # `$` reads the environment; anything else is the key itself
+
+# ---------------------------------------------------------------------------
+# The reference. Every key below is commented out; uncomment what you need.
 # ---------------------------------------------------------------------------
 
 # The startup model. When omitted, a resumed session keeps its model; a new
 # session uses the sole configured model or the first discovered name.
-model = "main/claude-sonnet-5"
+# model = "main/claude-sonnet-5"
 
 # Who writes the summary when history is compacted. Big input, small output,
 # little judgement — so it need not be the model doing the work. Defaults to
 # `model`.
-summarize_model = "main/claude-haiku-4-5"
+# summarize_model = "main/claude-haiku-4-5"
 
 # How hard the model thinks, on every wire alike; unset is `high`.
-effort = "medium"                # off | low | medium | high
-tier   = "exec"                  # read | write | exec | net
+# effort = "medium"               # off | low | medium | high
+# tier   = "exec"                 # read | write | exec | net
 
 # How many rounds a `/loop` may run before it stops on its own. Unset is 10 —
 # a loop ends on its own when a round changes nothing, when a round undoes the
 # last one, or when rounds only nibble; this is the floor for a loop that keeps
 # changing files forever. Esc is always the brake.
-loop_max_rounds = 10
+# loop_max_rounds = 10
 
 # Seconds a subagent may run silent before it is read as wedged. Unset is 1800.
 # The only thing that stops a subagent on its own: it is not capped by turns.
@@ -41,8 +58,8 @@ loop_max_rounds = 10
 # seconds of silence before a stream counts as wedged. The second is generous
 # on purpose: a reasoning model can legitimately think for minutes before its
 # first token.
-retries = 4
-idle_timeout = 300
+# retries = 4
+# idle_timeout = 300
 
 # Days a session, and an image pasted with ctrl+v, is kept after it was last
 # worked on; an older one is deleted when pi starts. Unset is 90, 0 keeps
@@ -75,7 +92,7 @@ idle_timeout = 300
 # A part with nothing to say is left out rather than shown empty, so one list
 # serves the running line and the finished one: `queued` is gone once the run
 # ends, `cost` until something has been spent.
-status = ["elapsed", "in_out", "speed", "cache", "ctx", "cost", "compacted", "queued"]
+# status = ["elapsed", "in_out", "speed", "cache", "ctx", "cost", "compacted", "queued"]
 
 # ---------------------------------------------------------------------------
 # Provider connections. Put all top-level settings above the first table.
@@ -83,21 +100,15 @@ status = ["elapsed", "in_out", "speed", "cache", "ctx", "cost", "compacted", "qu
 # `format` is the shape pi speaks: `anthropic` is the Messages API, `openai`
 # the Responses API, and `chat` Chat Completions.
 # ---------------------------------------------------------------------------
-[provider.main]
-base_url = "https://api.anthropic.com"
-format = "anthropic"
-# A `$` reads the environment; anything else is the key itself. A literal key
-# beginning with `$` cannot be written here — put it in a variable.
-# No environment credential is used unless api_key names it here.
-api_key = "$ANTHROPIC_API_KEY"
+
+# A second connection. The first one above is live; this one shows the shape.
+# [provider.openai]
+# base_url = "https://api.openai.com/v1"
+# format = "openai"
+# api_key = "$OPENAI_API_KEY"
 # Anthropic only, and off unless measured. `standard` requests 5-minute
 # caching; `long_ttl` requests 1-hour caching.
-cache_control = "standard"
-
-[provider.openai]
-base_url = "https://api.openai.com/v1"
-format = "openai"
-api_key = "$OPENAI_API_KEY"
+# cache_control = "standard"
 
 # A local provider needs only its connection. A leading `:port` means IPv4
 # loopback. Change the field paths only where the catalog differs.
@@ -140,29 +151,29 @@ api_key = "$OPENAI_API_KEY"
 # ---------------------------------------------------------------------------
 
 # Measured 2026-08-14.
-[models."main/claude-sonnet-5"]
-context_window    = 200_000
-max_output_tokens = 64_000
-vision            = true
+# [models."main/claude-sonnet-5"]
+# context_window    = 200_000
+# max_output_tokens = 64_000
+# vision            = true
 # Claude 4.6+ and the OpenAI reasoning models reject every temperature but the
 # default, so the only request they accept is one that omits it.
-accepts_temperature = false
-pricing = { input_per_mtok = 3.0, output_per_mtok = 15.0, cache_read_per_mtok = 0.3, cache_write_per_mtok = 3.75 }
+# accepts_temperature = false
+# pricing = { input_per_mtok = 3.0, output_per_mtok = 15.0, cache_read_per_mtok = 0.3, cache_write_per_mtok = 3.75 }
 
 # Measured 2026-08-14.
-[models."main/claude-haiku-4-5"]
-context_window    = 200_000
-max_output_tokens = 32_000
-pricing = { input_per_mtok = 1.0, output_per_mtok = 5.0 }
+# [models."main/claude-haiku-4-5"]
+# context_window    = 200_000
+# max_output_tokens = 32_000
+# pricing = { input_per_mtok = 1.0, output_per_mtok = 5.0 }
 
 # A model that cannot think is told nothing of thinking, `off` included: on
 # some endpoints the field alone is a 400.
-[models."openai/gpt-4.1"]
-effort = "unsupported"
+# [models."openai/gpt-4.1"]
+# effort = "unsupported"
 
-[models."openai/gpt-5"]
-context_window    = 400_000
-max_output_tokens = 128_000
+# [models."openai/gpt-5"]
+# context_window    = 400_000
+# max_output_tokens = 128_000
 
 # Commands run on events by `bash -c` in the workspace, each handed the event
 # as one line of JSON on stdin. `tool.before` and `tool.after` are gates, given
@@ -198,28 +209,39 @@ max_output_tokens = 128_000
 
 # MCP servers, each one's tools offered as `<name>__<tool>`. A value that is
 # `$NAME` reads pi's environment.
-[mcp.github]
-command = "github-mcp-server"
-args    = ["stdio"]
-env     = { GITHUB_TOKEN = "$GITHUB_TOKEN" }
+# [mcp.github]
+# command = "github-mcp-server"
+# args    = ["stdio"]
+# env     = { GITHUB_TOKEN = "$GITHUB_TOKEN" }
+#
+# [mcp.docs]
+# url     = "https://example.com/mcp"
+# headers = { Authorization = "$DOCS_AUTHORIZATION" }
 
-[mcp.docs]
-url     = "https://example.com/mcp"
-headers = { Authorization = "$DOCS_AUTHORIZATION" }
+# Key bindings. An entry replaces that action's defaults rather than adding to
+# them. `/keys` lists every id. Two presses apart by a space are a pair.
+# [keys]
+# "menu.accept"   = ["tab"]
+# "menu.next"     = ["down", "ctrl+n"]
+# "menu.previous" = ["up", "ctrl+p"]
+# "mode.normal"   = ["j k"]   # Insert to Normal; [] leaves no way in
 
-[keys]
-# An entry replaces that action's defaults rather than adding to them.
-# `/keys` lists every id. Two presses apart by a space are a pair.
-"menu.accept"   = ["tab"]
-"menu.next"     = ["down", "ctrl+n"]
-"menu.previous" = ["up", "ctrl+p"]
-"mode.normal"   = ["j k"]   # Insert to Normal; [] leaves no way in
-
-[vim]
-enabled = true
+# Vim keys.
+# [vim]
+# enabled = true
 # How long the first of a pair of bare characters (`j k`, `g g`, `d d`)
 # waits for the second. Pairs with ctrl, alt or a named key wait 500 ms.
-pair_timeout_ms = 250
+# pair_timeout_ms = 250
 # The cursor in each mode: block, bar, underline, or default (the terminal's own).
-insert_cursor = "bar"
-normal_cursor = "block"
+# insert_cursor = "bar"
+# normal_cursor = "block"
+
+# Colours. Unset keys keep the built-in Catppuccin values: Mocha on a dark
+# background, Latte on a light one. `syntax` takes `auto`, `catppuccin-mocha`
+# or `catppuccin-latte`; a colour is an SGR code or `#rrggbb`.
+# [theme]
+# syntax = "auto"
+# link   = { color = "#89b4fa", sgr = ["underline"] }
+# muted  = { color = "39", sgr = ["dim"] }   # 39: the terminal's default foreground
+# quote  = { color = "39", sgr = ["dim"] }
+# strong = { color = "#a6e3a1", sgr = ["bold"] }

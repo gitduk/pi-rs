@@ -1,6 +1,6 @@
 ---
-name: bar-creator
-description: Create, edit, or troubleshoot pi's bar.rs script to customize the bar layout, parts, styles, or refresh behavior.
+name: bar-setup
+description: Set up or fix pi's bar — the bar.rs script that lays out the bar under the input line, its parts, styles, and refresh behavior.
 ---
 
 # Customize the bar
@@ -19,7 +19,7 @@ Before editing an existing script, read `<pi_home>/bar.rs`.
 Before creating a new script, read this skill's `bar.rs` example.
 If any instruction or customization method is unclear, read the example before searching elsewhere.
 This also applies when the user already has a script.
-To read the example, call `skill` with `{"name": "bar-creator", "file": "bar.rs"}`.
+To read the example, call `skill` with `{"name": "bar-setup", "file": "bar.rs"}`.
 This skill and its example describe the interface for ordinary customization.
 pi's source code is not required.
 

@@ -8,7 +8,7 @@ serde_json = "1"
 ---
 
 //! A bar layout: copy to `~/.pi/bar.rs`. pi runs it with what it knows as
-//! JSON on stdin and draws the layout it prints; see the built-in `bar-creator` skill.
+//! JSON on stdin and draws the layout it prints; see the built-in `bar-setup` skill.
 
 use serde::Deserialize;
 use serde_json::json;
