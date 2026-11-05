@@ -326,33 +326,18 @@ impl Ui {
         if n < 2 {
             return None;
         }
-        // The bar's order, and a tab that names no checkout is dropped — a lane
-        // whose checkout went names nothing to step to.
-        let mut order: Vec<&str> = Vec::with_capacity(n);
-        for tab in &self.tabs {
-            let name = tab.name.as_str();
-            if trees.iter().any(|c| c.name == name) && !order.contains(&name) {
-                order.push(name);
-            }
-        }
-        // A bar that has not rebuilt since the disk changed leaves the ring
-        // short of it: the disk's own order is where the rest belongs.
-        for tree in trees {
-            if !order.contains(&tree.name.as_str()) {
-                order.push(&tree.name);
-            }
-        }
-        // The lane's worktree name — or its directory, in the main checkout.
-        let at = order
+        // Git's own order, the one the bar lists and numbers them in. A lane
+        // whose checkout is no longer on disk names nothing to step to.
+        let at = trees
             .iter()
-            .position(|name| *name == lane_name(lane))
+            .position(|tree| tree.name == lane_name(lane))
             .unwrap_or(0);
         let i = if forward {
-            (at + 1) % order.len()
+            (at + 1) % n
         } else {
-            (at + order.len() - 1) % order.len()
+            (at + n - 1) % n
         };
-        Some(order[i].to_string())
+        Some(trees[i].name.clone())
     }
 
     pub(super) fn set_theme(
