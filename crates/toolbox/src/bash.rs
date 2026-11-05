@@ -61,6 +61,8 @@ pub async fn foreground(command: &str, cwd: &str, ctx: &Ctx) -> Result<ToolOutpu
 pub struct Foreground {
     pub completion: Completion,
     body: String,
+    /// What the command printed, tags left out: the rows a screen shows.
+    output: Vec<String>,
     preview: String,
     changes: Option<crate::drift::Report>,
 }
@@ -85,16 +87,19 @@ impl Foreground {
     }
 
     pub fn into_output(self) -> ToolOutput {
-        let out = match self.completion {
-            Completion::Exited(code) => Ran {
-                code,
-                body: self.body,
-            }
-            .output(self.preview),
-            Completion::Background { .. } => ToolOutput::text(self.body).with_preview(self.preview),
+        let Foreground {
+            completion,
+            body,
+            output,
+            preview,
+            changes,
+        } = self;
+        let out = match completion {
+            Completion::Exited(code) => finished(code, body, preview),
+            Completion::Background { .. } => ToolOutput::text(body).with_preview(preview),
         };
-        match self.changes {
-            Some(changes) => changes.append(out),
+        match changes {
+            Some(changes) => changes.append(out, &output),
             None => out,
         }
     }
@@ -421,7 +426,7 @@ impl Bash {
     ) -> Result<Foreground, ToolError> {
         let before = crate::drift::before(ctx);
         let launched = launch(&prepared, ctx)?;
-        let (completion, body) = if let Some(executions) = &self.executions {
+        let (completion, body, output) = if let Some(executions) = &self.executions {
             let mut requests = ctx.background_requests();
             let peek = launched.streams.peek();
             // The turn can stop this wait, but must not own the cancellation
@@ -452,7 +457,8 @@ impl Bash {
                     supervise(running, execution);
                     preview = format!("{preview} [background #{id}]");
                     (Completion::Background { id },
-                     format!("The user moved this command to the background as command #{id}. Continue independent work; its result will arrive later."))
+                     format!("The user moved this command to the background as command #{id}. Continue independent work; its result will arrive later."),
+                     Vec::new())
                 }
             }
         } else {
@@ -465,6 +471,7 @@ impl Bash {
         Ok(Foreground {
             completion,
             body,
+            output,
             preview,
             changes: crate::drift::report(&moved),
         })
@@ -554,6 +561,7 @@ async fn wait(
     Ok(Ran {
         code,
         body: body(&out, &err),
+        output: screen_output([&out, &err]),
     })
 }
 
@@ -583,23 +591,27 @@ pub struct Ran {
     /// What the command printed, plus a spill note for what did not fit and
     /// any note explaining the failure. Empty when it succeeded silently.
     pub body: String,
+    /// The same lines, tags and spill notes left out: what a screen shows.
+    output: Vec<String>,
 }
 
 impl Ran {
-    fn completed(self) -> (Completion, String) {
-        (Completion::Exited(self.code), self.body)
+    fn completed(self) -> (Completion, String, Vec<String>) {
+        (Completion::Exited(self.code), self.body, self.output)
     }
+}
 
-    fn output(mut self, preview: String) -> ToolOutput {
-        if self.code != 0 {
-            self.body.push_str(&format!("exit {}\n", self.code));
-        }
-        if self.body.is_empty() {
-            self.body.push_str("exit 0, no output");
-        }
-        let out = ToolOutput::text(self.body).with_preview(preview);
-        if self.code != 0 { out.warned() } else { out }
+// The result an exited command leaves: what it printed, and the exit when it
+// did not end well.
+fn finished(code: i32, mut body: String, preview: String) -> ToolOutput {
+    if code != 0 {
+        body.push_str(&format!("exit {}\n", code));
     }
+    if body.is_empty() {
+        body.push_str("exit 0, no output");
+    }
+    let out = ToolOutput::text(body).with_preview(preview);
+    if code != 0 { out.warned() } else { out }
 }
 
 /// Run `command` to completion under the workspace's clamps — its own process
@@ -640,6 +652,7 @@ pub async fn run(
     Ok(Ran {
         code,
         body: body(&stdout, &stderr),
+        output: screen_output([&stdout, &stderr]),
     })
 }
 
@@ -657,6 +670,15 @@ pub(crate) fn body(stdout: &output::Captured, stderr: &output::Captured) -> Stri
     body
 }
 
+// The same lines as `body` holds, without the tags and spill notes: what a
+// screen shows of them.
+fn screen_output(captures: [&output::Captured; 2]) -> Vec<String> {
+    captures
+        .into_iter()
+        .flat_map(|captured| captured.text.lines().map(str::to_string))
+        .collect()
+}
+
 fn section(label: &str, s: &output::Captured) -> String {
     let body = s.text.trim_end();
     if body.is_empty() {
@@ -668,7 +690,7 @@ fn section(label: &str, s: &output::Captured) -> String {
 #[cfg(test)]
 mod background_tests {
     use super::*;
-    use crate::testing::{Sink, ctx};
+    use crate::testing::{Sink, ctx, seen};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -690,16 +712,8 @@ mod background_tests {
     #[tokio::test]
     async fn foreground_content_preserves_output_and_changes_without_exit_notices() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tracked.txt");
-        std::fs::write(&path, "before\n").unwrap();
-        std::fs::File::options()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() - Duration::from_secs(10))
-            .unwrap();
         let ctx = ctx(dir.path());
-        ctx.note_view(&path, "before\n");
+        let path = seen(dir.path(), &ctx, "tracked.txt", "before\n");
         let result = foreground_result(
             "printf 'exit 3'; printf 'after\\n' > tracked.txt; exit 3",
             ".",
@@ -718,6 +732,18 @@ mod background_tests {
         let output = result.into_output();
         assert!(output.warned);
         assert_eq!(output.flatten().matches("exit 3").count(), 2);
+        // The row the screen draws: the command, what it printed, then the
+        // file's rows — each marked, so none reads as another's.
+        let preview = output.preview();
+        let rows: Vec<&str> = preview.lines().collect();
+        assert_eq!(
+            rows[0],
+            "printf 'exit 3'; printf 'after\\n' > tracked.txt; exit 3"
+        );
+        assert_eq!(rows[1], "· exit 3");
+        assert_eq!(rows[2], "tracked.txt +1 -1", "{rows:?}");
+        assert_eq!(rows[3], "-1 before", "{rows:?}");
+        assert_eq!(rows[4], "+1 after", "{rows:?}");
     }
 
     // The call returns at once; the end comes back as one result, exit code

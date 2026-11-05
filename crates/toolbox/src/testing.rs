@@ -134,3 +134,20 @@ impl crate::channel::Channel for Handle {
 pub(crate) fn ctx(dir: &std::path::Path) -> Ctx {
     Ctx::new(tool::Workspace::new(dir).unwrap())
 }
+
+/// A file the model has seen: written, its mtime backdated so a command's own
+/// write moves it even on a coarse clock, and noted as the view.
+pub(crate) fn seen(
+    dir: &std::path::Path,
+    ctx: &Ctx,
+    name: &str,
+    content: &str,
+) -> std::path::PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, content).unwrap();
+    (std::fs::File::options().write(true).open(&path).unwrap())
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(10))
+        .unwrap();
+    ctx.note_view(&path, content);
+    path
+}

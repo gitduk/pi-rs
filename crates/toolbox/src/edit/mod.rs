@@ -4,8 +4,8 @@ mod sketch;
 
 use self::edits::{Anchor, Refusal};
 use self::notes::{blank_note, broke_syntax, notes};
-pub(crate) use self::sketch::CHANGED_RUN;
 use self::sketch::sketch;
+pub(crate) use self::sketch::{CHANGED_RUN, rows as sketch_rows};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -15,7 +15,14 @@ use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
 /// The diff a whole-file write shows: one landing that took every old row,
 /// changed runs cut past `changed_run` rows.
-pub(crate) fn rewrite_sketch(path: &str, old: &str, new: &str, changed_run: usize) -> String {
+/// The rows a whole-file rewrite changed, and the same rows as one text: the
+/// two ways a caller reads one change.
+pub(crate) fn rewrite_rows(
+    path: &str,
+    old: &str,
+    new: &str,
+    changed_run: usize,
+) -> Vec<tool::row::Row> {
     let rows = edits::split_bom(new).1.lines().count();
     let applied = edits::Applied {
         content: new.to_string(),
@@ -31,7 +38,11 @@ pub(crate) fn rewrite_sketch(path: &str, old: &str, new: &str, changed_run: usiz
         }],
         left_blank: Vec::new(),
     };
-    sketch(path, &applied, changed_run)
+    sketch_rows(path, &applied, changed_run)
+}
+
+pub(crate) fn rewrite_sketch(path: &str, old: &str, new: &str, changed_run: usize) -> String {
+    tool::row::render(&rewrite_rows(path, old, new, changed_run))
 }
 
 // What a call that gets the arguments wrong is told, so it resends the call

@@ -237,12 +237,13 @@ impl Tool for Script {
 
         let moved = crate::drift::absorb(ctx, before);
         let captured = exited.stdout;
+        let output: Vec<String> = captured.text.lines().map(str::to_string).collect();
         let out = match captured.text.trim().is_empty() {
             true => ToolOutput::text(format!("{}: no output", self.name)),
             false => ToolOutput::text(captured.noted()),
         }
         .with_preview(preview);
-        Ok(crate::drift::tell(out, &moved))
+        Ok(crate::drift::tell(out, &output, &moved))
     }
 }
 

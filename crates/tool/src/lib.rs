@@ -35,6 +35,7 @@ pub mod fold;
 pub mod limit;
 pub mod output;
 pub mod registry;
+pub mod row;
 pub mod spill;
 pub mod stamp;
 pub mod state;

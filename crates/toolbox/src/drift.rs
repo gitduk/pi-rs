@@ -7,9 +7,10 @@ use std::sync::{Arc, PoisonError};
 use std::time::SystemTime;
 
 use tool::limit::{MAX_BYTES, over_limit};
+use tool::row::{Row, render};
 use tool::{Ctx, ToolOutput};
 
-use crate::edit::{CHANGED_RUN, rewrite_sketch};
+use crate::edit::{CHANGED_RUN, rewrite_rows, rewrite_sketch};
 
 /// The diff of each file from its last view to disk, or `None`; each change
 /// is told once, the view moving to what is on disk now. A file deleted, or
@@ -90,20 +91,30 @@ impl Moved {
     pub fn sketch(&self, changed_run: usize) -> String {
         change(&self.rel, &self.was, &self.now, changed_run)
     }
+
+    /// The same change, as the rows a screen draws whole.
+    fn rows(&self) -> Vec<Row> {
+        match &self.now {
+            Disk::Text(now) => rewrite_rows(&self.rel, &self.was, now, usize::MAX),
+            Disk::Over(len) => vec![Row::Output(over_limit(&self.rel, *len))],
+            Disk::Gone => vec![Row::Output(format!("{} deleted", self.rel))],
+        }
+    }
 }
 
 /// `out` with what the command changed told after it: to the model with long
-/// runs cut, on screen whole under the row's head.
-pub fn tell(mut out: ToolOutput, moved: &[Moved]) -> ToolOutput {
+/// runs cut, on screen whole under the row's head, below what it printed.
+pub fn tell(mut out: ToolOutput, output: &[String], moved: &[Moved]) -> ToolOutput {
     if let Some(report) = report(moved) {
-        out = report.append(out);
+        out = report.append(out, output);
     }
     out
 }
 
 pub(crate) struct Report {
     pub content: String,
-    preview: String,
+    /// The same change, whole: what the screen draws under the head.
+    rows: Vec<Row>,
 }
 
 pub(crate) fn report(moved: &[Moved]) -> Option<Report> {
@@ -121,19 +132,34 @@ pub(crate) fn report(moved: &[Moved]) -> Option<Report> {
             "{files} from your earlier reads changed while this command ran:\n{}",
             all(CHANGED_RUN)
         ),
-        preview: all(usize::MAX),
+        rows: moved.iter().flat_map(Moved::rows).collect(),
     })
 }
 
+// What it printed stays a glimpse: enough to see the command said something,
+// few enough that the diff keeps its window.
+const PRINTED_ROWS: usize = 3;
+
 impl Report {
-    pub fn append(self, mut out: ToolOutput) -> ToolOutput {
+    pub fn append(self, mut out: ToolOutput, output: &[String]) -> ToolOutput {
         out.content
             .push(llm::message::ToolResultContent::Text(llm::message::Text {
                 text: self.content,
             }));
         let head = out.preview();
         let head = head.lines().next().unwrap_or_default();
-        out.preview = Some(format!("{head}\n{}", self.preview));
+        let mut rows: Vec<Row> = output
+            .iter()
+            .filter(|row| !row.trim().is_empty())
+            .take(PRINTED_ROWS)
+            .map(|row| Row::Output(row.clone()))
+            .collect();
+        rows.extend(self.rows);
+        out.preview = Some(if rows.is_empty() {
+            head.to_string()
+        } else {
+            format!("{head}\n{}", render(&rows))
+        });
         out
     }
 }
@@ -218,11 +244,12 @@ fn settle(ctx: &Ctx, path: &Path, was: &Arc<str>, now: Option<Arc<str>>) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{ctx, seen};
 
     #[test]
     fn tells_each_change_once_and_not_the_models_own() {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let ctx = ctx(dir.path());
         let (a, b) = (dir.path().join("a.txt"), dir.path().join("b.txt"));
         std::fs::write(&a, "one\ntwo\n").unwrap();
         std::fs::write(&b, "kept\n").unwrap();
@@ -244,22 +271,13 @@ mod tests {
     #[test]
     fn what_a_command_changed_is_absorbed_what_came_before_is_told() {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let ctx = ctx(dir.path());
         let (ran, theirs, gone, reread) = (
-            dir.path().join("ran.txt"),
-            dir.path().join("theirs.txt"),
-            dir.path().join("gone.txt"),
-            dir.path().join("reread.txt"),
+            seen(dir.path(), &ctx, "ran.txt", "old\n"),
+            seen(dir.path(), &ctx, "theirs.txt", "old\n"),
+            seen(dir.path(), &ctx, "gone.txt", "old\n"),
+            seen(dir.path(), &ctx, "reread.txt", "old\n"),
         );
-        // Backdated, so the command's write moves mtime even on a coarse clock.
-        let past = SystemTime::now() - std::time::Duration::from_secs(10);
-        for p in [&ran, &theirs, &gone, &reread] {
-            std::fs::write(p, "old\n").unwrap();
-            (std::fs::File::options().write(true).open(p).unwrap())
-                .set_modified(past)
-                .unwrap();
-            ctx.note_view(p, "old\n");
-        }
         std::fs::write(&theirs, "user\n").unwrap();
 
         let before = before(&ctx);
@@ -280,10 +298,43 @@ mod tests {
         assert!(told.contains("theirs.txt"), "{told}");
     }
 
+    // Changes far apart in one file read as the rows they moved; the span
+    // between them is context, not a whole-block replacement.
+    #[test]
+    fn a_change_far_from_another_is_sketched_where_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx(dir.path());
+        let old: String = (1..=521).map(|n| format!("row {n}\n")).collect();
+        let path = seen(dir.path(), &ctx, "wide.txt", &old);
+
+        let before = before(&ctx);
+        let now = old.replacen("row 57\n", "row 57 changed\n", 1).replacen(
+            "row 371\n",
+            "row 371 changed\n",
+            1,
+        );
+        std::fs::write(&path, now).unwrap();
+        let moved = absorb(&ctx, before);
+        let report = report(&moved).unwrap();
+        let text = render(&report.rows);
+        let rows: Vec<&str> = text.lines().collect();
+
+        assert_eq!(rows[0], "wide.txt +2 -2", "{rows:?}");
+        assert!(
+            rows.iter().any(|r| r.contains("row 57 changed")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("row 371 changed")),
+            "{rows:?}"
+        );
+        assert!(rows.len() < 20, "{} rows for 2 changes", rows.len());
+    }
+
     #[test]
     fn a_file_grown_past_the_limit_is_told_not_read() {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let ctx = ctx(dir.path());
         let log = dir.path().join("big.log");
         std::fs::write(&log, "small\n").unwrap();
         ctx.note_view(&log, "small\n");
