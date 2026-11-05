@@ -99,8 +99,13 @@ impl crate::channel::Channel for Handle {
             .unwrap()
             .push(format!("result {}", text.trim()));
     }
-    fn input(&self, text: String) {
-        self.said.lock().unwrap().push(format!("input {text}"));
+    fn input(&self, text: String, note: String) {
+        let said = if note.is_empty() {
+            format!("input {text}")
+        } else {
+            format!("input {text} ({note})")
+        };
+        self.said.lock().unwrap().push(said);
     }
     fn choose(&self, asked: crate::channel::Asked) {
         self.said.lock().unwrap().push(format!(
@@ -120,6 +125,9 @@ impl crate::channel::Channel for Handle {
     }
     fn follow(&self) {
         self.said.lock().unwrap().push("follow".into());
+    }
+    fn drive(&self, on: bool) {
+        self.said.lock().unwrap().push(format!("drive {on}"));
     }
 }
 

@@ -507,6 +507,10 @@ const TOOL_CREATOR: &str = include_str!("../../skills/tool-creator/SKILL.md");
 // Both creators write text that a model reads, so they share one guide.
 const WRITING: (&str, &str) = ("writing.md", include_str!("../../skills/writing.md"));
 
+// A script's fd 3 protocol: what it may say and what pi writes back. A script
+// author and a driver of one read the same page.
+const EVENTS: (&str, &str) = ("events.md", include_str!("../../skills/events.md"));
+
 const TOOL_CREATOR_FILES: [(&str, &str); 4] = [
     (
         "interface.md",
@@ -516,10 +520,7 @@ const TOOL_CREATOR_FILES: [(&str, &str); 4] = [
         "background.md",
         include_str!("../../skills/tool-creator/background.md"),
     ),
-    (
-        "events.md",
-        include_str!("../../skills/tool-creator/events.md"),
-    ),
+    EVENTS,
     WRITING,
 ];
 
@@ -571,7 +572,7 @@ const ARCHITECTURE: &str = include_str!("../../skills/architecture/SKILL.md");
 // What a session, a tool, a script or a file does: the pages the README no
 // longer carries, so the model can answer for them.
 const PI_USAGE: &str = include_str!("../../skills/pi-usage/SKILL.md");
-const PI_USAGE_FILES: [(&str, &str); 4] = [
+const PI_USAGE_FILES: [(&str, &str); 5] = [
     (
         "references/session.md",
         include_str!("../../skills/pi-usage/references/session.md"),
@@ -580,6 +581,7 @@ const PI_USAGE_FILES: [(&str, &str); 4] = [
         "references/tools.md",
         include_str!("../../skills/pi-usage/references/tools.md"),
     ),
+    ("references/events.md", EVENTS.1),
     (
         "references/context.md",
         include_str!("../../skills/pi-usage/references/context.md"),

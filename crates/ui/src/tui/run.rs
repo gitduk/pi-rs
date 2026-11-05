@@ -103,6 +103,7 @@ impl Tui {
                 input: super::view::Pending::Prompt(ask),
                 request,
                 line,
+                note: String::new(),
             });
             return false;
         }
@@ -343,10 +344,9 @@ impl Tui {
         } = fetched;
         let token = request.lane;
         let front = self.core.lane().token() == token;
-        let started = match text {
+        match text {
             Err(why) => {
                 self.complete(request, Output::Notice(String::new()), Outcome::Failed(why));
-                false
             }
             Ok(send) if front && !self.core.lane().is_running() => {
                 self.echo(&typed);
@@ -354,7 +354,7 @@ impl Tui {
                     super::clipboard::prompt(send, Some(typed), &self.ui.images),
                     request,
                     done,
-                )
+                );
             }
             Ok(_) if !front => {
                 self.complete(
@@ -364,7 +364,6 @@ impl Tui {
                         "{typed} came back after its lane left the front; run it again"
                     )),
                 );
-                false
             }
             Ok(_) => {
                 self.complete(
@@ -374,15 +373,7 @@ impl Tui {
                         "{typed} came back while another turn ran; run it again"
                     )),
                 );
-                false
             }
-        };
-        if !started
-            && request.origin == Origin::Loop
-            && let Some(at) = self.core.position_of(token)
-            && let Some(said) = self.drivers.unstarted(request)
-        {
-            self.say_notice_of(at, &said);
         }
     }
 
@@ -651,10 +642,7 @@ impl Tui {
                 tracing::warn!(target: "pi::loop", lane = token, error = %why, "run failed")
             }
         }
-        let cap = self.core.config.loop_cap();
-        let ended = self
-            .drivers
-            .turn_ended(token, &how, self.core.lanes[lane].ctx(), cap);
+        self.drivers.turn_ended(token, &how);
 
         let ok = out.is_ok();
         // Non-model tasks have their ending in the operation output. The
@@ -679,9 +667,6 @@ impl Tui {
         }
         // Last, and outside the split: a rewind rebuilds the whole surface, and
         // a row landed before it would go with the old drawing.
-        if let Some(ended) = ended {
-            self.say_notice_of(lane, &ended);
-        }
     }
 
     async fn settle_compact(&mut self, lane: usize, done: Done) {

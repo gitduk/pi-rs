@@ -22,7 +22,7 @@ fn bridge(tui: &Tui) -> (Arc<dyn RunHandle>, UnboundedReceiver<Told>) {
 }
 
 async fn submit(tui: &mut Tui, execution: &dyn RunHandle, text: &str) -> UnboundedReceiver<Done> {
-    execution.channel().input(text.into());
+    execution.channel().input(text.into(), String::new());
     let (origin, wake) = tui.driver_line().expect("the submission was received");
     let (replies, inb) = crate::tui::run::Replies::channels();
     match wake {
@@ -126,8 +126,7 @@ async fn a_status_request_and_a_refused_compact_do_not_end_the_running_models_re
         dir.path(),
         &agent::Event::TextDelta("the model's answer".into()),
     );
-    tui.drivers
-        .turn_ended(request.lane, &Ended::Done, tui.core.lane().ctx(), None);
+    tui.drivers.turn_ended(request.lane, &Ended::Done);
     assert_eq!(
         response(&mut rx),
         (
@@ -469,8 +468,7 @@ async fn moving_from_prompt_fetch_to_model_execution_begins_and_ends_only_once()
         dir.path(),
         &agent::Event::TextDelta("done".into()),
     );
-    tui.drivers
-        .turn_ended(request.lane, &Ended::Done, tui.core.lane().ctx(), None);
+    tui.drivers.turn_ended(request.lane, &Ended::Done);
     assert_eq!(
         response(&mut rx),
         (

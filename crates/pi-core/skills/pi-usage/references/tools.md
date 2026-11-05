@@ -112,47 +112,7 @@ These wrappers are available only in interactive sessions.
 
 A script can write JSON lines to file descriptor 3 (fd 3), specified by
 `PI_EVENTS_FD`.
-
-| Event | Purpose |
-| --- | --- |
-| `status` | Report progress. |
-| `result` | Send a result that opens a turn. Stdout at exit supplies the final result. |
-| `input` | Submit a person's line as if typed, including commands. A leading space sends slash-prefixed text as prose. |
-| `choose` with `options` | Ask a question, as with the `choose` tool. Stopping the command withdraws it. |
-| `interrupt` | Stop the checkout's turn. |
-| `follow` | Receive every turn in the checkout. |
-
-Send content only the person needs, such as a QR code, to stderr.
-The person opens the command to read it.
-pi reports each turn opened by an input through fd 3.
-After `follow`, it also reports other turns in the checkout.
-The sequence is `started`, optional `{"progress": "..."}` messages, then `reply`.
-`reply` contains the remaining answer, excluding text already sent as progress.
-
-Progress includes completed model text before tool calls and changed tool or
-command output. pi paces these updates while work continues.
-A following script also receives each question in the checkout:
-
-1. `{"question": {"id", "text", "options", "back"}}` when the question appears.
-2. `{"closed": <id>}` when someone answers or withdraws it.
-
-Answer a question with `{"answer": <id>, "picks": [0]}`, using option positions.
-pi submits the selection as if the person typed it.
-If pi rejects the answer, the script receives `{"refused": <id>, "why"}`.
-An `input` closes every question that does not wait.
-
-Foreground scripts can use `choose`.
-pi answers on fd 3 with `{"asked": true}` when the question appears, or an
-`error` that explains the failure.
-With `"answer": "back"`, pi returns the selection to the script instead of
-submitting it:
-
-- `{"answer": "<option>"}` for a selected option.
-- The person's own words if they wrote an answer.
-- `{"answer": null}` when the person closes the question.
-
-Use this mode for a script that waits for the person, such as approval before a
-command runs.
+What it may say there, and what pi writes back, is `references/events.md`.
 
 ## Questions
 

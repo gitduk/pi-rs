@@ -9,7 +9,6 @@
 | `/worktree [name]`, `/worktree rm` | work in `<repo>.worktrees/<name>`             |
 | `/mv <dir>`                        | move this session and its background commands to another directory |
 | `/compact [focus]`                 | summarize everything but the working tail     |
-| `/loop <line>`                     | resubmit a line until a round edits no file   |
 | `/<tool> [key=value…]`             | run a named tool. Background tools return immediately |
 | `/mcp`, `/mcp restart [name]`      | list MCP servers and tools, or reconnect      |
 | `/settings`                        | edit the project's config                     |

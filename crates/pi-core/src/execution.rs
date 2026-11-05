@@ -79,7 +79,6 @@ pub enum Action {
         word: String,
         args: String,
     },
-    Drive(crate::input::Drive),
     Quit,
 }
 
@@ -113,7 +112,6 @@ pub fn dispatch(core: &mut Core, intent: Intent) -> Action {
         Step::Edit(path) => return Action::Edit(path),
         Step::Removal(removal) => return Action::Removal(removal),
         Step::Surface { word, args } => return Action::Surface { word, args },
-        Step::Drive(drive) => return Action::Drive(drive),
         Step::Quit => return Action::Quit,
     };
     Action::Complete { change, output }

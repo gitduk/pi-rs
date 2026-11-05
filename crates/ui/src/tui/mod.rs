@@ -450,8 +450,8 @@ impl Tui {
                     Mark::Front
                 } else {
                     match lane.run() {
-                        // A loop between rounds: the lane has not finished.
-                        Run::Ended { ok: true, .. } if self.drivers.holds(lane.token()) => {
+                        // A driven lane between rounds: it has not finished.
+                        Run::Ended { ok: true, .. } if self.drivers.holds(lane.root()) => {
                             Mark::Plain
                         }
                         Run::Ended { ok: true, .. } => Mark::Done,
@@ -483,14 +483,14 @@ impl Tui {
         self.ui.tabs = tabs;
     }
 
-    // Drops idle lanes whose checkout was deleted outside pi (a running
-    // or looping one keeps its index). Silent — the bar says it's gone.
+    // Drops idle lanes whose checkout was deleted outside pi (a working
+    // or driven one keeps its index). Silent — the bar says it's gone.
     fn drop_vanished_lanes(&mut self) {
         let mut gone: Vec<usize> = Vec::new();
         // Back to front, stopping at a working lane: removing one before
         // it would shift the index a run reports back by.
         for (at, lane) in self.core.lanes.iter().enumerate().rev() {
-            if lane.is_running() || self.drivers.holds(lane.token()) {
+            if lane.is_running() || self.drivers.holds(lane.root()) {
                 break;
             }
             if at == self.core.current {
@@ -596,7 +596,6 @@ impl Tui {
 
     fn land_driven(&mut self, said: Said) {
         match said {
-            Said::Nothing => {}
             Said::Notice(line) => self.notice(line),
             Said::Noted(line, note) => {
                 self.notice(line);
@@ -604,9 +603,6 @@ impl Tui {
                 let view = front_view(&mut self.views, lane);
                 self.ui.say_note(lane, view, &note);
             }
-            Said::Transcript(line) => self
-                .ui
-                .say_notice(front_view(&mut self.views, self.core.lane()), &line),
         }
     }
 
@@ -615,12 +611,20 @@ impl Tui {
         self.ui.say_notice(view, text);
     }
 
+    // A note rides the turn its line opens: nothing else reads it.
+    fn file_note(&mut self, note: &str) {
+        if !note.is_empty() {
+            self.core.lane_mut().push_note(note);
+        }
+    }
+
     // The one gate every input passes, so two ways of asking the same
     // thing can't get different answers. `fate` decides only mid-run.
-    fn admit(&mut self, asked: Asked, origin: Origin, line: Option<String>) -> Wake {
+    fn admit(&mut self, asked: Asked, origin: Origin, line: Option<String>, note: &str) -> Wake {
         if !self.core.lane().is_running()
             || matches!(&asked, Asked::Core(Intent::Prompt(_))) && origin == Origin::Typed
         {
+            self.file_note(note);
             return Wake::Do(asked, line);
         }
         let intent = match asked {
@@ -645,6 +649,7 @@ impl Tui {
                     input: Pending::Intent(intent),
                     request: pi_core::execution::Request::new(origin, self.core.lane().token()),
                     line,
+                    note: note.to_string(),
                 });
                 Wake::Nothing
             }
@@ -702,7 +707,7 @@ impl Tui {
             && self.ui.editor.is_empty()
             && self.ui.background_open.is_none()
             && (self.views.values()).all(|v| v.draft.is_empty() && v.queued.is_empty())
-            && !(self.core.lanes.iter()).any(|lane| self.drivers.holds(lane.token()));
+            && !(self.core.lanes.iter()).any(|lane| self.drivers.holds(lane.root()));
         if !settled {
             return None;
         }
@@ -733,10 +738,7 @@ impl Tui {
                 self.cancel_queued(request, "its session was removed");
             }
             let core = &self.core;
-            for said in self.drivers.retain(|t| core.position_of(t).is_some()) {
-                self.ui
-                    .say_notice(front_view(&mut self.views, self.core.lane()), &said);
-            }
+            self.drivers.retain(|t| core.position_of(t).is_some());
             // A list that answers is taken up at once rather than at the next
             // walk, so its facts are in force before the first keypress is.
             if self.core.awaiting_models()
@@ -796,8 +798,8 @@ impl Tui {
             let waiting = !view.queued.is_empty();
             // Who sent what is carried out this pass.
             let mut origin = Origin::Typed;
-            // Results and loops wait for a free lane. User submissions also
-            // reach admission during a run, so immediate commands can answer.
+            // Results and driven lines wait for a free lane. User submissions
+            // also reach admission during a run, so immediate commands can answer.
             let free = !running && !waiting;
             let driven = (free || running).then(|| self.driver_line()).flatten();
             if free
@@ -872,7 +874,7 @@ impl Tui {
                             if line.is_some() {
                                 self.save_history();
                             }
-                            self.admit(intent, Origin::Typed, line)
+                            self.admit(intent, Origin::Typed, line, "")
                         }
                         None => Wake::Leave("The terminal input closed; pi exited."),
                     },
@@ -904,7 +906,7 @@ impl Tui {
                     if self.resume_queued(queued, &replies).await {
                         break match origin {
                             Origin::Typed => "The user exited pi.",
-                            Origin::Loop | Origin::Background | Origin::Input(_) => {
+                            Origin::Background | Origin::Input(_) => {
                                 "pi exited in response to a background command."
                             }
                         };
@@ -927,7 +929,7 @@ impl Tui {
             if self.execute(intent, origin, line, &replies).await {
                 break match origin {
                     Origin::Typed => "The user exited pi.",
-                    Origin::Loop | Origin::Background | Origin::Input(_) => {
+                    Origin::Background | Origin::Input(_) => {
                         "pi exited in response to a background command."
                     }
                 };
@@ -946,7 +948,7 @@ impl Tui {
         let next = if lane.is_running() {
             self.drivers.next_input(lane.root())?
         } else {
-            self.drivers.next(lane.token(), lane.root(), lane.ctx())?
+            self.drivers.next(lane.root(), lane.ctx())?
         };
         let view = front_view(&mut self.views, self.core.lane());
         view.surface.follow();
@@ -971,10 +973,11 @@ impl Tui {
                     &self.core.commands,
                     Some(&self.core.lane().agent().brief.registry),
                 );
-                if !next.note.is_empty() {
-                    self.core.lane_mut().push_note(&next.note);
-                }
-                self.admit(Asked::Core(intent), next.origin, Some(next.line))
+                let note = match intent.starts_turn(&self.core.commands) {
+                    true => next.note,
+                    false => String::new(),
+                };
+                self.admit(Asked::Core(intent), next.origin, Some(next.line), &note)
             }
         };
         Some((next.origin, wake))

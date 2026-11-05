@@ -177,7 +177,12 @@ impl Inner {
             );
             match &mut back {
                 Back::Result(due) => due.line.push_str(&format!("\n\n{dropped}")),
-                Back::Input { note, .. } => *note = dropped,
+                Back::Input { note, .. } => {
+                    if !note.is_empty() {
+                        note.push('\n');
+                    }
+                    note.push_str(&dropped);
+                }
             }
         }
         settle(&mut self.items, at);
@@ -239,6 +244,8 @@ struct Item {
     requests: HashMap<u64, RequestPhase>,
     // It asked to stop its checkout's running turn, not yet acted on.
     interrupt: bool,
+    // It claimed its checkout's turns.
+    driving: bool,
     // Reads the latest of what it printed; None for one that keeps none.
     output: Option<Peek>,
     // How much of `output` the model has read, in bytes.
@@ -318,6 +325,7 @@ impl Item {
             listens: Listens::Never,
             requests: HashMap::new(),
             interrupt: false,
+            driving: false,
             output: None,
             read_to: 0,
             told: false,
@@ -339,6 +347,8 @@ impl Item {
         self.phase = Phase::Over { stopped };
         self.listens = Listens::Never;
         self.requests.clear();
+        // An execution that is over owes no further turn.
+        self.driving = false;
         self.ended_last =
             (self.output.as_ref()).map(|peek| pi_store::text::last_line(&peek.latest()));
     }
@@ -358,7 +368,7 @@ impl Item {
         }
     }
 
-    // Nothing of the last run is left to show or deliver.
+    // Nothing of the last run is left to show, deliver, or claim.
     fn clear_run(&mut self) {
         self.requests.clear();
         self.last_output.clear();
@@ -367,6 +377,7 @@ impl Item {
         self.progress.clear();
         self.waiting.clear();
         self.dropped = 0;
+        self.driving = false;
     }
 
     // The execution as a person reads it: `judge #3`.
@@ -599,6 +610,15 @@ impl Table {
 
     fn wake(&self) {
         self.changed.notify_one();
+    }
+
+    /// Whether a running execution of `root` claimed its turns: a lane that
+    /// ends meanwhile is not done.
+    pub fn driving(&self, root: &Path) -> bool {
+        self.lock()
+            .items
+            .iter()
+            .any(|i| i.root == root && i.driving && i.running())
     }
 
     /// Now, if an execution for `root` has something waiting.
@@ -1440,7 +1460,7 @@ impl toolbox::channel::Channel for Handle {
 
     // Writing instead of picking answers every question that does not wait:
     // what they wrote is the answer.
-    fn input(&self, text: String) {
+    fn input(&self, text: String, note: String) {
         tracing::info!(target: "pi::background", execution = self.id, bytes = text.len(), "input");
         let mut inner = self.table.lock();
         let Some(at) = inner.mine(self.id, self.run) else {
@@ -1454,10 +1474,7 @@ impl toolbox::channel::Channel for Handle {
         for id in lapsed {
             inner.close(id, "the person wrote instead");
         }
-        inner.items[at].wait(Back::Input {
-            text,
-            note: String::new(),
-        });
+        inner.items[at].wait(Back::Input { text, note });
         drop(inner);
         self.table.wake();
     }
@@ -1551,6 +1568,11 @@ impl toolbox::channel::Channel for Handle {
         }
         drop(inner);
         self.table.wake();
+    }
+
+    fn drive(&self, on: bool) {
+        tracing::info!(target: "pi::background", execution = self.id, on, "drives");
+        self.table.update(self.id, self.run, |i| i.driving = on);
     }
 }
 
@@ -2219,6 +2241,38 @@ mod tests {
         execution
     }
 
+    // A running execution claims its checkout's turns; an ended one owes none.
+    #[test]
+    fn a_driven_checkout_is_held_until_the_execution_says_off_or_ends() {
+        let table = Arc::new(Table::default());
+        let root = Path::new("/checkout");
+        let execution = start(&table, root, "driver");
+        assert!(!table.driving(root), "nothing claims it yet");
+        execution.channel().drive(true);
+        assert!(table.driving(root));
+        execution.channel().drive(false);
+        assert!(!table.driving(root), "said off");
+        execution.channel().drive(true);
+        execution.end();
+        assert!(!table.driving(root), "an ended execution owes nothing");
+    }
+
+    // A claim is the run's, not the item's: the run started over is not the one
+    // that made it.
+    #[tokio::test]
+    async fn a_restarted_execution_claims_nothing_of_the_run_it_replaced() {
+        let table = Arc::new(Table::default());
+        let root = Path::new("/checkout");
+        let (execution, _reruns) = rerunnable(&table, root);
+        execution.channel().drive(true);
+        assert!(table.driving(root));
+        table.restart(root, execution.id()).unwrap();
+        assert!(
+            !table.driving(root),
+            "the claim went with the run it was made by"
+        );
+    }
+
     // What a command listened on closes when it ends, though it stays listed.
     #[test]
     fn an_ended_command_lets_go_of_its_channel() {
@@ -2334,7 +2388,9 @@ mod tests {
         );
         execution.channel().listen(tx);
         execution.channel().result("connected".into());
-        execution.channel().input("why did the tests fail".into());
+        execution
+            .channel()
+            .input("why did the tests fail".into(), String::new());
         assert!(matches!(table.take_back(&root), Some((_, Back::Result(_)))));
         let Some((id, Back::Input { text, note, .. })) = table.take_back(&root) else {
             panic!("the input comes next")
@@ -2358,7 +2414,9 @@ mod tests {
         let root = PathBuf::from("/checkout");
         let execution = start(&table, &root, "wechat");
         for n in 0..MAX_WAITING + 2 {
-            execution.channel().input(format!("line {n}"));
+            execution
+                .channel()
+                .input(format!("line {n}"), String::new());
         }
         let mut last = None;
         while let Some((_, back)) = table.take_back(&root) {
@@ -2568,7 +2626,7 @@ mod tests {
         for q in &up {
             assert!(matches!(rx.try_recv(), Ok(Told::Question { id, .. }) if id == q.id));
         }
-        bridge.channel().input("neither".into());
+        bridge.channel().input("neither".into(), String::new());
         assert_eq!(rx.try_recv(), Ok(Told::Closed(up[1].id)), "it lapsed");
         assert_eq!(table.questions(&root).len(), 1, "one that waits stays");
         bridge.channel().answer(up[0].id, vec![1]);

@@ -1615,8 +1615,8 @@ mod tests {
         }
     }
 
-    // Whatever the user's side files after a stop — a shell command, a command's or
-    // loop's note — must not split a `tool_use` from its result: providers
+    // Whatever the user's side files after a stop — a shell command or a
+    // command's note — must not split a `tool_use` from its result: providers
     // 400 on a result that is not first in its user turn.
     #[test]
     fn user_side_entries_after_a_stop_follow_the_closing_result() {

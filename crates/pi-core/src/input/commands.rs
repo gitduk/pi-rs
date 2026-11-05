@@ -138,12 +138,6 @@ pub(crate) const BUILTIN: &[Command] = &[
         |_, rest| Intent::Builtin(Builtin::Compact(rest)),
     ),
     Command::builtin(
-        "/loop",
-        Args::optional("text", Values::Text),
-        "repeat a line while it keeps changing the tree; bare, stop one",
-        |_, rest| Intent::Builtin(Builtin::Loop(rest)),
-    ),
-    Command::builtin(
         "/effort",
         Args::optional("level", Values::Fixed(pi_store::args::EffortArg::names)),
         "how hard the model thinks, from the next request on",

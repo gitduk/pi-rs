@@ -57,8 +57,6 @@ pub enum Builtin {
     // A file the model is given, by the name `/edit` lists it under, or
     // empty to list them.
     Edit(String),
-    // What to run over and over, or empty to stop the loop in force.
-    Loop(String),
     // Bare, the MCP servers and their tools; `restart [name]` reconnects.
     Mcp(String),
     // `/new` and whatever else the surface asks it by are one variant: a fresh
@@ -132,8 +130,6 @@ impl Intent {
             Intent::Other { .. } | Intent::Prompt(_) => Fate::Queued,
             // The surface answers it from what it holds, not from the run.
             Intent::Surface { .. } => Fate::Now,
-            // Its first round is due at once, and a round wants the lane free.
-            Intent::Builtin(Builtin::Loop(_)) => Fate::Queued,
             // Beside the run: it touches neither the transcript nor the turn.
             Intent::Tool { .. } => Fate::Now,
             // A `!` files its result in the transcript, which the run has.
@@ -144,6 +140,20 @@ impl Intent {
             // Both reach for the transcript, and the run is holding it.
             // Leaving is never refused: a hung run must not trap the user.
             Intent::Builtin(Builtin::Quit) => Fate::Now,
+        }
+    }
+
+    /// Whether carrying this out opens a model turn: only a turn reads a note
+    /// filed before it.
+    pub fn starts_turn(&self, commands: &[Command]) -> bool {
+        match self {
+            Intent::Prompt(_) => true,
+            Intent::Other { word, .. } => starts_turn(commands, word),
+            Intent::Bash(_)
+            | Intent::Builtin(_)
+            | Intent::Surface { .. }
+            | Intent::Tool { .. }
+            | Intent::Background(_) => false,
         }
     }
 }
@@ -395,9 +405,6 @@ pub enum Step {
         args: String,
         typed: String,
     },
-    // A command for what drives a lane from outside. The surface hands it
-    // to the drivers and places what they answer.
-    Drive(Drive),
     // A file to open in `$EDITOR`, everything it feeds rebuilt after: the
     // editor takes the terminal, which only the surface can give away.
     Edit(std::path::PathBuf),
@@ -417,13 +424,6 @@ pub enum Step {
     // a notice when it could not be written.
     Rewound(Rewound, Option<String>),
     Quit,
-}
-
-/// A command for a driver.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Drive {
-    /// `/loop` over a goal already known to start a turn; `None` stops it.
-    Loop(Option<String>),
 }
 
 /// Lines of a notice folded into one.

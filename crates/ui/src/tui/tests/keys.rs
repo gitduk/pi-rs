@@ -25,7 +25,12 @@ async fn an_idle_lane_opens_the_rewind_selector() {
     let mut tui = surface(dir.path());
     assert!(
         matches!(
-            tui.admit(Asked::Own(Deed::Rewind), crate::tui::Origin::Typed, None),
+            tui.admit(
+                Asked::Own(Deed::Rewind),
+                crate::tui::Origin::Typed,
+                None,
+                ""
+            ),
             crate::tui::Wake::Nothing
         ),
         "the run in flight refuses it"
@@ -70,7 +75,7 @@ async fn an_idle_lane_opens_the_rewind_selector() {
     );
 
     let crate::tui::Wake::Do(Asked::Own(deed), _) =
-        tui.admit(asked, crate::tui::Origin::Typed, None)
+        tui.admit(asked, crate::tui::Origin::Typed, None, "")
     else {
         panic!("an idle lane refused the rewind: {:?}", tui.ui.flash);
     };
@@ -199,9 +204,12 @@ async fn the_rewind_of_a_lane_with_no_transcript_says_so() {
         "the transcript is gone"
     );
 
-    let crate::tui::Wake::Do(Asked::Own(deed), _) =
-        tui.admit(Asked::Own(Deed::Rewind), crate::tui::Origin::Typed, None)
-    else {
+    let crate::tui::Wake::Do(Asked::Own(deed), _) = tui.admit(
+        Asked::Own(Deed::Rewind),
+        crate::tui::Origin::Typed,
+        None,
+        "",
+    ) else {
         panic!("an idle lane refused the rewind: {:?}", tui.ui.flash);
     };
     tui.carry(deed).await;
@@ -209,8 +217,8 @@ async fn the_rewind_of_a_lane_with_no_transcript_says_so() {
     assert!(tui.ui.editor.is_empty(), "there is nothing to go back to");
 }
 
-// `/new`, `/worktree` to an open checkout, and `/loop` (which only arms a
-// lane) all answer empty; a dismiss-for-nothing overlay is worse than silence.
+// `/new` and `/worktree` to an open checkout both answer empty; a
+// dismiss-for-nothing overlay is worse than silence.
 #[tokio::test]
 async fn an_empty_command_page_is_not_opened() {
     let dir = tempfile::tempdir().expect("a checkout");

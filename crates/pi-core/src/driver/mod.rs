@@ -1,11 +1,11 @@
-//! What drives a lane from outside the keyboard: an execution, a `/loop`.
+//! What drives a lane from outside the keyboard: an execution, a person through
+//! one, a program claiming the checkout's turns.
 //!
 //! A driver hears the progress and end of turns its own lines began; `Drivers`
 //! keeps that ledger so the surface need not know which driver cares.
 
 pub mod background;
 pub mod input;
-pub mod looping;
 
 use std::sync::Arc;
 
@@ -15,16 +15,13 @@ use tool::Ctx;
 use toolbox::channel::Response;
 use toolbox::channel::Told;
 
-use crate::input::Drive;
-use looping::Loops;
-
 /// Who sent a line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     Typed,
-    Loop,
     Background,
-    /// A person speaking through execution `0`: the operation's answer goes back to it.
+    /// A line an execution submitted, as if typed: the operation's answer
+    /// goes back to it.
     Input(u64),
 }
 
@@ -49,16 +46,13 @@ impl Ended {
     }
 }
 
-/// What a driver's command answers, and where it goes.
+/// What a command control answers, and where it goes.
 pub enum Said {
-    Nothing,
     // A refusal or what did not happen: a notice, not an answer.
     Notice(String),
     // A notice (empty when there is none) and a note the model reads before
     // it next speaks: something it started was changed under it.
     Noted(String, String),
-    // Something that happened to the lane, filed with its transcript.
-    Transcript(String),
 }
 
 /// A line a driver sends a free lane, and the note that goes before it.
@@ -73,7 +67,6 @@ pub struct Next {
 
 #[derive(Default)]
 pub struct Drivers {
-    loops: Loops,
     executions: Arc<background::Table>,
     // Runs an execution is told the end of — its input opened them, or it follows
     // its checkout — each with its answer so far.
@@ -93,7 +86,7 @@ struct Owed {
 }
 
 impl Drivers {
-    /// Take a submitted user line without consuming background results or loops.
+    /// Take a submitted user line without consuming background results.
     pub fn next_input(&self, root: &std::path::Path) -> Option<Next> {
         let (execution, background::Back::Input { text, note }) =
             self.executions.take_input(root)?
@@ -114,7 +107,6 @@ impl Drivers {
             self.running.insert(request.lane, request);
             match request.origin {
                 Origin::Input(execution) => self.owe_request(execution, request.lane, request.id),
-                Origin::Loop => self.loops.ask(request.lane),
                 Origin::Typed | Origin::Background => {}
             }
         } else {
@@ -146,56 +138,23 @@ impl Drivers {
     /// only when the lane is free and nothing typed is waiting: what the user
     /// says comes first.
     ///
-    /// Queued execution results together first: they were due already, and a loop's
-    /// next round can wait one turn where a loop that never settles would hold
-    /// them off for good. Inputs through executions keep their own turns.
-    pub fn next(&mut self, lane: u64, root: &std::path::Path, ctx: &Ctx) -> Option<Next> {
-        Some(match self.executions.take_back(root) {
-            Some((_, background::Back::Result(due))) => Next {
+    /// Queued execution results first: they were due already, and an input of
+    /// a driving execution can wait one turn. Inputs keep their own turns.
+    pub fn next(&mut self, root: &std::path::Path, ctx: &Ctx) -> Option<Next> {
+        Some(match self.executions.take_back(root)? {
+            (_, background::Back::Result(due)) => Next {
                 note: due.note_for(ctx),
                 line: due.line,
                 origin: Origin::Background,
                 label: Some(due.label),
             },
-            Some((execution, background::Back::Input { text, note })) => Next {
+            (execution, background::Back::Input { text, note }) => Next {
                 line: text,
                 note,
                 origin: Origin::Input(execution),
                 label: None,
             },
-            None => {
-                let due = self.loops.due(lane)?;
-                Next {
-                    line: due.goal,
-                    note: due.note,
-                    origin: Origin::Loop,
-                    label: None,
-                }
-            }
         })
-    }
-
-    /// Carry out a driver's command, given on `lane`.
-    pub fn command(&mut self, drive: Drive, lane: u64, ctx: &Ctx) -> Said {
-        match drive {
-            Drive::Loop(Some(goal)) => match self.loops.start(lane, goal, ctx) {
-                Ok(()) => Said::Nothing,
-                Err(why) => Said::Notice(why),
-            },
-            Drive::Loop(None) => match self.loops.stop(lane) {
-                // A loop really ended: that belongs in the transcript.
-                Some(said) => Said::Transcript(said),
-                None => Said::Notice("no loop here".into()),
-            },
-        }
-    }
-
-    /// A loop's line did not start a model run.
-    pub fn unstarted(&mut self, request: Request) -> Option<String> {
-        match request.origin {
-            Origin::Loop => self.loops.unstarted(request.lane),
-            Origin::Typed | Origin::Background | Origin::Input(_) => None,
-        }
     }
 
     /// One event from any lane's run, on the checkout at `root`; each driver
@@ -244,15 +203,8 @@ impl Drivers {
         }
     }
 
-    /// A run on `lane` ended. What comes back says why a loop ended, if one
-    /// did; `cap` is the config's ceiling on its rounds.
-    pub fn turn_ended(
-        &mut self,
-        lane: u64,
-        ended: &Ended,
-        ctx: &Ctx,
-        cap: Option<usize>,
-    ) -> Option<String> {
+    /// A run on `lane` ended.
+    pub fn turn_ended(&mut self, lane: u64, ended: &Ended) {
         self.running.remove(&lane);
         for owed in self.owed.extract_if(.., |o| o.lane == lane) {
             self.executions.tell(
@@ -263,18 +215,15 @@ impl Drivers {
                 }),
             );
         }
-        self.loops
-            .turn_ended(lane, ended, ctx, cap)
-            .and_then(|round| round.ending())
     }
 
-    /// Whether a driver will send `lane` more: it has not finished.
-    pub fn holds(&self, lane: u64) -> bool {
-        self.loops.active(lane)
+    /// Whether a driver will send the lane at `root` more: it has not finished.
+    pub fn holds(&self, root: &std::path::Path) -> bool {
+        self.executions.driving(root)
     }
 
-    /// End the loops of lanes that are gone, saying which ended.
-    pub fn retain(&mut self, live: impl Fn(u64) -> bool) -> Vec<String> {
+    /// End the runs of lanes that are gone.
+    pub fn retain(&mut self, live: impl Fn(u64) -> bool) {
         self.running.retain(|lane, _| live(*lane));
         // A command left waiting on a reply would wait for good.
         for owed in self.owed.extract_if(.., |o| !live(o.lane)) {
@@ -286,7 +235,6 @@ impl Drivers {
                 }),
             );
         }
-        self.loops.retain(live)
     }
 }
 
@@ -404,14 +352,14 @@ mod tests {
         .unwrap();
         assert!(out.flatten().contains("command #1"));
         assert!(!marker.exists(), "the command has not finished");
-        assert!(drivers.next(1, root, &ctx).is_none());
+        assert!(drivers.next(root, &ctx).is_none());
         ctx.cancel.cancel();
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!marker.exists(), "ending the turn does not stop it");
         let next = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let changed = table.changed().notified();
-                if let Some(next) = drivers.next(1, root, &ctx) {
+                if let Some(next) = drivers.next(root, &ctx) {
                     break next;
                 }
                 changed.await;
@@ -422,7 +370,7 @@ mod tests {
         assert_eq!(next.origin, Origin::Background);
         assert!(next.line.contains("finished"));
         assert!(marker.exists());
-        assert!(drivers.next(1, root, &ctx).is_none(), "reported once");
+        assert!(drivers.next(root, &ctx).is_none(), "reported once");
     }
 
     #[tokio::test]
@@ -457,7 +405,7 @@ mod tests {
         first.channel().result("built".into());
         first.end();
 
-        let next = drivers.next(1, root, &ctx).unwrap();
+        let next = drivers.next(root, &ctx).unwrap();
         assert_eq!(next.origin, Origin::Background);
         assert_eq!(next.label.as_deref(), Some("2 background command results"));
         assert_eq!(
@@ -466,17 +414,17 @@ mod tests {
         );
         assert!(next.note.contains("2 queued results"));
         assert!(
-            drivers.next(1, root, &ctx).is_none(),
+            drivers.next(root, &ctx).is_none(),
             "one turn drains the backlog"
         );
         assert!(
             table.background(root).is_empty(),
             "ended executions are settled"
         );
-        let next = drivers.next(2, elsewhere, &ctx).unwrap();
+        let next = drivers.next(elsewhere, &ctx).unwrap();
         assert!(next.line.ends_with("another checkout"));
         assert!(next.note.contains("background command #2 (other)"));
-        assert!(drivers.next(2, elsewhere, &ctx).is_none());
+        assert!(drivers.next(elsewhere, &ctx).is_none());
     }
 
     // What the run wrote after a command started is named beside its result;
@@ -500,7 +448,7 @@ mod tests {
         build.channel().result("built".into());
         build.end();
 
-        let note = drivers.next(1, root, &ctx).unwrap().note;
+        let note = drivers.next(root, &ctx).unwrap().note;
         assert!(
             note.contains("You changed these files after build #1 started: `after.rs`."),
             "{note}"
@@ -527,41 +475,66 @@ mod tests {
         );
         execution.channel().result("first".into());
         execution.channel().result("second".into());
-        execution.channel().input("what happened?".into());
+        execution
+            .channel()
+            .input("what happened?".into(), String::new());
         execution.channel().result("third".into());
-        execution.channel().input("and now?".into());
+        execution.channel().input("and now?".into(), String::new());
         other.channel().result("built".into());
         other.end();
 
-        let batch = drivers.next(1, root, &ctx).unwrap();
+        let batch = drivers.next(root, &ctx).unwrap();
         assert_eq!(batch.label.as_deref(), Some("2 background command results"));
         assert!(batch.line.ends_with("second"));
         assert!(!batch.line.contains("third"));
-        let input = drivers.next(1, root, &ctx).unwrap();
+        let input = drivers.next(root, &ctx).unwrap();
         assert_eq!(input.origin, Origin::Input(execution.id()));
         assert_eq!(input.line, "what happened?");
         assert!(input.label.is_none());
         assert!(input.note.is_empty());
-        assert!(drivers.next(1, root, &ctx).unwrap().line.ends_with("third"));
-        let input = drivers.next(1, root, &ctx).unwrap();
+        assert!(drivers.next(root, &ctx).unwrap().line.ends_with("third"));
+        let input = drivers.next(root, &ctx).unwrap();
         assert_eq!(input.origin, Origin::Input(execution.id()));
         assert_eq!(input.line, "and now?");
-        assert!(drivers.next(1, root, &ctx).unwrap().line.ends_with("built"));
-        assert!(drivers.next(1, root, &ctx).is_none());
+        assert!(drivers.next(root, &ctx).unwrap().line.ends_with("built"));
+        assert!(drivers.next(root, &ctx).is_none());
 
         execution.channel().result("later".into());
         execution.end();
-        let next = drivers.next(1, root, &ctx).unwrap();
+        let next = drivers.next(root, &ctx).unwrap();
         assert!(next.line.ends_with("later"));
         assert!(next.note.contains("background command #1 (watch)"));
-        assert!(drivers.next(1, root, &ctx).is_none());
+        assert!(drivers.next(root, &ctx).is_none());
+    }
+
+    // A note rides with the line: the model reads it before the round.
+    #[tokio::test]
+    async fn an_input_carries_its_note_to_the_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let mut drivers = Drivers::default();
+        let root = std::path::Path::new("/checkout");
+        let sink = background::Commands::new(drivers.background());
+        let execution = sink.start(
+            root.into(),
+            toolbox::background::Invocation::shell("driver"),
+            Default::default(),
+        );
+        execution.channel().drive(true);
+        execution
+            .channel()
+            .input("/code-review".into(), "This is loop round 2.".into());
+        assert!(drivers.holds(root), "a driving execution holds its lane");
+        let next = drivers.next(root, &ctx).unwrap();
+        assert_eq!(next.origin, Origin::Input(execution.id()));
+        assert_eq!(next.line, "/code-review");
+        assert_eq!(next.note, "This is loop round 2.");
     }
 
     #[tokio::test]
     async fn progress_reaches_the_command_before_tools_without_repeating_in_the_reply() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
-        let ctx = Ctx::new(tool::Workspace::new(&root).unwrap());
         let mut drivers = Drivers::default();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let execution = background::Commands::new(drivers.background()).start(
@@ -639,7 +612,7 @@ mod tests {
             },
         );
         drivers.observe(1, &root, &Event::TextDelta("done".into()));
-        drivers.turn_ended(1, &Ended::Done, &ctx, None);
+        drivers.turn_ended(1, &Ended::Done);
         assert_eq!(
             rx.try_recv(),
             Ok(Told::Response {
@@ -672,7 +645,6 @@ mod tests {
             ),
         ] {
             let dir = tempfile::tempdir().unwrap();
-            let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
             let mut drivers = Drivers::default();
             let execution = background::Commands::new(drivers.background()).start(
                 dir.path().to_path_buf(),
@@ -685,7 +657,7 @@ mod tests {
             drivers.started(request, true);
             rx.try_recv().unwrap();
             drivers.observe(1, dir.path(), &Event::TextDelta(text.into()));
-            drivers.turn_ended(1, &ended, &ctx, None);
+            drivers.turn_ended(1, &ended);
             assert_eq!(
                 rx.try_recv(),
                 Ok(Told::Response {
@@ -714,9 +686,10 @@ mod tests {
             Default::default(),
         );
         execution.channel().listen(tx);
-        execution.channel().input("why did it fail".into());
-
-        let next = drivers.next(1, &root, &ctx).expect("the input is due");
+        execution
+            .channel()
+            .input("why did it fail".into(), String::new());
+        let next = drivers.next(&root, &ctx).expect("the input is due");
         assert_eq!(next.line, "why did it fail");
         assert_eq!(next.origin, Origin::Input(execution.id()));
         assert!(next.label.is_none(), "read as typed, not relayed");
@@ -732,7 +705,7 @@ mod tests {
         );
         drivers.observe(1, &root, &Event::TextDelta("parse.rs".into()));
         drivers.observe(2, &root, &Event::TextDelta("another lane".into()));
-        drivers.turn_ended(1, &Ended::Stopped, &ctx, None);
+        drivers.turn_ended(1, &Ended::Stopped);
         assert_eq!(
             rx.try_recv(),
             Ok(Told::Response {
@@ -743,7 +716,7 @@ mod tests {
                 }
             })
         );
-        drivers.turn_ended(1, &Ended::Done, &ctx, None);
+        drivers.turn_ended(1, &Ended::Done);
         assert!(rx.try_recv().is_err(), "told once");
     }
 
@@ -856,8 +829,8 @@ mod tests {
             Default::default(),
         );
         execution.channel().listen(tx);
-        execution.channel().input("btc".into());
-        let next = drivers.next(1, &root, &ctx).expect("the input is due");
+        execution.channel().input("btc".into(), String::new());
+        let next = drivers.next(&root, &ctx).expect("the input is due");
         let request = Request::new(next.origin, 1);
         drivers.started(request, true);
         assert_eq!(
@@ -883,7 +856,7 @@ mod tests {
         ] {
             drivers.observe(1, &root, &ev);
         }
-        drivers.turn_ended(1, &Ended::Done, &ctx, None);
+        drivers.turn_ended(1, &Ended::Done);
         assert_eq!(
             rx.try_recv(),
             Ok(Told::Response {
@@ -932,7 +905,7 @@ mod tests {
             panic!("a followed run begins")
         };
         drivers.observe(1, &root, &Event::TextDelta("connected".into()));
-        drivers.turn_ended(1, &Ended::Done, &ctx, None);
+        drivers.turn_ended(1, &Ended::Done);
         assert_eq!(
             rx.try_recv(),
             Ok(Told::Response {
@@ -948,13 +921,13 @@ mod tests {
             "one that does not follow hears nothing"
         );
 
-        execution.channel().input("btc".into());
-        let next = drivers.next(1, &root, &ctx).expect("the input is due");
+        execution.channel().input("btc".into(), String::new());
+        let next = drivers.next(&root, &ctx).expect("the input is due");
         let request = Request::new(next.origin, 1);
         drivers.started(request, true);
         drivers.observe(1, &root, &Event::TurnStart { turn: 1 });
         drivers.observe(1, &root, &Event::TextDelta("83057.6".into()));
-        drivers.turn_ended(1, &Ended::Done, &ctx, None);
+        drivers.turn_ended(1, &Ended::Done);
         assert_eq!(
             rx.try_recv(),
             Ok(Told::Response {

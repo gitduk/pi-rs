@@ -3,7 +3,7 @@
 use super::run::Replies;
 use super::view::{Pending, Queued};
 use super::{Tui, clipboard, front_view, keys};
-use pi_core::driver::{Origin, Said};
+use pi_core::driver::Origin;
 use pi_core::execution::{self, Action, Change, Completion, Output, Request};
 use pi_core::input::{Intent, Rewound};
 use toolbox::channel::{Outcome, Response};
@@ -39,7 +39,6 @@ impl Tui {
         if !matches!(action, Action::Prompt { .. }) || !self.core.lane().is_running() {
             self.drivers.started(request, false);
         }
-        let starts_turn = matches!(action, Action::Prompt { .. } | Action::McpPrompt { .. });
         match action {
             Action::Complete { change, output } => {
                 self.adopt_change(change);
@@ -91,38 +90,14 @@ impl Tui {
                 };
                 self.complete(request, output, Outcome::Done);
             }
-            Action::Drive(drive) => {
-                let lane = self.core.lane();
-                let said = self.drivers.command(drive, lane.token(), lane.ctx());
-                let output = match said {
-                    Said::Nothing => Output::Notice(String::new()),
-                    Said::Notice(text) => Output::Notice(text),
-                    Said::Noted(text, note) => {
-                        let lane = self.core.lane_mut();
-                        let view = front_view(&mut self.views, lane);
-                        self.ui.say_note(lane, view, &note);
-                        Output::Notice(text)
-                    }
-                    Said::Transcript(text) => Output::Text(text),
-                };
-                self.complete(request, output, Outcome::Done);
-            }
             Action::Prompt { send, typed } => {
                 let ask = clipboard::prompt(send, typed, &self.ui.images);
-                if !self.deliver_prompt_for(ask, request, line, &replies.done)
-                    && !self.core.lane().is_running()
-                    && let Some(said) = self.drivers.unstarted(request)
-                {
-                    self.say_notice_of(self.core.current, &said);
-                }
+                self.deliver_prompt_for(ask, request, line, &replies.done);
             }
             Action::Quit => {
                 self.complete(request, Output::Notice("exiting".into()), Outcome::Done);
                 return true;
             }
-        }
-        if !starts_turn && let Some(said) = self.drivers.unstarted(request) {
-            self.say_notice_of(self.core.current, &said);
         }
         false
     }
@@ -150,7 +125,9 @@ impl Tui {
             input,
             request,
             line,
+            note,
         } = queued;
+        self.file_note(&note);
         match input {
             Pending::Intent(intent) => self.execute_for(intent, request, line, replies).await,
             Pending::Prompt(ask) => {

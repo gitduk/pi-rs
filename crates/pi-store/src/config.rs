@@ -76,15 +76,6 @@ pub struct Config {
     /// says each event. A checkout's are named when pi starts, like `[mcp]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<Hook>,
-    /// How many rounds a loop may run before it stops on its own. Defaults
-    /// to 10 — the fingerprint and thin-round brakes catch a converging loop,
-    /// and this is the floor for the shape they cannot (a round that keeps
-    /// changing files forever). Unset reads as 10; the user's stop is always the brake.
-    #[serde(
-        default = "default_loop_max_rounds",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub loop_max_rounds: Option<usize>,
 
     /// How long a subagent may run silent, in seconds, before it is
     /// read as wedged and stopped — the one brake a subagent has of its own,
@@ -258,14 +249,8 @@ fn default_insert_cursor() -> Cursor {
 fn default_normal_cursor() -> Cursor {
     Cursor::Block
 }
-fn default_loop_max_rounds() -> Option<usize> {
-    Some(DEFAULT_LOOP_MAX_ROUNDS)
-}
 
 const DEFAULT_KEEP_DAYS: u32 = 90;
-
-// The default `loop_max_rounds` — see the field doc.
-const DEFAULT_LOOP_MAX_ROUNDS: usize = 10;
 
 impl Default for Vim {
     fn default() -> Self {
@@ -314,13 +299,6 @@ impl Config {
             .map(|(id, b)| (id.clone(), b.clone().into_vec()))
             .collect();
         crate::keys::Keys::resolve(&overrides)
-    }
-
-    /// The ceiling an unset `loop_max_rounds` reads as — see the field. An
-    /// `Option` here mirrors the field, so `None` and the config staying
-    /// silent mean the same thing to callers.
-    pub fn loop_cap(&self) -> Option<usize> {
-        self.loop_max_rounds.or(Some(DEFAULT_LOOP_MAX_ROUNDS))
     }
 
     /// How long an untouched session or pasted image is kept; `None` keeps

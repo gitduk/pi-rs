@@ -93,7 +93,9 @@ mod tests {
             toolbox::background::Invocation::shell("phone"),
             Default::default(),
         );
-        phone.channel().input("a remote question".into());
+        phone
+            .channel()
+            .input("a remote question".into(), String::new());
         phone.channel().result("phone result".into());
         let first = sink.start(
             root.clone(),

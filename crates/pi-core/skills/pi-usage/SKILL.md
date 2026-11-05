@@ -10,9 +10,11 @@ lists the flags.
 
 - A session: commands, keys, queues, `!` and `!!`:
   `skill(name: "pi-usage", file: "references/session.md")`.
-- Tools: built-ins, MCP, shell and background, scripts and their events,
-  questions, hooks, skills:
+- Tools: built-ins, MCP, shell and background, scripts, questions, hooks,
+  skills:
   `skill(name: "pi-usage", file: "references/tools.md")`.
+- A script's fd 3 events, and what pi writes back to it:
+  `skill(name: "pi-usage", file: "references/events.md")`.
 - What reaches the model: images, web access, repeated output, compaction:
   `skill(name: "pi-usage", file: "references/context.md")`.
 - Files: what each path holds, retention, memory, the journal:

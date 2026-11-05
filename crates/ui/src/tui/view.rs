@@ -189,6 +189,9 @@ pub(super) struct Queued {
     // A typed line, kept off the transcript while it waits: up hands it back
     // to the editor, or its answer echoes it if it lands under the line.
     pub(super) line: Option<String>,
+    // What the model reads before the turn this opens; empty for a line that
+    // opens none.
+    pub(super) note: String,
 }
 
 pub(super) enum Pending {

@@ -88,9 +88,13 @@ pub trait Channel: Send + Sync {
     fn listen(&self, to: UnboundedSender<Told>);
     fn status(&self, text: String);
     fn result(&self, text: String);
-    fn input(&self, text: String);
+    /// A line to submit, and what the model should know about it first.
+    fn input(&self, text: String, note: String);
     fn choose(&self, asked: Asked);
     fn answer(&self, question: u64, picks: Vec<usize>);
     fn interrupt(&self);
     fn follow(&self);
+    /// Claim or release the checkout's turns: while claimed, a turn that ends
+    /// is not the last one, since this execution owes it another.
+    fn drive(&self, on: bool);
 }

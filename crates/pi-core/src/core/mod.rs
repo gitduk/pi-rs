@@ -28,7 +28,7 @@ pub mod worktree;
 
 use crate::core::lane::Lane;
 use crate::input::commands::{Command, help, with_prompts};
-use crate::input::{Builtin, Drive, Intent, Step, notice, step_for};
+use crate::input::{Builtin, Intent, Step, notice, step_for};
 use pi_store::config;
 use pi_store::listing::Listing;
 use pi_store::session::Store;
@@ -360,23 +360,6 @@ impl Core {
         }
     }
 
-    // Whether `goal` would start a turn. A skill is looked up, not
-    // expanded — that would log it as invoked before any round has run.
-    fn starts_turn(&self, goal: &str) -> bool {
-        match crate::input::read(
-            goal,
-            &self.commands,
-            Some(&self.lane().agent().brief.registry),
-        ) {
-            Intent::Prompt(_) | Intent::Bash(_) => true,
-            Intent::Other { word, .. } => crate::input::starts_turn(&self.commands, &word),
-            Intent::Builtin(_)
-            | Intent::Surface { .. }
-            | Intent::Tool { .. }
-            | Intent::Background(_) => false,
-        }
-    }
-
     /// Carry out an intent, or say what the surface must do to carry it out.
     ///
     /// Exhaustive with no catch-all, like `Intent::fate`: the arms a surface
@@ -411,7 +394,6 @@ impl Core {
     // A built-in command, carried out. Exhaustive for the reason `dispatch` is.
     fn builtin(&mut self, builtin: Builtin) -> Step {
         match builtin {
-            Builtin::Loop(goal) => self.loop_step(goal.trim()),
             Builtin::Quit => Step::Quit,
             Builtin::Help => {
                 Step::Handled(help(&self.commands, &self.lane().agent().brief.registry))
@@ -450,16 +432,6 @@ impl Core {
             Builtin::Worktree(name) => self.worktree_step(&name),
             Builtin::Settings(rest) => self.settings_step(rest.trim()),
             Builtin::Edit(name) => self.edit(name.trim()),
-        }
-    }
-
-    fn loop_step(&self, goal: &str) -> Step {
-        match goal {
-            "" => Step::Drive(Drive::Loop(None)),
-            goal if self.starts_turn(goal) => Step::Drive(Drive::Loop(Some(goal.to_string()))),
-            goal => Step::Notice(format!(
-                "`{goal}` starts no turn — a loop needs one to measure"
-            )),
         }
     }
 
@@ -745,7 +717,6 @@ mod tests {
                 step => panic!("unexpected step for {line}: {step:?}"),
             }
         }
-        assert!(!core.starts_turn("/read path=README.md"));
     }
 
     #[test]
@@ -1001,28 +972,6 @@ mod tests {
         assert!(
             old_saw.lock().unwrap().is_empty(),
             "the old endpoint is gone"
-        );
-    }
-
-    // A loop measures turns, so a goal that starts none is refused up front
-    // rather than looping on nothing; a bare `/loop` stops one.
-    #[test]
-    fn a_loop_needs_a_goal_that_starts_a_turn() {
-        use crate::input::{Drive, Step};
-        let dir = tempfile::tempdir().unwrap();
-        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
-        let mut run = |goal: &str| core.dispatch(Intent::Builtin(Builtin::Loop(goal.into())));
-
-        let step = run(" ");
-        assert!(matches!(step, Step::Drive(Drive::Loop(None))), "{step:?}");
-        match run(" make the tests pass ") {
-            Step::Drive(Drive::Loop(Some(goal))) => assert_eq!(goal, "make the tests pass"),
-            step => panic!("a prompt is a goal: {step:?}"),
-        }
-        let step = run("/status");
-        assert!(
-            matches!(step, Step::Notice(_)),
-            "a built-in starts no turn: {step:?}"
         );
     }
 

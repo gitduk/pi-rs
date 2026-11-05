@@ -21,11 +21,12 @@ const MAX_LINE: usize = 1 << 20;
 enum Said {
     Status(String),
     Result(String),
-    Input(String),
+    Input { text: String, note: String },
     Choose(Asked),
     Answer { question: u64, picks: Vec<usize> },
     Interrupt,
     Follow,
+    Drive(bool),
 }
 
 struct Process {
@@ -154,10 +155,11 @@ pub async fn foreground(
                     }
                 }
                 Said::Result(_)
-                | Said::Input(_)
+                | Said::Input { .. }
                 | Said::Answer { .. }
                 | Said::Interrupt
-                | Said::Follow => tracing::warn!(
+                | Said::Follow
+                | Said::Drive(_) => tracing::warn!(
                     target: "pi::scripts", script = name, "session message requires background=true, dropped"
                 ),
             },
@@ -207,7 +209,7 @@ pub(crate) fn background(
                 event = fd3.next() => match event {
                     Said::Status(text) => execution.channel().status(text),
                     Said::Result(text) => execution.channel().result(text),
-                    Said::Input(text) => execution.channel().input(text),
+                    Said::Input { text, note } => execution.channel().input(text, note),
                     Said::Choose(asked) if asked.back => {
                         let _ = told.send(Told::Answer(Err("a background command cannot wait for a foreground answer".into())));
                     }
@@ -215,6 +217,7 @@ pub(crate) fn background(
                     Said::Answer {question,picks} => execution.channel().answer(question,picks),
                     Said::Interrupt => execution.channel().interrupt(),
                     Said::Follow => execution.channel().follow(),
+                    Said::Drive(on) => execution.channel().drive(on),
                 },
                 status = child.wait() => break status,
             }
@@ -359,6 +362,9 @@ fn parse(line: &str) -> Option<Said> {
     if v.get("follow").and_then(Value::as_bool) == Some(true) {
         return Some(Said::Follow);
     }
+    if let Some(on) = v.get("drive").and_then(Value::as_bool) {
+        return Some(Said::Drive(on));
+    }
     if let Some(question) = text("choose") {
         let options = (v
             .get("options")
@@ -386,7 +392,12 @@ fn parse(line: &str) -> Option<Said> {
     }
     text("result")
         .map(Said::Result)
-        .or_else(|| text("input").map(Said::Input))
+        .or_else(|| {
+            text("input").map(|line| Said::Input {
+                text: line,
+                note: text("note").unwrap_or_default(),
+            })
+        })
         .or_else(|| text("status").map(Said::Status))
 }
 
@@ -544,7 +555,8 @@ printf '%s\n' "$a" > heard"#;
         let ctx = ctx(dir.path());
         let _cmd = script(
             dir.path(),
-            r#"echo '{"input":"why did it fail"}' >&3
+            r#"echo '{"drive":true}' >&3
+echo '{"input":"why did it fail","note":"round 2"}' >&3
 echo '{"choose":"the task changed","options":["summarize","go on"]}' >&3
 echo '{"answer":3,"picks":[1]}' >&3
 echo '{"interrupt":true}' >&3
@@ -580,9 +592,10 @@ printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" "$e" "$f" > heard"#,
             .await
             .expect("it ended");
         assert_eq!(
-            sink.said.lock().unwrap()[1..6],
+            sink.said.lock().unwrap()[1..7],
             [
-                "input why did it fail",
+                "drive true",
+                "input why did it fail (round 2)",
                 "choose the task changed: summarize | go on",
                 "answer 3: [1]",
                 "interrupt",

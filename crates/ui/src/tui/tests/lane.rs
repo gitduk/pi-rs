@@ -2,8 +2,8 @@ use crate::tui::row::Row;
 use crate::tui::{Asked, Deed, Intent, Origin, View, front_view, view_at};
 use agent::Event;
 use pi_core::core::lane::Lane;
+use pi_core::input::Builtin;
 use pi_core::input::commands::Choice;
-use pi_core::input::{Builtin, Drive};
 use pi_store::keys::Mode;
 use pi_store::listing::Listing;
 use pi_store::status::Segment;
@@ -704,33 +704,37 @@ fn only_a_finished_lane_wears_a_mark_in_the_bar() {
     );
 }
 
-// A loop between rounds is not the lane finishing: its next round is work
-// this lane still has, so `Done` is not its mark.
+// A lane whose checkout has a driving execution has not finished between
+// rounds: `Done` is its mark only once the claim is released.
 #[test]
-fn a_lane_under_a_loop_has_not_finished() {
+fn a_driven_lane_has_not_finished() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     let (_run_dir, mut behind) = a_running_lane();
     behind.set_worktree(Some("fix-mem".into()));
     behind.end(true, false);
-    let token = behind.token();
-    let started = tui
-        .drivers
-        .command(Drive::Loop(Some("go".into())), token, behind.ctx());
-    assert!(matches!(started, pi_core::driver::Said::Nothing));
+    let execution = toolbox::background::RunSink::start(
+        &pi_core::driver::background::Commands::new(tui.drivers.background()),
+        behind.root().to_path_buf(),
+        toolbox::background::Invocation::shell("driver"),
+        Default::default(),
+    );
+    execution.channel().drive(true);
     tui.core.lanes.push(behind);
     tui.refresh_tabs();
     assert_eq!(
         tui.ui.tabs[1].mark,
         crate::tui::Mark::Plain,
-        "the loop is going on"
+        "the driver owes this lane another turn"
     );
 
-    // The loop is over, and that is the lane the colour is for.
-    tui.drivers
-        .command(Drive::Loop(None), token, tui.core.lanes[1].ctx());
+    execution.channel().drive(false);
     tui.refresh_tabs();
-    assert_eq!(tui.ui.tabs[1].mark, crate::tui::Mark::Done);
+    assert_eq!(
+        tui.ui.tabs[1].mark,
+        crate::tui::Mark::Done,
+        "nothing more is coming"
+    );
 }
 
 // Nowhere to go is said, not walked to: one checkout has no next.
@@ -1171,6 +1175,7 @@ async fn a_queued_line_remembers_the_command_it_came_from() {
         Asked::Core(Intent::Prompt("from the phone".into())),
         Origin::Input(1),
         None,
+        "",
     );
     let (done, _) = tokio::sync::mpsc::unbounded_channel();
     tui.deliver_prompt(
@@ -1198,11 +1203,13 @@ async fn a_typed_followup_waits_for_the_run_and_survives_cancellation() {
         Asked::Core(Intent::Bash("echo first".into())),
         Origin::Typed,
         Some("!echo first".into()),
+        "",
     );
     let wake = tui.admit(
         Asked::Core(Intent::Prompt("new direction".into())),
         Origin::Typed,
         Some("new direction".into()),
+        "",
     );
     assert!(matches!(
         wake,
@@ -1271,11 +1278,13 @@ fn followups_pass_waiting_commands_and_remote_input_without_entering_another_lan
         Asked::Core(Intent::Bash("echo first".into())),
         Origin::Typed,
         Some("! echo first".into()),
+        "",
     );
     tui.admit(
         Asked::Core(Intent::Prompt("remote input".into())),
         Origin::Input(1),
         None,
+        "",
     );
     let mut ask = crate::tui::clipboard::prompt("after bash".into(), None, &[]);
     ask.images.push(llm::message::Image::Url {
@@ -1338,6 +1347,7 @@ async fn up_inside_a_multiline_draft_keeps_steering_and_waiting_commands() {
         Asked::Core(Intent::Bash("echo first".into())),
         Origin::Typed,
         Some("!echo first".into()),
+        "",
     );
     tui.deliver_prompt(
         crate::tui::clipboard::prompt("new direction".into(), None, &[]),
@@ -1378,6 +1388,7 @@ async fn recalling_steering_and_waiting_commands_keeps_submission_order_and_remo
         Asked::Core(Intent::Bash("echo first".into())),
         Origin::Typed,
         Some("!echo first".into()),
+        "",
     );
     tui.deliver_prompt(
         crate::tui::clipboard::prompt("first direction".into(), None, &[]),
@@ -1389,11 +1400,13 @@ async fn recalling_steering_and_waiting_commands_keeps_submission_order_and_remo
         Asked::Core(Intent::Prompt("remote input".into())),
         Origin::Input(1),
         None,
+        "",
     );
     tui.admit(
         Asked::Core(Intent::Bash("echo second".into())),
         Origin::Typed,
         Some("!echo second".into()),
+        "",
     );
     tui.deliver_prompt(
         crate::tui::clipboard::prompt("second direction".into(), None, &[]),
@@ -1479,7 +1492,7 @@ async fn remote_submissions_use_the_same_parser_as_local_lines() {
         Default::default(),
     );
     for line in ["/compact", "!echo hello", " /compact"] {
-        execution.channel().input(line.into());
+        execution.channel().input(line.into(), String::new());
         let Some((Origin::Input(_), crate::tui::Wake::Do(Asked::Core(intent), _))) =
             tui.driver_line()
         else {
@@ -1494,6 +1507,96 @@ async fn remote_submissions_use_the_same_parser_as_local_lines() {
             )
         );
     }
+}
+
+// A note belongs to the turn its line opens: a command that opens none files
+// none, so a driving script's note cannot ride an unrelated turn later.
+#[tokio::test]
+async fn a_note_is_filed_only_for_a_line_that_starts_a_turn() {
+    fn noted(tui: &crate::tui::Tui, text: &str) -> bool {
+        (tui.core.lane().session().map(|s| s.entries().to_vec()))
+            .unwrap_or_default()
+            .iter()
+            .any(|e| matches!(e, agent::session::Entry::Note { note, .. } if note.contains(text)))
+    }
+
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    tui.core.lane_mut().finish();
+    tui.core
+        .lane_mut()
+        .return_session(agent::session::Session::new());
+    let execution = toolbox::background::RunSink::start(
+        &pi_core::driver::background::Commands::new(tui.drivers.background()),
+        dir.path().to_path_buf(),
+        toolbox::background::Invocation::shell("driver"),
+        Default::default(),
+    );
+
+    execution
+        .channel()
+        .input("/status".into(), "This is loop round 2.".into());
+    assert!(
+        tui.driver_line().is_some(),
+        "the command is carried out all the same"
+    );
+    assert!(
+        !noted(&tui, "round 2"),
+        "a line that opens no turn files no note"
+    );
+
+    execution
+        .channel()
+        .input("!echo hi".into(), "This is loop round 4.".into());
+    assert!(
+        tui.driver_line().is_some(),
+        "a shell command is carried out all the same"
+    );
+    assert!(!noted(&tui, "round 4"), "a shell line opens no turn either");
+
+    execution
+        .channel()
+        .input("keep going".into(), "This is loop round 5.".into());
+    assert!(tui.driver_line().is_some());
+    assert!(
+        noted(&tui, "round 5"),
+        "a prompt's note goes before its turn"
+    );
+}
+
+// A note submitted under a run waits with its own line: the run in flight must
+// not read it as something about itself.
+#[tokio::test]
+async fn a_queued_line_keeps_its_note_off_the_running_turn() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let execution = toolbox::background::RunSink::start(
+        &pi_core::driver::background::Commands::new(tui.drivers.background()),
+        dir.path().to_path_buf(),
+        toolbox::background::Invocation::shell("driver"),
+        Default::default(),
+    );
+
+    execution
+        .channel()
+        .input("keep going".into(), "This is loop round 6.".into());
+    assert!(
+        matches!(
+            tui.driver_line(),
+            Some((Origin::Input(_), crate::tui::Wake::Nothing))
+        ),
+        "a line sent under a run waits for it"
+    );
+    let held = (tui.core.lane().notes()).expect("the run holds the transcript");
+    assert!(
+        held.take().is_none(),
+        "the running turn reads no note meant for the line that waits"
+    );
+    let queued = (front_view(&mut tui.views, tui.core.lane())
+        .queued
+        .pop_front())
+    .expect("the line waits on its lane");
+    assert_eq!(queued.note, "This is loop round 6.");
 }
 
 // A note filed while idle waits for the next turn's save; quitting or a

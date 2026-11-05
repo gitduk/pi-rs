@@ -4,7 +4,6 @@ mod harness;
 mod hover;
 mod keys;
 mod lane;
-mod looping;
 mod requests;
 mod scroll;
 mod status;
