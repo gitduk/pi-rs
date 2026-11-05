@@ -1425,6 +1425,37 @@ fn a_preview_the_window_cuts_ends_at_its_footer() {
     assert!(!row.has_page(row.len() - 1, width));
 }
 
+// A group opened in place keeps its way back: a cut spends the budget on
+// content and on the footer, never on the row that folds the group again.
+#[test]
+fn a_cut_keeps_the_row_that_folds_the_group_back() {
+    let paint = Paint::new(false);
+    let width = 80;
+    let mut row = Row::steps(Step::thinking(1, vec!["head".into()], false, &paint), false);
+    for i in 2..=9 {
+        let step = Step::thinking(
+            i,
+            vec![ratatui::text::Line::from(format!("block {i}"))],
+            false,
+            &paint,
+        );
+        assert!(row.join(step).is_ok());
+    }
+    // A window of ten rows leaves a budget of five.
+    row.prepare_preview(&paint, width, 10);
+    let lines: Vec<String> = (0..row.len())
+        .map(|i| row.line(i, &paint, width).0.to_string())
+        .collect();
+    assert_eq!(lines.len(), 5, "{lines:?}");
+    assert!(
+        lines.last().expect("a last line").contains("less"),
+        "{lines:?}"
+    );
+    assert!(row.has_page(row.len() - 2, width), "{lines:?}");
+    // And the row still folds the group back.
+    assert!(row.toggle_at(row.len() - 1, width), "{lines:?}");
+}
+
 // The footer names the rows left out and opens the step they are in: a cut
 // inside the second step must not open the group's first.
 #[test]

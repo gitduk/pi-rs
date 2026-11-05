@@ -62,7 +62,7 @@ enum PreviewLine {
 
 #[derive(Clone, Copy)]
 enum More {
-    // The line whose fold the page shows, from where the cut left off.
+    // The line whose fold the page shows.
     Page(usize),
     Steps,
     CollapseSteps,
@@ -108,18 +108,37 @@ impl Preview {
 
 // What the window can hold of a fold's lines: all of them, or a cut that
 // spends its last row on a footer naming the rows left out.
-fn within_budget(lines: Vec<PreviewLine>, heights: &[usize], budget: usize) -> Vec<PreviewLine> {
+fn within_budget(
+    mut lines: Vec<PreviewLine>,
+    heights: &[usize],
+    budget: usize,
+) -> Vec<PreviewLine> {
+    // The row that folds the group back is the way out of a cut, so it keeps
+    // its row whatever the budget: content and footer share what is left.
+    let collapse = matches!(
+        lines.last(),
+        Some(PreviewLine::More {
+            target: More::CollapseSteps,
+            ..
+        })
+    )
+    .then(|| lines.pop().expect("the last line was a footer"));
+    let room = budget.saturating_sub(usize::from(collapse.is_some()));
     let total: usize = lines.iter().map(|line| line.rows(heights)).sum();
-    if total <= budget {
+    if total <= room {
+        lines.extend(collapse);
         return lines;
     }
-    let mut kept = Vec::with_capacity(budget);
-    let mut room = budget - 1;
+    if room == 0 {
+        return collapse.into_iter().collect();
+    }
+    let mut kept = Vec::with_capacity(room);
+    let mut left = room - 1;
     let mut shown = 0;
     let mut heading = 0;
     for line in lines {
         let rows = line.rows(heights);
-        let take = rows.min(room);
+        let take = rows.min(left);
         if take < rows {
             if take > 0
                 && let PreviewLine::Content { source, .. } = line
@@ -133,7 +152,7 @@ fn within_budget(lines: Vec<PreviewLine>, heights: &[usize], budget: usize) -> V
             heading = line.source();
             break;
         }
-        room -= take;
+        left -= take;
         shown += take;
         kept.push(line);
     }
@@ -141,6 +160,7 @@ fn within_budget(lines: Vec<PreviewLine>, heights: &[usize], budget: usize) -> V
         target: More::Page(heading),
         remaining: total - shown,
     });
+    kept.extend(collapse);
     kept
 }
 
@@ -317,8 +337,7 @@ trait Fold {
             true
         }
     }
-    // What a page reads for line `i`: the row's lines whole, as opening it
-    // in place shows them.
+    // What a page reads for line `i`: the row's lines whole.
     fn opening(&self, i: usize, paint: &Paint) -> Option<Opening>;
     // Whether lines are cut at `width` that only its opening shows whole.
     fn clipped(&self, _width: usize) -> bool {
