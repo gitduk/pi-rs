@@ -493,8 +493,8 @@ impl Core {
         // Saved before the move, against the root it belongs to; an empty
         // session has nothing to keep, and a run in flight saves its own.
         self.leave("worktree")?;
-        // Already open: the lane that holds it comes back whole. Nothing is
-        // said — the lane coming to the front says where you are.
+        // Already open: the lane that holds it comes back whole, and only a
+        // reload note is worth saying.
         if let Some(i) = self.lane_at(ws.root()) {
             self.current = i;
             let notes = self.refresh_config().unwrap_or_default();
