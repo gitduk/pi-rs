@@ -2,7 +2,7 @@
 
 use ratatui::text::{Line, Span};
 
-use super::{Fold, Opened, Opening, page_of};
+use super::{Fold, Opening, page_of};
 use crate::render::{self, Outcome, Paint};
 use crate::tui::browse::PageLine;
 use crate::tui::{THINKING, screen};
@@ -764,18 +764,6 @@ impl Fold for Group {
         self.steps[k].flip();
         self.folded = !self.steps.iter().any(Step::is_open);
         true
-    }
-
-    // The step headed by line `i`.
-    fn opened(&self, i: usize, paint: &Paint) -> Option<Opened> {
-        let step = self.page_step(i)?;
-        let lines = (0..step.opened_len()).map(|j| {
-            (
-                step.marked(j, step.opened_content(j, false, 0, paint), 0, paint),
-                opened_border(j),
-            )
-        });
-        Some(lines.collect())
     }
 
     fn opening(&self, i: usize, paint: &Paint) -> Option<Opening> {

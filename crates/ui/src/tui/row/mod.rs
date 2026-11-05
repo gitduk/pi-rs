@@ -254,11 +254,10 @@ enum Kind {
     Steps(Group),
 }
 
-/// What opening a closed line shows on the reading page: what it reads
-/// opened in place, whole.
+/// What a page reads for a closed line: its lines whole, one per row.
 pub type Opening = Vec<PageLine>;
 
-/// A closed line's lines as opening it in place draws them, whole, each with
+/// A closed line's page before its shared indent is taken out: each line with
 /// the border a wrap repeats.
 pub type Opened = Vec<(PageLine, Option<Line<'static>>)>;
 
@@ -318,13 +317,9 @@ trait Fold {
             true
         }
     }
-    // What opening line `i` in place would show, whole since a
-    // page reads it wrapped; drawn in place by the same code.
-    fn opened(&self, i: usize, paint: &Paint) -> Option<Opened>;
-    // What the page reads for line `i`: what `opened` gives, as a page.
-    fn opening(&self, i: usize, paint: &Paint) -> Option<Opening> {
-        self.opened(i, paint).map(page_of)
-    }
+    // What a page reads for line `i`: the row's lines whole, as opening it
+    // in place shows them.
+    fn opening(&self, i: usize, paint: &Paint) -> Option<Opening>;
     // Whether lines are cut at `width` that only its opening shows whole.
     fn clipped(&self, _width: usize) -> bool {
         false

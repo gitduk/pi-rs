@@ -4,7 +4,7 @@
 use ratatui::text::Line;
 
 use super::steps::STEP_INDENT;
-use super::{CODE_INDENT, Fold, Opened, clip_beside, count};
+use super::{CODE_INDENT, Fold, Opening, clip_beside, count, page_of};
 use crate::render::{self, Paint};
 use crate::tui::browse::PageLine;
 use pi_store::icons;
@@ -154,14 +154,14 @@ impl Fold for Relayed {
         self.open = !self.open;
     }
 
-    fn opened(&self, _i: usize, paint: &Paint) -> Option<Opened> {
+    fn opening(&self, _i: usize, paint: &Paint) -> Option<Opening> {
         if !self.expandable() {
             return None;
         }
-        Some(
+        Some(page_of(
             (0..=self.body.len())
                 .map(|i| self.opened_line(i, false, paint))
                 .collect(),
-        )
+        ))
     }
 }
