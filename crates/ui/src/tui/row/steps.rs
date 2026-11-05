@@ -149,7 +149,7 @@ fn call_frame(tick: usize) -> &'static str {
 
 // The frame reasoning still streaming shows at spinner tick `tick`.
 fn think_frame(tick: usize) -> &'static str {
-    const TICKS_PER_FRAME: usize = 2;
+    const TICKS_PER_FRAME: usize = 4;
     icons::THINK_FRAMES[tick / TICKS_PER_FRAME % icons::THINK_FRAMES.len()]
 }
 
