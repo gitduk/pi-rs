@@ -212,7 +212,6 @@ If both locations contain the same script or skill name, pi offers the project's
 version.
 
 The built-in `tool-creator` skill teaches the model to write tools.
-`skill-creator` teaches it to write skills.
 `pi-setup` explains how to add a model provider or an MCP server.
 `pi-usage` holds these pages: what a session, a tool, a script or a file does.
 `architecture` guides the model to review a project's structure, or to design

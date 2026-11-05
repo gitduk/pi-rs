@@ -185,7 +185,7 @@ You do not need to restart pi. \
 pi registers tools from scripts in `tools/`. \
 Do not store the current task's scripts or files here.\n\n\
 - Read `tool-creator` to create tools.\n\
-- Read `skill-creator` to create skills.\n\
+- Read `pi-usage` (`references/tools.md`) to create skills.\n\
 - Read `pi-setup` to add or repair a model connection or an MCP server.\n</pi_home>",
             escaped(home.display())
         ));

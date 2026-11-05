@@ -290,7 +290,7 @@ pub fn resolve(
             builtins
                 .into_iter()
                 .filter_map(skills::Skill::builtin)
-                .chain([tool_creator(), skill_creator(), pi_setup(), pi_usage()])
+                .chain([tool_creator(), pi_setup(), pi_usage()])
                 .chain(pinned.skills.iter().cloned())
                 .fold(shelf, skills::Shelf::with_builtin),
         )
@@ -504,7 +504,6 @@ fn system_file(pinned: &Pinned) -> Option<PathBuf> {
 const TOOL_CREATOR: &str = include_str!("../../skills/tool-creator/SKILL.md");
 
 // The parts few tools need stay out of the instructions until asked for.
-// Both creators write text that a model reads, so they share one guide.
 const WRITING: (&str, &str) = ("writing.md", include_str!("../../skills/writing.md"));
 
 // A script's fd 3 protocol: what it may say and what pi writes back. A script
@@ -533,13 +532,6 @@ fn tool_creator() -> skills::Skill {
                 .map(|(name, text)| (name.to_string(), *text))
                 .collect(),
         )
-}
-const SKILL_CREATOR: &str = include_str!("../../skills/skill-creator/SKILL.md");
-
-fn skill_creator() -> skills::Skill {
-    skills::Skill::builtin(SKILL_CREATOR)
-        .expect("a valid built-in skill")
-        .with_files(vec![(WRITING.0.to_string(), WRITING.1)])
 }
 const PI_SETUP: &str = include_str!("../../skills/pi-setup/SKILL.md");
 
@@ -938,10 +930,9 @@ mod tests {
 
     // A built-in skill is dropped without a word when its header does not parse.
     #[test]
-    fn the_skill_creators_and_connection_instructions_are_builtin_skills() {
+    fn the_creators_and_connection_instructions_are_builtin_skills() {
         for (name, text) in [
             ("tool-creator", super::TOOL_CREATOR),
-            ("skill-creator", super::SKILL_CREATOR),
             ("pi-setup", super::PI_SETUP),
             ("pi-usage", super::PI_USAGE),
             ("architecture", super::ARCHITECTURE),
@@ -954,12 +945,7 @@ mod tests {
     // A file the instructions name but the skill cannot serve fails only when the model asks for it.
     #[test]
     fn the_creators_serve_every_file_their_instructions_name() {
-        for skill in [
-            super::tool_creator(),
-            super::skill_creator(),
-            super::pi_setup(),
-            super::pi_usage(),
-        ] {
+        for skill in [super::tool_creator(), super::pi_setup(), super::pi_usage()] {
             let text = skill.text().unwrap();
             // A reference is a `.md` file the instructions list, or a name they
             // ask for with `file:`. Files an example tells the model to create
@@ -1021,13 +1007,7 @@ mod tests {
                     vec![("example.txt".into(), "example")]
                 );
             }
-            for name in [
-                "tool-creator",
-                "skill-creator",
-                "pi-setup",
-                "architecture",
-                "caller-skill",
-            ] {
+            for name in ["tool-creator", "pi-setup", "architecture", "caller-skill"] {
                 assert_eq!(
                     resolved
                         .commands
@@ -1049,17 +1029,6 @@ mod tests {
         for (name, _) in super::TOOL_CREATOR_FILES {
             assert!(super::TOOL_CREATOR.contains(&format!("`{name}`")), "{name}");
         }
-    }
-
-    #[test]
-    fn the_skill_creator_example_parses() {
-        let example = super::SKILL_CREATOR
-            .split("```markdown\n")
-            .nth(1)
-            .and_then(|rest| rest.split("```").next())
-            .expect("a skill example");
-        let (_, description) = skills::frontmatter(example).unwrap();
-        assert!(description.is_some_and(|d| !d.is_empty()));
     }
 
     // Models copy these examples, so exercise them through tool discovery.
