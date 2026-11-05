@@ -290,7 +290,7 @@ pub fn resolve(
             builtins
                 .into_iter()
                 .filter_map(skills::Skill::builtin)
-                .chain([tool_creator(), skill_creator(), pi_setup()])
+                .chain([tool_creator(), skill_creator(), pi_setup(), pi_usage()])
                 .chain(pinned.skills.iter().cloned())
                 .fold(shelf, skills::Shelf::with_builtin),
         )
@@ -567,6 +567,39 @@ fn pi_setup() -> skills::Skill {
         )
 }
 const ARCHITECTURE: &str = include_str!("../../skills/architecture/SKILL.md");
+
+// What a session, a tool, a script or a file does: the pages the README no
+// longer carries, so the model can answer for them.
+const PI_USAGE: &str = include_str!("../../skills/pi-usage/SKILL.md");
+const PI_USAGE_FILES: [(&str, &str); 4] = [
+    (
+        "references/session.md",
+        include_str!("../../skills/pi-usage/references/session.md"),
+    ),
+    (
+        "references/tools.md",
+        include_str!("../../skills/pi-usage/references/tools.md"),
+    ),
+    (
+        "references/context.md",
+        include_str!("../../skills/pi-usage/references/context.md"),
+    ),
+    (
+        "references/files.md",
+        include_str!("../../skills/pi-usage/references/files.md"),
+    ),
+];
+
+fn pi_usage() -> skills::Skill {
+    skills::Skill::builtin(PI_USAGE)
+        .expect("a valid built-in skill")
+        .with_files(
+            PI_USAGE_FILES
+                .iter()
+                .map(|(name, text)| (name.to_string(), *text))
+                .collect(),
+        )
+}
 
 /// The checkout's directories before the home's, so a name both use is the
 /// project's — skill and script alike. The reason to keep something in a
@@ -908,6 +941,7 @@ mod tests {
             ("tool-creator", super::TOOL_CREATOR),
             ("skill-creator", super::SKILL_CREATOR),
             ("pi-setup", super::PI_SETUP),
+            ("pi-usage", super::PI_USAGE),
             ("architecture", super::ARCHITECTURE),
         ] {
             let skill = skills::Skill::builtin(text).expect("a valid built-in skill");
@@ -922,6 +956,7 @@ mod tests {
             super::tool_creator(),
             super::skill_creator(),
             super::pi_setup(),
+            super::pi_usage(),
         ] {
             let text = skill.text().unwrap();
             // A reference is a `.md` file the instructions list, or a name they

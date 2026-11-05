@@ -15,6 +15,10 @@
 #
 # To change more than these keys, ask pi: the built-in `pi-setup` skill reads
 # this file as its field reference.
+#
+# A provider's list is read at a start, when this file changes, and when /model
+# is used; nothing reads it unasked. A fact that moved for a model nothing runs
+# waits for the next /model.
 
 # ---------------------------------------------------------------------------
 # What to run. Fill in the key below, then `pi`.

@@ -49,3 +49,11 @@ A model id that contains `/` keeps it:
 - The window is smaller than the model's: override `context_window` under `[models."<name>/<id>"]`, which also carries `vision`, `effort` and `pricing` overrides.
 - The cost reads zero: the catalog quotes rates under other paths, or `unit = "token"` is missing.
 - A capability or price fact is absent: a path that selects nothing leaves that fact unset rather than failing the load.
+
+## When a list is read
+
+pi reads each provider's catalog at a start, when `settings.toml` changes, and
+when `/model` is used. `/model` applies the whole list, since it is being
+chosen from; a list read for any other reason is applied when its model names
+change or when a fact moves for a model a lane runs. A price that moved on a
+model nothing runs waits for the next `/model`.
