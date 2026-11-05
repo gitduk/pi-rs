@@ -122,7 +122,9 @@ Explicit fields override discovered values. Discovery never writes the settings
 file. Catalogs refresh in the background every five minutes and when `/model`
 is used without a name. Each discovery attempt has a five-second timeout;
 failed refreshes keep the last successful list. Responses with `has_more` and
-`last_id` are paginated using `after_id`.
+`last_id` are paginated using `after_id`. An interactive start paints before the
+lists answer and applies their facts when they arrive, so only a start with no
+model to name — a provider-only config, say — waits for one.
 
 [`examples/pi.toml`](examples/pi.toml) lists every key. An unknown key is
 refused at load.

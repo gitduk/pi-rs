@@ -298,6 +298,18 @@ impl Catalog {
         }
     }
 
+    /// Start the lists' fetch without waiting for it: a surface is about to
+    /// paint, and `poll` takes the answer when it comes.
+    pub fn fetch(&mut self, pinned: &Pinned, config: &Config) {
+        self.poll(pinned, config);
+    }
+
+    /// A list nobody has answered yet: a surface keeps waking for it, so its
+    /// facts land when they arrive rather than at the next keypress.
+    pub fn awaiting_models(&self) -> bool {
+        self.pending.is_some()
+    }
+
     fn poll(&mut self, pinned: &Pinned, config: &Config) -> Option<Refresh> {
         self.configure(pinned, config);
         if self.pending.is_some() {
@@ -318,6 +330,11 @@ impl Catalog {
 }
 
 impl Core {
+    /// Whether a model list is still on its way.
+    pub fn awaiting_models(&self) -> bool {
+        self.catalog.awaiting_models()
+    }
+
     /// Poll discovery without blocking a caller; new facts rebuild the active agent.
     pub fn refresh_models(&mut self) -> Option<Vec<String>> {
         let refresh = self.catalog.poll(&self.pinned, &self.config)?;
@@ -336,6 +353,11 @@ impl Core {
                 }
                 Err(why) => notes.push(why),
             }
+        } else if !notes.is_empty() {
+            // No list came, so what the files leave unstated is a guess again;
+            // a start that skipped the wait said nothing about it then.
+            let spec = self.lane().agent().spec();
+            notes.extend(crate::core::dial::assumed(&self.pinned, &self.config, spec));
         }
         (!notes.is_empty()).then_some(notes)
     }
@@ -717,5 +739,43 @@ format = "chat"
         assert!(resolved.notes.is_empty(), "{:?}", resolved.notes);
         assert_eq!(resolved.catalog_generation, core.catalog.generation());
         assert!(core.refresh_model_config().is_none());
+    }
+
+    // A list nobody answers leaves the files' silences in force: the run says
+    // why it has none and what it assumes instead, since a start that painted
+    // first had no facts to check against.
+    #[tokio::test]
+    async fn a_list_that_never_comes_names_what_is_assumed_instead() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.toml");
+        let (url, _) = server(vec![(500, json!({"error": "no list"}))]);
+        std::fs::write(
+            &file,
+            format!("[provider.local]\nbase_url = \"{url}\"\nformat = \"chat\"\n"),
+        )
+        .unwrap();
+        let mut core = two_lanes(dir.path(), &file, false).await;
+        let notes = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(notes) = core.refresh_models() {
+                    break notes;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.starts_with("model discovery unavailable")),
+            "{notes:?}"
+        );
+        assert!(
+            notes.iter().any(|n| n.starts_with("assuming a ")
+                && n.contains("window")
+                && n.contains("`local/m`")),
+            "the facts nobody stated are named: {notes:?}"
+        );
     }
 }

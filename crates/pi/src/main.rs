@@ -208,15 +208,29 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
 
     let mut pinned = args.pinned();
     pinned.skills = ui::skills::builtins();
+    let from_project = settings.project_sets("model").is_some();
+    let resume_model = prior.as_ref().map(|p| p.model.as_str());
     let mut catalog = core::catalog::Catalog::default();
-    let discovery_notes = catalog.load(&pinned, &config).await;
-    let config = Arc::new(catalog.enrich(&settings, &pinned, config)?);
+    // Only a start with no model to name has to wait for the lists: anywhere
+    // else the surface paints first and their facts land through the refresh
+    // every pass runs.
+    let waits = !interactive
+        || config
+            .model(args.model.as_deref(), resume_model, from_project)
+            .is_none();
+    let discovery_notes = match waits {
+        true => catalog.load(&pinned, &config).await,
+        false => {
+            catalog.fetch(&pinned, &config);
+            Vec::new()
+        }
+    };
+    let config = Arc::new(match waits {
+        true => catalog.enrich(&settings, &pinned, config)?,
+        false => config,
+    });
     let (named, named_by) = config
-        .model(
-            args.model.as_deref(),
-            prior.as_ref().map(|p| p.model.as_str()),
-            settings.project_sets("model").is_some(),
-        )
+        .model(args.model.as_deref(), resume_model, from_project)
         .ok_or_else(|| {
             if discovery_notes.is_empty() {
                 no_model(&args)
@@ -226,17 +240,21 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
         })?;
     // A session's model is a preference, not a fact: the connection it named
     // may be gone since. What `model` selects now stands in, and says so.
-    let (dialled, replaced) = match dial(&pinned, &config, &named, named_by) {
+    let (mut dialled, replaced) = match dial(&pinned, &config, &named, named_by) {
         Err(why) if named_by == pi_store::config::ModelOrigin::Resumed => {
-            let (other, by) = config
-                .model(None, None, settings.project_sets("model").is_some())
-                .ok_or(why)?;
+            let (other, by) = config.model(None, None, from_project).ok_or(why)?;
             let dialled = dial(&pinned, &config, &other, by)?;
             let said = format!("no longer reaching `{named}`; on `{other}` instead");
             (dialled, Some(said))
         }
         picked => (picked?, None),
     };
+    // Facts the catalog is about to state are not guesses yet: naming them so
+    // would be a line the refresh contradicts a second later. A list that never
+    // comes says them then, where the failure is also said.
+    if !waits {
+        dialled.assumed = None;
+    }
 
     // Only the terminal answers its own words; a one-shot run has none.
     let words: &'static [_] = if interactive { tui::WORDS } else { &[] };

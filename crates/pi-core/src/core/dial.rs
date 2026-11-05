@@ -73,25 +73,7 @@ pub fn dial(
 
     // Every fact nobody stated is a guess. Naming them lets the user correct
     // the one that matters instead of debugging a 400 later.
-    let entry = config.entry(&spec.model);
-    let mut guessed: Vec<String> = Vec::new();
-    let window_guessed = entry.context_window.is_none() && pinned.context.is_none();
-    if window_guessed {
-        guessed.push(format!("a {}-token window", spec.context_window));
-    }
-    if entry.max_output_tokens.is_none() {
-        guessed.push(format!("{} max output", spec.max_output_tokens));
-    }
-    if entry.pricing == llm::model::Pricing::default() {
-        guessed.push("no pricing".into());
-    }
-    let assumed = (!guessed.is_empty()).then(|| {
-        let hint = match window_guessed {
-            true => ". Set --context if the server's window differs.",
-            false => ".",
-        };
-        format!("assuming {} for `{}`{hint}", joined(&guessed), spec.model)
-    });
+    let assumed = assumed(pinned, config, &spec);
     let key = config.key_for(model);
     let warning = config
         .written_key(model)
@@ -110,6 +92,31 @@ pub fn dial(
         transport,
         assumed,
         warning,
+    })
+}
+
+// Every fact nobody stated, as one sentence; `None` when the files and the
+// flags say all of them. The same rule whether a start or a list that never
+// came leaves the facts unstated.
+pub fn assumed(pinned: &Pinned, config: &config::Config, spec: &ModelSpec) -> Option<String> {
+    let entry = config.entry(&spec.model);
+    let mut guessed: Vec<String> = Vec::new();
+    let window_guessed = entry.context_window.is_none() && pinned.context.is_none();
+    if window_guessed {
+        guessed.push(format!("a {}-token window", spec.context_window));
+    }
+    if entry.max_output_tokens.is_none() {
+        guessed.push(format!("{} max output", spec.max_output_tokens));
+    }
+    if entry.pricing == llm::model::Pricing::default() {
+        guessed.push("no pricing".into());
+    }
+    (!guessed.is_empty()).then(|| {
+        let hint = match window_guessed {
+            true => ". Set --context if the server's window differs.",
+            false => ".",
+        };
+        format!("assuming {} for `{}`{hint}", joined(&guessed), spec.model)
     })
 }
 

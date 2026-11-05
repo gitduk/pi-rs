@@ -388,13 +388,10 @@ impl Tui {
         let mut notes = Vec::new();
         if let Some(said) = self.core.refresh_config() {
             notes.extend(said);
-            let view = front_view(&mut self.views, self.core.lane());
-            self.ui.adopt_config(&self.core, view);
+            self.adopt_view();
         }
-        if let Some(said) = self.core.refresh_models() {
+        if let Some(said) = self.facts() {
             notes.extend(said);
-            let view = front_view(&mut self.views, self.core.lane());
-            self.ui.adopt_config(&self.core, view);
         }
         if self.core.refresh_prompts() {
             self.ui.commands = self.core.commands.clone();
@@ -404,6 +401,19 @@ impl Tui {
             notes.extend(said);
         }
         self.notice(pi_core::input::notice(notes));
+    }
+
+    // The catalog's answer, when one has come: a poll on a channel, so it costs
+    // nothing to ask and the view follows the facts it brings.
+    fn facts(&mut self) -> Option<Vec<String>> {
+        let said = self.core.refresh_models()?;
+        self.adopt_view();
+        Some(said)
+    }
+
+    fn adopt_view(&mut self) {
+        let view = front_view(&mut self.views, self.core.lane());
+        self.ui.adopt_config(&self.core, view);
     }
 
     // Take what every lane's run has posted since the last look into its own
@@ -720,6 +730,13 @@ impl Tui {
                 self.ui
                     .say_notice(front_view(&mut self.views, self.core.lane()), &said);
             }
+            // A list that answers is taken up at once rather than at the next
+            // walk, so its facts are in force before the first keypress is.
+            if self.core.awaiting_models()
+                && let Some(said) = self.facts()
+            {
+                self.notice(pi_core::input::notice(said));
+            }
             // What changed on disk is taken up within a second: settings
             // resolve the lane again, a skill's word starts to answer. Not on
             // every frame: each look is a walk.
@@ -807,9 +824,10 @@ impl Tui {
                         self.land_fetched(fetched, &done_tx);
                         Wake::Nothing
                     }
-                    // Only while something runs, or a flash is up — an idle
-                    // loop waking ten times a second has nothing to spin.
-                    _ = tick.tick(), if anywhere || executions.working(lane.root()) || self.ui.flash.is_some() || self.ui.copied.is_some() => {
+                    // Only while something runs, a flash is up or a model list
+                    // is on its way: an idle loop waking ten times a second
+                    // has nothing to spin.
+                    _ = tick.tick(), if anywhere || executions.working(lane.root()) || self.ui.flash.is_some() || self.ui.copied.is_some() || self.core.awaiting_models() => {
                         self.ui.spinner += 1;
                         Wake::Nothing
                     }
