@@ -96,8 +96,7 @@ pub fn dial(
 }
 
 // Every fact nobody stated, as one sentence; `None` when the files and the
-// flags say all of them. The same rule whether a start or a list that never
-// came leaves the facts unstated.
+// flags say all of them. A start and a list that never came share the rule.
 pub fn assumed(pinned: &Pinned, config: &config::Config, spec: &ModelSpec) -> Option<String> {
     let entry = config.entry(&spec.model);
     let mut guessed: Vec<String> = Vec::new();
