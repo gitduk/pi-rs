@@ -24,18 +24,15 @@ fn bridge(tui: &Tui) -> (Arc<dyn RunHandle>, UnboundedReceiver<Told>) {
 async fn submit(tui: &mut Tui, execution: &dyn RunHandle, text: &str) -> UnboundedReceiver<Done> {
     execution.channel().input(text.into());
     let (origin, wake) = tui.driver_line().expect("the submission was received");
-    let (done, done_rx) = unbounded_channel();
-    let (fetched, _fetched_rx) = unbounded_channel();
-    let (started, _started_rx) = unbounded_channel();
+    let (replies, inb) = crate::tui::run::Replies::channels();
     match wake {
         Wake::Do(Asked::Core(intent), line) => {
-            tui.execute(intent, origin, line, &done, &fetched, &started)
-                .await;
+            tui.execute(intent, origin, line, &replies).await;
         }
         Wake::Nothing => {}
         _ => panic!("a submission must be admitted or queued"),
     }
-    done_rx
+    inb.done
 }
 
 fn response(rx: &mut UnboundedReceiver<Told>) -> (u64, Response) {
@@ -518,10 +515,9 @@ async fn queued_prompts_and_shell_commands_keep_one_identity_until_completion() 
             .unwrap();
         assert_eq!(queued.request.id, id);
         tui.core.lane_mut().finish();
-        let (done, mut completed) = unbounded_channel();
-        let (fetched, _) = unbounded_channel();
-        let (started, _) = unbounded_channel();
-        assert!(!tui.resume_queued(queued, &done, &fetched, &started).await);
+        let (replies, inb) = crate::tui::run::Replies::channels();
+        let mut completed = inb.done;
+        assert!(!tui.resume_queued(queued, &replies).await);
         assert_eq!(response(&mut rx), (id, Response::Started));
         let done = tokio::time::timeout(Duration::from_secs(3), completed.recv())
             .await
@@ -569,10 +565,9 @@ async fn a_queued_input_that_cannot_start_still_finishes_with_its_original_ident
         .pop_front()
         .unwrap();
     tui.core.lane_mut().finish();
-    let (done, mut completed) = unbounded_channel();
-    let (fetched, _) = unbounded_channel();
-    let (started, _) = unbounded_channel();
-    assert!(!tui.resume_queued(queued, &done, &fetched, &started).await);
+    let (replies, inb) = crate::tui::run::Replies::channels();
+    let mut completed = inb.done;
+    assert!(!tui.resume_queued(queued, &replies).await);
     assert_eq!(response(&mut rx), (id, Response::Started));
     let (
         finished,

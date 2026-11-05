@@ -336,6 +336,32 @@ pub enum Rewound {
     Unsent(String),
 }
 
+/// Worktrees to remove, for a surface to run off the loop: git and the disk
+/// go in the background, the lanes and records follow when it lands.
+#[derive(Debug, Clone)]
+pub struct Removal {
+    /// The repository git answers from.
+    pub from: std::path::PathBuf,
+    /// The main checkout, whose worktrees directory is emptied afterwards.
+    pub main: std::path::PathBuf,
+    /// Each checkout to remove.
+    pub targets: Vec<Target>,
+    /// What was refused before anything moved, said with the result.
+    pub refused: Vec<String>,
+    /// The session left one of these first, so the surface rebuilds its view.
+    pub switched: bool,
+    /// Whether `/worktree rm` named none: all of them go, and each name is
+    /// said in the result rather than left to the list.
+    pub all: bool,
+}
+
+/// One checkout a removal takes, by the name `/worktree` gives it.
+#[derive(Debug, Clone)]
+pub struct Target {
+    pub name: String,
+    pub path: std::path::PathBuf,
+}
+
 #[derive(Debug)]
 pub enum Step {
     // A word of the surface's own, with what followed it.
@@ -384,9 +410,9 @@ pub enum Step {
     // The lane in front now works in another directory, the transcript kept:
     // whatever the surface keys on its root follows; with a notice.
     Moved(String),
-    // The set of worktrees changed (a removal): drop the cached list, which
-    // would keep naming the checkout that just went; with a notice.
-    Worktrees(String),
+    // Checkouts to remove off the loop: a big one takes seconds on the disk,
+    // and the screen must not wait for it.
+    Removal(Removal),
     // The transcript went back: the surface rebuilds its view from it. With
     // a notice when it could not be written.
     Rewound(Rewound, Option<String>),

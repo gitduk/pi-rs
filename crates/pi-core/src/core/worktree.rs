@@ -4,8 +4,7 @@
 //! a branch of the same name — one word names the directory, branch and arg.
 
 use super::Core;
-use crate::input::Step;
-use crate::input::refused;
+use crate::input::{Removal, Step, Target, refused};
 use pi_store::listing::{Listing, Row};
 
 use std::path::{Path, PathBuf};
@@ -278,6 +277,17 @@ pub fn enter(dir: &Path, name: &str) -> Result<Tree> {
         })?;
     Ok(found)
 }
+
+/// One checkout a removal takes, by the name `/worktree` gives it.
+impl Target {
+    fn of(tree: &Tree) -> Self {
+        Self {
+            name: tree.name.clone(),
+            path: tree.path.clone(),
+        }
+    }
+}
+
 /// What removing a checkout took, for the caller's receipt.
 #[derive(Debug)]
 pub struct Removed {
@@ -345,6 +355,46 @@ pub fn remove(dir: &Path, name: &str) -> Result<Removed> {
     })
 }
 
+/// A checkout that went, and what was recorded under it.
+#[derive(Debug)]
+pub struct Gone {
+    pub name: String,
+    pub removed: Removed,
+    /// Session records dropped with the checkout.
+    pub sessions: usize,
+    /// Execution records dropped with it.
+    pub commands: usize,
+}
+
+/// Removes the checkouts `removal` names, off the loop: git and the disk take
+/// the time, not the screen. Lanes are left to the surface that lands this.
+pub(crate) fn remove_targets(
+    removal: &Removal,
+    store: &pi_store::session::Store,
+    executions: Option<&crate::driver::background::Table>,
+) -> Vec<Result<Gone, String>> {
+    let mut out = Vec::with_capacity(removal.targets.len());
+    for target in &removal.targets {
+        match remove(&removal.from, &target.name) {
+            Ok(removed) => {
+                let sessions = store.drop_under(&removed.path);
+                let commands = executions.map_or(0, |table| table.drop_under(&removed.path));
+                out.push(Ok(Gone {
+                    name: target.name.clone(),
+                    removed,
+                    sessions,
+                    commands,
+                }));
+            }
+            Err(e) => out.push(Err(format!("{}: {e}", target.name))),
+        }
+    }
+    if let Err(e) = clean_home(&removal.main, None) {
+        out.push(Err(format!("worktree directory cleanup failed: {e}")));
+    }
+    out
+}
+
 // Remove only empty directories: nested names can leave empty parents, while
 // unregistered files in the worktree directory must stay untouched.
 fn clean_home(root: &Path, removed: Option<&Path>) -> Result<()> {
@@ -392,43 +442,44 @@ fn named(dir: &Path, name: &str) -> Result<(Vec<Tree>, usize)> {
 }
 
 impl Core {
+    // What a `/worktree rm` with no name takes: every linked checkout, off the
+    // loop. What cannot go now is refused here, before the disk moves.
     pub(super) fn remove_all_worktrees(&mut self) -> Result<Step, String> {
         let from = self.lane().root().to_path_buf();
         let trees = list(&from).map_err(|e| refused("worktree", e))?;
         let main = trees
             .first()
-            .ok_or_else(|| "not a git repository".to_string())?;
+            .ok_or_else(|| "not a git repository".to_string())?
+            .path
+            .clone();
         let switched = holding(&trees, &from).is_some_and(|tree| !tree.main);
         if switched {
-            self.enter_worktree(&main.name)?;
+            let name = trees[0].name.clone();
+            self.enter_worktree(&name)?;
         }
-        let mut said = Vec::new();
-        for tree in trees.iter().filter(|tree| !tree.main) {
-            match self.remove_worktree(&tree.name) {
-                Ok(Step::Worktrees(note)) => {
-                    said.push(format!("{} removed", tree.name));
-                    if !note.is_empty() {
-                        said.push(note);
-                    }
-                }
-                Ok(_) => unreachable!("removing a worktree returns a worktree change"),
-                Err(e) => said.push(format!("{}: {e}", tree.name)),
-            }
+        let (targets, refused) = self.planned(trees.iter().filter(|tree| !tree.main));
+        // Nothing to wait for: the answer is what could not go.
+        if targets.is_empty() && !switched {
+            return Ok(Step::Notice(crate::input::notice(refused)));
         }
-        if let Err(e) = clean_home(&main.path, None) {
-            said.push(format!("worktree directory cleanup failed: {e}"));
-        }
-        let note = crate::input::notice(said);
-        Ok(if switched {
-            Step::Swap(note)
-        } else {
-            Step::Worktrees(note)
-        })
+        self.hold_removals(&targets);
+        Ok(Step::Removal(Removal {
+            from,
+            main,
+            targets,
+            refused,
+            switched,
+            all: true,
+        }))
     }
 
     // Each tree keeps its own transcript: paths in it are workspace-relative
     // and locks are keyed by absolute path, so a shared one would misresolve.
     pub(super) fn enter_worktree(&mut self, name: &str) -> Result<Step, String> {
+        let trimmed = name.trim().trim_end_matches('/');
+        if self.removals.iter().any(|target| target.name == trimmed) {
+            return Ok(Step::Notice(format!("`{trimmed}` is being removed")));
+        }
         let from = self.lane_mut().root().to_path_buf();
         let tree = enter(&from, name).map_err(|e| refused("worktree", e))?;
         // Built before the comparison: both sides are then canonical, and a
@@ -454,38 +505,97 @@ impl Core {
         let said = self.take_up_latest();
         Ok(Step::Swap(crate::input::notice(said)))
     }
-    // Removes the checkout, its branch, and every transcript under it; a
-    // dirty checkout's refusal from git is passed on, not forced past.
+    // The checkout is checked here, then removed off the loop with whatever
+    // else `/worktree rm` names.
     pub(super) fn remove_worktree(&mut self, name: &str) -> Result<Step, String> {
         let from = self.lane().root().to_path_buf();
         // Resolved as `remove` resolves it, so the guard and the removal agree
         // on which tree the name means.
-        if let Ok((trees, at)) = named(&from, name)
-            && !trees[at].main
-        {
-            let target = &trees[at];
-            let running = self.lanes.iter().enumerate().any(|(i, lane)| {
-                i != self.current && lane.root().starts_with(&target.path) && lane.is_running()
-            });
-            if running {
-                return Err(format!(
-                    "`{}` is running in another lane of this run — stop it first",
-                    target.name
-                ));
+        let (trees, at) = named(&from, name).map_err(|e| refused("worktree", e))?;
+        self.check_removable(&trees[at])?;
+        let target = Target::of(&trees[at]);
+        self.hold_removals(std::slice::from_ref(&target));
+        Ok(Step::Removal(Removal {
+            from,
+            main: trees[0].path.clone(),
+            targets: vec![target],
+            refused: Vec::new(),
+            switched: false,
+            all: false,
+        }))
+    }
+
+    // What may go now, and why the rest may not.
+    fn planned<'a>(&self, trees: impl Iterator<Item = &'a Tree>) -> (Vec<Target>, Vec<String>) {
+        let mut targets = Vec::new();
+        let mut refused = Vec::new();
+        for tree in trees {
+            match self.check_removable(tree) {
+                Ok(()) => targets.push(Target::of(tree)),
+                Err(why) => refused.push(why),
             }
         }
-        let removed = remove(&from, name).map_err(|e| refused("worktree", e))?;
+        (targets, refused)
+    }
+
+    fn check_removable(&self, tree: &Tree) -> Result<(), String> {
+        // Asking twice while the first is still going would only race the disk.
+        if let Some(target) = self.removals.iter().find(|target| target.path == tree.path) {
+            return Err(format!("`{}` is already being removed", target.name));
+        }
+        if tree.main {
+            return Err(format!(
+                "`{}` is the main checkout — it cannot be removed",
+                tree.name
+            ));
+        }
+        let running = self.lanes.iter().enumerate().any(|(i, lane)| {
+            i != self.current && lane.root().starts_with(&tree.path) && lane.is_running()
+        });
+        if running {
+            return Err(format!(
+                "`{}` is running in another lane of this run — stop it first",
+                tree.name
+            ));
+        }
+        if self.lane().root().starts_with(&tree.path) {
+            return Err(format!(
+                "`{}` is where this session is — /worktree out of it first",
+                tree.name
+            ));
+        }
+        Ok(())
+    }
+
+    // Names on their way out: no lane may open one while the disk is moving.
+    fn hold_removals(&mut self, targets: &[Target]) {
+        self.removals.extend(targets.iter().cloned());
+    }
+
+    /// Lets a name that did not go be entered again.
+    pub fn release_removal(&mut self, name: &str) {
+        self.removals.retain(|target| target.name != name);
+    }
+
+    /// The checkout is gone: close the lanes that worked in it and say what
+    /// went besides the directory. That it went is the surface's to show.
+    pub fn settle_removal(&mut self, gone: Gone) -> String {
+        let Gone {
+            removed,
+            sessions,
+            commands,
+            ..
+        } = gone;
         for i in (0..self.lanes.len()).rev() {
-            if i != self.current && self.lanes[i].root().starts_with(&removed.path) {
+            // A run still holds its transcript; the vanished checkout is
+            // taken up when it ends.
+            if i == self.current || self.lanes[i].is_running() {
+                continue;
+            }
+            if self.lanes[i].root().starts_with(&removed.path) {
                 self.remove_lane(i);
             }
         }
-        let dropped = self.store.drop_under(&removed.path);
-        let commands_dropped = self
-            .executions
-            .as_ref()
-            .map_or(0, |executions| executions.drop_under(&removed.path));
-        // That the checkout went is the surface's to show; what else went is not.
         let mut said = Vec::new();
         if let Some(branch) = removed.branch {
             said.push(format!("branch {branch} deleted"));
@@ -493,13 +603,13 @@ impl Core {
         if let Some(note) = removed.note {
             said.push(note);
         }
-        if dropped > 0 {
-            said.push(format!("{dropped} session record(s) dropped"));
+        if sessions > 0 {
+            said.push(format!("{sessions} session record(s) dropped"));
         }
-        if commands_dropped > 0 {
-            said.push(format!("{commands_dropped} command(s) dropped"));
+        if commands > 0 {
+            said.push(format!("{commands} command(s) dropped"));
         }
-        Ok(Step::Worktrees(crate::input::notice(said)))
+        crate::input::notice(said)
     }
     // The checkouts `/worktree` can move to, the repository's own first, the
     // one the session is in marked.
@@ -916,6 +1026,78 @@ mod tests {
         assert!(trees[0].main, "the main checkout survives");
     }
 
+    // What the surface does with a removal: the disk off the loop, the lanes
+    // when the result lands.
+    fn run_removal(core: &mut Core, step: Step) {
+        let Step::Removal(removal) = step else {
+            panic!("a removal is its own step: {step:?}");
+        };
+        let results = remove_targets(&removal, &core.store, core.executions.as_deref());
+        for result in results {
+            match result {
+                Ok(gone) => {
+                    core.settle_removal(gone);
+                }
+                Err(why) => panic!("removal failed: {why}"),
+            }
+        }
+        for target in &removal.targets {
+            core.release_removal(&target.name);
+        }
+    }
+
+    // The plan touches no disk: a big checkout takes seconds, and the screen
+    // keeps drawing meanwhile.
+    #[test]
+    fn planning_a_removal_leaves_the_checkout_on_disk() {
+        let dir = crate::core::worktree::test_repo();
+        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
+        core.enter_worktree("fix-tools").unwrap();
+        core.current = 0;
+        core.in_force();
+
+        let step = core.remove_worktree("fix-tools").unwrap();
+        assert!(matches!(step, Step::Removal(_)), "{step:?}");
+        assert!(home(dir.path()).unwrap().join("fix-tools").exists());
+        // Its name is taken until the removal lands: opening it again would
+        // race the disk.
+        let again = core.enter_worktree("fix-tools").unwrap();
+        assert!(matches!(again, Step::Notice(_)), "{again:?}");
+        assert!(home(dir.path()).unwrap().join("fix-tools").exists());
+    }
+
+    // Twice in the window between the plan and the disk: the second asks
+    // again for a checkout already on its way out.
+    #[test]
+    fn a_second_removal_of_the_same_checkout_is_refused() {
+        let dir = crate::core::worktree::test_repo();
+        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
+        core.enter_worktree("fix-tools").unwrap();
+        core.current = 0;
+        core.in_force();
+
+        core.remove_worktree("fix-tools").unwrap();
+        let err = core.remove_worktree("fix-tools").unwrap_err();
+        assert!(err.contains("already being removed"), "{err}");
+    }
+
+    // A run that starts after the plan keeps its transcript and its lane:
+    // the vanished checkout is taken up when the run ends.
+    #[test]
+    fn a_lane_that_starts_while_the_checkout_goes_is_left_alone() {
+        let dir = crate::core::worktree::test_repo();
+        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
+        core.enter_worktree("fix-tools").unwrap();
+        core.current = 0;
+        core.in_force();
+
+        let step = core.remove_worktree("fix-tools").unwrap();
+        core.lanes[1].begin(tokio_util::sync::CancellationToken::new());
+        run_removal(&mut core, step);
+        assert_eq!(core.lanes.len(), 2);
+        assert!(core.lanes[1].is_running());
+    }
+
     #[test]
     fn remove_worktree_closes_idle_lane_in_same_run() {
         let dir = crate::core::worktree::test_repo();
@@ -930,7 +1112,8 @@ mod tests {
         core.in_force();
 
         let res = core.remove_worktree("fix-tools");
-        assert!(res.is_ok(), "remove_worktree failed: {res:?}");
+        let step = res.expect("remove_worktree refused");
+        run_removal(&mut core, step);
         assert_eq!(core.lanes.len(), 1);
         assert_eq!(core.current, 0);
         assert!(!home(dir.path()).unwrap().join("fix-tools").exists());
@@ -947,8 +1130,10 @@ mod tests {
         assert_eq!(core.lanes.len(), 3);
         assert_eq!(core.current, 2);
 
-        let res = core.remove_worktree("feat-one");
-        assert!(res.is_ok(), "remove_worktree failed: {res:?}");
+        let step = core
+            .remove_worktree("feat-one")
+            .expect("remove_worktree refused");
+        run_removal(&mut core, step);
         assert_eq!(core.lanes.len(), 2);
         assert_eq!(core.current, 1);
         assert_eq!(core.lane().worktree(), Some("feat-two"));
@@ -996,7 +1181,8 @@ mod tests {
         core.current = 0;
         core.in_force();
         let step = worktree(&mut core, "rm  rm ");
-        assert!(!matches!(step, Step::Notice(_)), "{step:?}");
+        assert!(matches!(step, Step::Removal(_)), "{step:?}");
+        run_removal(&mut core, step);
         assert_eq!(core.lanes.len(), 1);
         assert!(!home(dir.path()).unwrap().join("rm").exists());
     }

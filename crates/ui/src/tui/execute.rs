@@ -1,8 +1,6 @@
 //! Adapting operation outputs to the local surface and the submitting channel.
 
-use tokio::sync::mpsc::UnboundedSender;
-
-use super::run::{Done, Fetched, Started};
+use super::run::Replies;
 use super::view::{Pending, Queued};
 use super::{Tui, clipboard, front_view, keys};
 use pi_core::driver::{Origin, Said};
@@ -18,13 +16,10 @@ impl Tui {
         intent: Intent,
         origin: Origin,
         line: Option<String>,
-        done: &UnboundedSender<Done>,
-        fetched: &UnboundedSender<Fetched>,
-        started: &UnboundedSender<Started>,
+        replies: &Replies,
     ) -> bool {
         let request = Request::new(origin, self.core.lane().token());
-        self.execute_for(intent, request, line, done, fetched, started)
-            .await
+        self.execute_for(intent, request, line, replies).await
     }
 
     pub(super) async fn execute_for(
@@ -32,9 +27,7 @@ impl Tui {
         intent: Intent,
         request: Request,
         line: Option<String>,
-        done: &UnboundedSender<Done>,
-        fetched: &UnboundedSender<Fetched>,
-        started: &UnboundedSender<Started>,
+        replies: &Replies,
     ) -> bool {
         let origin = request.origin;
         tracing::info!(target: "pi::session", request = request.id, ?origin,
@@ -63,17 +56,18 @@ impl Tui {
                 if let Some(line) = line {
                     self.echo(&line);
                 }
-                self.start_bash(command, request, done);
+                self.start_bash(command, request, &replies.done);
             }
-            Action::Compact(focus) => self.start_compact(focus, request, done),
-            Action::Tool { name, args } => self.start_tool(name, args, request, started),
+            Action::Compact(focus) => self.start_compact(focus, request, &replies.done),
+            Action::Tool { name, args } => self.start_tool(name, args, request, &replies.started),
             Action::McpPrompt {
                 prompt,
                 args,
                 typed,
             } => {
-                self.start_fetch(prompt, args, typed, request, fetched);
+                self.start_fetch(prompt, args, typed, request, &replies.fetched);
             }
+            Action::Removal(removal) => self.start_removal(removal, request, &replies.removed),
             Action::Edit(file) => {
                 if matches!(origin, Origin::Input(_)) {
                     let why = "this operation needs the local terminal's editor".to_string();
@@ -115,7 +109,7 @@ impl Tui {
             }
             Action::Prompt { send, typed } => {
                 let ask = clipboard::prompt(send, typed, &self.ui.images);
-                if !self.deliver_prompt_for(ask, request, line, done)
+                if !self.deliver_prompt_for(ask, request, line, &replies.done)
                     && !self.core.lane().is_running()
                     && let Some(said) = self.drivers.unstarted(request)
                 {
@@ -151,25 +145,16 @@ impl Tui {
         self.drivers.respond(request, Response::Queued);
     }
 
-    pub(super) async fn resume_queued(
-        &mut self,
-        queued: Queued,
-        done: &UnboundedSender<Done>,
-        fetched: &UnboundedSender<Fetched>,
-        started: &UnboundedSender<Started>,
-    ) -> bool {
+    pub(super) async fn resume_queued(&mut self, queued: Queued, replies: &Replies) -> bool {
         let Queued {
             input,
             request,
             line,
         } = queued;
         match input {
-            Pending::Intent(intent) => {
-                self.execute_for(intent, request, line, done, fetched, started)
-                    .await
-            }
+            Pending::Intent(intent) => self.execute_for(intent, request, line, replies).await,
             Pending::Prompt(ask) => {
-                self.deliver_prompt_for(ask, request, line, done);
+                self.deliver_prompt_for(ask, request, line, &replies.done);
                 false
             }
         }
@@ -187,7 +172,7 @@ impl Tui {
         );
     }
 
-    fn adopt_change(&mut self, change: Change) {
+    pub(super) fn adopt_change(&mut self, change: Change) {
         match change {
             Change::None => {}
             Change::Session => {

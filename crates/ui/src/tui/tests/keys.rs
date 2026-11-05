@@ -246,9 +246,7 @@ async fn only_an_answer_under_the_line_echoes_it() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     tui.core.lane_mut().finish();
-    let (done, _done_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (fetched, _fetched_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (started, _started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (replies, _inb) = crate::tui::run::Replies::channels();
     // The real table, or `/keys` is a word the door does not know and the
     // line is read as a prompt — which is a different test.
     let table = std::sync::Arc::new(pi_core::input::commands::commands(
@@ -274,15 +272,8 @@ async fn only_an_answer_under_the_line_echoes_it() {
         };
         let line = tui.ui.took_submit();
         assert_eq!(line.as_deref(), Some(typed));
-        tui.execute(
-            intent,
-            pi_core::driver::Origin::Typed,
-            line,
-            &done,
-            &fetched,
-            &started,
-        )
-        .await;
+        tui.execute(intent, pi_core::driver::Origin::Typed, line, &replies)
+            .await;
         assert_eq!(rows(&mut tui), before + echoed, "{typed}");
     }
 }

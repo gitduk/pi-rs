@@ -754,6 +754,11 @@ impl Core {
         if at < self.current || self.current >= self.lanes.len() {
             self.current = self.current.saturating_sub(1);
         }
+        // The lane takes its session record with it: a run that saved after
+        // its checkout went must not outlive it on disk.
+        if let Some(dir) = self.store.path_of(lane.root(), lane.id()).parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
         lane
     }
     /// Save the transcript. Called after every turn: an interrupted one is

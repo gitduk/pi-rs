@@ -103,6 +103,9 @@ pub struct Core {
     /// Words the surface answers itself, listed beside the built-ins: each
     /// comes back as [`Step::Surface`]. Every resolve is handed them.
     pub surface: &'static [Command],
+    /// Checkouts a removal has claimed until the surface lands it: no lane
+    /// may open one while its directory is going.
+    pub removals: Vec<crate::input::Target>,
 }
 
 impl Core {
@@ -947,6 +950,7 @@ mod tests {
             lanes: vec![lane],
             refused: Default::default(),
             executions: None,
+            removals: Default::default(),
             current: 0,
             surface: &[],
         }

@@ -72,6 +72,9 @@ pub enum Action {
         typed: String,
     },
     Edit(std::path::PathBuf),
+    // Checkouts to remove: git and the disk take the time, so the surface
+    // runs them off the loop and brings the result back.
+    Removal(crate::input::Removal),
     Surface {
         word: String,
         args: String,
@@ -88,7 +91,6 @@ pub fn dispatch(core: &mut Core, intent: Intent) -> Action {
         Step::Handled(rows) => (Change::None, Output::Listing(rows)),
         Step::Swap(text) => (Change::Session, Output::Notice(text)),
         Step::Moved(text) => (Change::Directory, Output::Notice(text)),
-        Step::Worktrees(text) => (Change::Worktrees, Output::Notice(text)),
         Step::Rewound(outcome, unsaved) => {
             let text = rewind_output(core, &outcome, unsaved);
             (Change::Rewound(outcome), Output::Notice(text))
@@ -109,6 +111,7 @@ pub fn dispatch(core: &mut Core, intent: Intent) -> Action {
             };
         }
         Step::Edit(path) => return Action::Edit(path),
+        Step::Removal(removal) => return Action::Removal(removal),
         Step::Surface { word, args } => return Action::Surface { word, args },
         Step::Drive(drive) => return Action::Drive(drive),
         Step::Quit => return Action::Quit,
@@ -445,6 +448,34 @@ pub async fn tool(
         request,
         output,
         outcome,
+    }
+}
+
+/// A removal's outcome, for the surface to settle against the lanes.
+pub struct RemovedWorktrees {
+    pub request: Request,
+    pub removal: crate::input::Removal,
+    pub results: Vec<Result<crate::core::worktree::Gone, String>>,
+}
+
+/// Removes checkouts off the loop: git and the disk run where the screen does
+/// not wait, and the lanes close when the surface takes the result.
+pub async fn remove_worktrees(
+    request: Request,
+    removal: crate::input::Removal,
+    store: pi_store::session::Store,
+    executions: Option<std::sync::Arc<crate::driver::background::Table>>,
+) -> RemovedWorktrees {
+    let run = removal.clone();
+    let results = tokio::task::spawn_blocking(move || {
+        crate::core::worktree::remove_targets(&run, &store, executions.as_deref())
+    })
+    .await
+    .unwrap_or_else(|_| vec![Err("the removal crashed".to_string())]);
+    RemovedWorktrees {
+        request,
+        removal,
+        results,
     }
 }
 

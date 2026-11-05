@@ -142,6 +142,7 @@ pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
         lanes: vec![running_lane(dir)],
         refused: Default::default(),
         executions: None,
+        removals: Default::default(),
         current: 0,
         surface: crate::tui::WORDS,
     };

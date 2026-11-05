@@ -474,6 +474,7 @@ max_output_tokens = 2048
             current: 0,
             refused: Default::default(),
             executions: None,
+            removals: Default::default(),
             surface: &[],
         };
         core.try_reload().unwrap();

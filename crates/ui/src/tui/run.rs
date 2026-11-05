@@ -12,9 +12,48 @@ use super::term::{Deafened, EXIT_GRACE, external_editor, scratch_file};
 use super::view::{Doing, Work, front_view, tail_of, view_at};
 use super::{NO_TRANSCRIPT, Tui};
 use pi_core::driver::{Ended, Origin};
-use pi_core::execution::{self, Output, Request, RunError, RunResult};
-pub(super) use pi_core::execution::{Done, Fetched, Kind, Started};
+use pi_core::execution::{self, Change, Output, Request, RunError, RunResult};
+pub(super) use pi_core::execution::{Done, Fetched, Kind, RemovedWorktrees, Started};
 use toolbox::channel::Outcome;
+
+// Where off-loop work reports back: one channel per kind of result.
+pub(super) struct Replies {
+    pub done: UnboundedSender<Done>,
+    pub fetched: UnboundedSender<Fetched>,
+    pub started: UnboundedSender<Started>,
+    pub removed: UnboundedSender<RemovedWorktrees>,
+}
+
+// The receiving halves of [`Replies`]; the loop reads them.
+pub(super) struct RepliesIn {
+    pub done: UnboundedReceiver<Done>,
+    pub fetched: UnboundedReceiver<Fetched>,
+    pub started: UnboundedReceiver<Started>,
+    pub removed: UnboundedReceiver<RemovedWorktrees>,
+}
+
+impl Replies {
+    pub(super) fn channels() -> (Self, RepliesIn) {
+        let (done, done_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (fetched, fetched_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (started, started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (removed, removed_rx) = tokio::sync::mpsc::unbounded_channel();
+        (
+            Self {
+                done,
+                fetched,
+                started,
+                removed,
+            },
+            RepliesIn {
+                done: done_rx,
+                fetched: fetched_rx,
+                started: started_rx,
+                removed: removed_rx,
+            },
+        )
+    }
+}
 
 impl Tui {
     // The front lane's transcript, for `request`'s run about to start on it.
@@ -208,6 +247,73 @@ impl Tui {
 
     pub(super) fn land_started(&mut self, started: Started) {
         self.present(started);
+    }
+
+    // Removes checkouts off the loop: a big one takes seconds on the disk,
+    // and the screen keeps drawing meanwhile.
+    pub(super) fn start_removal(
+        &mut self,
+        removal: pi_core::input::Removal,
+        request: Request,
+        removed: &UnboundedSender<RemovedWorktrees>,
+    ) {
+        let names: Vec<&str> = removal
+            .targets
+            .iter()
+            .map(|target| target.name.as_str())
+            .collect();
+        if !names.is_empty() {
+            self.ui.flash(format!("removing {}…", names.join(", ")));
+        }
+        let store = self.core.store.clone();
+        let executions = self.core.executions.clone();
+        let removed = removed.clone();
+        tokio::spawn(async move {
+            let done = execution::remove_worktrees(request, removal, store, executions).await;
+            let _ = removed.send(done);
+        });
+    }
+
+    // A removal came home: close the lanes that worked in its checkouts, say
+    // what went, and drop the cached list that still names them.
+    pub(super) fn land_removal(&mut self, done: RemovedWorktrees) {
+        let RemovedWorktrees {
+            request,
+            removal,
+            results,
+        } = done;
+        let mut said = removal.refused.clone();
+        for result in results {
+            match result {
+                Ok(gone) => {
+                    if removal.all {
+                        said.push(format!("{} removed", gone.name));
+                    }
+                    let line = self.core.settle_removal(gone);
+                    if !line.is_empty() {
+                        said.push(line);
+                    }
+                }
+                Err(why) => said.push(why),
+            }
+        }
+        for target in &removal.targets {
+            self.core.release_removal(&target.name);
+        }
+        if removal.switched {
+            self.adopt_change(Change::Session);
+        }
+        self.adopt_change(Change::Worktrees);
+        // Said on the lane in front: the lane the request came from may be
+        // one of the checkouts that just went.
+        self.complete(
+            Request {
+                lane: self.core.lane().token(),
+                ..request
+            },
+            Output::Notice(pi_core::input::notice(said)),
+            Outcome::Done,
+        );
     }
 
     // Asks an MCP server for a prompt's text off the loop: a slow server

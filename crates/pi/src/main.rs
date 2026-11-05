@@ -474,6 +474,7 @@ async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended
         lanes: vec![first],
         refused: Default::default(),
         executions: None,
+        removals: Default::default(),
         surface: words,
     };
     let drivers = pi_core::driver::Drivers::default();

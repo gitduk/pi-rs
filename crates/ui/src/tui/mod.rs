@@ -48,7 +48,7 @@ use std::sync::Arc;
 
 use crate::theme::following_terminal;
 use menu::Lists;
-use run::Done;
+use run::{Done, Replies};
 use term::{HISTORY_KEEP, Hold, drop_shared_history, history_of, reader};
 use ui::{Mark, Tab, Ui, lane_name};
 use view::{Pending, Queued, View, Views, front_view, prune_views, view_at};
@@ -708,9 +708,7 @@ impl Tui {
         let mut ended = Ended::Quit;
         // Every lane's runs report here when they end. One channel rather than a
         // handle per lane: the loop waits on it like any other source.
-        let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<Done>();
-        let (fetched_tx, mut fetched_rx) = tokio::sync::mpsc::unbounded_channel::<run::Fetched>();
-        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel::<run::Started>();
+        let (replies, mut inb) = Replies::channels();
         let mut tick = tokio::time::interval(status::SPIN);
         let mut hangup = term::Hangup::new()?;
         let mut looked = std::time::Instant::now();
@@ -815,13 +813,17 @@ impl Tui {
                 // Every branch must be cancel-safe: a loser is dropped mid-poll.
                 // `recv()` and `tick()` are; a blocking read gets its own thread.
                 tokio::select! {
-                    Some(done) = done_rx.recv() => Wake::Turn(done),
-                    Some(started) = started_rx.recv() => {
+                    Some(done) = inb.done.recv() => Wake::Turn(done),
+                    Some(started) = inb.started.recv() => {
                         self.land_started(started);
                         Wake::Nothing
                     }
-                    Some(fetched) = fetched_rx.recv() => {
-                        self.land_fetched(fetched, &done_tx);
+                    Some(fetched) = inb.fetched.recv() => {
+                        self.land_fetched(fetched, &replies.done);
+                        Wake::Nothing
+                    }
+                    Some(removed) = inb.removed.recv() => {
+                        self.land_removal(removed);
                         Wake::Nothing
                     }
                     // Only while something runs, a flash is up or a model list
@@ -885,15 +887,12 @@ impl Tui {
                 Wake::Leave(why) => break why,
                 // Its driver hears nothing of the turn, so nothing follows.
                 Wake::Relay(ask) => {
-                    self.deliver_prompt(ask, Origin::Background, None, &done_tx);
+                    self.deliver_prompt(ask, Origin::Background, None, &replies.done);
                     continue;
                 }
                 Wake::Queued(queued) => {
                     let origin = queued.request.origin;
-                    if self
-                        .resume_queued(queued, &done_tx, &fetched_tx, &started_tx)
-                        .await
-                    {
+                    if self.resume_queued(queued, &replies).await {
                         break match origin {
                             Origin::Typed => "The user exited pi.",
                             Origin::Loop | Origin::Background | Origin::Input(_) => {
@@ -916,10 +915,7 @@ impl Tui {
                 // arrives already read.
                 Asked::Core(ready) => ready,
             };
-            if self
-                .execute(intent, origin, line, &done_tx, &fetched_tx, &started_tx)
-                .await
-            {
+            if self.execute(intent, origin, line, &replies).await {
                 break match origin {
                     Origin::Typed => "The user exited pi.",
                     Origin::Loop | Origin::Background | Origin::Input(_) => {
@@ -929,7 +925,7 @@ impl Tui {
             }
         };
         self.save_history();
-        self.settle_all(&mut done_rx, leaving).await;
+        self.settle_all(&mut inb.done, leaving).await;
         self.core.hand_over_background();
         Ok(ended)
     }
