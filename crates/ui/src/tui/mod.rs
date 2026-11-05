@@ -434,17 +434,19 @@ impl Tui {
 
     // Rebuilds the bar before every draw: an off-screen run must reach
     // the screen unasked, and a step walks this same order (bar = ring).
+    // The order is git's own, the one `worktree list` and the bar's counter
+    // walk; each lane sits where its checkout does, not where it was opened.
     fn refresh_tabs(&mut self) {
         let current = self.core.current;
-        let mut tabs: Vec<Tab> = self
+        let mut lanes: Vec<(String, Mark)> = self
             .core
             .lanes
             .iter()
             .enumerate()
-            .map(|(at, lane)| Tab {
+            .map(|(at, lane)| {
                 // In front is in front, whatever it is doing: the run row above
                 // already says whether this one is working.
-                mark: if at == current {
+                let mark = if at == current {
                     Mark::Front
                 } else {
                     match lane.run() {
@@ -456,21 +458,28 @@ impl Tui {
                         Run::Ended { ok: false, .. } => Mark::Failed,
                         Run::Running { .. } | Run::Idle => Mark::Plain,
                     }
-                },
-                name: lane_name(lane),
+                };
+                (lane_name(lane), mark)
             })
             .collect();
-        // The checkouts no lane has open, in git's order: the ring is not the
-        // lanes alone. `Lists` holds the read, one fork per list.
+        let mut tabs: Vec<Tab> = Vec::with_capacity(lanes.len());
+        // The checkouts on disk, in their own order: one no lane has open is
+        // on the bar too, and `Lists` holds the read, one fork per list.
         for tree in self.ui.lists.worktrees_read().unwrap_or_default() {
-            if tabs.iter().any(|t| t.name == tree.name) {
-                continue;
+            match lanes.iter().position(|(name, _)| *name == tree.name) {
+                Some(at) => {
+                    let (name, mark) = lanes.remove(at);
+                    tabs.push(Tab { mark, name });
+                }
+                None => tabs.push(Tab {
+                    mark: Mark::Unopened,
+                    name: tree.name.clone(),
+                }),
             }
-            tabs.push(Tab {
-                mark: Mark::Unopened,
-                name: tree.name.clone(),
-            });
         }
+        // A lane git does not list — rooted outside the worktrees directory,
+        // or in a subdirectory of a checkout — follows the disk's.
+        tabs.extend(lanes.into_iter().map(|(name, mark)| Tab { mark, name }));
         self.ui.tabs = tabs;
     }
 

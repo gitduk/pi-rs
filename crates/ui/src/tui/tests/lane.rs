@@ -508,50 +508,58 @@ fn stepping_the_checkouts_walks_the_ring_and_wraps_both_ways() {
     assert_eq!(ring(Some("f2"), false).as_deref(), Some("f1"));
 }
 
-// A step lands on the next checkout in the order tabs were opened, not
-// git's order, with checkouts not open yet after the open ones.
+// The ring walks the checkouts in git's order, the one the bar numbers them
+// in, whatever order their lanes were opened in.
 #[test]
-fn the_ring_walks_the_tabs_order_not_gits() {
-    let mut ui = test_ui(80, 24);
-    let trees = ["pi-rs", "fw-rm", "fix-input", "fix-mem"]
+fn the_ring_walks_the_checkouts_order_not_the_lanes() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let trees = ["pi-rs", "feat/add", "fix/choose", "fix/lane", "fix/nmore"]
         .iter()
         .map(|n| Choice {
             name: n.to_string(),
             note: String::new(),
         })
         .collect();
-    ui.lists.worktrees.set(trees).ok();
-    // fix-input was created before fix-mem, but the user opened fix-mem
-    // first — the bar's order, which a step from fw-rm must follow.
-    ui.tabs = vec![
-        crate::tui::Tab {
-            mark: crate::tui::Mark::Plain,
-            name: "pi-rs".into(),
-        },
-        crate::tui::Tab {
-            mark: crate::tui::Mark::Plain,
-            name: "fw-rm".into(),
-        },
-        crate::tui::Tab {
-            mark: crate::tui::Mark::Front,
-            name: "fix-mem".into(),
-        },
-        crate::tui::Tab {
-            mark: crate::tui::Mark::Plain,
-            name: "fix-input".into(),
-        },
-    ];
-    let (_dir, mut lane) = a_running_lane();
-    lane.set_worktree(Some("fw-rm".into()));
+    tui.ui.lists.worktrees.set(trees).ok();
 
-    assert_eq!(ui.step_checkout(&lane, true).as_deref(), Some("fix-mem"));
-    lane.set_worktree(Some("fix-mem".into()));
-    assert_eq!(ui.step_checkout(&lane, true).as_deref(), Some("fix-input"));
-    lane.set_worktree(Some("fix-input".into()));
-    assert_eq!(ui.step_checkout(&lane, true).as_deref(), Some("pi-rs"));
-    // And the other way, still on the bar's order.
-    lane.set_worktree(Some("fix-mem".into()));
-    assert_eq!(ui.step_checkout(&lane, false).as_deref(), Some("fw-rm"));
+    // Opened in the order the worktrees were made, which is not the order
+    // git lists them in: `fix/nmore` is the oldest and last on disk.
+    tui.core.lanes[0].set_worktree(Some("pi-rs".into()));
+    let mut guards = Vec::new();
+    for name in ["fix/nmore", "feat/add", "fix/choose", "fix/lane"] {
+        let (guard, mut lane) = a_running_lane();
+        lane.set_worktree(Some(name.into()));
+        tui.core.lanes.push(lane);
+        guards.push(guard);
+    }
+    tui.core.current = 4;
+    tui.refresh_tabs();
+
+    let names: Vec<&str> = tui.ui.tabs.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["pi-rs", "feat/add", "fix/choose", "fix/lane", "fix/nmore"],
+        "the bar lists the checkouts as git does"
+    );
+    assert_eq!(
+        tui.ui.tabs[3].mark,
+        crate::tui::Mark::Front,
+        "the lane in front is marked where its checkout sits"
+    );
+
+    // So a step from the main checkout goes to the checkout after it on
+    // disk, not to the lane opened next.
+    let step = |at: usize, forward: bool| {
+        tui.ui
+            .step_checkout(&tui.core.lanes[at], forward)
+            .as_deref()
+            .map(str::to_string)
+    };
+    assert_eq!(step(0, true).as_deref(), Some("feat/add"));
+    assert_eq!(step(2, true).as_deref(), Some("fix/choose"));
+    assert_eq!(step(1, true).as_deref(), Some("pi-rs"), "round the end");
+    assert_eq!(step(0, false).as_deref(), Some("fix/nmore"));
 }
 
 // A checkout deleted from the shell leaves its lane a dead end; dropping
