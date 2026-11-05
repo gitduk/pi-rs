@@ -494,10 +494,11 @@ fn stepping_the_checkouts_walks_the_ring_and_wraps_both_ways() {
             .collect();
         ui.lists.worktrees.set(trees).ok();
         let (_dir, mut lane) = a_running_lane();
-        lane.set_worktree(at.map(str::to_string));
+        // A lane in the main checkout names it as its own directory.
+        lane.set_worktree(Some(at.unwrap_or("pi-rs").to_string()));
         ui.step_checkout(&lane, forward)
     };
-    // The main checkout is the one a lane names as None.
+    // The main checkout is the one a lane names as its directory.
     assert_eq!(ring(None, true).as_deref(), Some("f1"));
     assert_eq!(ring(Some("f1"), true).as_deref(), Some("f2"));
     // And round the end, back to the main one.
@@ -506,6 +507,50 @@ fn stepping_the_checkouts_walks_the_ring_and_wraps_both_ways() {
     assert_eq!(ring(None, false).as_deref(), Some("f2"));
     assert_eq!(ring(Some("f1"), false).as_deref(), Some("pi-rs"));
     assert_eq!(ring(Some("f2"), false).as_deref(), Some("f1"));
+}
+
+// A step names the checkout it goes to, so a name two checkouts share is one
+// stop: stepping from it must land elsewhere, not on itself.
+#[test]
+fn a_step_never_lands_on_the_checkout_it_left() {
+    let ring = |trees: &[&str], at: &str, forward: bool| {
+        let ui = test_ui(80, 24);
+        ui.lists
+            .worktrees
+            .set(
+                trees
+                    .iter()
+                    .map(|n| Choice {
+                        name: n.to_string(),
+                        note: String::new(),
+                    })
+                    .collect(),
+            )
+            .ok();
+        let (_dir, mut lane) = a_running_lane();
+        lane.set_worktree(Some(at.to_string()));
+        ui.step_checkout(&lane, forward)
+    };
+    // The main checkout and a tree made outside the worktrees home share a
+    // name; only the first is a stop, so the ring skips the duplicate.
+    assert_eq!(
+        ring(&["pi-rs", "pi-rs", "f1"], "pi-rs", true).as_deref(),
+        Some("f1")
+    );
+    assert_eq!(
+        ring(&["pi-rs", "pi-rs", "f1"], "pi-rs", false).as_deref(),
+        Some("f1")
+    );
+    // A lane git does not list — moved into a subdirectory — reads last on the
+    // bar, so the way on from it is the first checkout.
+    assert_eq!(
+        ring(&["pi-rs", "f1"], "sub", true).as_deref(),
+        Some("pi-rs")
+    );
+    assert_eq!(ring(&["pi-rs", "f1"], "sub", false).as_deref(), Some("f1"));
+    // Two names is a ring of two; one is nowhere to go.
+    assert_eq!(ring(&["pi-rs"], "pi-rs", true), None);
+    assert_eq!(ring(&["solo", "solo"], "solo", true), None);
 }
 
 // The ring walks the checkouts in git's order, the one the bar numbers them
@@ -523,8 +568,8 @@ fn the_ring_walks_the_checkouts_order_not_the_lanes() {
         .collect();
     tui.ui.lists.worktrees.set(trees).ok();
 
-    // Opened in the order the worktrees were made, which is not the order
-    // git lists them in: `fix/nmore` is the oldest and last on disk.
+    // Opened in an order of their own: git lists checkouts by path, which
+    // puts `fix/nmore` last whatever order they were made in.
     tui.core.lanes[0].set_worktree(Some("pi-rs".into()));
     let mut guards = Vec::new();
     for name in ["fix/nmore", "feat/add", "fix/choose", "fix/lane"] {
@@ -780,6 +825,8 @@ fn normal_capitals_step_the_checkouts_and_the_window() {
     ui.lists.worktrees.set(trees).ok();
     ui.vim = Some(Mode::Normal);
     let (_dir, mut lane) = a_running_lane();
+    // Where a lane in the main checkout sits: it names its own directory.
+    lane.set_worktree(Some("pi-rs".into()));
     let mut view = View::default();
 
     let next = ui.key(&lane, &mut view, typed('L'), false);

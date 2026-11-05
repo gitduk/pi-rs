@@ -322,22 +322,29 @@ impl Ui {
     // either end; None with nowhere else to go.
     pub(super) fn step_checkout(&self, lane: &Lane, forward: bool) -> Option<String> {
         let trees = self.lists.worktrees();
-        let n = trees.len();
-        if n < 2 {
+        // Git's own order, the one the bar lists them in. A step names the
+        // checkout it goes to, so two sharing a name are one stop.
+        let mut order: Vec<&str> = Vec::with_capacity(trees.len());
+        for tree in trees {
+            if !order.contains(&tree.name.as_str()) {
+                order.push(&tree.name);
+            }
+        }
+        if order.len() < 2 {
             return None;
         }
-        // Git's own order, the one the bar lists and numbers them in. A lane
-        // whose checkout is no longer on disk names nothing to step to.
-        let at = trees
-            .iter()
-            .position(|tree| tree.name == lane_name(lane))
-            .unwrap_or(0);
+        // A lane whose checkout git does not list reads last on the bar, one
+        // step past the checkouts: the way on wraps, the way back does not.
+        let (n, at) = match order.iter().position(|name| *name == lane_name(lane)) {
+            Some(at) => (order.len(), at),
+            None => (order.len() + 1, order.len()),
+        };
         let i = if forward {
             (at + 1) % n
         } else {
             (at + n - 1) % n
         };
-        Some(trees[i].name.clone())
+        Some(order[i].to_string())
     }
 
     pub(super) fn set_theme(
