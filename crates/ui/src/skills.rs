@@ -3,7 +3,7 @@
 /// Instructions and examples for customizing the surface.
 pub fn builtins() -> Vec<skills::Skill> {
     vec![
-        skills::Skill::builtin(include_str!("../skills/bar-creator/SKILL.md"))
+        skills::Skill::builtin(include_str!("../skills/bar-setup/SKILL.md"))
             .expect("a valid built-in skill")
             .with_files(vec![(
                 "bar.rs".to_string(),
@@ -17,12 +17,12 @@ mod tests {
     use tool::Tool;
 
     #[tokio::test]
-    async fn bar_creator_serves_its_instructions_and_example() {
+    async fn bar_setup_serves_its_instructions_and_example() {
         let loader = skills::Load::new(super::builtins());
         let dir = tempfile::tempdir().unwrap();
         let ctx = tool::Ctx::new(tool::Workspace::new(dir.path()).unwrap());
         let instructions = loader
-            .execute(serde_json::json!({"name": "bar-creator"}), &ctx)
+            .execute(serde_json::json!({"name": "bar-setup"}), &ctx)
             .await
             .unwrap();
         assert!(
@@ -34,7 +34,7 @@ mod tests {
 
         let example = loader
             .execute(
-                serde_json::json!({"name": "bar-creator", "file": "bar.rs"}),
+                serde_json::json!({"name": "bar-setup", "file": "bar.rs"}),
                 &ctx,
             )
             .await
