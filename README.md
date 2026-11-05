@@ -486,7 +486,7 @@ Use this mode for a script that waits for the person, such as approval before a 
 ### Questions
 
 A question has up to 9 options.
-Each option is the line the person would send to select it.
+Each option is the line the person would send to select it, so it speaks in their voice and calls the model `you`.
 It can contain words for the model or a command such as `/compact`.
 The option list appears above the input, even when the input is empty.
 It uses completion-list keys:
