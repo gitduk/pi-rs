@@ -20,6 +20,8 @@ Match the depth of the analysis to the scope and the cost of reversing the chang
    - The evidence, with file paths and line numbers.
    - The effect on later changes.
    - A recommended fix.
+   A type the design adds that only wraps a field or groups others is
+   over-modelling: report it as one.
 4. Order the problems by their effect, the largest first.
 5. Report the parts that follow the principles in one short list.
    Do not report a principle that you could not check as a pass.
@@ -33,6 +35,10 @@ Match the depth of the analysis to the scope and the cost of reversing the chang
    Special cases, flag parameters, and copied branches are signs of a misfit.
 4. Design the data shape before the logic.
    Consider how the design would include this requirement from the start.
+   Write the fewest types that cover it, and name the error each one makes
+   impossible. A type that wraps one field, or only groups others, is that
+   field; a flat list with a marker value usually beats nested wrappers.
+   Display rules — row limits, fold thresholds, markers — are not data.
 5. Compare two or three options when the choice has meaningful tradeoffs.
    For each option, state which errors it makes impossible, which later changes it makes expensive, and how much it costs to undo.
    Choose one and give the reason.
@@ -60,6 +66,13 @@ If you compared options, explain why you rejected the alternatives.
 ### Model the domain
 
 - Make illegal states impossible to represent in the types.
+- Every type must make a class of error impossible to write.
+  A wrapper around one field, or a type that only groups others, is deleted
+  and its field used directly.
+- Every variant needs a second real value: a variant with one value is a
+  constant, and a field that is always set is not optional.
+- Count the types against the concepts. Two shapes that both make the errors
+  impossible: take the one with fewer types.
 - Give each concept one name, and use that name everywhere.
 - Do not bypass the type checker with casts, suppressions, or untyped values to make a design fit.
 - Leave clear, local code as it is.
@@ -94,6 +107,9 @@ If you compared options, explain why you rejected the alternatives.
 
 - Remove complexity that the new design makes unnecessary before you add new parts.
 - Remove code that nothing uses.
+- Keep display rules where they are drawn: a row limit, a fold threshold or a
+  marker is not part of a data shape, and a constant that only a renderer
+  reads belongs to the renderer.
 
 ### Reversibility
 
