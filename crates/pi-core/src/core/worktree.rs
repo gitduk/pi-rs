@@ -499,7 +499,8 @@ impl Core {
             self.current = i;
             let notes = self.refresh_config().unwrap_or_default();
             self.in_force();
-            return Ok(Step::Handled(Listing::say(notes)));
+            // A reload note is a notice: a listing would open the page.
+            return Ok(Step::Notice(crate::input::notice(notes)));
         }
         self.open_lane(ws, (!tree.main).then(|| tree.name.clone()), self.current)?;
         let said = self.take_up_latest();
