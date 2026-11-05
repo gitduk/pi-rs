@@ -1378,3 +1378,77 @@ fn a_page_lies_over_the_commands() {
     );
     assert!((0..24).all(|row| ui.command_at(row).is_none()));
 }
+
+// A run whose open step overruns the window budget: the preview ends at the
+// footer that opens the rest, with nothing drawn under it.
+#[test]
+fn a_preview_the_window_cuts_ends_at_its_footer() {
+    let paint = Paint::new(false);
+    let width = 80;
+    let first = Step::thinking(
+        1,
+        (1..=20)
+            .map(|i| ratatui::text::Line::from(format!("thought {i}")))
+            .collect(),
+        false,
+        &paint,
+    );
+    let mut row = Row::steps(first, false);
+    for i in 1..=4 {
+        let step = Step::thinking(
+            10 + i,
+            vec![ratatui::text::Line::from(format!("block {i}"))],
+            false,
+            &paint,
+        );
+        assert!(row.join(step).is_ok());
+    }
+    // Budget is half the history height: ten rows for ten of it.
+    row.prepare_preview(&paint, width, 20);
+    let lines: Vec<String> = (0..row.len())
+        .map(|i| row.line(i, &paint, width).0.to_string())
+        .collect();
+    let shown = 9;
+    let rows = 24;
+    assert_eq!(lines.len(), 10, "the preview fills the budget: {lines:?}");
+    assert_eq!(lines[0].trim(), "thought 1");
+    let footer = lines.last().expect("a footer");
+    assert_eq!(footer.trim(), format!("{} more", rows - shown));
+    assert!(row.has_page(row.len() - 1, width));
+    // The footer opens the step it cut short, whole.
+    let page = row.opening(row.len() - 1, &paint).ok_or("no page").unwrap();
+    assert_eq!(page.len(), 20);
+
+    // A row that fills the budget exactly is shown whole, with no footer.
+    row.prepare_preview(&paint, width, 48);
+    assert_eq!(row.len(), rows);
+    assert!(!row.has_page(row.len() - 1, width));
+}
+
+// The footer names the rows left out and opens the step they are in: a cut
+// inside the second step must not open the group's first.
+#[test]
+fn a_cut_inside_a_step_opens_that_step() {
+    let paint = Paint::new(false);
+    let width = 80;
+    let head = Step::thinking(1, vec!["head".into()], false, &paint);
+    let mut row = Row::steps(head, false);
+    for i in 2..=5 {
+        let lines = match i {
+            2 => (1..=20)
+                .map(|n| ratatui::text::Line::from(format!("deep {n}")))
+                .collect(),
+            _ => vec!["tail".into()],
+        };
+        assert!(row.join(Step::thinking(i, lines, false, &paint)).is_ok());
+    }
+    assert!(row.toggle_at(1, width), "the second step opens in place");
+    row.prepare_preview(&paint, width, 20);
+    let footer = row.len() - 1;
+    assert!(
+        row.has_page(footer, width),
+        "the preview ends at the footer"
+    );
+    let page = row.opening(footer, &paint).ok_or("no page").unwrap();
+    assert_eq!(page.len(), 20, "the step the cut is in");
+}
