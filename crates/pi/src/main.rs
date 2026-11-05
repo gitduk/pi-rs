@@ -141,6 +141,11 @@ fn drive(run: impl std::future::Future<Output = Result<Ended>>) -> Result<Ended>
 
 async fn run(updated_from: Option<String>) -> Result<Ended> {
     let args = Arc::new(Args::parse());
+    // Before stdin: a machine with no settings yet has no prompt to read.
+    if args.example {
+        print!("{}", pi_store::config::EXAMPLE_SETTINGS);
+        return Ok(Ended::Exit(ExitCode::SUCCESS));
+    }
     let prompt = read_prompt(&args)?;
     let start = start(args, prompt.is_none()).await?;
     match prompt {

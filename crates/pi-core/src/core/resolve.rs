@@ -545,10 +545,7 @@ const PI_SETUP: &str = include_str!("../../skills/pi-setup/SKILL.md");
 // The field reference travels with the skill: it is the file a user copies,
 // so the model edits the shape that user will read.
 const PI_SETUP_FILES: [(&str, &str); 3] = [
-    (
-        "settings.toml",
-        include_str!("../../../../examples/settings.toml"),
-    ),
+    ("settings.toml", pi_store::config::EXAMPLE_SETTINGS),
     (
         "references/provider.md",
         include_str!("../../skills/pi-setup/references/provider.md"),

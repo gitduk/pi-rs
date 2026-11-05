@@ -610,6 +610,10 @@ pub fn global_path() -> Option<PathBuf> {
     super::dir().map(|root| root.join("settings.toml"))
 }
 
+/// The settings file pi ships: the field reference a machine with none
+/// copies, and the one the `pi-setup` skill reads.
+pub const EXAMPLE_SETTINGS: &str = include_str!("../../../examples/settings.toml");
+
 /// The file that, where it exists, replaces the built-in system prompt.
 pub fn system_file() -> Option<PathBuf> {
     super::dir().map(|root| root.join("SYSTEM.md"))
@@ -918,8 +922,7 @@ mod tests {
 
     #[test]
     fn the_shipped_example_is_a_valid_config() {
-        let example = include_str!("../../../examples/settings.toml");
-        let config = Config::from_tree(toml::from_str(example).unwrap());
+        let config = Config::from_tree(toml::from_str(EXAMPLE_SETTINGS).unwrap());
         assert!(config.is_ok(), "{:?}", config.err());
     }
 

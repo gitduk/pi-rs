@@ -28,15 +28,16 @@ leaves the binary at `target/release/pi`.
 
 ## Run it
 
-1. Copy the shipped settings file, then fill in one key:
+1. Write the settings file pi ships, then fill in one key:
 
    ```bash
-   mkdir -p ~/.pi && cp examples/settings.toml ~/.pi/settings.toml
+   mkdir -p ~/.pi && pi --example > ~/.pi/settings.toml
    ```
 
    The first section is live and the rest is commented out as the field
    reference. Set `api_key` — the example reads `$ANTHROPIC_API_KEY` from the
-   environment — or replace that provider with the one you have.
+   environment — or replace that provider with the one you have. On a machine
+   that already has settings, this would overwrite them.
 
 2. Run it:
 

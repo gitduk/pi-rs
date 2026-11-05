@@ -15,6 +15,10 @@ pub struct Args {
     /// Print the version and exit.
     #[arg(short = 'v', long, action = clap::ArgAction::Version)]
     pub version: Option<bool>,
+
+    /// Print the shipped settings file and exit, for a machine with none yet.
+    #[arg(long)]
+    pub example: bool,
     /// The prompt. Reads stdin when omitted. Runs once and keeps nothing.
     pub prompt: Option<String>,
 
