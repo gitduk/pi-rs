@@ -492,12 +492,30 @@ fn params(schema: &serde_json::Value) -> impl Iterator<Item = Param<'_>> {
     out.into_iter()
 }
 
-// After a tool's command word: the keys not given yet, while no `=` is typed.
+// After a tool's command word: the keys not given yet while no `=` is typed,
+// or the values the typed key's schema enumerates once one is.
 fn tool_args(tool: &dyn tool::Tool, head: &str, typed: &str) -> Vec<Candidate> {
-    if typed.contains(['=', '"']) {
+    if typed.contains('"') {
         return Vec::new();
     }
     let schema = tool.schema();
+    if let Some((key, value)) = typed.split_once('=') {
+        let names = schema["properties"][key]["enum"].as_array();
+        return names
+            .into_iter()
+            .flatten()
+            .filter_map(|name| name.as_str())
+            .filter(|name| name.starts_with(value) && *name != value)
+            .map(|name| Candidate {
+                show: name.to_string(),
+                line: format!("{head}{key}={name}"),
+                help: String::new(),
+                accept: Acceptance::Continue,
+                more: false,
+                picked_only: true,
+            })
+            .collect();
+    }
     let given: Vec<&str> = (head.split_whitespace().skip(1))
         .filter_map(|w| w.split_once('=').map(|(k, _)| k))
         .collect();
@@ -601,15 +619,37 @@ mod tests {
         Input::new(line, line.len(), commands, Some(tools)).complete(&Sources::default())
     }
 
-    #[test]
-    fn tools_share_slash_completion_without_taking_existing_words() {
-        let skills = [Skill {
-            name: "dotfiles".into(),
+    fn skill(name: &str) -> Skill {
+        Skill {
+            name: name.into(),
             description: "Sync configuration. More details.".into(),
             dir: "/nowhere".into(),
             builtin: None,
             builtin_files: Vec::new(),
-        }];
+        }
+    }
+
+    #[test]
+    fn an_enumerated_tool_argument_completes_its_values() {
+        let tools = tool::Registry::new().with(skills::Load::new(vec![
+            skill("commit"),
+            skill("code-review"),
+            skill("simplify"),
+        ]));
+        let rows = offered("/skill name=co", BUILTIN, &tools);
+        assert_eq!(
+            rows.iter().map(|c| c.show.as_str()).collect::<Vec<_>>(),
+            ["commit", "code-review"]
+        );
+        assert_eq!(rows[0].line, "/skill name=commit");
+        assert!(rows.iter().all(|c| c.picked_only));
+        assert!(offered("/skill name=commit", BUILTIN, &tools).is_empty());
+        assert!(offered("/skill file=co", BUILTIN, &tools).is_empty());
+    }
+
+    #[test]
+    fn tools_share_slash_completion_without_taking_existing_words() {
+        let skills = [skill("dotfiles")];
         let table = commands(&skills, &[], &mut Vec::new());
         let tools = tool::Registry::new()
             .with(Named("wechat"))

@@ -160,10 +160,15 @@ impl Tool for Load {
     }
 
     fn schema(&self) -> Value {
+        let names: Vec<&str> = self.skills.iter().map(|s| s.name.as_str()).collect();
         json!({
             "type": "object",
             "properties": {
-                "name": { "type": "string", "description": "Specify a skill name from the list above." },
+                "name": {
+                    "type": "string",
+                    "description": "Specify a skill name from the list above.",
+                    "enum": names,
+                },
                 "file": {
                     "type": "string",
                     "description": "Read a file referenced by the skill's instructions. Specify its path within the skill.",
