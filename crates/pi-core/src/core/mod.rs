@@ -142,7 +142,9 @@ impl Core {
     }
 
     /// Resolve the lane in front again when a file it was built from changed
-    /// on disk. `Some` with what to say when it did; nothing to do otherwise.
+    /// on disk. `Some` when it was resolved again, with what to say — empty
+    /// when only model facts moved, which no line of its own announces;
+    /// `None` when there was nothing to do.
     pub fn refresh_config(&mut self) -> Option<Vec<String>> {
         let lane = self.lane();
         let now = resolve::watched(&self.pinned, lane.root());
@@ -177,12 +179,10 @@ impl Core {
         match reloaded {
             Ok(mut said) => {
                 self.refused.remove(&token);
-                let source = if moved.is_empty() {
-                    "model configuration".into()
-                } else {
-                    moved.join(", ")
-                };
-                said.insert(0, format!("reloaded — {source}"));
+                // Facts applied with nothing named are not worth a line.
+                if !moved.is_empty() {
+                    said.insert(0, format!("reloaded — {}", moved.join(", ")));
+                }
                 Some(said)
             }
             Err(why) => {

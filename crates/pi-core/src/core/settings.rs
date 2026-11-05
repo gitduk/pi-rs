@@ -351,6 +351,8 @@ impl Core {
             "model switched"
         );
         self.retarget(dialled.transport, dialled.spec);
+        // This switch dialled on the facts in force; the next one should not.
+        self.catalog.refresh();
         said
     }
     /// `/effort`: bare, the effort in force; with a level, that level from

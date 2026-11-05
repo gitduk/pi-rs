@@ -1,7 +1,7 @@
 //! Asynchronous discovery of the model facts described by provider settings.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use futures::future;
@@ -16,8 +16,6 @@ use crate::args::Pinned;
 
 // Discovery is optional: a slow catalog must not hold startup indefinitely.
 const TIMEOUT: Duration = Duration::from_secs(5);
-// Catalogs can change independently of the configuration files.
-const REFRESH: Duration = Duration::from_secs(300);
 
 /// A snapshot of the discovered model facts applied to a resolved configuration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -189,7 +187,12 @@ pub struct Catalog {
     generation: Generation,
     sources: Vec<Source>,
     known: BTreeMap<String, Cached>,
-    checked: Option<Instant>,
+    /// Whether a list was read since it was last asked for: a start, a
+    /// provider's configuration change or `/model` asks again.
+    fetched: bool,
+    /// A list someone asked for is applied whole: the menu it fills shows
+    /// every model's facts, not just the ones a lane runs.
+    apply_all: bool,
     pending: Option<Pending>,
     errors: Vec<String>,
 }
@@ -197,6 +200,24 @@ pub struct Catalog {
 struct Refresh {
     changed: bool,
     notes: Vec<String>,
+}
+
+/// Whether a lane would find something different: a new name, or a fact of a
+/// model it runs. A price on a model nothing runs can wait.
+fn reaches_a_lane(
+    provider: &str,
+    cached: &Cached,
+    models: &toml::Table,
+    in_use: &BTreeSet<String>,
+) -> bool {
+    if !cached.models.keys().eq(models.keys()) {
+        return true;
+    }
+    in_use.iter().any(|name| {
+        // A bare name is the one provider's, whichever holds it.
+        let (prefix, id) = name.split_once('/').unwrap_or((provider, name.as_str()));
+        prefix == provider && cached.models.get(id) != models.get(id)
+    })
 }
 
 impl Catalog {
@@ -208,7 +229,8 @@ impl Catalog {
     pub async fn load(&mut self, pinned: &Pinned, config: &Config) -> Vec<String> {
         self.sources = Source::configured(pinned, config);
         let sources = self.sources.clone();
-        self.accept(read(sources).await).notes
+        // No lane runs yet: nothing counts as in use.
+        self.accept(read(sources).await, &BTreeSet::new()).notes
     }
 
     /// Apply only facts belonging to the connections that are still configured.
@@ -231,23 +253,29 @@ impl Catalog {
         settings.config_with_models(&models)
     }
 
-    /// Ask for another list at the next opportunity, retaining the current one.
+    /// Ask for another list at the next opportunity, retaining the current
+    /// one. What comes back is applied whole: someone is choosing from it.
     pub fn refresh(&mut self) {
-        self.checked = None;
+        self.fetched = false;
+        self.apply_all = true;
     }
 
-    fn accept(&mut self, results: Results) -> Refresh {
-        self.checked = Some(Instant::now());
+    fn accept(&mut self, results: Results, in_use: &BTreeSet<String>) -> Refresh {
+        self.fetched = true;
+        let apply_all = std::mem::take(&mut self.apply_all);
         let mut changed = false;
         let mut errors = Vec::new();
         for (source, result) in results {
             match result {
                 Ok(models) => {
-                    let same = self
-                        .known
-                        .get(&source.name)
-                        .is_some_and(|c| c.source == source && c.models == models);
-                    if !same {
+                    let moved = self.known.get(&source.name).is_none_or(|cached| {
+                        // A new credential re-dials as much as a new fact does.
+                        cached.source != source
+                            || (cached.models != models
+                                && (apply_all
+                                    || reaches_a_lane(&source.name, cached, &models, in_use)))
+                    });
+                    if moved {
                         changed = true;
                         self.known
                             .insert(source.name.clone(), Cached { source, models });
@@ -275,21 +303,21 @@ impl Catalog {
             self.known
                 .retain(|name, _| sources.iter().any(|s| &s.name == name));
             self.sources = sources;
-            self.checked = None;
+            self.fetched = false;
             self.errors.clear();
         }
     }
 
-    fn finish_pending(&mut self) -> Option<Refresh> {
+    fn finish_pending(&mut self, in_use: &BTreeSet<String>) -> Option<Refresh> {
         match self.pending.as_mut()?.result.try_recv() {
             Ok(results) => {
                 self.pending = None;
-                Some(self.accept(results))
+                Some(self.accept(results, in_use))
             }
             Err(oneshot::error::TryRecvError::Empty) => None,
             Err(oneshot::error::TryRecvError::Closed) => {
                 self.pending = None;
-                self.checked = Some(Instant::now());
+                self.fetched = true;
                 Some(Refresh {
                     changed: false,
                     notes: vec!["model discovery ended without a result".into()],
@@ -301,7 +329,8 @@ impl Catalog {
     /// Start the lists' fetch without waiting for it: a surface is about to
     /// paint, and `poll` takes the answer when it comes.
     pub fn fetch(&mut self, pinned: &Pinned, config: &Config) {
-        self.poll(pinned, config);
+        self.configure(pinned, config);
+        self.start();
     }
 
     /// A list nobody has answered yet: a surface keeps waking for it, so its
@@ -310,26 +339,52 @@ impl Catalog {
         self.pending.is_some()
     }
 
-    fn poll(&mut self, pinned: &Pinned, config: &Config) -> Option<Refresh> {
+    fn poll(
+        &mut self,
+        pinned: &Pinned,
+        config: &Config,
+        in_use: &BTreeSet<String>,
+    ) -> Option<Refresh> {
         self.configure(pinned, config);
         if self.pending.is_some() {
-            return self.finish_pending();
+            return self.finish_pending(in_use);
         }
-        if self.sources.is_empty() || self.checked.is_some_and(|at| at.elapsed() < REFRESH) {
-            return None;
+        self.start();
+        None
+    }
+
+    /// Begin reading the lists, unless one is on its way or has come since it
+    /// was last asked for.
+    fn start(&mut self) {
+        if self.pending.is_some() || self.sources.is_empty() || self.fetched {
+            return;
         }
-        let runtime = tokio::runtime::Handle::try_current().ok()?;
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
         let sources = self.sources.clone();
         let (send, result) = oneshot::channel();
         let task = runtime.spawn(async move {
             let _ = send.send(read(sources).await);
         });
         self.pending = Some(Pending { task, result });
-        None
     }
 }
 
 impl Core {
+    /// The models this run stands on: every lane's, and the ones the files
+    /// would dial without being asked.
+    fn models_in_use(&self) -> BTreeSet<String> {
+        let mut names: BTreeSet<String> = self
+            .lanes
+            .iter()
+            .map(|lane| lane.agent().spec().model.clone())
+            .collect();
+        names.extend(self.config.model.clone());
+        names.extend(self.config.summarize_model.clone());
+        names
+    }
+
     /// Whether a model list is still on its way.
     pub fn awaiting_models(&self) -> bool {
         self.catalog.awaiting_models()
@@ -337,7 +392,8 @@ impl Core {
 
     /// Poll discovery without blocking a caller; new facts rebuild the active agent.
     pub fn refresh_models(&mut self) -> Option<Vec<String>> {
-        let refresh = self.catalog.poll(&self.pinned, &self.config)?;
+        let in_use = self.models_in_use();
+        let refresh = self.catalog.poll(&self.pinned, &self.config, &in_use)?;
         let mut notes = refresh.notes;
         for note in &notes {
             tracing::warn!(target: "pi::session", reason = %note, "model discovery failed");
@@ -427,6 +483,24 @@ max_output_tokens = 2048
             .unwrap(),
             None,
         )
+    }
+
+    async fn refreshed(
+        catalog: &mut Catalog,
+        pinned: &Pinned,
+        config: &Config,
+        in_use: &BTreeSet<String>,
+    ) -> Refresh {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(result) = catalog.poll(pinned, config, in_use) {
+                    break result;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
     }
 
     async fn two_lanes(root: &std::path::Path, file: &std::path::Path, discover: bool) -> Core {
@@ -548,7 +622,11 @@ context_window = 128000
         .unwrap();
         assert_eq!(core.lane().agent().spec().context_window, 300000);
         core.current = 0;
-        core.refresh_model_config().unwrap();
+        let said = core.refresh_model_config().unwrap();
+        assert!(
+            said.is_empty(),
+            "applying facts alone says nothing: {said:?}"
+        );
         assert_eq!(core.lane().agent().spec().context_window, 300000);
         assert!(
             core.refresh_model_config().is_none(),
@@ -662,18 +740,13 @@ format = "chat"
         let config = settings.config().unwrap();
         let mut catalog = Catalog::default();
         catalog.load(&pinned, &config).await;
+        assert!(
+            catalog.poll(&pinned, &config, &BTreeSet::new()).is_none(),
+            "a list is read again only when asked"
+        );
         catalog.refresh();
-        assert!(catalog.poll(&pinned, &config).is_none());
-        let refreshed = tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                if let Some(result) = catalog.poll(&pinned, &config) {
-                    break result;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
+        assert!(catalog.poll(&pinned, &config, &BTreeSet::new()).is_none());
+        let refreshed = refreshed(&mut catalog, &pinned, &config, &BTreeSet::new()).await;
         assert!(refreshed.changed);
         let config = catalog.enrich(&settings, &pinned, config).unwrap();
         assert_eq!(
@@ -687,6 +760,57 @@ format = "chat"
             "removed facts are gone"
         );
         assert_eq!(config.find("test/b").unwrap().context_window, 300000);
+    }
+
+    // A fact nobody runs waits for a list someone asked for; one a lane runs
+    // is applied whenever it moves.
+    #[test]
+    fn a_fact_nobody_runs_waits_for_a_list_someone_asked_for() {
+        let mut catalog = Catalog::default();
+        let idle: BTreeSet<String> = ["test/a".to_string()].into();
+        assert!(
+            catalog
+                .accept(
+                    vec![answer("test", &[("a", 100000), ("b", 9000)])],
+                    &BTreeSet::new()
+                )
+                .changed
+        );
+        let first = catalog.generation();
+
+        assert!(
+            !catalog
+                .accept(vec![answer("test", &[("a", 100000), ("b", 8000)])], &idle)
+                .changed,
+            "nothing a lane runs moved"
+        );
+        assert_eq!(catalog.generation(), first);
+
+        catalog.refresh();
+        assert!(
+            catalog
+                .accept(vec![answer("test", &[("a", 100000), ("b", 8000)])], &idle)
+                .changed,
+            "an asked-for list is applied whole"
+        );
+        assert_ne!(catalog.generation(), first);
+    }
+
+    fn answer(name: &str, rows: &[(&str, i64)]) -> (Source, Result<toml::Table, String>) {
+        let source = Source {
+            name: name.into(),
+            provider: toml::from_str("base_url = \"https://example.test/v1\"\nformat = \"chat\"")
+                .unwrap(),
+            key: None,
+            headers: Vec::new(),
+        };
+        let mut models = toml::Table::new();
+        for (id, window) in rows {
+            let mut facts = toml::Table::new();
+            facts.insert("context_window".into(), toml::Value::Integer(*window));
+            models.insert((*id).into(), toml::Value::Table(facts));
+        }
+        (source, Ok(models))
     }
 
     #[tokio::test]

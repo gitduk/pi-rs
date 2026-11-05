@@ -119,9 +119,13 @@ vision = true
 ```
 
 Explicit fields override discovered values. Discovery never writes the settings
-file. Catalogs refresh in the background every five minutes and when `/model`
-is used without a name. Each discovery attempt has a five-second timeout;
-failed refreshes keep the last successful list. Responses with `has_more` and
+file. Catalogs are read at startup, again when a provider's configuration
+changes, and whenever `/model` is used; nothing reads them unasked. A list
+someone asked for is applied whole, since they are choosing from it; otherwise
+it is applied when its names change or when a fact moves for a model a lane
+runs — a price that moved on a model nothing runs waits for the next ask. Each
+discovery attempt has a five-second timeout; failed reads keep the last
+successful list. Responses with `has_more` and
 `last_id` are paginated using `after_id`. An interactive start paints before the
 lists answer and applies their facts when they arrive, so only a start with no
 model to name — a provider-only config, say — waits for one.
