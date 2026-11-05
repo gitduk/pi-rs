@@ -4,7 +4,7 @@
 
 use ratatui::text::{Line, Span};
 
-use super::{Fold, Opened, clip_beside, count};
+use super::{Fold, Opening, clip_beside, count, page_of};
 use crate::render::Paint;
 use crate::tui::browse::PageLine;
 use pi_store::icons;
@@ -120,12 +120,12 @@ impl Fold for Note {
         (i == 0 && (self.open || self.expandable() || self.clipped(width))).then_some(0)
     }
 
-    fn opened(&self, _i: usize, paint: &Paint) -> Option<Opened> {
-        Some(
+    fn opening(&self, _i: usize, paint: &Paint) -> Option<Opening> {
+        Some(page_of(
             (0..self.lines.len())
                 .map(|i| self.opened_line(i, false, paint))
                 .collect(),
-        )
+        ))
     }
 
     fn clipped(&self, width: usize) -> bool {

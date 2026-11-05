@@ -55,12 +55,14 @@ struct Preview {
 
 #[derive(Clone, Copy)]
 enum PreviewLine {
+    // `rows` is what the line still shows when the window cut it short.
     Content { source: usize, rows: Option<usize> },
     More { target: More, remaining: usize },
 }
 
 #[derive(Clone, Copy)]
 enum More {
+    // The line whose fold the page shows, from where the cut left off.
     Page(usize),
     Steps,
     CollapseSteps,
@@ -80,42 +82,95 @@ impl PreviewLine {
             } => 0,
         }
     }
+
+    fn content(source: usize) -> Self {
+        Self::Content { source, rows: None }
+    }
+
+    fn rows(self, heights: &[usize]) -> usize {
+        match self {
+            Self::Content { source, rows: None } => heights[source],
+            Self::Content {
+                rows: Some(rows), ..
+            } => rows,
+            Self::More { .. } => 1,
+        }
+    }
 }
 
 impl Preview {
-    fn extend(&mut self, range: std::ops::Range<usize>, heights: &[usize]) {
-        let total: usize = heights[range.clone()].iter().sum();
-        let mut available = if total > self.budget {
-            self.budget - 1
-        } else {
-            total
-        };
-        let mut kept = 0;
-        for source in range.clone() {
-            if available == 0 {
-                break;
-            }
-            let rows = heights[source].min(available);
-            self.lines.push(PreviewLine::Content {
-                source,
-                rows: (rows < heights[source]).then_some(rows),
-            });
-            available -= rows;
-            kept += rows;
-        }
-        if kept < total {
-            self.lines.push(PreviewLine::More {
-                target: More::Page(range.start),
-                remaining: total - kept,
-            });
-        }
-    }
-
     fn heading(&self, source: usize) -> Option<usize> {
         self.lines.iter().position(
             |line| matches!(line, PreviewLine::Content { source: at, .. } if *at == source),
         )
     }
+}
+
+// What the window can hold of a fold's lines: all of them, or a cut that
+// spends its last row on a footer naming the rows left out.
+fn within_budget(lines: Vec<PreviewLine>, heights: &[usize], budget: usize) -> Vec<PreviewLine> {
+    let total: usize = lines.iter().map(|line| line.rows(heights)).sum();
+    if total <= budget {
+        return lines;
+    }
+    let mut kept = Vec::with_capacity(budget);
+    let mut room = budget - 1;
+    let mut shown = 0;
+    let mut heading = 0;
+    for line in lines {
+        let rows = line.rows(heights);
+        let take = rows.min(room);
+        if take < rows {
+            if take > 0
+                && let PreviewLine::Content { source, .. } = line
+            {
+                kept.push(PreviewLine::Content {
+                    source,
+                    rows: Some(take),
+                });
+                shown += take;
+            }
+            heading = line.source();
+            break;
+        }
+        room -= take;
+        shown += take;
+        kept.push(line);
+    }
+    kept.push(PreviewLine::More {
+        target: More::Page(heading),
+        remaining: total - shown,
+    });
+    kept
+}
+
+// Keep the start for context and the newest steps for live progress.
+fn step_lines(group: &Group) -> Vec<PreviewLine> {
+    const FIRST: usize = 2;
+    const LAST: usize = 3;
+    let sections = group.sections();
+    let count = sections.len();
+    let hidden = count.saturating_sub(FIRST + LAST);
+    let mut lines = Vec::with_capacity(count + 1);
+    for (index, range) in sections.into_iter().enumerate() {
+        if hidden > 0 && !group.all && (FIRST..count - LAST).contains(&index) {
+            if index == FIRST {
+                lines.push(PreviewLine::More {
+                    target: More::Steps,
+                    remaining: hidden,
+                });
+            }
+            continue;
+        }
+        lines.extend((range.start..range.end).map(PreviewLine::content));
+    }
+    if hidden > 0 && group.all {
+        lines.push(PreviewLine::More {
+            target: More::CollapseSteps,
+            remaining: hidden,
+        });
+    }
+    lines
 }
 
 struct Measured {
@@ -199,11 +254,10 @@ enum Kind {
     Steps(Group),
 }
 
-/// What opening a closed line shows on the reading page: what it reads
-/// opened in place, whole.
+/// What a page reads for a closed line: its lines whole, one per row.
 pub type Opening = Vec<PageLine>;
 
-/// A closed line's lines as opening it in place draws them, whole, each with
+/// A closed line's page before its shared indent is taken out: each line with
 /// the border a wrap repeats.
 pub type Opened = Vec<(PageLine, Option<Line<'static>>)>;
 
@@ -263,13 +317,9 @@ trait Fold {
             true
         }
     }
-    // What opening line `i` in place would show, whole since a
-    // page reads it wrapped; drawn in place by the same code.
-    fn opened(&self, i: usize, paint: &Paint) -> Option<Opened>;
-    // What the page reads for line `i`: what `opened` gives, as a page.
-    fn opening(&self, i: usize, paint: &Paint) -> Option<Opening> {
-        self.opened(i, paint).map(page_of)
-    }
+    // What a page reads for line `i`: the row's lines whole, as opening it
+    // in place shows them.
+    fn opening(&self, i: usize, paint: &Paint) -> Option<Opening>;
     // Whether lines are cut at `width` that only its opening shows whole.
     fn clipped(&self, _width: usize) -> bool {
         false
@@ -902,40 +952,15 @@ impl Row {
             let (line, border) = self.full_line(i, paint, width);
             heights.push(screen::wrap_rows(border.as_ref(), &line, width));
         }
-        let mut preview = Preview {
+        let lines = match &self.0 {
+            Kind::Steps(group) => step_lines(group),
+            _ => (0..heights.len()).map(PreviewLine::content).collect(),
+        };
+        *self.1.preview.borrow_mut() = Some(Box::new(Preview {
             width,
             budget,
-            lines: Vec::new(),
-        };
-        if let Kind::Steps(group) = &self.0 {
-            // Keep the start for context and the newest steps for live progress.
-            const FIRST: usize = 2;
-            const LAST: usize = 3;
-            let sections = group.sections();
-            let count = sections.len();
-            let hidden = count.saturating_sub(FIRST + LAST);
-            for (index, range) in sections.into_iter().enumerate() {
-                if hidden > 0 && !group.all && (FIRST..count - LAST).contains(&index) {
-                    if index == FIRST {
-                        preview.lines.push(PreviewLine::More {
-                            target: More::Steps,
-                            remaining: hidden,
-                        });
-                    }
-                    continue;
-                }
-                preview.extend(range, &heights);
-            }
-            if hidden > 0 && group.all {
-                preview.lines.push(PreviewLine::More {
-                    target: More::CollapseSteps,
-                    remaining: hidden,
-                });
-            }
-        } else {
-            preview.extend(0..heights.len(), &heights);
-        }
-        *self.1.preview.borrow_mut() = Some(Box::new(preview));
+            lines: within_budget(lines, &heights, budget),
+        }));
     }
 
     /// Screen rows logical line `i` takes at `width`, cached by width — a
