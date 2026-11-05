@@ -918,7 +918,7 @@ mod tests {
 
     #[test]
     fn the_shipped_example_is_a_valid_config() {
-        let example = include_str!("../../../examples/pi.toml");
+        let example = include_str!("../../../examples/settings.toml");
         let config = Config::from_tree(toml::from_str(example).unwrap());
         assert!(config.is_ok(), "{:?}", config.err());
     }
