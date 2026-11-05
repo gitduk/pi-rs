@@ -374,6 +374,16 @@ impl Ui {
             .zip(&self.row_targets)
             .filter_map(|(area, target)| matches!(target, Target::Rule).then_some(area))
             .collect();
+        // Output moves rows under a still pointer: settle the hover before
+        // painting, or the highlight lands on the row it has left.
+        let over = self
+            .pointer
+            .and_then(|(col, row)| self.hovered_row(view, col, row));
+        if over != self.hovered_scrollback || self.lit_text() != lit || self.on_closer() != ruled {
+            self.hovered_scrollback = over;
+            self.redraw = true;
+            return;
+        }
         let _ = self.screen.draw(|frame| {
             // Laid out for the size last reported: a frame of another would
             // draw off its edge, and the resize on its way redraws.
@@ -466,14 +476,6 @@ impl Ui {
             let caret_row = regions.editor.y + caret_in_view as u16;
             frame.set_cursor_position(command_caret.unwrap_or((caret.1, caret_row)));
         });
-        // Bold doesn't move a row, so a second frame settles it.
-        let over = self
-            .pointer
-            .and_then(|(col, row)| self.hovered_row(view, col, row));
-        if over != self.hovered_scrollback || self.lit_text() != lit || self.on_closer() != ruled {
-            self.hovered_scrollback = over;
-            self.redraw = true;
-        }
     }
 
     fn more_actions(&self, view: &View, regions: Regions) -> Vec<Rect> {

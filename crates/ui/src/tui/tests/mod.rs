@@ -1,6 +1,7 @@
 mod background;
 mod call;
 mod harness;
+mod hover;
 mod keys;
 mod lane;
 mod looping;
