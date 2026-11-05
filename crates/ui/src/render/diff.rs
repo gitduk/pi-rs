@@ -25,7 +25,7 @@ impl<'a> Row<'a> {
     fn parse(text: &'a str) -> Self {
         Self {
             text,
-            source: Source::parse(text),
+            source: Source::of(text),
             change: None,
         }
     }
@@ -36,18 +36,20 @@ impl<'a> Row<'a> {
 }
 
 impl<'a> Source<'a> {
-    fn parse(text: &'a str) -> Option<Self> {
-        let mark = text.chars().next()?;
-        if !matches!(mark, '+' | '-' | ' ') {
+    // The head is the row's own text before what it holds, so a clipped row
+    // still separates its number from its code.
+    fn of(text: &'a str) -> Option<Self> {
+        let tool::row::Kind::Line {
+            sign, text: body, ..
+        } = tool::row::kind(text)
+        else {
             return None;
-        }
-        let rest = text[1..].trim_start_matches(' ');
-        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        if digits == 0 || rest.as_bytes().get(digits) != Some(&b' ') {
-            return None;
-        }
-        let (head, body) = text.split_at(text.len() - rest.len() + digits + 1);
-        Some(Self { head, body, mark })
+        };
+        Some(Self {
+            head: &text[..text.len() - body.len()],
+            body,
+            mark: sign.mark(),
+        })
     }
 }
 
@@ -61,7 +63,6 @@ fn source_text(text: &str) -> String {
 
 pub(super) fn content(
     text: &[&str],
-    path: &str,
     p: &Paint,
     room: usize,
     emphasize_changes: bool,
@@ -74,10 +75,27 @@ pub(super) fn content(
     if emphasize_changes {
         replacements(&mut rows);
     }
-    let mut streams = Streams::new(path, p.theme.syntax);
+    // Each file a block names re-reads the syntax: a hunk of another file
+    // cannot continue this one's parser state.
+    let mut path = String::new();
+    let mut streams = Streams::new(&path, p.theme.syntax);
     rows.iter()
         .map(|row| {
-            let tokens = streams.line(row.source, path, p.theme.syntax);
+            if let tool::row::Kind::File {
+                path: named,
+                plus,
+                minus,
+            } = tool::row::kind(row.text)
+            {
+                path = named.to_string();
+                streams = Streams::new(&path, p.theme.syntax);
+                let head = format!("{named} +{plus} -{minus}");
+                return Line::from(Span::styled(
+                    clip(&head, room),
+                    super::style_to_ratatui(&p.theme.muted),
+                ));
+            }
+            let tokens = streams.line(row.source, &path, p.theme.syntax);
             draw(row, tokens, p, room)
         })
         .collect()
@@ -86,12 +104,11 @@ pub(super) fn content(
 #[cfg(test)]
 pub(super) fn rows(
     text: &[&str],
-    path: &str,
     p: &Paint,
     room: usize,
     emphasize_changes: bool,
 ) -> Vec<Line<'static>> {
-    content(text, path, p, room, emphasize_changes)
+    content(text, p, room, emphasize_changes)
         .into_iter()
         .map(|line| {
             let mut spans = vec![Span::raw(super::RESULT_INDENT)];
@@ -291,13 +308,7 @@ mod tests {
     fn escaped_source_is_clipped_without_slicing_changed_text() {
         let p = Paint::new(true);
         for room in 0..50 {
-            let lines = rows(
-                &["+1 \x1b[31mhello     你好世界中文"],
-                "sample.py",
-                &p,
-                room,
-                true,
-            );
+            let lines = rows(&["+1 \x1b[31mhello     你好世界中文"], &p, room, true);
             assert_eq!(
                 lines[0].to_string(),
                 format!("  {}", clip("+1 hello     你好世界中文", room))
@@ -329,13 +340,7 @@ mod tests {
             theme.prompt.panel.input = input;
             let p = Paint::with_theme(true, std::sync::Arc::new(theme))
                 .with_background(Some((24, 24, 24)));
-            let lines = rows(
-                &["-1 value = 123", "+1 value = 456"],
-                "sample.py",
-                &p,
-                80,
-                true,
-            );
+            let lines = rows(&["-1 value = 123", "+1 value = 456"], &p, 80, true);
             for (line, normal, strong, number) in [
                 (
                     &lines[0],
@@ -359,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn changes_keep_syntax_colours_and_pages_have_no_backgrounds() {
+    fn changes_keep_syntax_colours_on_a_row_and_on_its_page() {
         use ratatui::style::Modifier;
         let p = Paint::new(true);
         let preview = "sample.py +1 -1\n-1 value = foo('old')\n+1 value = bar(123)";
@@ -384,7 +389,10 @@ mod tests {
             ] {
                 assert_eq!(style_at(inline, needle).fg, style_at(page, needle).fg);
             }
-            assert!(page.spans.iter().all(|span| span.style.bg.is_none()));
+            // The page reads what the row showed: the change keeps its ground.
+            for (inline, page) in inline.spans.iter().zip(&page.spans) {
+                assert_eq!(inline.style.bg, page.style.bg);
+            }
             assert!(
                 inline
                     .spans
@@ -444,6 +452,7 @@ mod tests {
         let p = Paint::new(true);
         let lines = rows(
             &[
+                "sample.py +2 -2",
                 "-1 text = '''",
                 "+1 text = 1",
                 " 2 import os",
@@ -452,11 +461,12 @@ mod tests {
                 "  ⋮",
                 " 9 import os",
             ],
-            "sample.py",
             &p,
             80,
             false,
         );
+        // The block's head names the file; the rows it names follow it.
+        let lines = &lines[1..];
         let mut code = Code::new("sample.py", p.theme.syntax);
         let expected = code.line("import os");
         let import = expected
@@ -474,6 +484,24 @@ mod tests {
         assert_eq!(style_at(&lines[3], "'''").fg, old.line("'''")[0].style.fg);
     }
 
+    // A command's own line that reads like a diff row keeps its reading: only
+    // a row a tool wrote carries a sign.
+    #[test]
+    fn output_that_looks_like_a_diff_row_is_drawn_as_output() {
+        let p = Paint::new(true);
+        let printed = rows(&["· +3 import os"], &p, 80, true);
+        assert_eq!(printed[0].to_string(), "  · +3 import os");
+        for span in &printed[0].spans {
+            assert_eq!(span.style.bg, None, "{:?}", span.style);
+        }
+
+        let row = rows(&["+3 import os"], &p, 80, true);
+        assert!(
+            row[0].spans.iter().any(|span| span.style.bg.is_some()),
+            "a row of a file is a change"
+        );
+    }
+
     #[test]
     fn colouring_preserves_clipping_unicode_and_unknown_source() {
         let source = [
@@ -484,10 +512,12 @@ mod tests {
             "unstructured output",
         ];
         for path in ["sample.py", "sample.unknown"] {
+            let head = format!("{path} +2 -2");
+            let block: Vec<&str> = std::iter::once(head.as_str()).chain(source).collect();
             for room in [0, 1, 3, 6, 12, 80] {
-                let plain = rows(&source, path, &Paint::new(false), room, true);
-                let coloured = rows(&source, path, &Paint::new(true), room, true);
-                for ((plain, coloured), original) in plain.iter().zip(&coloured).zip(source) {
+                let plain = rows(&block, &Paint::new(false), room, true);
+                let coloured = rows(&block, &Paint::new(true), room, true);
+                for ((plain, coloured), original) in plain.iter().zip(&coloured).zip(&block) {
                     assert_eq!(plain.to_string(), format!("  {}", clip(original, room)));
                     assert_eq!(plain.to_string(), coloured.to_string());
                 }

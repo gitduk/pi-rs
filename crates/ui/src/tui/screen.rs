@@ -514,22 +514,16 @@ mod tests {
                 assert_eq!(buffer[(0, row as u16)].bg, Color::Reset);
                 assert_eq!(lines[row].style.bg, None);
                 assert_eq!(buffer[(23, row as u16)].bg, Color::Reset);
-                if shown == crate::render::Shown::Page {
-                    assert!(lines[row].spans.iter().all(|span| span.style.bg.is_none()));
-                    assert_eq!(buffer[(2, row as u16)].bg, Color::Reset);
-                    assert_eq!(buffer[(5, row as u16)].bg, Color::Reset);
-                } else {
-                    let background = lines[row].spans[1]
-                        .style
-                        .bg
-                        .expect("changed gutter has a background");
-                    assert_ne!(background, Color::Reset);
-                    assert_eq!(buffer[(2, row as u16)].bg, background);
-                    assert_eq!(buffer[(4, row as u16)].bg, background);
-                    let end = lines[row].width();
-                    assert_eq!(buffer[((end - 1) as u16, row as u16)].bg, background);
-                    assert_eq!(buffer[(end as u16, row as u16)].bg, Color::Reset);
-                }
+                let background = lines[row].spans[1]
+                    .style
+                    .bg
+                    .expect("changed gutter has a background");
+                assert_ne!(background, Color::Reset);
+                assert_eq!(buffer[(2, row as u16)].bg, background);
+                assert_eq!(buffer[(4, row as u16)].bg, background);
+                let end = lines[row].width();
+                assert_eq!(buffer[((end - 1) as u16, row as u16)].bg, background);
+                assert_eq!(buffer[(end as u16, row as u16)].bg, Color::Reset);
             }
             assert_eq!(buffer[(23, 2)].bg, Color::Reset);
             assert_eq!(lines[0].to_string(), "  +1 ");

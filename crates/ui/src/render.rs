@@ -672,21 +672,9 @@ pub(crate) fn result_parts(
     let mut out = vec![(Line::from(spans), Some(border))];
     let diff_lines: Vec<&str> = rest.lines().collect();
     let (rows, footer) = sketched(&diff_lines, shown);
-    let mut sketch = diff::content(
-        rows,
-        head.rsplit_once(" +").map_or(head, |(path, _)| path),
-        p,
-        room,
-        shown != Shown::Page,
-    );
-    if shown == Shown::Page {
-        for line in &mut sketch {
-            line.style.bg = None;
-            for span in &mut line.spans {
-                span.style.bg = None;
-            }
-        }
-    }
+    // A page reads the same rows a row does: the change keeps its colours, so
+    // what the row showed small is the same thing read whole.
+    let sketch = diff::content(rows, p, room, true);
     out.extend(
         sketch
             .into_iter()
@@ -1095,11 +1083,12 @@ mod tests {
             ("-    9 x", "+ 1 éé"),
         ] {
             for room in [0, 3, 6, 40] {
-                let rows = super::sketch_rows(&[was, is], "test.rs", &paint, room, true);
-                assert_eq!(rows.len(), 2);
+                let rows = super::sketch_rows(&["test.rs +1 -1", was, is], &paint, room, true);
+                // The block's head, then the pair itself.
+                assert_eq!(rows.len(), 3);
             }
         }
-        let rows = super::sketch_rows(&["-  9 a", "+ 10 ab"], "test.rs", &paint, 40, true);
+        let rows = super::sketch_rows(&["-  9 a", "+ 10 ab"], &paint, 40, true);
         let text: Vec<String> = rows.iter().map(ToString::to_string).collect();
         assert_eq!(text, ["  -  9 a", "  + 10 ab"]);
     }
