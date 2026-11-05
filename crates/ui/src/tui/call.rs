@@ -127,9 +127,10 @@ pub(super) fn drawn(tools: &[RunTool], row_holds: bool) -> Vec<&RunTool> {
     tools.iter().filter(|t| !(row_holds && t.held())).collect()
 }
 
-// Where a tool's row goes: a call that landed well and is not a write is a
-// step of the group; anything else is a line of its own that ends it.
-// `asked` is what the call asked for, as `Folds::take_asked` keeps it.
+// Where a tool's row goes: a call that landed well, and whose result says no
+// more than its line, is a step of the group; anything else is a line of its
+// own that ends it. `asked` is what the call asked for, as `Folds::take_asked`
+// keeps it.
 pub(super) fn push_tool_row(
     scrollback: &mut Scrollback,
     folds: &mut Folds,
@@ -137,7 +138,9 @@ pub(super) fn push_tool_row(
     asked: &str,
     result: &ToolResult,
 ) {
-    if let Some(name) = row.tool_name().filter(|&n| !modifies(n))
+    // Rows under the head are a change told: a step would drop them.
+    let sketched = row.tool_preview().is_some_and(|p| p.contains('\n'));
+    if let Some(name) = row.tool_name().filter(|&n| !modifies(n) && !sketched)
         && let Some(outcome @ (Outcome::Done | Outcome::Warned)) = row.outcome()
     {
         let tool = row::FoldedTool::new(

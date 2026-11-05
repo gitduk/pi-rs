@@ -627,3 +627,42 @@ fn an_open_commands_tail_counts_what_it_leaves_out() {
     let (from, rows) = tail_rows(&huge, 40);
     assert_eq!((from, rows.len()), (1, 8));
 }
+
+// A call whose result says more than its line keeps a row of its own: a step
+// shows one line, and the rows under a change report are the change.
+#[test]
+fn a_change_report_keeps_its_own_row() {
+    use crate::render::Outcome;
+    use crate::tui::call::push_tool_row;
+    use crate::tui::scrollback::{Folds, Scrollback};
+    use llm::message::ToolResult;
+
+    let result = ToolResult::text("c", "bash", "ok");
+    let drawn = |preview: &str| Row::result(Outcome::Done, "bash", preview);
+
+    let mut bare = Scrollback::default();
+    push_tool_row(
+        &mut bare,
+        &mut Folds::default(),
+        drawn("sed -i 's/POST/post/g' README.md"),
+        "",
+        &result,
+    );
+    assert!(bare.iter().any(Row::is_steps), "a bare command is a step");
+
+    let change = "sed -i 's/POST/post/g' README.md\nREADME.md +1 -1\n-1 POST /a\n+1 post /a";
+    let mut changed = Scrollback::default();
+    push_tool_row(
+        &mut changed,
+        &mut Folds::default(),
+        drawn(change),
+        "",
+        &result,
+    );
+    assert!(
+        !changed.iter().any(Row::is_steps),
+        "the change keeps its rows"
+    );
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].tool_preview(), Some(change));
+}
