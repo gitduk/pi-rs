@@ -350,7 +350,7 @@ impl Ui {
             .map(|band| band.patch(self.rat_style(&self.paint.theme.menu.selected)))
             .unwrap_or_default();
 
-        self.more_hits = self.more_actions(view, regions);
+        (self.more_hits, self.page_hits) = self.more_actions(view, regions);
         let flash_body = self.flash_hit.as_ref().and_then(|(at, hit)| {
             if *at >= regions.bar.height as usize {
                 return None;
@@ -475,23 +475,25 @@ impl Ui {
         });
     }
 
-    fn more_actions(&self, view: &View, regions: Regions) -> Vec<Rect> {
+    // Where a hint for more is drawn, and where a click opens a background
+    // command's page: its own `N more` line says so already.
+    fn more_actions(&self, view: &View, regions: Regions) -> (Vec<Rect>, Vec<Rect>) {
         let mut row_actions = Vec::new();
         let mut actions = Vec::new();
-        let mut add = |region: Rect, at: usize| {
+        let mut pages = Vec::new();
+        let row_area = |region: Rect, at: usize| {
             if at >= region.height as usize {
-                return;
+                return None;
             }
             let area = Rect {
                 y: region.y + at as u16,
                 height: 1,
                 ..region
             };
-            if area.intersection(regions.overlay()).is_empty()
-                && let Some(areas) = super::browse::MoreAreas::of(area)
-            {
-                actions.push(areas.action);
+            if !area.intersection(regions.overlay()).is_empty() {
+                return None;
             }
+            Some(area)
         };
         if !self.reading() {
             for (at, target) in self.row_targets.iter().enumerate() {
@@ -521,13 +523,15 @@ impl Ui {
                         }
                     }
                     Target::BackgroundResult(..) => {
-                        add(
-                            Rect {
-                                width: regions.history.width.saturating_sub(1),
-                                ..regions.history
-                            },
-                            at,
-                        );
+                        let area = Rect {
+                            width: regions.history.width.saturating_sub(1),
+                            ..regions.history
+                        };
+                        if let Some(area) = row_area(area, at)
+                            && let Some(areas) = super::browse::MoreAreas::of(area)
+                        {
+                            actions.push(areas.action);
+                        }
                     }
                     _ => {}
                 }
@@ -535,26 +539,20 @@ impl Ui {
             for (at, target) in self.command_rows.iter().enumerate() {
                 let opens = match target {
                     call::CommandRow::Earlier(_) => true,
-                    call::CommandRow::BackgroundCommand(id) => {
-                        !self
-                            .background_open
-                            .as_ref()
-                            .is_some_and(|open| open.id == *id)
-                            && self.executions.iter().any(|execution| {
-                                execution.id == *id
-                                    && call::background_opens(execution, self.screen.width())
-                            })
-                    }
-                    call::CommandRow::Under | call::CommandRow::Fold => false,
+                    call::CommandRow::BackgroundCommand(_)
+                    | call::CommandRow::Under
+                    | call::CommandRow::Fold => false,
                 };
-                if opens {
-                    add(
+                if opens
+                    && let Some(area) = row_area(
                         Rect {
                             width: regions.executions.width.saturating_sub(1),
                             ..regions.executions
                         },
                         at,
-                    );
+                    )
+                {
+                    pages.push(area);
                 }
             }
         }
@@ -569,7 +567,7 @@ impl Ui {
             });
         }
         actions.extend(row_actions);
-        actions
+        (actions, pages)
     }
 
     // A prompt's send time in its first screen row's free end, added after

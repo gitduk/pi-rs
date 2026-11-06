@@ -392,7 +392,10 @@ pub(super) fn background_lines(
                 rows.len(),
             ));
             if from > 0 {
-                rows.push(Line::default());
+                let shine = matches!(hovered, Some(CommandRow::Earlier(id)) if id == execution.id);
+                rows.push(Line::from(
+                    paint.action_hint(shine, format!("  {from} more")),
+                ));
                 ids.push(CommandRow::Earlier(execution.id));
             }
             let own = rows.len();
@@ -403,11 +406,7 @@ pub(super) fn background_lines(
             let ([head, last, tail], _) = background_row(execution, width);
             let row = closed_command_line(execution, &head, last, tail, shine, paint);
             ids.push(CommandRow::BackgroundCommand(execution.id));
-            vec![if background_opens(execution, width) {
-                super::browse::more_body(row, room)
-            } else {
-                row
-            }]
+            vec![row]
         };
         lines.extend(rows);
     }

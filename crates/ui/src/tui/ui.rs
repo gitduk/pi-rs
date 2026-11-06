@@ -103,6 +103,9 @@ pub(super) struct Ui {
     // columns, and its page action. A pointer there holds it.
     pub(super) flash_hit: Option<(usize, super::bar::FlashHit)>,
     pub(super) more_hits: Vec<ratatui::layout::Rect>,
+    // Rows a click opens a page from without a hint of their own: an open
+    // execution's `N more` line.
+    pub(super) page_hits: Vec<ratatui::layout::Rect>,
     // When a click last copied: the row says so for `FLASH`, and the loop
     // ticks until it is gone.
     pub(super) copied: Option<Instant>,
@@ -268,6 +271,7 @@ impl Ui {
             flash: None,
             flash_hit: None,
             more_hits: Vec::new(),
+            page_hits: Vec::new(),
             copied: None,
             executions: Vec::new(),
             background_focus: None,

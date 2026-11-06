@@ -117,7 +117,7 @@ impl Ui {
     }
 
     pub(super) fn page_command_at(&self, col: u16, row: u16) -> Option<u64> {
-        if self.reading() || !self.more_at_pointer(col, row) {
+        if self.reading() || !self.page_at_pointer(col, row) {
             return None;
         }
         match self.target_at(row) {
@@ -132,6 +132,16 @@ impl Ui {
                 .more_hits
                 .iter()
                 .any(|area| area.contains(Position::new(col, row)))
+    }
+
+    // A drawn hint, or a row whose own text already says a click opens it.
+    fn page_at_pointer(&self, col: u16, row: u16) -> bool {
+        self.more_at_pointer(col, row)
+            || (!self.over_menu(row)
+                && self
+                    .page_hits
+                    .iter()
+                    .any(|area| area.contains(Position::new(col, row))))
     }
 
     // Whether a click on screen row `row` closes the page: its rule, or the
