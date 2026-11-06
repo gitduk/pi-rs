@@ -147,6 +147,9 @@ async fn an_unsent_prompt_survives_a_failed_write() {
             ran: Some((session, Ok(llm::stream::Usage::default()))),
         })
         .await;
+        // The turn's own save lands before the disk is tampered with, or it
+        // recreates the directory under it.
+        super::harness::saved().await;
         // A file where the store's directory goes: no write gets under it.
         let state = dir.path().join("state");
         let _ = std::fs::remove_dir_all(&state);

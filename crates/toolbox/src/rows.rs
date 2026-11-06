@@ -28,6 +28,11 @@ pub(crate) fn of(items: &[crate::syntax::Item]) -> HashMap<usize, usize> {
         .collect()
 }
 
+/// A row's address alone, with its colon: nothing spans it.
+pub(crate) fn numbered(n: usize) -> String {
+    format!("{n}:")
+}
+
 /// A row's address and its colon, ready for the text of the row to follow.
 ///
 /// A row that spans itself prints as a range: the address says where the
@@ -35,10 +40,24 @@ pub(crate) fn of(items: &[crate::syntax::Item]) -> HashMap<usize, usize> {
 pub(crate) fn addr(n: usize, spans: &HashMap<usize, usize>) -> String {
     let end = spans.get(&n).copied().unwrap_or(n);
     if end == n {
-        format!("{n}:")
+        numbered(n)
     } else {
         format!("{n}-{end}:")
     }
+}
+
+/// The row an address names, read back, and the text after it — the other half
+/// of `addr`. What a view prints and what an edit accepts are one shape, so
+/// this is where that shape is read.
+pub(crate) fn split(text: &str) -> Option<(usize, &str)> {
+    let (head, rest) = text.split_once(':')?;
+    let mut parts = head.split('-');
+    let first = parts.next()?;
+    let digit = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+    if !digit(first) || !parts.all(digit) {
+        return None;
+    }
+    Some((first.parse().ok()?, rest))
 }
 
 /// What stands where a view's dropped rows were. Here rather than at each
@@ -51,4 +70,26 @@ pub(crate) fn line(out: &mut String, n: usize, spans: &HashMap<usize, usize>, te
     out.push_str(&addr(n, spans));
     out.push_str(text);
     out.push('\n');
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_address_reads_back_as_the_row_that_printed_it() {
+        let spans = HashMap::from([(120, 145)]);
+        for n in [1, 7, 120, 999] {
+            let printed = addr(n, &spans);
+            let (row, _) = split(&printed).expect("a printed address did not read back");
+            assert_eq!(row, n, "{printed}");
+        }
+    }
+
+    #[test]
+    fn text_that_is_not_an_address_is_not_read_as_one() {
+        for text in ["hello: world", ":", "1-:x", "-2:x", " 3:x", "1hey:x"] {
+            assert!(split(text).is_none(), "{text:?}");
+        }
+    }
 }

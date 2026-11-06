@@ -13,12 +13,14 @@ pub mod dial;
 pub mod hooks;
 pub mod instructions;
 pub mod lane;
+pub mod lanes;
 pub mod mcp;
 pub mod memory;
 pub mod meter;
 pub mod prompt;
 pub mod question;
 pub mod resolve;
+pub mod saves;
 pub mod settings;
 pub mod shells;
 pub mod status;
@@ -88,11 +90,9 @@ pub struct Core {
     /// The config files as last read: what `/settings` writes into and
     /// a reload reads again.
     pub settings: Settings,
-    /// Every checkout open in this run, in the order they were opened. The
-    /// main one is first, because that is where a run starts.
-    pub lanes: Vec<Lane>,
-    /// Which of them is in front. The surface shows one at a time.
-    pub current: usize,
+    /// Every checkout open in this run, in the order they were opened, and
+    /// which of them is in front. One value: apart, the two can disagree.
+    pub lanes: lanes::Lanes,
     /// By lane token, the files as they stood when a reload last refused
     /// them, so a broken file is said once rather than once a second.
     pub refused: std::collections::HashMap<u64, Vec<tool::stamp::Stamp>>,
@@ -197,7 +197,7 @@ impl Core {
     pub fn refresh_skills(&mut self) -> Option<Vec<String>> {
         let mut moved = false;
         let mut said = Vec::new();
-        for lane in &mut self.lanes {
+        for lane in self.lanes.all_mut() {
             let resolved = lane.resolved();
             let Some(shelf) = &resolved.shelf else {
                 continue;
@@ -249,14 +249,16 @@ impl Core {
             let archive =
                 self.archive(lane.root().to_path_buf(), lane.agent().spec().model.clone());
             let resolved = lane.resolved().clone();
-            self.lanes[at].rearm(resolved, archive, retry, self.executions.clone(), |_| {});
+            self.lanes
+                .at_mut(at)
+                .rearm(resolved, archive, retry, self.executions.clone(), |_| {});
         }
     }
 
-    /// The checkout in front. Indexing is safe by construction: `lanes` is
-    /// never empty, so `current` always names one.
+    /// The checkout in front. Always one: `Lanes` keeps a lane in front even
+    /// while others come and go.
     pub fn lane(&self) -> &Lane {
-        &self.lanes[self.current]
+        self.lanes.ahead()
     }
 
     // Where a subagent started in this lane files what it did. Root and
@@ -270,12 +272,12 @@ impl Core {
     }
 
     pub fn lane_mut(&mut self) -> &mut Lane {
-        &mut self.lanes[self.current]
+        self.lanes.ahead_mut()
     }
 
     /// Where the lane `token` names sits now; `None` once it is gone.
     pub fn position_of(&self, token: u64) -> Option<usize> {
-        self.lanes.iter().position(|lane| lane.token() == token)
+        self.lanes.position_of(token)
     }
 }
 
@@ -308,7 +310,7 @@ impl Core {
             .collect();
         Some(Restart {
             lanes,
-            front: self.current,
+            front: self.lanes.front(),
             flags: self.pinned.args(),
         })
     }
@@ -319,7 +321,7 @@ impl Core {
         let Some(table) = &self.executions else {
             return;
         };
-        for lane in &self.lanes {
+        for lane in self.lanes.all() {
             let executions = table.carried(lane.root());
             if !self.store.filed(lane.root(), lane.id()) {
                 if !executions.is_empty() {
@@ -339,7 +341,7 @@ impl Core {
         let Some(table) = &self.executions else {
             return;
         };
-        for lane in &self.lanes {
+        for lane in self.lanes.all() {
             let path = self.store.background_path(lane.root(), lane.id());
             let carried = match crate::driver::background::take_over(&path) {
                 Ok(carried) => carried,
@@ -917,11 +919,10 @@ mod tests {
                 toml::Value::Table(Default::default()),
                 None,
             ),
-            lanes: vec![lane],
+            lanes: crate::core::lanes::Lanes::of(lane),
             refused: Default::default(),
             executions: None,
             removals: Default::default(),
-            current: 0,
             surface: &[],
         }
     }

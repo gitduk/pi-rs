@@ -3,6 +3,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
+use tool::limit::MAX_BYTES;
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
 /// Drop the `[rel]` header if the content opens with the one `rel`'s views print.
@@ -36,17 +37,9 @@ fn numbered_throughout(text: &str) -> bool {
         if line.is_empty() {
             continue;
         }
-        // read's own output: every row is `N:` or `N-M:` with digits. This is
-        // the third place in the tree that has to agree with that shape.
-        let Some((n, _)) = line.split_once(':') else {
-            return false;
-        };
-        let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
-        let numbered = match n.split_once('-') {
-            Some((a, b)) => digits(a) && digits(b),
-            None => digits(n),
-        };
-        if !numbered {
+        // read's own output: every row opens with an address, and the shape of
+        // one is `rows`'s to know.
+        if crate::rows::split(line).is_none() {
             return false;
         }
         any = true;
@@ -64,7 +57,7 @@ fn strip_numbers(text: &str) -> String {
             Some(body) => (body, "\n"),
             None => (line, ""),
         };
-        match body.split_once(':') {
+        match crate::rows::split(body) {
             Some((_, rest)) => out.push_str(rest),
             None => out.push_str(body),
         }
@@ -164,12 +157,20 @@ impl Tool for Write {
         let content = clean(&args.content, &rel);
 
         let existed = tokio::fs::symlink_metadata(&path).await.is_ok();
-        if tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_dir()) {
+        let meta = tokio::fs::metadata(&path).await.ok();
+        if meta.as_ref().is_some_and(|m| m.is_dir()) {
             return Err(ToolError::Invalid(format!("{rel} is a directory")));
         }
         // Only an overwrite is gated: a new file that fails to parse is just a
         // stub with nothing to lose, but an overwrite that fails is usually content that ran short.
-        let was = tokio::fs::read(&path).await.ok();
+        // Above the read limit the old text is not loaded to be compared: a
+        // file too big to read is one whose parse check would cost its size.
+        let fits = meta.as_ref().is_some_and(|m| m.len() <= MAX_BYTES);
+        let was = if fits {
+            tokio::fs::read(&path).await.ok()
+        } else {
+            None
+        };
         if let Some(old) = was.as_deref().and_then(|b| std::str::from_utf8(b).ok())
             && let Some((row, text)) = crate::parses::broke(&rel, Some(old), &content)
         {

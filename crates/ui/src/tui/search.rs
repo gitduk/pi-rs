@@ -208,7 +208,7 @@ impl Ui {
         }
         let top = self.top_place();
         // Held on a hit at the bottom is not following the newest rows.
-        let newest = matches!(self.window_mut(view), (0, None));
+        let newest = self.window_mut(view).newest_rows();
         let draft = self.editor.take_composing();
         let mode = self.vim;
         self.leave_normal();
@@ -241,7 +241,7 @@ impl Ui {
         // The prompt may take rows off the bottom: a scrolled-up view keeps
         // its top line where it is.
         if !newest {
-            *self.window_mut(view).1 = top.map(Anchor::from);
+            self.window_mut(view).top = top.map(Anchor::from);
         }
     }
 
@@ -285,10 +285,10 @@ impl Ui {
 
     // The view to `top`; to the newest rows with none, when `/` found it there.
     fn search_place(&mut self, view: &mut View, top: Option<Anchor>, newest: bool) {
-        let (scroll, at) = self.window_mut(view);
-        *at = top;
+        let scroll = self.window_mut(view);
+        scroll.top = top;
         if top.is_none() && newest {
-            *scroll = 0;
+            scroll.by = 0;
         }
     }
 
@@ -334,7 +334,7 @@ impl Ui {
     pub(super) fn land_at(&mut self, view: &mut View, at: Place, regions: &Regions) {
         let covered = regions.history.intersection(regions.overlay()).height;
         let shown = regions.history.height.saturating_sub(covered);
-        *self.window_mut(view).1 = Some(Anchor {
+        self.window_mut(view).top = Some(Anchor {
             spot: at.spot,
             rows: at.row as isize - (shown / 2) as isize,
         });

@@ -535,24 +535,26 @@ max_output_tokens = 2048
                     tool::Ctx::new(tool::Workspace::new(root).unwrap()),
                 ))
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let mut lanes = lanes.into_iter();
+        let mut ring = crate::core::lanes::Lanes::of(lanes.next().expect("a first lane"));
+        ring.push(lanes.next().expect("a second lane"));
         let mut core = Core {
             store: pi_store::session::Store::new(root.join("state")),
             catalog,
             config: Arc::new(config),
             pinned,
             settings,
-            lanes,
+            lanes: ring,
             commands: Arc::new(Vec::new()),
             prompts_seen: 0,
-            current: 0,
             refused: Default::default(),
             executions: None,
             removals: Default::default(),
             surface: &[],
         };
         core.try_reload().unwrap();
-        core.current = 1;
+        core.lanes.show(1);
         core.try_reload().unwrap();
         core
     }
@@ -579,7 +581,7 @@ context_window = 128000
         let mut core = two_lanes(dir.path(), &file, false).await;
         std::fs::write(&file, body("new-test-key")).unwrap();
         core.try_reload().unwrap();
-        core.current = 0;
+        core.lanes.show(0);
         core.refresh_config().unwrap();
 
         let agent = core.lane().agent();
@@ -621,7 +623,7 @@ context_window = 128000
         .await
         .unwrap();
         assert_eq!(core.lane().agent().spec().context_window, 300000);
-        core.current = 0;
+        core.lanes.show(0);
         let said = core.refresh_model_config().unwrap();
         assert!(
             said.is_empty(),

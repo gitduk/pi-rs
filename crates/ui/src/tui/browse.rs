@@ -9,8 +9,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::Line;
 
 use super::Ui;
-use super::search::Anchor;
-use super::view::View;
+use super::view::{Scroll, View};
 use pi_store::keys::Mode;
 use pi_store::listing::Listing;
 
@@ -83,10 +82,8 @@ impl PageLine {
 
 pub(super) struct Read {
     pub(super) page: Vec<PageLine>,
-    // Rows the page is scrolled up by, as the transcript's `scroll`.
-    pub(super) scroll: usize,
-    // The row the page opens on, as the transcript's `top`.
-    pub(super) top: Option<Anchor>,
+    // Where the page is scrolled to, as the transcript has its own.
+    pub(super) scroll: Scroll,
     // The mode the line goes back to when the page closes, if opening it
     // moved the line to Normal.
     back: Option<Mode>,
@@ -132,8 +129,10 @@ impl Ui {
         self.read = Some(Read {
             page,
             // The draw stops `TOP` at the page's head.
-            scroll: super::screen::TOP,
-            top: None,
+            scroll: Scroll {
+                by: super::screen::TOP,
+                top: None,
+            },
             back,
         });
     }
@@ -151,13 +150,10 @@ impl Ui {
     }
 
     // The scroll and top row of what is up: the page's, else the transcript's.
-    pub(super) fn window_mut<'a>(
-        &'a mut self,
-        view: &'a mut View,
-    ) -> (&'a mut usize, &'a mut Option<Anchor>) {
+    pub(super) fn window_mut<'a>(&'a mut self, view: &'a mut View) -> &'a mut Scroll {
         match &mut self.read {
-            Some(read) => (&mut read.scroll, &mut read.top),
-            _ => (&mut view.surface.scroll, &mut view.surface.top),
+            Some(read) => &mut read.scroll,
+            _ => &mut view.surface.scroll,
         }
     }
 
@@ -165,6 +161,6 @@ impl Ui {
     // newest rows, which would otherwise follow the bottom.
     pub(super) fn pin(&mut self, view: &mut View) {
         let here = self.anchor_here(view);
-        *self.window_mut(view).1 = here;
+        self.window_mut(view).top = here;
     }
 }

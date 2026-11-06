@@ -372,8 +372,7 @@ impl Ui {
     // The asides gone from the screen, the line left as typed.
     pub(super) fn tidy(&mut self, view: &mut View) {
         if view.surface.scrollback.tidy() {
-            view.surface.top = None;
-            view.surface.scroll = 0;
+            view.surface.scroll = super::view::Scroll::newest();
             self.rows_moved();
         }
     }
@@ -382,9 +381,12 @@ impl Ui {
     fn rows_moved(&mut self) {
         // A page held to a transcript row.
         if let Some(read) = &mut self.read
-            && read.top.is_some_and(|a| !matches!(a.spot, Spot::Text(_)))
+            && read
+                .scroll
+                .top
+                .is_some_and(|a| !matches!(a.spot, Spot::Text(_)))
         {
-            read.top = None;
+            read.scroll.top = None;
         }
         // And a search on them, which holds them too.
         if self.read.is_none() {

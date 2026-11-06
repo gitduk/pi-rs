@@ -461,9 +461,10 @@ pub struct Measured {
 }
 
 // Why the most recent run ended before its prompt was answered, if it did:
-// the transcript alone can't say whose stop it was.
+// the transcript alone can't say whose stop it was. Saved with the session,
+// and carried whole in each record of the log a store keeps.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-enum StopCause {
+pub enum StopCause {
     // The user asked the run to stop, however they asked.
     User,
     // It died on its own — an error or a crash — and no more is known.
@@ -921,6 +922,29 @@ impl Session {
 
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    /// The id the next entry will take. With `stopped`, what a save records
+    /// beside the entries: a transcript appended to a file is its entries plus
+    /// these, and nothing else.
+    pub fn next_id(&self) -> u64 {
+        self.next
+    }
+
+    /// Why the last run ended unanswered, if it did.
+    pub fn stopped(&self) -> Option<&StopCause> {
+        self.interrupted.as_ref()
+    }
+
+    /// A transcript from its parts, as a saved log replays one. Nothing is
+    /// measured: a resumed transcript is measured afresh by its first request.
+    pub fn from_parts(entries: Vec<Entry>, next: u64, interrupted: Option<StopCause>) -> Self {
+        Self {
+            entries,
+            next,
+            interrupted,
+            measured: None,
+        }
     }
 
     /// Whether this session has anything the model would be told. The record of

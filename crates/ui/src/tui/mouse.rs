@@ -17,8 +17,8 @@ impl Ui {
     // next one moves nothing; before any frame, by rows from the bottom.
     pub(super) fn scroll_view(&mut self, view: &mut View, up: bool, step: usize) {
         let here = self.anchor_here(view);
-        let (scroll, top) = self.window_mut(view);
-        match top.or(here) {
+        let scroll = self.window_mut(view);
+        match scroll.top.or(here) {
             Some(mut anchor) => {
                 let step = step.min(isize::MAX as usize) as isize;
                 anchor.rows = if up {
@@ -26,10 +26,10 @@ impl Ui {
                 } else {
                     anchor.rows.saturating_add(step)
                 };
-                *top = Some(anchor);
+                scroll.top = Some(anchor);
             }
-            None if up => *scroll = scroll.saturating_add(step),
-            None => *scroll = scroll.saturating_sub(step),
+            None if up => scroll.by = scroll.by.saturating_add(step),
+            None => scroll.by = scroll.by.saturating_sub(step),
         }
     }
 

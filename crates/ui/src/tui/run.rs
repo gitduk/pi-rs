@@ -454,7 +454,7 @@ impl Tui {
         let unchanged = pi_core::core::resolve::unseed(&path);
         if let Err(e) = resumed {
             self.say_notice_of(
-                self.core.current,
+                self.core.lanes.front(),
                 &format!("the screen did not come back: {e}"),
             );
         }
@@ -539,7 +539,7 @@ impl Tui {
         // in the scrollback, where a flash's going cannot take it.
         if let Some(line) = said {
             if keep {
-                self.say_notice_of(self.core.current, &line);
+                self.say_notice_of(self.core.lanes.front(), &line);
             } else {
                 self.notice(line);
             }
@@ -559,7 +559,7 @@ impl Tui {
             }
             return;
         };
-        let unsend = self.core.lanes[lane].finish();
+        let unsend = self.core.lanes.at_mut(lane).finish();
 
         match done.kind {
             Kind::Turn | Kind::Bash { .. } | Kind::BashBackground { .. } => {
@@ -590,7 +590,7 @@ impl Tui {
         // good copy, so recovering it instead avoids overwriting it later.
         let (recovered, out) = match ran {
             Some((session, out)) => {
-                self.core.lanes[lane].return_session(session);
+                self.core.lanes.at_mut(lane).return_session(session);
                 (true, out)
             }
             None => (self.recover_session(lane, "run"), Err(RunError::Crashed)),
@@ -614,14 +614,14 @@ impl Tui {
         // A panic, or an unsent prompt, has nothing to tell the model; nor
         // does a user-stopped `!`, which was never the model's request.
         if ran_back && !unsend && was_turn && self.core.lanes[lane].session().is_some() {
-            self.core.lanes[lane].note_ended(&how);
+            self.core.lanes.at_mut(lane).note_ended(&how);
         }
 
         // Saved either way — an interrupted turn is worth keeping — unless
         // the transcript never came back, which would overwrite the disk copy.
         // A failure shows on the bar until a save lands; the error is in `/status`.
         if recovered {
-            let _ = self.core.save_lane(lane);
+            self.core.save_lane_behind(lane);
         }
 
         // A `!` draws its own rows as it lands, so its cursor is wherever the
@@ -656,14 +656,14 @@ impl Tui {
             },
             was_turn,
         );
-        if lane == self.core.current {
+        if lane == self.core.lanes.front() {
             if unsend && let Some(id) = self.core.lane().last_ask() {
                 self.rewind_turn(id);
             }
         } else {
             // Out of sight: the lane says so in the bar until someone looks,
             // and a prompt asked back is taken back then.
-            self.core.lanes[lane].end(ok, unsend);
+            self.core.lanes.at_mut(lane).end(ok, unsend);
         }
         // Last, and outside the split: a rewind rebuilds the whole surface, and
         // a row landed before it would go with the old drawing.
@@ -678,14 +678,14 @@ impl Tui {
         // give it back its transcript either way.
         let back = match ran {
             Some((session, _)) => {
-                self.core.lanes[lane].return_session(session);
+                self.core.lanes.at_mut(lane).return_session(session);
                 true
             }
             None => self.recover_session(lane, "compaction"),
         };
 
         if report.is_some() && back {
-            let _ = self.core.save_lane(lane);
+            self.core.save_lane_behind(lane);
         }
         // The pass is over, so the clock stops. What it was driving — the
         // live region — already went with the turn.
@@ -702,7 +702,10 @@ impl Tui {
         let path = self.core.store.path_of(on.root(), on.id());
         match pi_store::session::Store::read(&path) {
             Ok(stored) => {
-                self.core.lanes[lane].return_session(stored.into_session());
+                self.core
+                    .lanes
+                    .at_mut(lane)
+                    .return_session(stored.into_session());
                 self.say_notice_of(
                     lane,
                     &format!("the {verb} did not finish — back to the transcript as last saved"),
@@ -724,7 +727,7 @@ impl Tui {
 
     // Draw the end of a run into its lane's view, on screen or not.
     pub(super) fn close_run(&mut self, lane: usize, out: RunResult, was_turn: bool) {
-        let on = &mut self.core.lanes[lane];
+        let on = self.core.lanes.at_mut(lane);
         let view = view_at(&mut self.views, on.token());
         self.ui.close(view);
         // A cancelled run's calls got no `ToolEnd`; their animated rows
@@ -770,7 +773,7 @@ impl Tui {
         // A note filed while idle would otherwise wait for a turn that never comes.
         self.core.save_filed();
         let mut left = 0;
-        for lane in &self.core.lanes {
+        for lane in self.core.lanes.all() {
             if lane.is_running() {
                 lane.cancel();
                 left += 1;
@@ -802,7 +805,7 @@ impl Tui {
         }
         // A settling turn may start another command before shutdown completes.
         let executions = self.drivers.background();
-        for lane in &mut self.core.lanes {
+        for lane in self.core.lanes.all_mut() {
             let stopped = executions.stop_running(lane.root(), why);
             if !stopped.is_empty() {
                 lane.push_note(&format!(

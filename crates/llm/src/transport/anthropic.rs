@@ -1,6 +1,5 @@
 use async_trait::async_trait;
-use eventsource_stream::Eventsource;
-use futures::stream::{BoxStream, StreamExt};
+use futures::stream::BoxStream;
 use serde_json::{Value, json};
 
 use super::Transport;
@@ -175,14 +174,9 @@ fn marker(cache: CacheControl) -> Option<Value> {
 }
 
 pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
-    let max_tokens = req
-        .max_output_tokens
-        .unwrap_or(spec.max_output_tokens)
-        .min(spec.max_output_tokens);
-
     let mut body = json!({
         "model": spec.wire_model(),
-        "max_tokens": max_tokens,
+        "max_tokens": super::max_output_tokens(spec, req),
         "stream": true,
         "messages": encode_messages(&req.messages, spec),
     });
@@ -385,43 +379,25 @@ impl Transport for Anthropic {
         cache_control(spec)?;
         let body = build_body(spec, req);
         let url = format!("{}/v1/messages", spec.base_url.trim_end_matches('/'));
-        let mut call = super::extra_headers(self.http.post(&url), spec, req);
+        let mut call = super::Call::to(&self.http, "anthropic", url, spec, req)
+            .header("anthropic-version", API_VERSION);
         if let Some(key) = &self.api_key {
             call = call.header("x-api-key", key);
         }
-        let call = call.header("anthropic-version", API_VERSION).json(&body);
-        let resp = super::exchange("anthropic", url, spec, req, &body, call).await?;
+        let resp = call.send(&body).await?;
 
         let mut stop = StopReason::default();
         let mut usage = Usage::default();
         let gaps = self.gaps.clone();
 
-        let stream = resp.bytes_stream().eventsource().filter_map(move |frame| {
-            let out = match frame {
-                Err(e) => Some(Err(LlmError::Stream(e.to_string()))),
-                Ok(frame) => match serde_json::from_str::<Value>(&frame.data) {
-                    // `ping` and other bodyless frames carry no JSON.
-                    Err(_) => None,
-                    Ok(data) if data["type"] == "error" => {
-                        tracing::warn!(
-                            target: "pi::wire", format = "anthropic",
-                            detail = %data["error"], "error frame"
-                        );
-                        Some(Err(LlmError::Stream(data["error"].to_string())))
-                    }
-                    Ok(data) => {
-                        decode_frame(&data, &mut stop, &mut usage, &mut gaps.frame()).map(Ok)
-                    }
-                },
-            };
-            futures::future::ready(out)
+        let events = super::sse(resp, "anthropic", move |data| {
+            decode_frame(&data, &mut stop, &mut usage, &mut gaps.frame())
+                .into_iter()
+                .map(Ok)
+                .collect()
         });
 
-        Ok(super::terminated(
-            "anthropic",
-            self.gaps.clone(),
-            stream.boxed(),
-        ))
+        Ok(super::terminated("anthropic", self.gaps.clone(), events))
     }
 }
 

@@ -1,6 +1,8 @@
 //! Transcripts on disk: where a session's file lives, what a resumed one is
 //! read back as, and the bucket layout that keeps two workspaces apart.
 
+mod log;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,21 +48,6 @@ pub struct Header<'a> {
     /// Here, not with the entries: a rewind takes turns back, never the money
     /// they cost.
     pub spent: llm::Totals,
-}
-
-// A save as its parts, borrowed, so serializing never needs a `Stored`
-// clone — `save` runs from inside tool calls, several subagents at once.
-#[derive(Serialize)]
-struct StoredRef<'a> {
-    id: &'a str,
-    workspace: String,
-    model: &'a str,
-    created: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<&'a str>,
-    spent: llm::Totals,
-    #[serde(flatten)]
-    session: &'a Session,
 }
 
 // An archive read only as far as the listing needs: identity fields
@@ -343,43 +330,6 @@ fn sync_dir(dir: &Path) {
 // Beside a session's transcript: the subagents its turns called, one file each.
 const SUBAGENTS: &str = "subagents";
 
-// One transcript, written whole. The sync then rename means a crash
-// mid-write cannot leave a truncated one.
-fn write(path: &Path, workspace: &Path, header: Header<'_>, session: &Session) -> Result<PathBuf> {
-    let dir = path.parent().expect("a session directory");
-    std::fs::create_dir_all(dir)?;
-    let tmp = path.with_extension("json.tmp");
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&tmp)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // The transcript holds prompts and file contents. Chmodded before
-        // the write, not after: no moment when the data sits world-readable.
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-    }
-    // Serialized by reference: a transcript is megabytes by the end, and
-    // cloning it plus buffering would cost every parallel subagent a copy.
-    let stored = StoredRef {
-        id: header.id,
-        workspace: workspace.display().to_string(),
-        model: header.model,
-        created: header.created,
-        name: header.name,
-        spent: header.spent,
-        session,
-    };
-    let mut out = std::io::BufWriter::new(file);
-    serde_json::to_writer_pretty(&mut out, &stored)?;
-    out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
-    std::fs::rename(&tmp, path)?;
-    sync_dir(dir);
-    Ok(path.to_path_buf())
-}
-
 // One transcript per session directory in the bucket; asking for the
 // transcript inside each entry skips the bucket's own `history` file.
 fn bucket_transcripts(bucket: &Path) -> Vec<PathBuf> {
@@ -397,6 +347,12 @@ fn bucket_transcripts(bucket: &Path) -> Vec<PathBuf> {
 // is authoritative, since the bucket name only encodes the path lossily.
 fn belongs(transcript: &Path) -> Option<Belongs> {
     let text = std::fs::read_to_string(transcript).ok()?;
+    // A log names itself on its first line; a file from before the log is one
+    // object, and the whole of it is that line.
+    let first = text.lines().next().unwrap_or_default();
+    if log::is_log(&text) {
+        return serde_json::from_str::<Belongs>(first).ok();
+    }
     serde_json::from_str(&text).ok()
 }
 
@@ -554,7 +510,7 @@ impl Store {
     pub fn save(&self, workspace: &Path, header: Header<'_>, session: &Session) -> Result<PathBuf> {
         let path = self.path_of(workspace, header.id);
         self.changed();
-        write(&path, workspace, header, session)
+        log::write(&path, workspace, header, session)
     }
 
     /// Where a subagent's transcript is: inside its parent's session, so
@@ -585,7 +541,7 @@ impl Store {
             created,
             spent: llm::Totals::default(),
         };
-        write(&path, workspace, header, session)
+        log::write(&path, workspace, header, session)
     }
 
     /// How far every saved session has got, across all workspaces, read
@@ -595,13 +551,14 @@ impl Store {
             .into_iter()
             .flat_map(|(_, t)| t)
             .filter_map(|path| {
-                let body = std::fs::read_to_string(&path).ok()?;
-                let peek: Peek = serde_json::from_str(&body).ok()?;
+                // Read the same way a listing reads: a log or an older
+                // single-object file, each without building the transcript.
+                let (ledger, replayed, _) = log::shallow(&path)?;
                 Some(Progress {
-                    last: peek.entries.last()?.id,
-                    touched: peek.touched(),
-                    created: peek.created,
-                    id: peek.id,
+                    last: replayed.entries.last()?.id,
+                    touched: replayed.entries.last().map_or(ledger.created, |e| e.at),
+                    created: ledger.created,
+                    id: ledger.id,
                     path,
                 })
             })
@@ -612,7 +569,22 @@ impl Store {
     pub fn read(path: &Path) -> Result<Stored> {
         let body = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read {}", path.display()))?;
-        Ok(serde_json::from_str(&body)?)
+        if !log::is_log(&body) {
+            // Written before the log: one object holding the whole transcript.
+            return Ok(serde_json::from_str(&body)?);
+        }
+        let (replayed, ledger) = log::replay::<transcript::Entry>(&body);
+        Ok(Stored {
+            id: ledger.id,
+            workspace: ledger.workspace,
+            // The last save's, which a resume can change; the ledger's is what
+            // the session began on.
+            model: replayed.model.unwrap_or(ledger.model),
+            created: ledger.created,
+            name: replayed.name,
+            spent: replayed.spent,
+            session: Session::from_parts(replayed.entries, replayed.next, replayed.interrupted),
+        })
     }
 
     // A transcript by id, from whichever bucket has it: what a test asks
@@ -636,9 +608,7 @@ impl Store {
                 self.root.display()
             ));
         };
-        let body = std::fs::read_to_string(&path)
-            .with_context(|| format!("no session `{id}` at {}", path.display()))?;
-        Ok(serde_json::from_str(&body)?)
+        Self::read(&path).with_context(|| format!("no session `{id}` at {}", path.display()))
     }
 
     // Every session recorded for this workspace, newest first, read as
@@ -648,22 +618,18 @@ impl Store {
         let mut found: Vec<Peek> = bucket_transcripts(&self.dir_of(workspace))
             .into_iter()
             .filter_map(|path| {
-                let body = std::fs::read_to_string(&path).ok()?;
-                match serde_json::from_str::<Peek>(&body) {
-                    Ok(peek) => (peek.workspace == want).then_some(Peek {
-                        bytes: body.len() as u64,
-                        ..peek
-                    }),
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "pi::session",
-                            path = %path.display(),
-                            error = %e,
-                            "unreadable transcript skipped"
-                        );
-                        None
-                    }
-                }
+                // Read shallowly: a listing names a session and sizes it, and
+                // never builds the transcript to say either.
+                let (ledger, replayed, bytes) = log::shallow(&path)?;
+                (ledger.workspace == want).then_some(Peek {
+                    id: ledger.id,
+                    workspace: ledger.workspace,
+                    model: replayed.model.unwrap_or(ledger.model),
+                    created: ledger.created,
+                    name: replayed.name,
+                    entries: replayed.entries,
+                    bytes,
+                })
             })
             .collect();
         let mut seen = HashSet::new();
@@ -894,14 +860,66 @@ mod tests {
         Session::from_messages(messages)
     }
 
+    // A session saved as a log is still one a sweep of all workspaces sees:
+    // reading it as the single object an earlier build wrote would drop it.
+    #[test]
+    fn progress_sees_a_session_saved_as_a_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let at = dir.path().join("ws");
+        let mut session = Session::new();
+        session.push_note("one");
+        store
+            .save(&at, header("s1", "m", None, 1), &session)
+            .unwrap();
+        // The second save makes it a log of two records.
+        session.push_note("two");
+        store
+            .save(&at, header("s1", "m", None, 1), &session)
+            .unwrap();
+
+        let seen = store
+            .progress()
+            .into_iter()
+            .find(|p| p.id == "s1")
+            .expect("a session saved as a log");
+        assert_eq!(seen.last, session.entries().last().unwrap().id().0);
+    }
+
     // Sets what `touched()` reads. Forced through raw JSON because an
     // entry's stamp is the session's to set, not a caller's.
     fn touched_at(store: &Store, workspace: &Path, id: &str, at: u64) {
         let path = store.path_of(workspace, id);
-        let mut raw: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        raw["entries"].as_array_mut().unwrap().last_mut().unwrap()["at"] = json!(at);
-        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let stamped = rewrite_records(&text, |record| {
+            record["entries"].as_array_mut()?.last_mut()?["at"] = json!(at);
+            Some(())
+        });
+        std::fs::write(&path, stamped).unwrap();
+    }
+
+    // A save's own record, rewritten: what a test changes in a transcript
+    // without writing the whole thing again. `edit` sees the last record
+    // holding entries first, then the ones before it.
+    fn rewrite_records(
+        text: &str,
+        mut edit: impl FnMut(&mut serde_json::Value) -> Option<()>,
+    ) -> String {
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        for line in lines.iter_mut().skip(1).rev() {
+            let Ok(mut record) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            // An index line is not a record: it says where the log stands.
+            if record.get("index").is_some() {
+                continue;
+            }
+            if edit(&mut record).is_some() {
+                *line = serde_json::to_string(&record).unwrap();
+                break;
+            }
+        }
+        lines.join("\n") + "\n"
     }
 
     fn call(name: &str) -> Message {
@@ -1113,17 +1131,20 @@ mod tests {
                 "a transcript holds prompts and file contents"
             );
         }
-        // The session flattens to the top level: no nested `log` key.
+        // Each record flattens the session's entries to its own top level; the
+        // marker saying what the file is rides the ledger alone.
         let body = std::fs::read_to_string(&path).unwrap();
-        let flat = serde_json::from_str::<serde_json::Value>(&body).unwrap();
-        let flat = flat.as_object().unwrap();
+        let mut lines = body.lines();
+        let ledger: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert_eq!(ledger["log"], 1, "the first line names the file");
+        let record: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
         assert!(
-            flat.contains_key("entries"),
-            "session must flatten to the top level"
+            record.as_object().unwrap().contains_key("entries"),
+            "a record flattens the session to its top level"
         );
         assert!(
-            !flat.contains_key("log"),
-            "the nested `log` key must be gone"
+            !record.as_object().unwrap().contains_key("log"),
+            "the marker is the ledger's, not a record's"
         );
         let back = store.load("t1").unwrap();
         assert_eq!(back.model, "test-model");
@@ -1269,10 +1290,13 @@ mod tests {
             .unwrap();
         assert_eq!(store.take(w, "s").unwrap().0.spent, spent);
 
-        let mut raw: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        raw.as_object_mut().unwrap().remove("spent");
-        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        // A record from before `spent` existed: read with nothing spent.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let stripped = rewrite_records(&text, |record| {
+            record.as_object_mut()?.remove("spent");
+            Some(())
+        });
+        std::fs::write(&path, stripped).unwrap();
         assert_eq!(store.load("s").unwrap().spent, llm::Totals::default());
     }
 

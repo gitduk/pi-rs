@@ -32,7 +32,7 @@ impl Tui {
         let origin = request.origin;
         tracing::info!(target: "pi::session", request = request.id, ?origin,
             lane = request.lane, ?intent, "dispatch");
-        let was = self.core.current;
+        let was = self.core.lanes.front();
         let action = execution::dispatch(&mut self.core, intent);
         self.reconcile(was);
 
@@ -219,14 +219,14 @@ impl Tui {
                     }
                     text.push_str(&status);
                 }
-                if at == self.core.current {
+                if at == self.core.lanes.front() {
                     self.land_notice(text);
                 } else if !text.is_empty() {
                     self.say_notice_of(at, &text);
                 }
             }
             Output::Listing(rows) => {
-                if at == self.core.current {
+                if at == self.core.lanes.front() {
                     self.land_lines(rows);
                 } else {
                     for line in crate::listing::lines(&rows) {
@@ -250,12 +250,15 @@ impl Tui {
                     );
             }
             Output::Note(text) => {
-                let lane = &mut self.core.lanes[at];
+                let lane = self.core.lanes.at_mut(at);
                 let view = super::view::opened(&mut self.views, lane, &self.ui.paint);
                 self.ui.say_note(lane, view, &text);
             }
             Output::Compacted(report) => {
-                let _ = self.core.lanes[at]
+                let _ = self
+                    .core
+                    .lanes
+                    .at(at)
                     .sender()
                     .send(agent::Event::Compacted(report));
             }

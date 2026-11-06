@@ -139,11 +139,10 @@ pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
         commands: commands(),
         prompts_seen: 0,
         settings: pi_store::settings::Settings::new(toml::Value::Table(Default::default()), None),
-        lanes: vec![running_lane(dir)],
+        lanes: pi_core::core::lanes::Lanes::of(running_lane(dir)),
         refused: Default::default(),
         executions: None,
         removals: Default::default(),
-        current: 0,
         surface: crate::tui::WORDS,
     };
     crate::tui::Tui::on_test_screen(core)
@@ -152,10 +151,15 @@ pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
 // Put another lane in front, the way a checkout switch would, and
 // reconcile the surface against the lane it displaced.
 pub(super) fn switch_to(tui: &mut crate::tui::Tui, lane: Lane) {
-    let was = tui.core.current;
-    tui.core.lanes.push(lane);
-    tui.core.current = tui.core.lanes.len() - 1;
+    let was = tui.core.lanes.front();
+    tui.core.lanes.push_ahead(lane);
     tui.reconcile(was);
+}
+
+// Waits for a save handed to the saver thread, so a test can read the disk
+// the run wrote: the loop does not wait for one, by design.
+pub(super) async fn saved() {
+    pi_core::core::saves::flush().await;
 }
 
 pub(super) fn vim_ui() -> crate::tui::Ui {

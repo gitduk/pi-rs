@@ -452,7 +452,7 @@ fn block(
 ) -> Result<(Range<usize>, String), Refusal> {
     // The view's address strips indentation before matching the trimmed line;
     // the row it names disambiguates blocks that open on the same text.
-    let addressed = address(anchor).or_else(|| address(anchor.trim_start()));
+    let addressed = crate::rows::split(anchor).or_else(|| crate::rows::split(anchor.trim_start()));
     let (needle, named) = match addressed.filter(|(_, rest)| !rest.trim().is_empty()) {
         Some((row, rest)) => (rest.trim(), Some(row)),
         None => (anchor.trim(), None),
@@ -545,23 +545,10 @@ fn openings(path: &str, body: &str) -> String {
     }
 }
 
-/// Splits the `120-145:` prefix a view prints from a line: the row it names,
-/// and the text after it.
-fn address(text: &str) -> Option<(usize, &str)> {
-    let (head, rest) = text.split_once(':')?;
-    let mut parts = head.split('-');
-    let first = parts.next()?;
-    let digit = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
-    if !digit(first) || !parts.all(digit) {
-        return None;
-    }
-    Some((first.parse().ok()?, rest))
-}
-
 /// The anchor with that address taken off, when something is left to match:
 /// an address on its own names no text, and nothing matches everywhere.
 fn without_address(text: &str) -> Option<&str> {
-    let (_, rest) = address(text).or_else(|| address(text.trim_start()))?;
+    let (_, rest) = crate::rows::split(text).or_else(|| crate::rows::split(text.trim_start()))?;
     (!rest.trim().is_empty()).then_some(rest)
 }
 

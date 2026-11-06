@@ -684,8 +684,9 @@ async fn removing_a_lane_terminates_its_queued_requests() {
     let pending: Vec<_> = queue.lock().iter().map(|q| q.request).collect();
     assert_eq!(pending.len(), 2);
     switch_to(&mut tui, running_lane(other.path()));
-    tui.core.lanes.remove(0);
-    tui.core.current = 0;
+    let first = tui.core.lanes.at(0).token();
+    tui.core.lanes.take(first);
+    tui.core.lanes.show(0);
     let removed = crate::tui::view::prune_views(&tui.core, &mut tui.views);
     assert_eq!(
         removed, pending,

@@ -246,7 +246,7 @@ impl Tui {
         }
         // Every lane, not just the front: a restart carries them all over.
         let mut views = Views::new();
-        for lane in &core.lanes {
+        for lane in core.lanes.all() {
             let view = view::opened(&mut views, lane, &ui.paint);
             view.model_name = lane.model_name().to_string();
             // A resumed session shows its transcript from the start: the whole
@@ -330,7 +330,7 @@ impl Tui {
     // Brings the screen into step after a lane switch: parks the old
     // lane's draft, restores the new one's, follows lists, replays news.
     fn reconcile(&mut self, was: usize) {
-        if was == self.core.current {
+        if was == self.core.lanes.front() {
             return;
         }
         self.ui
@@ -419,15 +419,14 @@ impl Tui {
     // Take what every lane's run has posted since the last look into its own
     // view, drawn or not: its meter, filed rows and end happen when they do.
     async fn serve_lanes(&mut self) {
-        for at in 0..self.core.lanes.len() {
-            while let Ok(event) = self.core.lanes[at].inbox().try_recv() {
+        for lane in self.core.lanes.all_mut() {
+            while let Ok(event) = lane.inbox().try_recv() {
                 // Every lane, not just the one in front: a turn a command's input
                 // opened is still owed its answer after a switch.
-                let lane = &self.core.lanes[at];
                 self.drivers.observe(lane.token(), lane.root(), &event);
                 // Opened first: a banner drawn later would replace the rows.
-                let view = view::opened(&mut self.views, &self.core.lanes[at], &self.ui.paint);
-                self.ui.on_event(&mut self.core.lanes[at], view, event);
+                let view = view::opened(&mut self.views, lane, &self.ui.paint);
+                self.ui.on_event(lane, view, event);
             }
         }
     }
@@ -437,7 +436,7 @@ impl Tui {
     // The order is git's own, the one `worktree list` and the bar's counter
     // walk; each lane sits where its checkout does, not where it was opened.
     fn refresh_tabs(&mut self) {
-        let current = self.core.current;
+        let current = self.core.lanes.front();
         let mut lanes: Vec<(String, Mark)> = self
             .core
             .lanes
@@ -484,16 +483,17 @@ impl Tui {
     }
 
     // Drops idle lanes whose checkout was deleted outside pi (a working
-    // or driven one keeps its index). Silent — the bar says it's gone.
+    // or driven one stays). Silent — the bar says it's gone.
     fn drop_vanished_lanes(&mut self) {
-        let mut gone: Vec<usize> = Vec::new();
-        // Back to front, stopping at a working lane: removing one before
-        // it would shift the index a run reports back by.
-        for (at, lane) in self.core.lanes.iter().enumerate().rev() {
+        let front = self.core.lanes.ahead().token();
+        let mut gone: Vec<u64> = Vec::new();
+        // Back to front, stopping at a working lane: a run out of front is
+        // still owed its answer.
+        for lane in self.core.lanes.all().iter().rev() {
             if lane.is_running() || self.drivers.holds(lane.root()) {
                 break;
             }
-            if at == self.core.current {
+            if lane.token() == front {
                 continue;
             }
             // Only a lane with a checkout of its own can go this way: the one
@@ -501,14 +501,14 @@ impl Tui {
             if lane.worktree().is_none() || lane.root().exists() {
                 continue;
             }
-            gone.push(at);
+            gone.push(lane.token());
         }
         if gone.is_empty() {
             return;
         }
-        // Already highest first, so earlier indices stay put while they go.
-        for at in gone {
-            self.core.remove_lane(at);
+        // By token: what goes first does not move the lanes still here.
+        for token in gone {
+            self.core.remove_lane(token);
         }
         // The ring's list is cached; a vanished checkout must not stay in it
         // for a later step to offer — and re-create — by its stale name.
@@ -678,10 +678,10 @@ impl Tui {
         if !self.core.lanes[at].is_running() {
             return;
         }
-        if at == self.core.current {
+        if at == self.core.lanes.front() {
             self.stop_current(false);
         } else {
-            self.core.lanes[at].stop(false);
+            self.core.lanes.at_mut(at).stop(false);
         }
     }
 
@@ -707,7 +707,7 @@ impl Tui {
             && self.ui.editor.is_empty()
             && self.ui.background_open.is_none()
             && (self.views.values()).all(|v| v.draft.is_empty() && v.queued.is_empty())
-            && !(self.core.lanes.iter()).any(|lane| self.drivers.holds(lane.root()));
+            && !(self.core.lanes.all().iter()).any(|lane| self.drivers.holds(lane.root()));
         if !settled {
             return None;
         }
@@ -794,7 +794,7 @@ impl Tui {
                 continue;
             }
             let running = self.core.lane().is_running();
-            let anywhere = self.core.lanes.iter().any(|lane| lane.is_running());
+            let anywhere = self.core.lanes.all().iter().any(|lane| lane.is_running());
             let waiting = !view.queued.is_empty();
             // Who sent what is carried out this pass.
             let mut origin = Origin::Typed;

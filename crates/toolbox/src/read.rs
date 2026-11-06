@@ -187,6 +187,104 @@ fn deliver(ctx: &Ctx, rel: &str, view: View) -> Result<ToolOutput, ToolError> {
     Ok(ToolOutput::text(body).with_preview(view.shown(rel, cut)))
 }
 
+// Lines `start..end`, 0-based, as `(1-based number, text)`: only those are
+// built, so the cost is the window and not the file.
+fn window(text: &str, start: usize, end: usize) -> impl Iterator<Item = (usize, &str)> {
+    text.lines()
+        .enumerate()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .map(|(i, line)| (i + 1, line))
+}
+
+// One numbered row, its line capped at MAX_LINE: the shape both windows print.
+fn row(n: usize, line: &str) -> (usize, String) {
+    let mut out = crate::rows::numbered(n);
+    if line.len() > MAX_LINE {
+        out.push_str(llm::slice::head_bytes(line, MAX_LINE));
+        out.push_str("… (line truncated)\n");
+    } else {
+        out.push_str(line);
+        out.push('\n');
+    }
+    (n, out)
+}
+
+// A `spill:` file's lines, read from the start up to the end of the window and
+// no further: the file is pi's own output and can be hundreds of megabytes, so
+// it is never held whole. No total either, which reading past the window would
+// be the only way to learn.
+async fn spill_lines(
+    rel: &str,
+    path: &std::path::Path,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<ToolOutput, ToolError> {
+    use std::io::{BufRead, BufReader};
+    let offset = offset.unwrap_or(1).max(1);
+    let limit = limit.unwrap_or(DEFAULT_LIMIT).max(1);
+    let (path, rel) = (path.to_path_buf(), rel.to_string());
+    let (rows, more) = tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&path)?;
+        let reader = BufReader::with_capacity(64 * 1024, file);
+        spill_window(reader.lines(), offset, limit)
+    })
+    .await
+    .map_err(|e| ToolError::Invalid(format!("{rel}: {e}")))??;
+
+    if rows.is_empty() {
+        let at = if offset > 1 {
+            format!(" (line {offset} is past the end)")
+        } else {
+            String::new()
+        };
+        return Ok(ToolOutput::text(format!("{rel} is empty{at}")));
+    }
+    let span = format!("{rel}:{}-{}", rows[0].0, rows[rows.len() - 1].0);
+    let shown = if more { format!("{span} more") } else { span };
+    let note = if more {
+        format!(
+            "… more lines follow. Read again from line {}.\n",
+            offset + rows.len()
+        )
+    } else {
+        String::new()
+    };
+    let mut body = String::new();
+    body.push_str(&header(&rel));
+    body.push('\n');
+    for (_, row) in &rows {
+        body.push_str(row);
+    }
+    body.push_str(&note);
+    Ok(ToolOutput::text(body).with_preview(shown))
+}
+
+// The rows of a spill at `offset` for `limit` lines, and whether more follow.
+// The lines are read no further than the window and the one past it: this is
+// what makes a read of a spill cost its window and not the file.
+fn spill_window(
+    lines: impl Iterator<Item = std::io::Result<String>>,
+    offset: usize,
+    limit: usize,
+) -> std::io::Result<(Vec<(usize, String)>, bool)> {
+    let mut rows = Vec::new();
+    for (i, line) in lines.enumerate() {
+        let n = i + 1;
+        if n < offset {
+            continue;
+        }
+        // Read, not just counted: the line after the window is what says there
+        // is more, and reading it is the furthest this goes.
+        let line = line?;
+        if rows.len() == limit {
+            return Ok((rows, true));
+        }
+        rows.push(row(n, &line));
+    }
+    Ok((rows, false))
+}
+
 pub struct Read;
 
 impl Read {
@@ -297,9 +395,14 @@ impl Tool for Read {
             )));
         }
 
+        // A spill is written by pi and read back at whatever size it reached:
+        // served by its range, never held whole and never noted as viewed.
+        if is_spill {
+            return spill_lines(&rel, &path, args.offset, args.limit).await;
+        }
         // Sniffing needs the whole file in memory, so the size guard precedes
-        // the read; a spill locator is exempt since read promised to serve it by locator.
-        if meta.len() > MAX_BYTES && !is_spill {
+        // the read.
+        if meta.len() > MAX_BYTES {
             return Ok(ToolOutput::text(over_limit(&rel, meta.len())));
         }
         let bytes = tokio::fs::read(&path).await?;
@@ -328,17 +431,20 @@ impl Tool for Read {
         tracing::info!(target: "pi::read", path = %rel, hash = %hash, "read");
         // The numbering shown is current; a window read clears the whole file,
         // not just its own rows — catching an edit built with no read since the last one.
+        // The whole text, because an edit's staleness check and the diff of
+        // what a command changed both read it: this is what a read of a
+        // workspace file keeps, and why one loads the file it is asked about.
         ctx.note_view(&path, content);
 
         // A BOM is invisible in a terminal but is a character on line 1:
         // stripped from the view so what the model copies back is what an edit can match.
         let shown = content.strip_prefix('\u{FEFF}').unwrap_or(content);
-        let all: Vec<&str> = shown.lines().collect();
+        let lines = shown.lines().count();
 
         // A range request is an explicit ask for lines; only an unqualified read
         // of a long file is worth answering with a skeleton.
         let ranged = args.offset.is_some() || args.limit.is_some();
-        let wants_outline = args.outline.unwrap_or(!ranged && all.len() > OUTLINE_OVER);
+        let wants_outline = args.outline.unwrap_or(!ranged && lines > OUTLINE_OVER);
         if wants_outline && let Some(lang) = crate::syntax::Lang::of(&rel) {
             let items = crate::syntax::outline(lang, shown);
             if !items.is_empty() {
@@ -362,12 +468,12 @@ impl Tool for Read {
                     ctx,
                     &rel,
                     View {
-                        head: format!("{} {} · outline", header(&rel), count(all.len(), "line")),
+                        head: format!("{} {} · outline", header(&rel), count(lines, "line")),
                         rows,
                         note: "… declarations only, each with the range that replaces it \
                                whole. Read a range with offset and limit.\n"
                             .into(),
-                        kind: Kind::Outline { lines: all.len() },
+                        kind: Kind::Outline { lines },
                     },
                 );
             }
@@ -377,42 +483,31 @@ impl Tool for Read {
         let limit = args.limit.unwrap_or(DEFAULT_LIMIT).max(1);
         let start = offset - 1;
 
-        if all.is_empty() {
+        if lines == 0 {
             return Ok(ToolOutput::text(format!(
                 "{rel} is empty ({} bytes)",
                 bytes.len()
             )));
         }
-        if start >= all.len() {
+        if start >= lines {
             return Ok(ToolOutput::text(format!(
                 "{rel} line {offset} is past the end ({})",
-                count(all.len(), "line")
+                count(lines, "line")
             )));
         }
 
-        let end = start.saturating_add(limit).min(all.len());
-        let rows = all[start..end]
-            .iter()
-            .enumerate()
-            .map(|(i, line)| {
-                let n = start + i + 1;
-                let mut row = format!("{n}:");
-                if line.len() > MAX_LINE {
-                    row.push_str(llm::slice::head_bytes(line, MAX_LINE));
-                    row.push_str("… (line truncated)\n");
-                } else {
-                    row.push_str(line);
-                    row.push('\n');
-                }
-                (n, row)
-            })
+        let end = start.saturating_add(limit).min(lines);
+        // Only the window is built: a file of a million lines costs the rows it
+        // shows, which is what a range read is for.
+        let rows = window(shown, start, end)
+            .map(|(n, line)| row(n, line))
             .collect();
-        let left = all.len() - end;
+        let left = lines - end;
         let note = if left > 0 {
             format!(
                 "… lines {}-{} not shown. Read again from line {}.\n",
                 end + 1,
-                all.len(),
+                lines,
                 end + 1
             )
         } else {
@@ -428,9 +523,68 @@ impl Tool for Read {
                 // Both ends of the file reached. Whether a range was asked for
                 // does not come into it: what is named is what came back.
                 kind: Kind::Lines {
-                    whole: start == 0 && end == all.len(),
+                    whole: start == 0 && end == lines,
                 },
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::BufRead as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // A file that says it is a million lines long, handing out one at a time,
+    // and counting the bytes actually taken from it.
+    struct Endless {
+        taken: Arc<AtomicUsize>,
+    }
+
+    impl std::io::Read for Endless {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            const LINE: &[u8] = b"a line of the spill file\n";
+            let whole = buf.len() / LINE.len();
+            for i in 0..whole {
+                let at = i * LINE.len();
+                buf[at..at + LINE.len()].copy_from_slice(LINE);
+            }
+            let n = whole * LINE.len();
+            self.taken.fetch_add(n, Ordering::SeqCst);
+            Ok(n)
+        }
+    }
+
+    // The window is the whole of what a spill read costs: the file past it is
+    // never read, which is what a spill of a hundred megabytes needs.
+    #[test]
+    fn a_spill_read_takes_the_window_and_not_the_file() {
+        let taken = Arc::new(AtomicUsize::new(0));
+        let reader = std::io::BufReader::with_capacity(
+            16 * 1024,
+            Endless {
+                taken: taken.clone(),
+            },
+        );
+        let (rows, more) = spill_window(reader.lines(), 1, 3).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(more, "a file this long has more past the window");
+        let took = taken.load(Ordering::SeqCst);
+        assert!(took <= 32 * 1024, "read {took} bytes for three lines");
+    }
+
+    // Past the end there is nothing, and the note says so rather than claiming
+    // more follows.
+    #[test]
+    fn the_end_of_a_spill_is_not_reported_as_more() {
+        let lines = ["a", "b"].into_iter().map(|l| Ok(l.to_string()));
+        let (rows, more) = spill_window(lines, 1, 5).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(!more);
+        let (rows, more) = spill_window([Ok("a".to_string())].into_iter(), 9, 5).unwrap();
+        assert!(rows.is_empty(), "past the end: {}", rows.len());
+        assert!(!more);
     }
 }

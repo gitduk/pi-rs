@@ -556,8 +556,9 @@ pub(super) struct Group {
     // Calls in flight this row draws: not in the scrollback yet, left
     // to the row by the live block, since this is where they'll land.
     pending: Vec<PendingTool>,
-    pub(super) folded: bool,
-    pub(super) all: bool,
+    // Whether the preview lists every step rather than its first and last
+    // few. Which steps are open is theirs; `folded` answers from them.
+    all: bool,
     // The line under the mouse, when it is one a click opens or closes.
     hovered: Option<usize>,
     // The tick the marks of calls still out turn at.
@@ -570,11 +571,26 @@ impl Group {
         Self {
             steps: vec![first],
             pending: Vec::new(),
-            folded,
             all: !folded,
             hovered: None,
             spinner: 0,
         }
+    }
+
+    /// Whether every step is closed. Answered from the steps: a group is
+    /// folded while none of them is open, however they came to be closed.
+    pub(super) fn folded(&self) -> bool {
+        !self.steps.iter().any(Step::is_open)
+    }
+
+    /// Whether the preview lists every step.
+    pub(super) fn lists_all(&self) -> bool {
+        self.all
+    }
+
+    /// List every step, or only the first and last few.
+    pub(super) fn toggle_all(&mut self) {
+        self.all = !self.all;
     }
 
     pub(super) fn join(&mut self, step: Step) {
@@ -582,7 +598,6 @@ impl Group {
     }
 
     pub(super) fn set_folded(&mut self, to: bool) {
-        self.folded = to;
         self.all = !to;
         for step in &mut self.steps {
             step.set_open(!to);
@@ -745,7 +760,7 @@ impl Fold for Group {
     }
 
     fn flip(&mut self) {
-        self.all = !self.all;
+        self.toggle_all();
     }
 
     fn click_line(&self, i: usize, width: usize) -> Option<usize> {
@@ -762,7 +777,6 @@ impl Fold for Group {
             return false;
         };
         self.steps[k].flip();
-        self.folded = !self.steps.iter().any(Step::is_open);
         true
     }
 
@@ -876,6 +890,27 @@ mod tests {
         assert!(!row.is_expandable());
         assert!(!row.toggle_expand());
         assert_eq!(row.len(), 1);
+    }
+
+    // Folding is answered from the steps rather than kept beside them, so a
+    // group whose steps are all closed is folded however they came to be.
+    #[test]
+    fn a_group_answers_folded_from_its_steps() {
+        let paint = Paint::new(false);
+        // Opened whole, then the only step closes on a click on its own line.
+        let opened = FoldedTool::new("read", "read a.rs", r#"{"path":"a.rs"}"#, "");
+        let mut row = bundle(vec![opened]);
+        row.set_folded(false);
+        assert_eq!(row.folded(), Some(false), "opened whole");
+        assert!(row.toggle_at(0, 80), "a call with an argument opens");
+        assert_eq!(row.folded(), Some(true), "closed by its own line");
+
+        // The step that leaves the group takes its openness with it: what is
+        // left has nothing open, so nothing is unfolded.
+        let mut row = Row::steps(think(7, 0), false);
+        assert_eq!(row.folded(), Some(false), "opened whole");
+        assert!(row.end_block(7, &paint), "an empty block leaves no step");
+        assert_eq!(row.folded(), Some(true), "nothing is open");
     }
 
     fn think(block: u64, n: usize) -> Step {

@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::error::{LlmError, Result};
 use crate::model::ModelSpec;
-use crate::request::Request;
+use crate::request::{Request, ToolChoice};
 use crate::stream::StreamEvent;
 
 pub mod anthropic;
@@ -109,6 +109,83 @@ pub(crate) async fn exchange(
     })
 }
 
+/// One wire's call, once its endpoint and credential are on it: the whole of
+/// what the three wires differ in. Headers, body and the exchange are one flow.
+pub(crate) struct Call<'a> {
+    format: &'static str,
+    url: String,
+    spec: &'a ModelSpec,
+    req: &'a Request,
+    call: reqwest::RequestBuilder,
+}
+
+impl<'a> Call<'a> {
+    /// A call to `url`, with the connection's own headers already on it.
+    pub(crate) fn to(
+        http: &reqwest::Client,
+        format: &'static str,
+        url: String,
+        spec: &'a ModelSpec,
+        req: &'a Request,
+    ) -> Self {
+        Self {
+            format,
+            call: extra_headers(http.post(url.as_str()), spec, req),
+            url,
+            spec,
+            req,
+        }
+    }
+
+    /// The credential most hosts take, as `Authorization: Bearer`.
+    pub(crate) fn bearer(mut self, key: &Option<String>) -> Self {
+        if let Some(key) = key {
+            self.call = self.call.bearer_auth(key);
+        }
+        self
+    }
+
+    /// A header this wire sends on every call.
+    pub(crate) fn header(mut self, name: &'static str, value: &str) -> Self {
+        self.call = self.call.header(name, value);
+        self
+    }
+
+    /// Body on, out to the wire, and the exchange logged as one flow.
+    pub(crate) async fn send(self, body: &Value) -> Result<reqwest::Response> {
+        let call = self.call.json(body);
+        exchange(self.format, self.url, self.spec, self.req, body, call).await
+    }
+}
+
+/// The output cap every wire sends: what the caller asked for, never above
+/// what the model itself serves.
+pub(crate) fn max_output_tokens(spec: &ModelSpec, req: &Request) -> u32 {
+    req.max_output_tokens
+        .unwrap_or(spec.max_output_tokens)
+        .min(spec.max_output_tokens)
+}
+
+/// What the caller asked the model to do with tools, settled the same way by
+/// every wire: a model that cannot be forced gets `Auto`. Each wire then spells
+/// this in its own vocabulary, and nothing else decides it.
+pub(crate) enum Forced<'a> {
+    Auto,
+    None,
+    Required,
+    Named(&'a str),
+}
+
+pub(crate) fn forced<'a>(spec: &ModelSpec, req: &'a Request) -> Forced<'a> {
+    match &req.tool_choice {
+        ToolChoice::Auto => Forced::Auto,
+        ToolChoice::None => Forced::None,
+        _ if !spec.can_force_tool => Forced::Auto,
+        ToolChoice::Required => Forced::Required,
+        ToolChoice::Named(name) => Forced::Named(name),
+    }
+}
+
 // A refusal's body, capped. The cut backs off past a run of digits so a number
 // the body states — the limit an overflow names — is never read cut short.
 fn capped(body: String) -> String {
@@ -123,8 +200,8 @@ fn capped(body: String) -> String {
     format!("{} (truncated)", crate::slice::head_bytes(&body, cut))
 }
 
-/// The OpenAI-shaped wires' SSE frames as events: each frame's JSON goes to
-/// `decode`; an unreadable frame or one carrying `error` ends the turn.
+/// Every wire's SSE frames as events: each frame's JSON goes to `decode`; an
+/// unreadable frame or one carrying `error` ends the turn.
 pub(crate) fn sse(
     resp: reqwest::Response,
     format: &'static str,
@@ -133,26 +210,43 @@ pub(crate) fn sse(
     resp.bytes_stream()
         .eventsource()
         .flat_map(move |frame| {
-            let events: Vec<Result<StreamEvent>> = match frame {
+            let events = match frame {
                 Err(e) => vec![Err(LlmError::Stream(e.to_string()))],
-                // Chat Completions closes on a data-only `[DONE]`, no JSON in it;
-                // the chunks before it already delivered the turn.
-                Ok(f) if f.data == "[DONE]" => Vec::new(),
-                Ok(f) => match serde_json::from_str::<Value>(&f.data) {
-                    Err(e) => vec![Err(LlmError::Stream(e.to_string()))],
-                    Ok(data) if data.get("error").is_some_and(|e| !e.is_null()) => {
-                        tracing::warn!(
-                            target: "pi::wire", format,
-                            detail = %data["error"], "error frame"
-                        );
-                        vec![Err(LlmError::Stream(data["error"].to_string()))]
-                    }
-                    Ok(data) => decode(data),
-                },
+                Ok(f) => frame_events(&f.data, format, &mut decode),
             };
             futures::stream::iter(events)
         })
         .boxed()
+}
+
+/// What one frame means, for every wire: nothing, events, or the ending.
+///
+/// A frame that will not parse ends the turn rather than passing for a turn
+/// that simply had less in it; the model's own words would be missing and
+/// nothing would say so.
+fn frame_events(
+    data: &str,
+    format: &'static str,
+    decode: &mut impl FnMut(Value) -> Vec<Result<StreamEvent>>,
+) -> Vec<Result<StreamEvent>> {
+    let data = data.trim();
+    // Chat Completions closes on a data-only `[DONE]`, no JSON in it; the chunks
+    // before it already delivered the turn. A keep-alive carries nothing either.
+    if data == "[DONE]" || data.is_empty() {
+        return Vec::new();
+    }
+    let data: Value = match serde_json::from_str(data) {
+        Ok(data) => data,
+        Err(e) => return vec![Err(LlmError::Stream(e.to_string()))],
+    };
+    if data.get("error").is_some_and(|e| !e.is_null()) {
+        tracing::warn!(
+            target: "pi::wire", format,
+            detail = %data["error"], "error frame"
+        );
+        return vec![Err(LlmError::Stream(data["error"].to_string()))];
+    }
+    decode(data)
 }
 
 /// For a wire whose terminal frame is guaranteed: a stream that closes before
@@ -359,6 +453,62 @@ impl Gaps {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_frame_that_will_not_parse_ends_the_turn() {
+        let none = |_: Value| Vec::new();
+        let mut decode = none;
+
+        let cut = frame_events("{\"type\":\"content_bl", "anthropic", &mut decode);
+        assert!(matches!(cut.as_slice(), [Err(LlmError::Stream(_))]));
+    }
+
+    #[test]
+    fn a_keepalive_and_a_done_frame_carry_no_event() {
+        let mut decode = |_: Value| {
+            vec![Ok(StreamEvent::Done {
+                stop: Default::default(),
+                usage: Default::default(),
+            })]
+        };
+        for quiet in ["[DONE]", "", "  \n"] {
+            assert!(
+                frame_events(quiet, "chat", &mut decode).is_empty(),
+                "{quiet:?} read as an event"
+            );
+        }
+    }
+
+    #[test]
+    fn an_error_frame_is_the_ending_and_never_reaches_the_decoder() {
+        let mut decode = |_: Value| panic!("an error frame was decoded as content");
+        let out = frame_events(
+            r#"{"error":{"message":"invalid_api_key"}}"#,
+            "anthropic",
+            &mut decode,
+        );
+        assert!(
+            matches!(out.as_slice(), [Err(LlmError::Stream(text))] if text.contains("invalid_api_key"))
+        );
+    }
+
+    #[test]
+    fn a_model_that_cannot_be_forced_is_asked_for_auto() {
+        let forced_of = |can_force_tool, choice| {
+            let spec = ModelSpec {
+                can_force_tool,
+                ..ModelSpec::test()
+            };
+            let req = Request {
+                tool_choice: choice,
+                ..Request::default()
+            };
+            matches!(forced(&spec, &req), Forced::Auto)
+        };
+        assert!(forced_of(false, ToolChoice::Required), "refused but forced");
+        assert!(forced_of(false, ToolChoice::Named("read".into())));
+        assert!(!forced_of(true, ToolChoice::Required), "capable and forced");
+    }
 
     #[test]
     fn a_conversation_is_named_only_when_the_connection_names_a_header() {

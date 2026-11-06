@@ -5,33 +5,11 @@
 //! tool result carries it back, and the run that called it reports it.
 
 use std::sync::Arc;
-use std::sync::OnceLock;
 
 use agent::Archive;
 use agent::session::Session;
 
 use pi_store::session::{Store, now};
-
-// Saves handed off to a background thread, still in flight; the exit path
-// drains these so a promised transcript is actually on disk before exit.
-fn pending() -> &'static std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>> {
-    static PENDING: OnceLock<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> = OnceLock::new();
-    PENDING.get_or_init(|| std::sync::Mutex::new(Vec::new()))
-}
-
-/// Wait for every handed-off save to land. Cheap at the exit: a save already
-/// finished joins instantly, and one still running is exactly the one leaving
-/// would have dropped.
-pub async fn flush() {
-    let saves = std::mem::take(
-        &mut *pending()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    );
-    for save in saves {
-        let _ = save.await;
-    }
-}
 
 pub struct Filed {
     store: Store,
@@ -63,8 +41,8 @@ impl Archive for Nowhere {
 }
 
 impl Archive for Filed {
-    // Blocking thread: several subagents saving in parallel must not each
-    // serialize megabytes on the tool path. The handle lets `flush` await it.
+    // On the saver thread: several subagents saving must not each serialize
+    // megabytes on the tool path, and `flush` joins whatever is queued.
     fn keep(&self, parent: &str, id: &str, session: Session) {
         let (store, root, model, parent, id) = (
             self.store.clone(),
@@ -73,7 +51,7 @@ impl Archive for Filed {
             parent.to_string(),
             id.to_string(),
         );
-        let handle = tokio::task::spawn_blocking(move || {
+        super::saves::behind(move || {
             let saved = store.save_subagent(&parent, &id, &root, &model, now(), &session);
             if let Err(e) = saved {
                 tracing::warn!(
@@ -84,11 +62,5 @@ impl Archive for Filed {
                 );
             }
         });
-        let mut pending = pending()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Finished handles are zombies otherwise; the vec only ever grew.
-        pending.retain(|h| !h.is_finished());
-        pending.push(handle);
     }
 }

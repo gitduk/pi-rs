@@ -383,14 +383,14 @@ impl Ui {
         let Some(session) = lane.session().filter(|s| !s.entries().is_empty()) else {
             return;
         };
-        let (scroll, top, opened) = (view.surface.scroll, view.surface.top, view.surface.opened);
+        let (scroll, opened) = (view.surface.scroll, view.surface.opened);
         let banner = opened.then(|| Row::banner(lane.resolved(), &self.paint));
         self.rebuild(view, session, lane.root());
         if let Some(banner) = banner {
             view.surface.opened = true;
             view.surface.scrollback.push_front(banner);
         }
-        (view.surface.scroll, view.surface.top) = (scroll, top);
+        view.surface.scroll = scroll;
     }
 
     // Every copy of the config the surface keeps, brought up to date — the one

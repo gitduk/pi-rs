@@ -639,13 +639,13 @@ fn a_wrapped_row_landing_below_moves_the_scroll_by_its_rows() {
     ui.flush(&lane, &mut view);
     ui.scroll_view(&mut view, true, 2);
     ui.flush(&lane, &mut view);
-    let (shown, scrolled) = (ui.drawn.clone(), view.surface.scroll);
+    let (shown, scrolled) = (ui.drawn.clone(), view.surface.scroll.by);
 
     // 25 columns at a 19-column width: one line, two rows.
     view.surface.scrollback.push(Row::notice("x".repeat(25)));
     ui.flush(&lane, &mut view);
     assert_eq!(ui.drawn, shown, "the window stayed put");
-    assert_eq!(view.surface.scroll, scrolled + 2, "on both wrapped rows");
+    assert_eq!(view.surface.scroll.by, scrolled + 2, "on both wrapped rows");
 }
 
 // Groups folding above the window take their rows with them; the line at
@@ -681,6 +681,39 @@ fn the_key_reads_a_group_with_nothing_to_unfold_as_folded() {
     .into();
     t.toggle_current(&mut scrollback);
     assert!(!t.birth_fold(), "the next group is born open");
+}
+
+// A page has its own window: scrolling it leaves the transcript's where it
+// was, and closing it lands back on the rows the transcript was scrolled to.
+#[test]
+fn a_page_scrolls_itself_and_leaves_the_transcript_where_it_was() {
+    let mut ui = test_ui(30, 12);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    view.surface.scrollback = (1..=30).map(|n| Row::notice(format!("row {n}"))).collect();
+    ui.flush(&lane, &mut view);
+    ui.scroll_view(&mut view, true, 4);
+    ui.flush(&lane, &mut view);
+    let (transcript, shown) = (view.surface.scroll, ui.drawn.clone());
+    assert_eq!(transcript.by, 4, "the transcript is scrolled up");
+
+    ui.open_page(
+        (0..100)
+            .map(|i| Line::from(format!("line {i}")).into())
+            .collect(),
+    );
+    ui.flush(&lane, &mut view);
+    ui.scroll_view(&mut view, true, 6);
+    ui.flush(&lane, &mut view);
+    assert_eq!(
+        view.surface.scroll, transcript,
+        "the page scrolled the transcript's window"
+    );
+
+    assert!(ui.close_page(), "the page was up");
+    ui.flush(&lane, &mut view);
+    assert_eq!(view.surface.scroll, transcript, "still where it was left");
+    assert_eq!(ui.drawn, shown, "and the rows are the ones it was showing");
 }
 
 // A panel that holds the keys sets the transcript back, so the two do not

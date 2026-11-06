@@ -15,7 +15,7 @@ use super::row::{PendingTool, Row, count};
 use super::screen::{self, Rows};
 use super::scrollback::{Piece, ScrollbackRows, body};
 use super::search::{self, Anchor, Laid, Spot};
-use super::view::{Doing, StreamKind, View, snapshot};
+use super::view::{Doing, Scroll, StreamKind, View, snapshot};
 use crate::render;
 use crate::status;
 use pi_core::core::question::{Asker, Question};
@@ -30,11 +30,13 @@ impl Ui {
     pub(super) fn flush(&mut self, lane: &Lane, view: &mut View) {
         self.pin_selection(view);
         self.repaint(view, lane);
-        if self.background_focus.is_some() && (self.reading() || !self.menu().is_empty()) {
+        // Asked once a frame: the list and the hint are one answer, and asking
+        // for the menu again below ran the same follow twice.
+        let (menu, hint) = self.assistance().into_parts();
+        if self.background_focus.is_some() && (self.reading() || !menu.is_empty()) {
             self.leave_background();
         }
         let width = self.screen.width();
-        let menu = self.menu();
         let rewind = self.rewind_follow(view, &menu);
         let paged = self.read.is_some();
         let text = self.page_lines();
@@ -88,7 +90,6 @@ impl Ui {
         }
         let bar_rows = self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width);
         let mut bar: Vec<_> = bar_rows.iter().map(|row| row.line.clone()).collect();
-        let (menu, hint) = self.assistance().into_parts();
         let (input, caret) = self.input_view(width, hint.as_deref());
         // A question heads its options, and stays up over words that match
         // none of them, since those answer it too; a command's list hides it.
@@ -183,10 +184,7 @@ impl Ui {
         if let Some(at) = rewind {
             self.land_at(view, at, &regions);
         }
-        let (scroll, top) = {
-            let (scroll, top) = self.window_mut(view);
-            (*scroll, *top)
-        };
+        let Scroll { by: scroll, top } = *self.window_mut(view);
         // A line a click answers on is lit under the pointer, as a fold's
         // own line is.
         let lit = self.lit_text();
@@ -223,7 +221,9 @@ impl Ui {
             )
         });
 
-        let at = top.map(|a| (move |t: &Target| Spot::of(*t).cmp(&Some(a.spot)), a.rows));
+        // The `top` a window opens on, from the anchor that names it.
+        let top_of = |a: Anchor| (move |t: &Target| Spot::of(*t).cmp(&Some(a.spot)), a.rows);
+        let at = top.map(top_of);
         // The history row a page's output starts on, the transcript above it.
         let mut output_at = None;
         let (tagged_rows, scroll) = if paged && hist_view > 0 {
@@ -231,13 +231,11 @@ impl Ui {
             // that a page taller than the region pushes up to its top row.
             let (text, scroll) =
                 screen::window_tagged(text_stream, hist_view - 1, scroll, at, most);
-            let surface = &view.surface;
-            let under =
-                (surface.top).map(|a| (move |t: &Target| Spot::of(*t).cmp(&Some(a.spot)), a.rows));
+            let under = view.surface.scroll.top.map(top_of);
             let (mut rows, _) = screen::window_tagged(
                 scrollback.chain(live_stream),
                 hist_view,
-                surface.scroll,
+                view.surface.scroll.by,
                 under,
                 usize::MAX,
             );
@@ -339,8 +337,7 @@ impl Ui {
         let top = (scroll > 0 || on_hit)
             .then(|| self.anchor_here(view))
             .flatten();
-        let (was, top_was) = self.window_mut(view);
-        (*was, *top_was) = (scroll, top);
+        *self.window_mut(view) = Scroll { by: scroll, top };
         let picked = self.list.highlighted(&menu);
         let table = self.menu_table(&menu, picked, regions.menu.width as usize);
         // The picked row on the input's band, the menu's width: a bar the eye

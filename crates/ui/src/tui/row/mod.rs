@@ -173,7 +173,7 @@ fn step_lines(group: &Group) -> Vec<PreviewLine> {
     let hidden = count.saturating_sub(FIRST + LAST);
     let mut lines = Vec::with_capacity(count + 1);
     for (index, range) in sections.into_iter().enumerate() {
-        if hidden > 0 && !group.all && (FIRST..count - LAST).contains(&index) {
+        if hidden > 0 && !group.lists_all() && (FIRST..count - LAST).contains(&index) {
             if index == FIRST {
                 lines.push(PreviewLine::More {
                     target: More::Steps,
@@ -184,7 +184,7 @@ fn step_lines(group: &Group) -> Vec<PreviewLine> {
         }
         lines.extend((range.start..range.end).map(PreviewLine::content));
     }
-    if hidden > 0 && group.all {
+    if hidden > 0 && group.lists_all() {
         lines.push(PreviewLine::More {
             target: More::CollapseSteps,
             remaining: hidden,
@@ -667,7 +667,7 @@ impl Row {
             })
         ) && let Kind::Steps(group) = &mut self.0
         {
-            group.all = !group.all;
+            group.toggle_all();
             self.1.clear();
             return true;
         }
@@ -1193,7 +1193,7 @@ impl Row {
     /// Whether this row is folded, and the handle to change it.
     pub fn folded(&self) -> Option<bool> {
         match &self.0 {
-            Kind::Steps(g) => Some(g.folded),
+            Kind::Steps(g) => Some(g.folded()),
             _ => None,
         }
     }

@@ -28,7 +28,7 @@ use crate::core::meter::{Snapshot, Tally};
 use crate::core::resolve::Resolved;
 use crate::input::{Rewound, Step, refused};
 use pi_store::journal;
-use pi_store::session::{self, Stored};
+use pi_store::session::{self, Store, Stored};
 use pi_store::settings::Settings;
 
 /// Where this lane's run stands.
@@ -100,8 +100,9 @@ struct Conversation {
     // What the run in flight has cost so far, seeded when a run
     // arms; the status lines read this run alone, `/status` the session.
     tally: Tally,
-    // Why the last save failed; cleared by the next one that lands.
-    unsaved: Option<String>,
+    // Why the last save failed; cleared by the next one that lands. Shared
+    // because a save handed to the saver thread writes it from there.
+    unsaved: Arc<Mutex<Option<String>>>,
     // Rows and notes filed since the last save: turns save themselves, but
     // what lands between them waits for the next turn, or for leaving.
     filed: bool,
@@ -188,9 +189,69 @@ impl Conversation {
             _claim: claim,
             name,
             tally: Tally::default(),
-            unsaved: None,
+            unsaved: Arc::default(),
             filed: false,
         }
+    }
+}
+
+// One lane's transcript, ready to be written anywhere: nothing of it borrows
+// the lane, so it can outlive the frame that asked for the save.
+struct Written {
+    store: Store,
+    root: std::path::PathBuf,
+    id: String,
+    model: String,
+    name: Option<String>,
+    created: u64,
+    spent: Totals,
+    session: Session,
+    // Where the outcome goes: the bar and `/status` read it from the lane.
+    unsaved: Arc<Mutex<Option<String>>>,
+}
+
+impl Written {
+    // The lane's transcript, or `None` when a run has it — it saves its own on
+    // the way back, and writing a stale copy now would undo that.
+    fn of(lane: &Lane, store: &Store) -> Option<Self> {
+        let session = lane.talk.transcript.home()?;
+        Some(Self {
+            store: store.clone(),
+            root: lane.checkout.ctx.workspace.root().to_path_buf(),
+            id: lane.talk.id.clone(),
+            model: lane.checkout.agent.spec().model.clone(),
+            name: lane.talk.name.clone(),
+            created: lane.talk.created,
+            spent: lane.spent(),
+            session: session.clone(),
+            unsaved: lane.talk.unsaved.clone(),
+        })
+    }
+
+    // Write it whole, and say what that made of it.
+    fn run(&self) -> anyhow::Result<()> {
+        let header = session::Header {
+            id: &self.id,
+            model: &self.model,
+            name: self.name.as_deref(),
+            created: self.created,
+            spent: self.spent,
+        };
+        let saved = self.store.save(&self.root, header, &self.session);
+        *self
+            .unsaved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            saved.as_ref().err().map(|e| format!("{e:#}"));
+        if let Err(e) = &saved {
+            tracing::warn!(
+                target: "pi::session",
+                id = %self.id,
+                error = %format!("{e:#}"),
+                "transcript not saved"
+            );
+        }
+        saved.map(drop)
     }
 }
 
@@ -619,8 +680,12 @@ impl Lane {
     }
 
     /// Why the transcript on disk is behind this one, while it is.
-    pub fn unsaved(&self) -> Option<&str> {
-        self.talk.unsaved.as_deref()
+    pub fn unsaved(&self) -> Option<String> {
+        self.talk
+            .unsaved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// What the run in flight has cost, for the lines that say the run alone.
@@ -749,51 +814,61 @@ impl Lane {
 }
 
 impl Core {
-    pub fn remove_lane(&mut self, at: usize) -> Lane {
-        let lane = self.lanes.remove(at);
-        if at < self.current || self.current >= self.lanes.len() {
-            self.current = self.current.saturating_sub(1);
-        }
-        // The lane takes its session record with it: a run that saved after
-        // its checkout went must not outlive it on disk.
+    /// Take a lane out by its token, and its session record with it: a run
+    /// that saved after its checkout went must not outlive it on disk.
+    ///
+    /// The token is what names a lane here, not its place in the list: a place
+    /// moves as its neighbours go, and a surface holding one would take out
+    /// somebody else's lane. `None` for the lane in front, and for one gone.
+    pub fn remove_lane(&mut self, token: u64) -> Option<Lane> {
+        let lane = self.lanes.take(token)?;
         if let Some(dir) = self.store.path_of(lane.root(), lane.id()).parent() {
             let _ = std::fs::remove_dir_all(dir);
         }
-        lane
+        Some(lane)
     }
-    /// Save the transcript. Called after every turn: an interrupted one is
-    /// exactly the one worth keeping.
+    /// Save the transcript, on disk before this returns: what a move, a rewind
+    /// or a name depends on being written.
     pub fn save(&mut self) -> anyhow::Result<()> {
-        self.save_lane(self.current)
+        self.save_lane(self.lanes.front())
     }
     /// The same for a lane that is not in front: a run that ended out of sight
     /// still has to reach disk, and it is not the screen's turn that decides.
     pub fn save_lane(&mut self, at: usize) -> anyhow::Result<()> {
-        // Away with a run, which saves it itself on the way back.
-        let Some(lane) = self.lanes.get_mut(at) else {
+        let Some(written) = self.written_at(at) else {
             return Ok(());
         };
-        let Some(session) = lane.talk.transcript.home() else {
-            return Ok(());
-        };
-        let header = session::Header {
-            id: &lane.talk.id,
-            model: &lane.checkout.agent.spec().model,
-            name: lane.talk.name.as_deref(),
-            created: lane.talk.created,
-            spent: lane.spent(),
-        };
-        let saved = self
-            .store
-            .save(lane.checkout.ctx.workspace.root(), header, session);
-        lane.talk.unsaved = saved.as_ref().err().map(|e| format!("{e:#}"));
-        saved?;
-        lane.talk.filed = false;
-        Ok(())
+        // Written there, waited for here: one writer for every transcript, so a
+        // save that follows a rename lands after the one the turn started.
+        crate::core::saves::now(move || written.run())
     }
 
+    /// The save a turn ends with: the same write, handed to the saver thread.
+    ///
+    /// A turn is worth keeping even when it was interrupted, so this runs after
+    /// every one — and serializing and syncing megabytes on the frame loop is a
+    /// hitch the reader sees. Nothing waits for it here; a failure reaches the
+    /// bar and `/status` through `Lane::unsaved`.
+    pub fn save_lane_behind(&mut self, at: usize) {
+        let Some(written) = self.written_at(at) else {
+            return;
+        };
+        crate::core::saves::behind(move || {
+            let _ = written.run();
+        });
+    }
+
+    fn written_at(&mut self, at: usize) -> Option<Written> {
+        let lane = self.lanes.all_mut().get_mut(at)?;
+        let written = Written::of(lane, &self.store)?;
+        lane.talk.filed = false;
+        Some(written)
+    }
     /// Save every lane holding rows filed since its last save; one nothing
     /// was filed in stays as it is on disk, or off it.
+    ///
+    /// Waited for, unlike a turn's own save: this runs where the run is ending
+    /// or the lane is leaving, and nothing after it can retry.
     pub fn save_filed(&mut self) {
         for at in 0..self.lanes.len() {
             if self.lanes[at].talk.filed {
@@ -939,12 +1014,9 @@ impl Core {
             self.save().map_err(failed)?;
         }
 
-        let worktree = crate::core::worktree::list(&to).ok().and_then(|trees| {
-            let tree = trees
-                .into_iter()
-                .find(|t| !t.main && t.path.canonicalize().ok().as_ref() == Some(&to))?;
-            Some(tree.name)
-        });
+        // The same answer opening a lane there gives: by containment, so a
+        // subdirectory of a checkout still names it.
+        let worktree = crate::core::worktree::current(&to);
         let mut said = self.adopt(config, ws, Some(settings), None)?;
         // Built, not kept: a `Ctx`'s tables key on absolute paths in one tree.
         let id = self.lane().talk.id.clone();
@@ -1024,11 +1096,10 @@ impl Core {
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
         // absolute paths in one tree, and none of that lane's describe this.
         let ctx = tool::Ctx::new(ws);
-        self.lanes.push(Lane::opened(Opening {
+        self.lanes.push_ahead(Lane::opened(Opening {
             worktree,
             ..Opening::new(Arc::new(ag), resolved, ctx)
         }));
-        self.current = self.lanes.len() - 1;
         if let Some(notes) = self.refresh_model_config() {
             Arc::make_mut(&mut self.lane_mut().checkout.resolved)
                 .notes
@@ -1058,7 +1129,8 @@ impl Core {
     /// own session and model. What does not come back is said under the
     /// front one's banner, not fatal.
     pub fn reopen(&mut self, lanes: &[(std::path::PathBuf, Option<String>)]) {
-        let front = self.current;
+        let front = self.lanes.ahead().token();
+        let like = self.lanes.front();
         let mut order = Vec::new();
         let mut said = Vec::new();
         for (root, id) in lanes {
@@ -1076,7 +1148,7 @@ impl Core {
                 continue;
             }
             let worktree = crate::core::worktree::current(ws.root());
-            if let Err(why) = self.open_lane(ws, worktree, front) {
+            if let Err(why) = self.open_lane(ws, worktree, like) {
                 said.push(format!("{}: {why}", root.display()));
                 continue;
             }
@@ -1097,14 +1169,12 @@ impl Core {
                 }
             }
         }
-        let front = self.lanes[front].token();
-        self.lanes.sort_by_key(|lane| {
+        self.lanes.sort_keeping(front, |lane| {
             order
                 .iter()
                 .position(|root| root == lane.root())
                 .unwrap_or(usize::MAX)
         });
-        self.current = self.position_of(front).unwrap_or(0);
         said.extend(self.refresh_model_config().unwrap_or_default());
         self.in_force();
         for line in &said {
@@ -1189,6 +1259,39 @@ mod tests {
         assert!(said("not reopened", &gone), "{notes:?}");
     }
 
+    // A turn's save is handed off and a command's waits. The one that waited
+    // must not be overwritten by the one still in flight behind it.
+    #[tokio::test]
+    async fn a_save_from_behind_never_lands_after_the_one_that_waited() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
+        let id = core.lane().id().to_string();
+        core.lane_mut().push_note("the earlier one");
+        core.save_lane_behind(0);
+        core.lane_mut().push_note("the later one");
+        core.save_lane(0).expect("the later save");
+        crate::core::saves::flush().await;
+
+        let path = core.store.path_of(dir.path(), &id);
+        let stored = pi_store::session::Store::read(&path).expect("a transcript");
+        let said = serde_json::to_string(&stored.session.context()).unwrap();
+        assert!(said.contains("the later one"), "{said}");
+        assert!(said.contains("the earlier one"), "both are the session's");
+    }
+
+    // `/mv` into a subdirectory of a checkout names that checkout, as opening
+    // a lane there does: one answer to "which checkout is this path in".
+    #[test]
+    fn moving_into_a_subdirectory_names_the_checkout_it_is_in() {
+        let repo = crate::core::worktree::test_repo();
+        let tree = crate::core::worktree::enter(repo.path(), "fix").unwrap();
+        let deep = tree.path.join("crates/pi");
+        std::fs::create_dir_all(&deep).unwrap();
+        let mut core = a_repl(repo.path(), std::sync::Arc::new(Recording::default()), "m");
+        core.move_to(&deep.display().to_string()).unwrap();
+        assert_eq!(core.lane().worktree(), Some("fix"));
+    }
+
     // An opened lane is cloned from another's agent, so it would share that
     // meter unless given its own; a session taken up counts from its own file.
     #[test]
@@ -1206,7 +1309,7 @@ mod tests {
         assert_eq!(core.lane().spent(), agent::Totals::default());
         assert_eq!(core.lanes[0].spent(), spent);
 
-        core.current = 0;
+        core.lanes.show(0);
         core.save().unwrap();
         let left = core.lane().talk.id.clone();
         core.fresh_session();

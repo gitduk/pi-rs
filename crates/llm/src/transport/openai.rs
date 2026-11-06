@@ -3,7 +3,7 @@ use futures::stream::BoxStream;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-use super::Transport;
+use super::{Call, Forced, Transport, forced, max_output_tokens};
 use super::{FAILED, Gaps, Shared};
 use crate::error::{LlmError, Result};
 use crate::message::{
@@ -11,7 +11,7 @@ use crate::message::{
     ToolResult, ToolResultContent, UserContent,
 };
 use crate::model::{Format, ModelSpec};
-use crate::request::{Request, ToolChoice};
+use crate::request::Request;
 use crate::stream::{BlockKind, InvalidToolArgs, StopReason, StreamEvent, Usage};
 
 pub struct OpenAi {
@@ -41,6 +41,7 @@ fn check_format(spec: &ModelSpec) -> Result<()> {
         ))),
     }
 }
+
 fn encode_image(img: &Image) -> Value {
     let url = match img {
         Image::Url { url } => url.clone(),
@@ -184,16 +185,11 @@ fn encode(msgs: &[Message], spec: &ModelSpec) -> Vec<Value> {
 }
 
 pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
-    let max_output_tokens = req
-        .max_output_tokens
-        .unwrap_or(spec.max_output_tokens)
-        .min(spec.max_output_tokens);
-
     let mut body = json!({
         "model": spec.wire_model(),
         "stream": true,
         "input": encode(&req.messages, spec),
-        "max_output_tokens": max_output_tokens,
+        "max_output_tokens": max_output_tokens(spec, req),
         // A transcript on someone else's disk is not ours to leave behind, and
         // the reference page documents no default for this — so it is said.
         "store": false,
@@ -229,13 +225,11 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
         );
         // Documented without a default, so it is sent rather than assumed.
         body["parallel_tool_calls"] = json!(true);
-        body["tool_choice"] = match &req.tool_choice {
-            ToolChoice::Auto => json!("auto"),
-            ToolChoice::None => json!("none"),
-            // A model that refuses a forced choice gets auto, as on the other wires.
-            _ if !spec.can_force_tool => json!("auto"),
-            ToolChoice::Required => json!("required"),
-            ToolChoice::Named(name) => json!({ "type": "function", "name": name }),
+        body["tool_choice"] = match forced(spec, req) {
+            Forced::Auto => json!("auto"),
+            Forced::None => json!("none"),
+            Forced::Required => json!("required"),
+            Forced::Named(name) => json!({ "type": "function", "name": name }),
         };
     }
 
@@ -520,12 +514,10 @@ impl Transport for OpenAi {
         check_format(spec)?;
         let body = build_body(spec, req);
         let url = format!("{}/responses", spec.base_url.trim_end_matches('/'));
-        let mut call = super::extra_headers(self.http.post(&url), spec, req);
-        if let Some(key) = &self.api_key {
-            call = call.bearer_auth(key);
-        }
-        let call = call.json(&body);
-        let resp = super::exchange("openai", url, spec, req, &body, call).await?;
+        let resp = Call::to(&self.http, "openai", url, spec, req)
+            .bearer(&self.api_key)
+            .send(&body)
+            .await?;
 
         let mut dec = Decoder::new(spec.model.clone(), self.gaps.clone());
         let events = super::sse(resp, "openai", move |data| match failure(&data) {
@@ -539,6 +531,7 @@ impl Transport for OpenAi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request::ToolChoice;
 
     fn spec() -> ModelSpec {
         ModelSpec {

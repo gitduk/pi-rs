@@ -900,3 +900,62 @@ async fn only_a_new_script_is_made_executable() {
     .await;
     assert_eq!(mode("old.sh"), 0o600);
 }
+
+// A spill is pi's own output and can be as large as the tool that wrote it:
+// read serves the window asked for and stops, so its cost is the window.
+#[tokio::test]
+async fn reading_a_spill_stops_at_the_window_it_was_asked_for() {
+    let (dir, c) = common::spilling();
+    // One line every 32 bytes, and far more than a read would ever show.
+    let body: String = (0..200_000)
+        .map(|i| format!("line {i:07} padded out.\n"))
+        .collect();
+    let at = dir.path().join("spill").join("s1").join("big.log");
+    std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+    let size = body.len();
+    // Past the window the file is not even valid text, so a read that walked
+    // the whole thing would fail on it: what comes back is proof it stopped.
+    let mut corrupt = body.into_bytes();
+    corrupt.extend(std::iter::repeat_n(0xFFu8, 1_000_000));
+    std::fs::write(&at, &corrupt).unwrap();
+
+    // The locator our own writer mints: `<namespace>/<name>`.
+    let locator = "spill:s1/big".to_string();
+    let out = toolbox::read::Read
+        .execute(json!({ "path": locator, "offset": 1, "limit": 3 }), &c)
+        .await
+        .unwrap()
+        .flatten();
+    assert!(out.contains("line 0000000"), "{out}");
+    assert!(out.contains("line 0000002"), "{out}");
+    assert!(!out.contains("line 0000003"), "past the window:\n{out}");
+    assert!(
+        out.contains("more lines follow"),
+        "said there is more:\n{out}"
+    );
+    // Nothing of the file is held as a view: spills are not edited, and a
+    // session that kept every one of them would grow with its own output.
+    assert!(c.viewed(&at).is_none(), "a spill was kept as a viewed file");
+    assert!(
+        size > 4_000_000,
+        "the file is worth the claim: {size} bytes"
+    );
+}
+
+// The window a workspace read builds is the window it shows: the rest of the
+// file is counted, never materialized.
+#[tokio::test]
+async fn a_range_read_of_a_long_file_names_what_it_left() {
+    let (dir, c) = common::ctx();
+    let body: String = (0..50_000).map(|i| format!("row {i:05}\n")).collect();
+    std::fs::write(dir.path().join("long.txt"), &body).unwrap();
+    let out = common::run(
+        &toolbox::read::Read,
+        json!({ "path": "long.txt", "offset": 20_000, "limit": 2 }),
+        &c,
+    )
+    .await;
+    assert!(out.contains("20000:row 19999"), "{out}");
+    assert!(out.contains("20001:row 20000"), "{out}");
+    assert!(out.contains("lines 20002-50000 not shown"), "{out}");
+}

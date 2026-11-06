@@ -10,7 +10,7 @@ use agent::NoteOutcome as _;
 use pi_core::args::Args;
 use pi_core::core::dial::{dial, summary_writer};
 use pi_core::core::resolve::{fence, resolve};
-use pi_core::core::{self, Core, archive, lane, worktree};
+use pi_core::core::{self, Core, archive, lane, saves, worktree};
 use pi_core::input::expand;
 use pi_store::icons;
 use pi_store::settings::Settings;
@@ -475,8 +475,7 @@ async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended
         commands,
         prompts_seen: 0,
         settings,
-        current: 0,
-        lanes: vec![first],
+        lanes: pi_core::core::lanes::Lanes::of(first),
         refused: Default::default(),
         executions: None,
         removals: Default::default(),
@@ -634,10 +633,10 @@ async fn leave() {
     }
 }
 
-// What leaving waits on: subagent transcripts still being saved, and the
-// last events of a run still with the hooks that watch them.
+// What leaving waits on: transcripts still being saved, and the last events
+// of a run still with the hooks that watch them.
 async fn settle() {
-    archive::flush().await;
+    saves::flush().await;
     core::hooks::flush().await;
 }
 

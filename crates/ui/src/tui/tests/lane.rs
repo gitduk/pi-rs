@@ -1,4 +1,5 @@
 use crate::tui::row::Row;
+use crate::tui::view::Scroll;
 use crate::tui::{Asked, Deed, Intent, Origin, View, front_view, view_at};
 use agent::Event;
 use pi_core::core::lane::Lane;
@@ -180,7 +181,7 @@ async fn what_a_lane_out_of_front_posted_is_in_its_view_already() {
     );
 
     // The screen moves to it, the way a checkout switch does: still there once.
-    tui.core.current = 1;
+    tui.core.lanes.show(1);
     tui.reconcile(0);
     let rows = lane_rows(&mut tui, token);
     assert_eq!(
@@ -322,7 +323,10 @@ async fn a_stopped_run_does_not_tell_the_model_a_request_was_cancelled() {
                 ran: Some((session, Err(agent::AgentError::Cancelled.into()))),
             })
             .await;
-            let mut back = tui.core.lanes[0]
+            let mut back = tui
+                .core
+                .lanes
+                .at_mut(0)
                 .take_session()
                 .expect("the transcript back");
             back.send_prompt(String::from("now something else"), None::<String>);
@@ -441,7 +445,7 @@ fn the_bar_keeps_its_row_when_a_flash_comes_and_goes() {
 fn the_bar_lists_the_checkouts_no_lane_has_open() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let mut tui = surface(dir.path());
-    tui.core.lanes[0].set_worktree(Some("pi-rs".into()));
+    tui.core.lanes.at_mut(0).set_worktree(Some("pi-rs".into()));
     tui.ui
         .lists
         .worktrees
@@ -570,7 +574,7 @@ fn the_ring_walks_the_checkouts_order_not_the_lanes() {
 
     // Opened in an order of their own: git lists checkouts by path, which
     // puts `fix/nmore` last whatever order they were made in.
-    tui.core.lanes[0].set_worktree(Some("pi-rs".into()));
+    tui.core.lanes.at_mut(0).set_worktree(Some("pi-rs".into()));
     let mut guards = Vec::new();
     for name in ["fix/nmore", "feat/add", "fix/choose", "fix/lane"] {
         let (guard, mut lane) = a_running_lane();
@@ -578,7 +582,7 @@ fn the_ring_walks_the_checkouts_order_not_the_lanes() {
         tui.core.lanes.push(lane);
         guards.push(guard);
     }
-    tui.core.current = 4;
+    tui.core.lanes.show(4);
     tui.refresh_tabs();
 
     let names: Vec<&str> = tui.ui.tabs.iter().map(|t| t.name.as_str()).collect();
@@ -629,7 +633,7 @@ fn a_lane_whose_checkout_vanished_is_dropped_and_current_follows() {
 
     tui.drop_vanished_lanes();
     assert_eq!(tui.core.lanes.len(), 1);
-    assert_eq!(tui.core.current, 0);
+    assert_eq!(tui.core.lanes.front(), 0);
     assert!(
         tui.ui.flash.is_none(),
         "the lane leaving the bar is the whole notice"
@@ -643,11 +647,11 @@ fn a_lane_whose_checkout_vanished_is_dropped_and_current_follows() {
     let mut tui = surface(dir.path());
     let earlier = vanished_lane("fix-old");
     tui.core.lanes.insert(0, earlier);
-    tui.core.current = 1;
-    tui.core.lanes[1].finish();
+    tui.core.lanes.show(1);
+    tui.core.lanes.at_mut(1).finish();
     tui.drop_vanished_lanes();
     assert_eq!(tui.core.lanes.len(), 1);
-    assert_eq!(tui.core.current, 0, "the front lane follows its index");
+    assert_eq!(tui.core.lanes.front(), 0, "the front lane follows its lane");
 }
 
 // A vanished lane that sits before a running one waits: removing it
@@ -666,7 +670,7 @@ fn a_vanished_lane_before_a_running_one_waits_for_it() {
     assert_eq!(tui.core.lanes.len(), 3, "the run's lane must not move");
 
     // The run over, the same pass now reaches the vanished lane.
-    tui.core.lanes[2].finish();
+    tui.core.lanes.at_mut(2).finish();
     tui.drop_vanished_lanes();
     assert_eq!(tui.core.lanes.len(), 2);
 }
@@ -689,14 +693,14 @@ fn only_a_finished_lane_wears_a_mark_in_the_bar() {
         "a lane working out of sight is just a lane"
     );
 
-    tui.core.lanes[1].end(true, false);
+    tui.core.lanes.at_mut(1).end(true, false);
     tui.refresh_tabs();
     assert_eq!(
         marks(&tui),
         vec![crate::tui::Mark::Front, crate::tui::Mark::Done]
     );
 
-    tui.core.lanes[1].end(false, false);
+    tui.core.lanes.at_mut(1).end(false, false);
     tui.refresh_tabs();
     assert_eq!(
         marks(&tui),
@@ -762,7 +766,7 @@ async fn a_draft_is_parked_on_the_lane_it_was_typed_at_and_comes_back() {
     let mut tui = surface(first.path());
     tui.ui.editor.set_line("half a thought meant for this lane");
 
-    let was = tui.core.current;
+    let was = tui.core.lanes.front();
     switch_to(&mut tui, running_lane(second.path()));
 
     assert_eq!(
@@ -776,7 +780,7 @@ async fn a_draft_is_parked_on_the_lane_it_was_typed_at_and_comes_back() {
         "the checkout in front starts its own clean line"
     );
 
-    tui.core.current = was;
+    tui.core.lanes.show(was);
     tui.reconcile(was + 1);
     assert_eq!(
         tui.ui.editor.text(),
@@ -804,7 +808,7 @@ async fn a_switch_mid_recall_keeps_the_line_being_typed() {
     tui.ui.editor.up();
     assert_eq!(tui.ui.editor.text(), "an older prompt");
 
-    let was = tui.core.current;
+    let was = tui.core.lanes.front();
     switch_to(&mut tui, running_lane(second.path()));
 
     assert_eq!(
@@ -855,15 +859,15 @@ fn normal_capitals_step_the_checkouts_and_the_window() {
     }
 
     // And the window moves without the caret: scrolled up by J, back by K.
-    view.surface.scroll = 0;
+    view.surface.scroll = Scroll::newest();
     ui.key(&lane, &mut view, typed('K'), false);
-    let up = view.surface.scroll;
+    let up = view.surface.scroll.by;
     assert!(up > 0, "K went back through the window: {up}");
     ui.key(&lane, &mut view, typed('J'), false);
     assert!(
-        view.surface.scroll < up,
+        view.surface.scroll.by < up,
         "J came forward again: {}",
-        view.surface.scroll
+        view.surface.scroll.by
     );
 }
 

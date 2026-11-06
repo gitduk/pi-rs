@@ -11,13 +11,13 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use serde_json::{Value, json};
 
-use super::{FAILED, Shared, Transport};
+use super::{Call, FAILED, Forced, Shared, Transport, forced, max_output_tokens};
 use crate::error::{LlmError, Result};
 use crate::message::{
     AssistantContent, Image, Message, Replay, ToolResult, ToolResultContent, UserContent,
 };
 use crate::model::{Format, ModelSpec};
-use crate::request::{Request, ToolChoice};
+use crate::request::Request;
 use crate::stream::{BlockKind, StopReason, StreamEvent, Usage};
 
 pub struct ChatCompletions {
@@ -155,11 +155,6 @@ fn encode(msgs: &[Message], spec: &ModelSpec) -> Vec<Value> {
 }
 
 pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
-    let max_output_tokens = req
-        .max_output_tokens
-        .unwrap_or(spec.max_output_tokens)
-        .min(spec.max_output_tokens);
-
     // Without it most hosts send no usage at all; DeepSeek's own sends it
     // either way, on the finishing chunk.
     let mut body = json!({
@@ -167,7 +162,7 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
         "stream": true,
         "stream_options": { "include_usage": true },
         "messages": encode(&req.messages, spec),
-        "max_tokens": max_output_tokens,
+        "max_tokens": max_output_tokens(spec, req),
     });
 
     let system = req.system_text();
@@ -200,13 +195,11 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
                 }))
                 .collect::<Vec<_>>()
         );
-        body["tool_choice"] = match &req.tool_choice {
-            ToolChoice::Auto => json!("auto"),
-            ToolChoice::None => json!("none"),
-            // A model that refuses a forced choice gets auto, as on the other wires.
-            _ if !spec.can_force_tool => json!("auto"),
-            ToolChoice::Required => json!("required"),
-            ToolChoice::Named(name) => {
+        body["tool_choice"] = match forced(spec, req) {
+            Forced::Auto => json!("auto"),
+            Forced::None => json!("none"),
+            Forced::Required => json!("required"),
+            Forced::Named(name) => {
                 json!({ "type": "function", "function": { "name": name } })
             }
         };
@@ -410,12 +403,10 @@ impl Transport for ChatCompletions {
         check_format(spec)?;
         let body = build_body(spec, req);
         let url = format!("{}/chat/completions", spec.base_url.trim_end_matches('/'));
-        let mut call = super::extra_headers(self.http.post(&url), spec, req);
-        if let Some(key) = &self.api_key {
-            call = call.bearer_auth(key);
-        }
-        let call = call.json(&body);
-        let resp = super::exchange("chat", url, spec, req, &body, call).await?;
+        let resp = Call::to(&self.http, "chat", url, spec, req)
+            .bearer(&self.api_key)
+            .send(&body)
+            .await?;
 
         let mut dec = Decoder::new(self.gaps.clone());
         let events = super::sse(resp, "chat", move |data| {

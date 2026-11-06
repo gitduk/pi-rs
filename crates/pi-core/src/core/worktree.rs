@@ -37,7 +37,21 @@ pub struct Tree {
     pub main: bool,
 }
 
+/// Whether `path` sits inside the checkout rooted at `root` — that root
+/// included, and by whole components: `/a/b` holds `/a/b/c`, never `/a/bc`.
+///
+/// The one definition of "beneath a checkout": `holding` picks among these,
+/// and the guards that ask whether a run is under one call it too.
+fn beneath(root: &Path, path: &Path) -> bool {
+    path.starts_with(root)
+}
+
 impl Tree {
+    /// Whether `path` sits inside this checkout.
+    pub fn holds(&self, path: &Path) -> bool {
+        beneath(&self.path, path)
+    }
+
     /// The branch to name beside this checkout, or None when naming it would
     /// only repeat the worktree's own name back at the reader.
     pub fn branch_note(&self) -> Option<&str> {
@@ -191,7 +205,7 @@ fn vetted(name: &str) -> Result<&str> {
 pub fn holding<'a>(trees: &'a [Tree], path: &Path) -> Option<&'a Tree> {
     trees
         .iter()
-        .filter(|t| path.starts_with(&t.path))
+        .filter(|t| t.holds(path))
         .max_by_key(|t| t.path.as_os_str().len())
 }
 
@@ -496,13 +510,17 @@ impl Core {
         // Already open: the lane that holds it comes back whole, and only a
         // reload note is worth saying.
         if let Some(i) = self.lane_at(ws.root()) {
-            self.current = i;
+            self.lanes.show(i);
             let notes = self.refresh_config().unwrap_or_default();
             self.in_force();
             // A reload note is a notice: a listing would open the page.
             return Ok(Step::Notice(crate::input::notice(notes)));
         }
-        self.open_lane(ws, (!tree.main).then(|| tree.name.clone()), self.current)?;
+        self.open_lane(
+            ws,
+            (!tree.main).then(|| tree.name.clone()),
+            self.lanes.front(),
+        )?;
         let said = self.take_up_latest();
         Ok(Step::Swap(crate::input::notice(said)))
     }
@@ -550,16 +568,19 @@ impl Core {
                 tree.name
             ));
         }
-        let running = self.lanes.iter().enumerate().any(|(i, lane)| {
-            i != self.current && lane.root().starts_with(&tree.path) && lane.is_running()
-        });
+        let front = self.lanes.front();
+        let running = self
+            .lanes
+            .iter()
+            .enumerate()
+            .any(|(i, lane)| i != front && tree.holds(lane.root()) && lane.is_running());
         if running {
             return Err(format!(
                 "`{}` is running in another lane of this run — stop it first",
                 tree.name
             ));
         }
-        if self.lane().root().starts_with(&tree.path) {
+        if tree.holds(self.lane().root()) {
             return Err(format!(
                 "`{}` is where this session is — /worktree out of it first",
                 tree.name
@@ -587,15 +608,20 @@ impl Core {
             commands,
             ..
         } = gone;
-        for i in (0..self.lanes.len()).rev() {
+        // By token, not by position: what goes first does not move the
+        // others under their names. The front lane stays: `Lanes::take`
+        // refuses it, and `check_removable` refused a removal under it.
+        let gone: Vec<u64> = self
+            .lanes
+            .iter()
             // A run still holds its transcript; the vanished checkout is
             // taken up when it ends.
-            if i == self.current || self.lanes[i].is_running() {
-                continue;
-            }
-            if self.lanes[i].root().starts_with(&removed.path) {
-                self.remove_lane(i);
-            }
+            .filter(|lane| !lane.is_running())
+            .filter(|lane| beneath(&removed.path, lane.root()))
+            .map(|lane| lane.token())
+            .collect();
+        for token in gone {
+            self.remove_lane(token);
         }
         let mut said = Vec::new();
         if let Some(branch) = removed.branch {
@@ -847,6 +873,22 @@ mod tests {
         assert!(enter(dir.path(), "one").is_err());
     }
 
+    // Containment by whole components: a sibling whose name starts the same
+    // is not inside, and a checkout holds its own root.
+    #[test]
+    fn a_checkout_holds_its_root_and_never_a_sibling() {
+        let tree = Tree {
+            path: PathBuf::from("/repo/work"),
+            name: "work".into(),
+            branch: None,
+            main: false,
+        };
+        assert!(tree.holds(Path::new("/repo/work")));
+        assert!(tree.holds(Path::new("/repo/work/src/deep")));
+        assert!(!tree.holds(Path::new("/repo/working")));
+        assert!(!tree.holds(Path::new("/repo")));
+    }
+
     #[test]
     fn a_subdirectory_is_held_by_the_checkout_it_is_in() {
         let dir = repo();
@@ -1054,7 +1096,7 @@ mod tests {
         let dir = crate::core::worktree::test_repo();
         let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
         core.enter_worktree("fix-tools").unwrap();
-        core.current = 0;
+        core.lanes.show(0);
         core.in_force();
 
         let step = core.remove_worktree("fix-tools").unwrap();
@@ -1074,7 +1116,7 @@ mod tests {
         let dir = crate::core::worktree::test_repo();
         let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
         core.enter_worktree("fix-tools").unwrap();
-        core.current = 0;
+        core.lanes.show(0);
         core.in_force();
 
         core.remove_worktree("fix-tools").unwrap();
@@ -1089,11 +1131,13 @@ mod tests {
         let dir = crate::core::worktree::test_repo();
         let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
         core.enter_worktree("fix-tools").unwrap();
-        core.current = 0;
+        core.lanes.show(0);
         core.in_force();
 
         let step = core.remove_worktree("fix-tools").unwrap();
-        core.lanes[1].begin(tokio_util::sync::CancellationToken::new());
+        core.lanes
+            .at_mut(1)
+            .begin(tokio_util::sync::CancellationToken::new());
         run_removal(&mut core, step);
         assert_eq!(core.lanes.len(), 2);
         assert!(core.lanes[1].is_running());
@@ -1107,16 +1151,16 @@ mod tests {
 
         core.enter_worktree("fix-tools").unwrap();
         assert_eq!(core.lanes.len(), 2);
-        assert_eq!(core.current, 1);
+        assert_eq!(core.lanes.front(), 1);
 
-        core.current = 0;
+        core.lanes.show(0);
         core.in_force();
 
         let res = core.remove_worktree("fix-tools");
         let step = res.expect("remove_worktree refused");
         run_removal(&mut core, step);
         assert_eq!(core.lanes.len(), 1);
-        assert_eq!(core.current, 0);
+        assert_eq!(core.lanes.front(), 0);
         assert!(!home(dir.path()).unwrap().join("fix-tools").exists());
     }
 
@@ -1129,14 +1173,14 @@ mod tests {
         core.enter_worktree("feat-one").unwrap();
         core.enter_worktree("feat-two").unwrap();
         assert_eq!(core.lanes.len(), 3);
-        assert_eq!(core.current, 2);
+        assert_eq!(core.lanes.front(), 2);
 
         let step = core
             .remove_worktree("feat-one")
             .expect("remove_worktree refused");
         run_removal(&mut core, step);
         assert_eq!(core.lanes.len(), 2);
-        assert_eq!(core.current, 1);
+        assert_eq!(core.lanes.front(), 1);
         assert_eq!(core.lane().worktree(), Some("feat-two"));
     }
 
@@ -1149,9 +1193,11 @@ mod tests {
         core.enter_worktree("fix-tools").unwrap();
         assert_eq!(core.lanes.len(), 2);
 
-        core.lanes[1].begin(tokio_util::sync::CancellationToken::new());
+        core.lanes
+            .at_mut(1)
+            .begin(tokio_util::sync::CancellationToken::new());
 
-        core.current = 0;
+        core.lanes.show(0);
         core.in_force();
 
         // Spelled as removal accepts it, the name still finds the running lane.
@@ -1179,7 +1225,7 @@ mod tests {
         assert_eq!(core.lane().worktree(), Some("rm"));
         assert!(home(dir.path()).unwrap().join("rm").exists());
 
-        core.current = 0;
+        core.lanes.show(0);
         core.in_force();
         let step = worktree(&mut core, "rm  rm ");
         assert!(matches!(step, Step::Removal(_)), "{step:?}");

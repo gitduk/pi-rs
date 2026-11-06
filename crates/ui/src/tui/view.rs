@@ -58,11 +58,9 @@ pub struct Surface {
     // Whether the first row is the opening banner, which a theme change
     // repaints in its place.
     pub(super) opened: bool,
-    // Rows the view is scrolled up by. Zero shows the newest rows.
-    pub(super) scroll: usize,
-    // The row a scrolled-up view opens on, so what lands or folds under it
-    // leaves it put. `None` goes by `scroll`.
-    pub(super) top: Option<super::search::Anchor>,
+    // Where it is scrolled to. A page up has its own, so closing it lands
+    // back where the transcript was left.
+    pub(super) scroll: Scroll,
     // Id of the last entry adopted into scrollback. Entries beyond it fold
     // in as they commit, so live doesn't wait on a rebuild.
     pub(super) tail: Option<EntryId>,
@@ -357,11 +355,34 @@ pub(super) fn prune_views(core: &Core, views: &mut Views) -> Vec<Request> {
     cancelled
 }
 
+/// Where a surface is scrolled to: rows up from the newest, and the row the
+/// top of the window opens on so what lands or folds under it leaves it put.
+/// Zero and `None` show the newest rows.
+///
+/// One value rather than two fields: a window is written from one place
+/// (`window_mut`) and read in one frame, and the two halves only move together.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(super) struct Scroll {
+    pub(super) by: usize,
+    pub(super) top: Option<super::search::Anchor>,
+}
+
+impl Scroll {
+    /// On the newest rows, following them as they land.
+    pub(super) fn newest() -> Self {
+        Self::default()
+    }
+
+    /// Whether it shows the newest rows, with nothing held above them.
+    pub(super) fn newest_rows(&self) -> bool {
+        *self == Self::newest()
+    }
+}
+
 impl Surface {
     // Back on the newest rows, following them as they land.
     pub(super) fn follow(&mut self) {
-        self.scroll = 0;
-        self.top = None;
+        self.scroll = Scroll::newest();
     }
 
     // The screen a session rebuilds to: the transcript as rows, the fold

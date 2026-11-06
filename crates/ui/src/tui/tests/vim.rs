@@ -1,5 +1,6 @@
 use crate::tui::row::Row;
 use crate::tui::screen::{self};
+use crate::tui::view::Scroll;
 use crate::tui::{Asked, Deed, Intent, View, view_at};
 use pi_core::input::Builtin;
 use pi_store::keys::Mode;
@@ -424,16 +425,20 @@ fn an_empty_line_sends_gg_and_g_to_the_history_ends() {
     ui.key(&lane, &mut view, typed('g'), false);
     ui.key(&lane, &mut view, typed('g'), false);
     ui.flush(&lane, &mut view);
-    let top = view.surface.scroll;
+    let top = view.surface.scroll.by;
     assert!(top > 0, "gg went back through the history: {top}");
 
     ui.key(&lane, &mut view, typed('K'), false);
     ui.flush(&lane, &mut view);
-    assert_eq!(view.surface.scroll, top, "gg is as far back as it goes");
+    assert_eq!(view.surface.scroll.by, top, "gg is as far back as it goes");
 
     ui.key(&lane, &mut view, typed('G'), false);
     ui.flush(&lane, &mut view);
-    assert_eq!(view.surface.scroll, 0, "G came back to the newest rows");
+    assert_eq!(
+        view.surface.scroll,
+        Scroll::newest(),
+        "G came back to the newest rows"
+    );
 
     // A line to command: the keys stay on it, and the history stays where
     // the user scrolled it to.
@@ -520,7 +525,7 @@ fn a_page_takes_the_empty_lines_window_keys() {
     let mut view = View::default();
     // The page's own scroll; the transcript's stays where it was.
     let page = |ui: &crate::tui::Ui| match &ui.read {
-        Some(read) => read.scroll,
+        Some(read) => read.scroll.by,
         _ => usize::MAX,
     };
     ui.vim = Some(Mode::Normal);
@@ -567,12 +572,14 @@ fn a_page_takes_the_empty_lines_window_keys() {
     ui.key(&lane, &mut view, esc, false);
     assert!(ui.read.is_none());
     assert_eq!(
-        view.surface.scroll, 0,
+        view.surface.scroll,
+        Scroll::newest(),
         "and leaves the transcript where it was"
     );
     ui.key(&lane, &mut view, typed('g'), false);
     assert_eq!(
-        view.surface.scroll, 0,
+        view.surface.scroll,
+        Scroll::newest(),
         "a g made after the page is not its pair"
     );
 }
@@ -666,7 +673,7 @@ fn slash_in_normal_searches_the_transcript() {
     press(&mut ui, &mut view, esc);
     assert!(ui.search_prompt().is_none(), "esc let it go");
     assert_eq!(ui.drawn[0], bottom, "and the view is back where it was");
-    assert_eq!(view.surface.scroll, 0);
+    assert_eq!(view.surface.scroll, Scroll::newest());
     // So does backing out of an empty `/`.
     let backspace =
         crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
