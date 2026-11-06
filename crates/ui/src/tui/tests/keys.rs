@@ -831,7 +831,6 @@ async fn a_question_is_answered_from_the_list_over_the_line() {
     // In Normal the bare letters move it and `q` closes it.
     tui.ui.editor.clear();
     tui.ui.vim = Some(Mode::Normal);
-    press(&mut tui, typed('j'));
     press(&mut tui, typed('k'));
     press(&mut tui, typed('j'));
     press(&mut tui, key(KeyCode::Enter));

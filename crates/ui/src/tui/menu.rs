@@ -389,15 +389,16 @@ impl List {
         self.picked.unwrap_or(fresh).min(last)
     }
 
-    // From where the list reads now, so the first move off a fresh one
-    // goes from the row `highlighted` shows rather than from an end of
-    // its own choosing.
+    // From where the list reads now, not an end of its own choosing; past
+    // an end it comes back on the other.
     fn step(&mut self, down: bool, menu: &[MenuEntry]) {
         let n = menu.len().saturating_sub(1);
         let at = self.highlighted(menu);
         self.picked = Some(match down {
-            true => at.saturating_add(1).min(n),
-            false => at.saturating_sub(1),
+            true if at >= n => 0,
+            true => at + 1,
+            false if at == 0 => n,
+            false => at - 1,
         });
     }
 
