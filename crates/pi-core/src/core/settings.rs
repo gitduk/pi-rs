@@ -2,7 +2,7 @@
 //!
 //! The value itself is `pi_store::settings`; this is what the Core does to it.
 
-use super::meter::summary;
+use super::meter::{column_widths, summary};
 use super::status::carries_reasoning;
 use super::{Core, resolve};
 use crate::input::commands::Choice;
@@ -264,23 +264,38 @@ impl Core {
         }
         shadowed
     }
-    /// The models `/model` can reach, with what tells them apart.
+    /// The models `/model` can reach, with what tells them apart, ordered for
+    /// a menu that reads upward from its line: unpriced first, then cheapest.
     pub fn choices(&self) -> Vec<Choice> {
-        self.config
+        let rows: Vec<(&str, String, u32, &llm::model::Pricing)> = self
+            .config
             .models
             .iter()
             .map(|(name, entry)| {
                 let format = self.config.find(name).ok().map(|s| s.format);
-                Choice {
-                    name: name.clone(),
-                    note: summary(
-                        format.map(|f| f.name()).unwrap_or_default(),
-                        entry.window(),
-                        &entry.pricing,
-                    ),
-                }
+                (
+                    format.map(|f| f.name()).unwrap_or_default(),
+                    name.clone(),
+                    entry.window(),
+                    &entry.pricing,
+                )
             })
-            .collect()
+            .collect();
+        let widths = column_widths(rows.iter().map(|(format, _, window, _)| (*format, *window)));
+        let mut choices: Vec<((f64, f64), Choice)> = rows
+            .into_iter()
+            .map(|(format, name, window, pricing)| {
+                (
+                    price_order(pricing),
+                    Choice {
+                        name,
+                        note: summary(format, window, pricing, &widths),
+                    },
+                )
+            })
+            .collect();
+        choices.sort_by(|(a, _), (b, _)| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        choices.into_iter().map(|(_, choice)| choice).collect()
     }
     // The model `name` for the lane in front, unless it is on it already;
     // the refusal is worded for the user.
@@ -336,6 +351,7 @@ impl Core {
             spec.format.name(),
             spec.context_window,
             &spec.pricing,
+            &column_widths(std::iter::once((spec.format.name(), spec.context_window))),
         ));
         // An absent transcript is one a run has, and it is writing this
         // model's reasoning into it as we speak — so say it either way.
@@ -403,5 +419,14 @@ impl Core {
             };
             Row::new([format!("{mark} {}", c.name), c.note.clone()])
         }))
+    }
+}
+
+// A menu's rows read upward from its line, so the first is the one nearest it.
+// A price stated as zero states none, and joins the unpriced.
+fn price_order(p: &llm::model::Pricing) -> (f64, f64) {
+    match p.input_per_mtok > 0.0 || p.output_per_mtok > 0.0 {
+        true => (p.input_per_mtok, p.output_per_mtok),
+        false => (f64::NEG_INFINITY, f64::NEG_INFINITY),
     }
 }

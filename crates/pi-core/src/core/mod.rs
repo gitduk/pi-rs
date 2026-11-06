@@ -976,6 +976,61 @@ mod tests {
         );
     }
 
+    // A menu's rows read upward from its line: the first is nearest to it.
+    #[tokio::test]
+    async fn the_model_list_puts_the_unpriced_then_the_cheapest_nearest_the_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
+        let tree: toml::Value = toml::from_str(
+            r#"
+[provider.local]
+base_url = "http://localhost:7896/v1"
+format   = "chat"
+
+[provider.home]
+base_url = "https://api.anthropic.com"
+format   = "anthropic"
+
+[models."home/pricey".pricing]
+input_per_mtok = 20.0
+
+[models."home/plain"]
+
+[models."local/dear".pricing]
+input_per_mtok = 10.0
+
+[models."local/cheap"]
+context_window = 262_100
+
+[models."local/cheap".pricing]
+input_per_mtok = 1.0
+
+[models."local/deep".pricing]
+input_per_mtok  = 1.0
+output_per_mtok = 5.0
+"#,
+        )
+        .unwrap();
+        core.config = std::sync::Arc::new(pi_store::config::Config::in_force(tree).unwrap());
+
+        let choices = core.choices();
+        let names: Vec<&str> = choices.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "home/plain",
+                "local/cheap",
+                "local/deep",
+                "local/dear",
+                "home/pricey"
+            ]
+        );
+        // A format or a window of another width must not split the price column.
+        let prices: Vec<usize> = choices.iter().filter_map(|c| c.note.find('$')).collect();
+        assert_eq!(prices.len(), 4, "{:?}", choices);
+        assert!(prices.iter().all(|at| *at == prices[0]), "{prices:?}");
+    }
+
     // Only the bare word opens the project's file; an argument is refused
     // rather than read as a verb.
     #[test]

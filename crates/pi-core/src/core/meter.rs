@@ -237,10 +237,27 @@ pub fn compaction_line(r: &agent::Report) -> String {
     format!("compacted{detail}{warn}")
 }
 
+/// What a list's own fields are widened to, so one column of prices lines up
+/// under another.
+#[derive(Default)]
+pub(super) struct Widths {
+    format: usize,
+    window: usize,
+}
+
 // Takes the three pieces rather than a config entry: the running model may
 // never have had one — a passed-through name has no entry to read.
-pub(super) fn summary(format: &str, window: u32, p: &llm::model::Pricing) -> String {
-    let mut parts = vec![format.to_string(), llm::figures::size(u64::from(window))];
+pub(super) fn summary(
+    format: &str,
+    window: u32,
+    p: &llm::model::Pricing,
+    widths: &Widths,
+) -> String {
+    let size = llm::figures::size(u64::from(window));
+    let mut parts = vec![
+        pi_store::text::pad(format, widths.format),
+        pi_store::text::pad(&size, widths.window),
+    ];
     if p.input_per_mtok > 0.0 || p.output_per_mtok > 0.0 {
         parts.push(format!(
             "${:.2}/${:.2} per Mtok",
@@ -248,6 +265,17 @@ pub(super) fn summary(format: &str, window: u32, p: &llm::model::Pricing) -> Str
         ));
     }
     parts.join(icons::PART_SEP)
+}
+
+// The width each field is widened to: the widest of them in the list.
+pub(super) fn column_widths<'a>(items: impl Iterator<Item = (&'a str, u32)>) -> Widths {
+    let mut widths = Widths::default();
+    for (format, window) in items {
+        let size = llm::figures::size(u64::from(window));
+        widths.format = widths.format.max(pi_store::text::width(format));
+        widths.window = widths.window.max(pi_store::text::width(&size));
+    }
+    widths
 }
 
 #[cfg(test)]
