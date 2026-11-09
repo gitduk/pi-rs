@@ -196,7 +196,12 @@ impl Bash {
                  Its results, including a failure at startup, open a later turn. \
                  Continue independent work or end this turn. \
                  Do not wait for the background result. \
-                 Leave output unredirected so it can be read while the command runs.",
+                 Leave output unredirected so it can be read while the command runs. \
+                 Report the result when it arrives instead of asking the user to inspect it. \
+                 Do not use `sleep` to wait for a result; sleep only guesses how long a command takes. \
+                 Do not change files a running background command uses; restart the command after the change. \
+                 To check that a server is ready, run one foreground command that waits for the ready condition, \
+                 such as a request with retries.",
                 llm::figures::elapsed(tool::limit::MAX_CALL)
             ),
         }
@@ -302,7 +307,7 @@ impl Tool for Bash {
         schema["properties"]["background"] = json!({
             "type": "boolean",
             "description": "Run the command independently of this turn. \
-                Use this mode for builds, deployments, development servers, or watchers. \
+                Use this mode for builds, full test suites, installs, CI runs, deployments, development servers, or watchers. \
                 The call returns a command ID immediately. \
                 Each result the command reports, and its exit status and output, arrive automatically with other queued results, \
                 also after this run ends. A command that fails at startup reports that the same way. \
