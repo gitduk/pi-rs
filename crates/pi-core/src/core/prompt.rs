@@ -238,7 +238,7 @@ The user's current instructions take precedence.\n{}\n</memory>",
             "\n\n<env date=\"{}\" platform=\"{}\" shell=\"{}\" pi=\"{}\" tier=\"{tier}\"/>",
             self.day,
             std::env::consts::OS,
-            toolbox::bash::SHELL,
+            pi_tools::bash::SHELL,
             env!("CARGO_PKG_VERSION"),
         ));
     }

@@ -87,7 +87,7 @@ fn encode_tool_result(r: &ToolResult) -> Value {
 // Dress a stored reasoning block in this wire's shapes. Which way it leaves is
 // `Reasoning::replay_for`'s call, shared with the estimate that sizes it.
 fn encode_reasoning(r: &Reasoning, spec: &ModelSpec) -> Option<Value> {
-    match r.replay_for(spec) {
+    match crate::message::replay_for(r, spec) {
         Replay::Encrypted { id, encrypted } => Some(json!({
             "type": "reasoning",
             "id": id,

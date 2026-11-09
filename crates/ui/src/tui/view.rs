@@ -14,9 +14,7 @@ use pi_core::core::Core;
 use pi_core::core::lane::Lane;
 use pi_core::core::meter::Snapshot;
 use pi_core::core::resolve::Resolved;
-use pi_core::driver::Origin;
 use pi_core::execution::Request;
-use pi_core::input::Intent;
 
 /// One lane's screen: conversation, stream, scroll, and parked draft.
 /// Keyed by lane token, so lanes can reorder or drop without confusion.
@@ -179,137 +177,7 @@ pub enum StreamKind {
     Answer,
 }
 
-// One line waiting for the lane in front to come free: what the door made of
-// it, and who sent it.
-pub(super) struct Queued {
-    pub(super) input: Pending,
-    pub(super) request: Request,
-    // A typed line, kept off the transcript while it waits: up hands it back
-    // to the editor, or its answer echoes it if it lands under the line.
-    pub(super) line: Option<String>,
-    // What the model reads before the turn this opens; empty for a line that
-    // opens none.
-    pub(super) note: String,
-}
-
-pub(super) enum Pending {
-    Intent(Intent),
-    // Already read and logged at the door: only its turn is left.
-    Prompt(agent::session::Prompt),
-}
-
-/// A lane's pending input, shared with its run. Typed prompts have their own
-/// queue so operations waiting for the run to end cannot block steering.
-#[derive(Clone, Default)]
-pub(super) struct Queue(std::sync::Arc<std::sync::Mutex<Queues>>);
-
-#[derive(Default)]
-pub(super) struct Queues {
-    steering: std::collections::VecDeque<Queued>,
-    waiting: std::collections::VecDeque<Queued>,
-}
-
-impl Queues {
-    // Display and recall retain submission order across both queues. Request
-    // ids increase at submission and survive an operation waiting or restarting.
-    pub(super) fn iter(&self) -> impl Iterator<Item = &Queued> {
-        in_submission_order(self.steering.iter(), self.waiting.iter())
-    }
-
-    pub(super) fn len(&self) -> usize {
-        self.steering.len() + self.waiting.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    fn push(&mut self, queued: Queued) {
-        if matches!(&queued.input, Pending::Prompt(_)) && queued.request.origin == Origin::Typed {
-            self.steering.push_back(queued);
-        } else {
-            self.waiting.push_back(queued);
-        }
-    }
-
-    // Take recalled lines in submission order, preserving remote input and
-    // everything else without an editable line in its original queue.
-    pub(super) fn recall(&mut self) -> Vec<(Request, String)> {
-        let pending: Vec<_> = self.drain().collect();
-        let mut recalled = Vec::new();
-        for mut queued in pending {
-            if let Some(line) = queued.line.take() {
-                recalled.push((queued.request, line));
-            } else {
-                self.push(queued);
-            }
-        }
-        recalled
-    }
-
-    fn drain(&mut self) -> impl Iterator<Item = Queued> {
-        in_submission_order(self.steering.drain(..), self.waiting.drain(..))
-    }
-}
-
-// Both queues are already ordered. Merge borrowed entries for display or
-// owned entries for recall and cleanup without allocating or sorting again.
-fn in_submission_order<T: std::borrow::Borrow<Queued>>(
-    steering: impl Iterator<Item = T>,
-    waiting: impl Iterator<Item = T>,
-) -> impl Iterator<Item = T> {
-    let mut steering = steering.peekable();
-    let mut waiting = waiting.peekable();
-    std::iter::from_fn(move || {
-        let first = steering.peek().map(|q| q.borrow());
-        let second = waiting.peek().map(|q| q.borrow());
-        if steering_first(first, second) {
-            steering.next()
-        } else {
-            waiting.next()
-        }
-    })
-}
-
-fn steering_first(steering: Option<&Queued>, waiting: Option<&Queued>) -> bool {
-    steering.is_some_and(|a| waiting.is_none_or(|b| a.request.id < b.request.id))
-}
-
-impl Queue {
-    pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, Queues> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    pub(super) fn push(&self, queued: Queued) {
-        self.lock().push(queued);
-    }
-
-    pub(super) fn is_empty(&self) -> bool {
-        self.lock().is_empty()
-    }
-
-    pub(super) fn pop_front(&self) -> Option<Queued> {
-        let mut queues = self.lock();
-        // Once idle, unconsumed steering and waiting operations resume in
-        // submission order, including after the preceding run was cancelled.
-        if steering_first(queues.steering.front(), queues.waiting.front()) {
-            queues.steering.pop_front()
-        } else {
-            queues.waiting.pop_front()
-        }
-    }
-
-    // Only typed prompts enter the running conversation. This never takes an
-    // operation or remote input from the queue waiting for the run to end.
-    pub(super) fn take_prompt(&self) -> Option<agent::session::Prompt> {
-        match self.lock().steering.pop_front()?.input {
-            Pending::Prompt(ask) => Some(ask),
-            Pending::Intent(_) => unreachable!("only prompts enter the steering queue"),
-        }
-    }
-}
+pub(super) use pi_core::execution::queue::{Pending, Queue, Queued};
 
 pub(super) type Views = std::collections::BTreeMap<u64, View>;
 
@@ -337,7 +205,9 @@ pub(super) fn snapshot(lane: &Lane, view: &View) -> Snapshot {
 // Fields rather than `&mut self`: the caller still reads/writes the
 // rest of the lane this screen belongs to.
 pub(super) fn front_view<'a>(views: &'a mut Views, lane: &Lane) -> &'a mut View {
-    view_at(views, lane.token())
+    let view = view_at(views, lane.token());
+    view.queued = lane.queue().clone();
+    view
 }
 
 // Drops screens for lanes that are gone. `/worktree` can remove a lane

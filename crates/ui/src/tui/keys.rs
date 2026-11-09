@@ -69,7 +69,7 @@ impl Ui {
                 question: question.id,
                 picked,
             }),
-            (false, Some(line)) => self.run_line(line),
+            (false, Some(line)) => self.submit_line(line),
             (false, None) => Asked::Own(Deed::Nothing),
         }
     }
@@ -613,6 +613,13 @@ impl Ui {
 
     // Submit `line` as typed: kept in history if it can be recalled, then read.
     fn run_line(&mut self, line: String) -> Asked {
+        if self.questions.first().is_some_and(|question| question.back) && !line.trim().is_empty() {
+            return self.answer(&[], Some(line));
+        }
+        self.submit_line(line)
+    }
+
+    fn submit_line(&mut self, line: String) -> Asked {
         if input::recallable(&line, &self.commands) {
             self.editor.remember(&line);
         }

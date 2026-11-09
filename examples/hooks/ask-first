@@ -26,9 +26,13 @@ def main():
     if not any(re.search(p, command) for p in RISKY):
         return 0
     asked = {
-        "choose": f"Allow: {command.splitlines()[0][:120]}",
-        "options": ["allow", "deny"],
-        "answer": "back",
+        "type": "runtime",
+        "command": {
+            "type": "prompt",
+            "text": f"Allow: {command.splitlines()[0][:120]}",
+            "options": ["allow", "deny"],
+            "back": True,
+        },
     }
     # A socket, so no "r+": that wants a file it can seek. One end each way.
     fd = int(os.environ["PI_EVENTS_FD"])
@@ -36,9 +40,10 @@ def main():
         to_pi.write(json.dumps(asked) + "\n")
     with os.fdopen(os.dup(fd), "r") as from_pi:
         said = json.loads(from_pi.readline() or "{}")
-    if said.get("answer") == "allow":
+    event = said.get("event", {}) if said.get("type") == "runtime" else {}
+    if event.get("type") == "answer" and event.get("text") == "allow":
         return 0
-    why = said.get("error") or said.get("answer") or "closed without an answer"
+    why = event.get("message") or event.get("text") or "closed without an answer"
     print(f"the user did not allow it: {why}")
     return 2
 

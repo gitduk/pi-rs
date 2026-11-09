@@ -2,6 +2,7 @@
 //! read back as, and the bucket layout that keeps two workspaces apart.
 
 mod log;
+pub mod messages;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

@@ -107,7 +107,7 @@ fn wired(turns: Vec<Vec<StreamEvent>>) -> (tempfile::TempDir, Agent, Ctx, Arc<Sc
 // Host-independent built-ins: `Agent::new` starts with none.
 fn tooled(transport: Arc<dyn Transport>, spec: ModelSpec) -> Agent {
     let mut a = Agent::new(transport, spec);
-    brief(&mut a).registry = toolbox::builtin();
+    brief(&mut a).registry = pi_tools::builtin();
     a
 }
 
@@ -1546,4 +1546,130 @@ async fn a_coded_tool_error_reaches_the_model_with_its_code() {
         );
         assert!(body.ends_with("[code: TOOL_TIMEOUT]"), "{body}");
     }
+}
+
+// The registration port supplies canonical requests before effects. Every
+// hook and concurrent executor must receive its own request, and an
+// unregistered child invocation must clear a cloned parent's association.
+#[tokio::test]
+async fn call_context_keeps_the_registered_request_through_hooks_and_execution() {
+    struct Probe(tokio::sync::Barrier);
+    fn check(args: &Value, ctx: &Ctx) {
+        assert_eq!(
+            ctx.request().map(|m| m.id().as_str()),
+            args["request"].as_str()
+        );
+    }
+    #[async_trait]
+    impl Tool for Probe {
+        fn name(&self) -> &str {
+            "probe"
+        }
+        fn description(&self) -> &str {
+            "Inspect invocation context"
+        }
+        fn schema(&self) -> Value {
+            json!({"type":"object", "properties":{"request":{"type":["string","null"]}}, "required":["request"]})
+        }
+        fn tier(&self) -> Tier {
+            Tier::Read
+        }
+        async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
+            self.0.wait().await;
+            check(&args, ctx);
+            Ok(ToolOutput::text("done"))
+        }
+    }
+    #[async_trait]
+    impl agent::Hooks for Probe {
+        async fn before(&self, _: &str, args: &Value, ctx: &Ctx) -> Result<(), String> {
+            check(args, ctx);
+            Ok(())
+        }
+        async fn after(&self, _: &str, args: &Value, _: &ToolOutput, ctx: &Ctx) -> Option<String> {
+            check(args, ctx);
+            None
+        }
+    }
+    struct Registered;
+    impl agent::seams::Input for Registered {
+        fn take(&self) -> Option<agent::session::Prompt> {
+            None
+        }
+        fn tool_request(
+            &self,
+            call: &llm::message::ToolCall,
+            kind: message::ModelRequest,
+            body: Vec<message::Block>,
+        ) -> Result<Option<Arc<message::Message>>, String> {
+            let request = message::WireMessage {
+                id: message::MessageId::new(call.args["request"].as_str().unwrap().into()).unwrap(),
+                session: message::SessionId::new("session".into()).unwrap(),
+                by: None,
+                at: 1,
+                kind: message::WireKind::Request(message::Request::FromModel(kind)),
+                body,
+            }
+            .validate(
+                None,
+                message::Limits {
+                    bytes: 1024,
+                    blocks: 1,
+                    options: 0,
+                },
+            )
+            .unwrap();
+            Ok(Some(Arc::new(request)))
+        }
+    }
+    let (dir, mut agent, ctx) = harness(vec![
+        call_turn(&[
+            ("native-a", "probe", r#"{"request":"semantic-a"}"#),
+            ("native-b", "probe", r#"{"request":"semantic-b"}"#),
+        ]),
+        text_turn("first done"),
+        call_turn(&[
+            ("native-c", "probe", r#"{"request":null}"#),
+            ("native-d", "probe", r#"{"request":null}"#),
+        ]),
+        text_turn("second done"),
+    ]);
+    let probe = Arc::new(Probe(tokio::sync::Barrier::new(2)));
+    brief(&mut agent).registry = Registry::new();
+    brief(&mut agent).registry.offer(probe.clone());
+    brief(&mut agent).hooks = probe;
+    let inherited = agent::seams::Input::tool_request(
+        &Registered,
+        &llm::message::ToolCall {
+            id: "parent".into(),
+            name: "probe".into(),
+            args: json!({"request":"parent"}),
+        },
+        message::ModelRequest::Tool {
+            name: "probe".into(),
+        },
+        vec![message::Block::Data(json!({"request":"parent"}))],
+    )
+    .unwrap();
+    let ctx = ctx.with_request(inherited);
+    let (tx, _) = mpsc::unbounded_channel();
+    let retry = Retry::default();
+    let mut session = Session::with_prompt("first");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        agent.run_with_input(&mut session, &ctx, &tx, &retry, &Registered),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut session = Session::with_prompt("unregistered child");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        agent.run(&mut session, &ctx, &tx, &retry),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(ctx.request().unwrap().id().as_str(), "parent");
+    assert!(ctx.with_session("child", dir.path()).request().is_none());
 }

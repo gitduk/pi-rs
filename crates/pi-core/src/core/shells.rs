@@ -7,7 +7,7 @@ use tool::Registry;
 /// Give a run a shell that waits for each command to exit. There are no
 /// detached commands to control; cancellation releases the active process.
 pub fn foreground(mut registry: Registry) -> Registry {
-    registry.offer(Arc::new(toolbox::bash::Bash::foreground()));
+    registry.offer(Arc::new(pi_tools::bash::Bash::foreground()));
     registry
 }
 
@@ -26,14 +26,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
         let _stop = ctx.cancel.clone().drop_guard();
-        let full = foreground(toolbox::builtin());
-        let shell = full.get(toolbox::bash::Bash::NAME).unwrap();
+        let full = foreground(pi_tools::builtin());
+        let shell = full.get(pi_tools::bash::Bash::NAME).unwrap();
         assert!(shell.schema()["properties"].get("background").is_none());
         assert!(shell.schema()["properties"].get("stop").is_none());
-        let read_only = foreground(toolbox::builtin().within(tool::Tier::Read));
-        assert!(read_only.get(toolbox::bash::Bash::NAME).is_none());
-        let hidden = foreground(toolbox::builtin().without(toolbox::bash::Bash::NAME));
-        assert!(hidden.get(toolbox::bash::Bash::NAME).is_none());
+        let read_only = foreground(pi_tools::builtin().within(tool::Tier::Read));
+        assert!(read_only.get(pi_tools::bash::Bash::NAME).is_none());
+        let hidden = foreground(pi_tools::builtin().without(pi_tools::bash::Bash::NAME));
+        assert!(hidden.get(pi_tools::bash::Bash::NAME).is_none());
 
         let script = dir.path().join("bash");
         std::fs::write(
@@ -41,10 +41,10 @@ mod tests {
             "#!/bin/sh\n# ---\n# description = \"custom shell\"\n# ---\nprintf custom\n",
         )
         .unwrap();
-        let mut registry = toolbox::builtin();
-        registry.read(Arc::new(toolbox::scripts::Dir::new(dir.path())));
+        let mut registry = pi_tools::builtin();
+        registry.read(Arc::new(pi_tools::scripts::Dir::new(dir.path())));
         let registry = foreground(registry);
-        let shell = registry.get(toolbox::bash::Bash::NAME).unwrap();
+        let shell = registry.get(pi_tools::bash::Bash::NAME).unwrap();
         assert!(
             shell
                 .execute(json!({"command": "echo builtin"}), &ctx)
@@ -57,8 +57,8 @@ mod tests {
 
     #[test]
     fn foreground_shell_only_accepts_commands_and_describes_the_wait() {
-        let registry = foreground(toolbox::builtin());
-        let shell = registry.get(toolbox::bash::Bash::NAME).unwrap();
+        let registry = foreground(pi_tools::builtin());
+        let shell = registry.get(pi_tools::bash::Bash::NAME).unwrap();
         let schema = shell.schema();
         let properties = schema["properties"].as_object().unwrap();
         assert_eq!(properties.len(), 3);
@@ -105,7 +105,7 @@ mod tests {
             };
             let (name, args): (&str, Value) = match step {
                 0 => (
-                    toolbox::bash::Bash::NAME,
+                    pi_tools::bash::Bash::NAME,
                     json!({
                         "command": "echo start >> starts; echo ready; sleep 0.02; echo finished; exit 3"
                     }),

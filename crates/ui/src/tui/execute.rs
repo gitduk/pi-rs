@@ -6,7 +6,7 @@ use super::{Tui, clipboard, front_view, keys};
 use pi_core::driver::Origin;
 use pi_core::execution::{self, Action, Change, Completion, Output, Request};
 use pi_core::input::{Intent, Rewound};
-use toolbox::channel::{Outcome, Response};
+use pi_tools::channel::{Outcome, Response};
 
 impl Tui {
     /// Every admitted operation uses this executor, independently of where its
@@ -55,9 +55,9 @@ impl Tui {
                 if let Some(line) = line {
                     self.echo(&line);
                 }
-                self.start_bash(command, request, &replies.done);
+                self.start_bash(command, request);
             }
-            Action::Compact(focus) => self.start_compact(focus, request, &replies.done),
+            Action::Compact(focus) => self.start_compact(focus, request),
             Action::Tool { name, args } => self.start_tool(name, args, request, &replies.started),
             Action::McpPrompt {
                 prompt,
@@ -91,8 +91,13 @@ impl Tui {
                 self.complete(request, output, Outcome::Done);
             }
             Action::Prompt { send, typed } => {
-                let ask = clipboard::prompt(send, typed, &self.ui.images);
-                self.deliver_prompt_for(ask, request, line, &replies.done);
+                let images = if request.origin == Origin::Typed {
+                    &self.ui.images[..]
+                } else {
+                    &[]
+                };
+                let ask = clipboard::prompt(send, typed, images);
+                self.deliver_prompt_for(ask, request, line);
             }
             Action::Quit => {
                 self.complete(request, Output::Notice("exiting".into()), Outcome::Done);
@@ -102,8 +107,30 @@ impl Tui {
         false
     }
 
-    pub(super) fn enqueue(&mut self, queued: Queued) {
+    pub(super) fn enqueue(&mut self, mut queued: Queued) {
         let request = queued.request;
+        queued.input = match queued.input {
+            Pending::Intent(Intent::Prompt(text)) => {
+                let images = if request.origin == Origin::Typed {
+                    &self.ui.images[..]
+                } else {
+                    &[]
+                };
+                let prompt = clipboard::prompt(text, None, images);
+                match self.core.lane().messages().admit(request.origin, prompt) {
+                    Ok(input) => Pending::Prompt(input),
+                    Err(error) => {
+                        self.complete(
+                            request,
+                            Output::Notice(String::new()),
+                            Outcome::Failed(error.to_string()),
+                        );
+                        return;
+                    }
+                }
+            }
+            pending => pending,
+        };
         match &queued.input {
             Pending::Intent(intent) => {
                 tracing::info!(target: "pi::session", request = request.id,
@@ -131,7 +158,7 @@ impl Tui {
         match input {
             Pending::Intent(intent) => self.execute_for(intent, request, line, replies).await,
             Pending::Prompt(ask) => {
-                self.deliver_prompt_for(ask, request, line, &replies.done);
+                self.deliver_admitted(ask, request, line);
                 false
             }
         }

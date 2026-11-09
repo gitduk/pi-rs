@@ -5,6 +5,7 @@
 //! `status.rs`, `meter.rs`, `bash.rs`, `driver/`.
 
 pub mod archive;
+pub mod ask;
 pub mod bar;
 pub mod bash;
 pub mod catalog;
@@ -47,7 +48,7 @@ pub struct Restart {
 /// Ask rtk what it is now, in the background, so `/status` can say before
 /// the first command does.
 pub fn warm_rtk() {
-    tokio::spawn(toolbox::rtk::warm());
+    tokio::spawn(pi_tools::rtk::warm());
 }
 
 /// The retry schedule, with the defaults the file may leave out. Read where
@@ -72,6 +73,7 @@ pub fn not_saved(e: &impl std::fmt::Display) -> String {
 /// Everything a run holds that outlives any one turn of it, and the one place
 /// an intent is answered.
 pub struct Core {
+    pub runtime: crate::execution::host::Runtime,
     pub store: Store,
     pub catalog: catalog::Catalog,
     /// The config in force, as opposed to the one on disk. `/model` picks from
@@ -145,6 +147,10 @@ impl Core {
     /// when only model facts moved, which no line of its own announces;
     /// `None` when there was nothing to do.
     pub fn refresh_config(&mut self) -> Option<Vec<String>> {
+        self.refresh_config_with_mcp(true)
+    }
+
+    pub(crate) fn refresh_config_with_mcp(&mut self, sync_mcp: bool) -> Option<Vec<String>> {
         let lane = self.lane();
         let now = resolve::watched(&self.pinned, lane.root());
         let was = &lane.resolved().watched;
@@ -161,7 +167,7 @@ impl Core {
             .chain(was.iter().filter(|s| !now.iter().any(|n| n.0 == s.0)))
             .map(|(path, ..)| crate::core::instructions::short(path, &root))
             .collect();
-        let reloaded = self.try_reload();
+        let reloaded = self.try_reload_with_mcp(sync_mcp);
         if files_changed {
             tracing::info!(
                 target: "pi::session", moved = %moved.join(", "),
@@ -356,7 +362,7 @@ impl Core {
                     tracing::warn!(target: "pi::background", execution = execution.id, root = %execution.root.display(), "no lane to carry it to");
                     continue;
                 }
-                let rerun = toolbox::bash::rerun(execution.again.clone(), lane.ctx());
+                let rerun = pi_tools::bash::rerun(execution.again.clone(), lane.ctx());
                 table.revive(execution, rerun);
             }
         }
@@ -373,7 +379,7 @@ impl Core {
             // The shell already runs commands beside the turn, reports them
             // and carries them over; a `!!` is that, asked for by hand.
             Intent::Background(command) => Step::Tool {
-                name: toolbox::bash::Bash::NAME.to_string(),
+                name: pi_tools::bash::Bash::NAME.to_string(),
                 args: serde_json::json!({ "command": command, "background": true }),
             },
             Intent::Prompt(send) => Step::Prompt { send, typed: None },
@@ -909,6 +915,7 @@ mod tests {
         });
         lane.return_session(agent::session::Session::default());
         crate::core::Core {
+            runtime: Default::default(),
             store,
             catalog: Default::default(),
             config: std::sync::Arc::new(pi_store::config::Config::default()),

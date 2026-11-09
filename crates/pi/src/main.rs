@@ -6,7 +6,6 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use tokio::sync::mpsc;
 
-use agent::NoteOutcome as _;
 use pi_core::args::Args;
 use pi_core::core::dial::{dial, summary_writer};
 use pi_core::core::resolve::{fence, resolve};
@@ -163,7 +162,6 @@ struct Start {
     pinned: pi_core::args::Pinned,
     store: session::Store,
     workspace: tool::Workspace,
-    root: std::path::PathBuf,
     worktree: Option<String>,
     // What this run keeps: an interactive session, or one the user named with
     // `-c`/`--resume`. A one-shot prompt leaves nothing behind, not even a log.
@@ -178,8 +176,6 @@ struct Start {
     words: &'static [pi_core::input::commands::Command],
     ag: agent::Agent,
     resolved: Arc<pi_core::core::resolve::Resolved>,
-    retry: agent::Retry,
-    model_id: String,
 }
 
 // Everything up to the first turn. Each step that can refuse to start comes
@@ -357,7 +353,6 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
         pinned,
         store,
         workspace,
-        root,
         worktree,
         keeps,
         id,
@@ -369,8 +364,6 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
         words,
         ag,
         resolved,
-        retry,
-        model_id,
     })
 }
 
@@ -468,6 +461,7 @@ async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended
     });
     first.return_session(carried);
     let mut core = Core {
+        runtime: Default::default(),
         store,
         catalog,
         config,
@@ -481,6 +475,7 @@ async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended
         removals: Default::default(),
         surface: words,
     };
+    core.restore_messages()?;
     let drivers = pi_core::driver::Drivers::default();
     core.enable_background(drivers.background());
     core.reopen(&args.lanes());
@@ -505,25 +500,26 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         config,
         store,
         workspace,
-        root,
         worktree,
         keeps,
         id,
+        claim,
         name,
         created,
         carried,
         resumed,
         mut ag,
         resolved,
-        retry,
-        model_id,
+        settings,
+        catalog,
+        pinned,
+        words,
         ..
     } = start;
     // One request, so the servers get a moment to list their tools first.
     pi_core::core::mcp::settled(std::time::Duration::from_secs(10)).await;
 
-    // A skill command is a prompt, so it means the same here as at the
-    // terminal; built-ins aren't — they operate on a session this run has none of.
+    // Skill names expand into input; host control words stay literal model input.
     let prompt = match expand(&resolved.commands, &prompt) {
         Some(Ok(instructions)) => instructions,
         Some(Err(why)) => bail!("{why}"),
@@ -539,7 +535,7 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         config.status.to_vec(),
         ag.spec().wire_model().to_string(),
         ag.spec().pricing,
-        worktree,
+        worktree.clone(),
     );
     let mut ctx = tool::Ctx::new(workspace).with_cancel(cancel_on_interrupt());
     // Every run names its conversation, kept or not; one that keeps nothing
@@ -556,38 +552,98 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
     let patch = Arc::make_mut(&mut ag.brief);
     patch.registry = core::shells::foreground(std::mem::take(&mut patch.registry));
 
-    // Always through the log: a loaded session whose view happens to be empty
-    // still has history worth keeping, and `resume` handles an empty session.
-    let mut session = carried;
-    session.send_prompt(prompt, None);
-    let outcome = ag.run(&mut session, &ctx, &tx, &retry).await;
+    // A transient run uses an isolated archive, so long runs still have bounded
+    // message lookup without creating a resumable session in the user's store.
+    let temporary = (!keeps).then(tempfile::tempdir).transpose()?;
+    let host_store = temporary
+        .as_ref()
+        .map_or(store, |dir| session::Store::new(dir.path().to_path_buf()));
+    let mut first = lane::Lane::opened(lane::Opening {
+        id: id.clone(),
+        created,
+        name: name.clone(),
+        claim,
+        worktree: worktree.clone(),
+        ..lane::Opening::new(Arc::new(ag), resolved.clone(), ctx)
+    });
+    first.return_session(carried);
+    let mut core = Core {
+        runtime: Default::default(),
+        store: host_store,
+        catalog,
+        config: config.clone(),
+        pinned,
+        commands: resolved.commands.clone(),
+        prompts_seen: 0,
+        settings,
+        lanes: pi_core::core::lanes::Lanes::of(first),
+        refused: Default::default(),
+        executions: None,
+        removals: Default::default(),
+        surface: words,
+    };
+    core.restore_messages()?;
+    let input = core.lane().messages().admit(
+        pi_core::driver::Origin::Typed,
+        agent::session::Prompt {
+            text: prompt,
+            images: Vec::new(),
+            shown: None,
+            relayed: None,
+        },
+    )?;
+    let request =
+        pi_core::execution::Request::new(pi_core::driver::Origin::Typed, core.lane().token());
+    let started = core
+        .start_model(input, request)
+        .map_err(anyhow::Error::msg)?;
+    for notice in started.notices {
+        eprintln!("{notice}");
+    }
+    let outcome = loop {
+        use pi_core::execution::host::{Event, Settlement};
+        match core.next_runtime_event().await {
+            Event::Agent { event, .. } => {
+                let _ = tx.send(event);
+            }
+            Event::Settled(Settlement::Returned(settled)) => break settled.result,
+            Event::Settled(Settlement::Removed(_)) => {
+                break Err(pi_core::execution::RunError::Crashed);
+            }
+            Event::Rejected { message, .. } => {
+                break Err(pi_core::execution::RunError::Failed(message));
+            }
+            Event::Deferred(deferred) => {
+                tracing::warn!(target:"pi::session",lane=deferred.lane,message=%deferred.message,"background input deferred")
+            }
+            Event::Activity
+            | Event::Started(_)
+            | Event::Stopping { .. }
+            | Event::Settled(Settlement::Ignored) => {}
+        }
+    };
     stop.cancel();
-
-    session.note_outcome(&outcome);
-
+    core.stop_runtime();
+    core.finish_runtime_shutdown("single run completed");
     drop(tx);
     let _ = painter.await;
-
-    // Saved whichever way the run ended: an aborted turn is exactly the one
-    // worth resuming. A one-shot has no session to save.
     if keeps {
-        let header = session::Header {
-            id: &id,
-            model: &model_id,
-            name: name.as_deref(),
-            created,
-            spent: ag.meter.read(),
+        saves::flush().await;
+        let saved: Result<()> = if core.lane().session().is_none() {
+            Err(anyhow::anyhow!("session transcript could not be recovered"))
+        } else {
+            core.lane()
+                .unsaved()
+                .map_or(Ok(()), |why| Err(anyhow::anyhow!(why)))
         };
-        let saved = store.save(&root, header, &session);
         say_saved(saved, &id, name.as_deref(), resumed, args.quiet);
     }
-
     // A stopped run is the one whose subagents were cut short with a save
     // in flight.
     leave().await;
     // A run the user stopped is not a failure of the run; scripts should be
     // able to tell the two apart.
-    if matches!(outcome, Err(agent::AgentError::Cancelled)) {
+    if outcome.as_ref().is_err_and(|error| error.is_cancelled()) {
         return Ok(Ended::Exit(ExitCode::from(INTERRUPTED)));
     }
 

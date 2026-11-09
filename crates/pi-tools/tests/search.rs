@@ -23,8 +23,8 @@ fn tree() -> (tempfile::TempDir, Ctx) {
 #[tokio::test]
 async fn grep_order_does_not_change_between_identical_searches() {
     let (_d, c) = tree();
-    let a = run(&toolbox::grep::Grep, json!({ "pattern": "TODO" }), &c).await;
-    let b = run(&toolbox::grep::Grep, json!({ "pattern": "TODO" }), &c).await;
+    let a = run(&pi_tools::grep::Grep, json!({ "pattern": "TODO" }), &c).await;
+    let b = run(&pi_tools::grep::Grep, json!({ "pattern": "TODO" }), &c).await;
     assert_eq!(a, b);
 }
 
@@ -33,7 +33,7 @@ async fn grep_order_does_not_change_between_identical_searches() {
 async fn overlapping_roots_report_one_file_once() {
     let (_d, c) = tree();
     let out = run(
-        &toolbox::grep::Grep,
+        &pi_tools::grep::Grep,
         json!({ "pattern": "TODO", "path": ["src", "src/deep"] }),
         &c,
     )
@@ -51,7 +51,7 @@ async fn a_file_with_invalid_utf8_still_reports_its_matches() {
     std::fs::write(c.workspace.root().join("src/odd.rs"), &bytes).unwrap();
 
     let out = run(
-        &toolbox::grep::Grep,
+        &pi_tools::grep::Grep,
         json!({ "pattern": "TODO", "glob": ["odd.rs"] }),
         &c,
     )
@@ -76,7 +76,7 @@ async fn an_over_long_grep_drops_whole_sections_and_spills_the_rest() {
         .unwrap();
     }
 
-    let out = run(&toolbox::grep::Grep, json!({ "pattern": "NEEDLE" }), &c).await;
+    let out = run(&pi_tools::grep::Grep, json!({ "pattern": "NEEDLE" }), &c).await;
     assert!(out.len() <= tool::spill::MAX_OUTPUT, "{} bytes", out.len());
     for line in out.lines().filter(|l| l.starts_with(char::is_numeric)) {
         let (_, text) = line.split_once(':').expect("a row is addressed");
@@ -100,7 +100,7 @@ async fn an_over_long_grep_drops_whole_sections_and_spills_the_rest() {
         format!("NEEDLE {}\n", "z".repeat(tool::spill::MAX_OUTPUT)),
     )
     .unwrap();
-    let out = run(&toolbox::grep::Grep, json!({ "pattern": "NEEDLE" }), &c2).await;
+    let out = run(&pi_tools::grep::Grep, json!({ "pattern": "NEEDLE" }), &c2).await;
     assert!(!out.contains("NEEDLE"), "a section was split\n{out}");
     let whole = common::spilled_body(&c2, &out);
     assert!(whole.contains("NEEDLE"), "the spill must hold what went");
@@ -118,14 +118,14 @@ async fn a_pattern_with_a_slash_matches_from_the_searched_directory() {
     std::fs::write(r.join("src/sub/one.txt"), "TODO\n").unwrap();
 
     let out = run(
-        &toolbox::glob::Glob,
+        &pi_tools::glob::Glob,
         json!({ "pattern": "src/**/mod.rs" }),
         &c,
     )
     .await;
     assert!(out.contains("src/a/b/mod.rs"), "{out}");
     let out = run(
-        &toolbox::glob::Glob,
+        &pi_tools::glob::Glob,
         json!({ "pattern": "sub/*.txt", "path": "src" }),
         &c,
     )
@@ -133,7 +133,7 @@ async fn a_pattern_with_a_slash_matches_from_the_searched_directory() {
     assert!(out.contains("src/sub/one.txt"), "{out}");
 
     let out = run(
-        &toolbox::grep::Grep,
+        &pi_tools::grep::Grep,
         json!({ "pattern": "TODO", "glob": ["src/**/mod.rs"] }),
         &c,
     )
@@ -142,7 +142,7 @@ async fn a_pattern_with_a_slash_matches_from_the_searched_directory() {
     assert!(!out.contains("util.rs"), "{out}");
 
     let out = run(
-        &toolbox::grep::Grep,
+        &pi_tools::grep::Grep,
         json!({ "pattern": "TODO", "exclude": ["src/deep"] }),
         &c,
     )

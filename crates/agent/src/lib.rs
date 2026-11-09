@@ -18,6 +18,7 @@ mod calls;
 pub mod compaction;
 pub mod event;
 pub mod hooks;
+mod replies;
 pub mod retry;
 pub mod seams;
 mod turn;
@@ -58,6 +59,9 @@ pub const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 pub enum AgentError {
     #[error(transparent)]
     Llm(#[from] llm::LlmError),
+
+    #[error("interaction failed: {0}")]
+    Interaction(String),
 
     #[error("cancelled")]
     Cancelled,
@@ -201,7 +205,21 @@ impl Agent {
         if let Some(note) = self.brief.hooks.ahead(&prompt, ctx).await {
             say_note(session, &voice, note);
         }
-        let out = self.turns(session, ctx, &voice, retry, input).await;
+        let mut out = self.turns(session, ctx, &voice, retry, input).await;
+        let closing = match &out {
+            Ok(_) => message::Status::Failed(message::Failure {
+                code: "MISSING_TOOL_RESULT".into(),
+                message: "run ended without a call result".into(),
+            }),
+            Err(AgentError::Cancelled) => message::Status::Stopped,
+            Err(error) => message::Status::Failed(message::Failure {
+                code: "CALL_INTERRUPTED".into(),
+                message: error.to_string(),
+            }),
+        };
+        if let Err(error) = replies::settle(session, ctx, &voice, input, closing) {
+            out = Err(error);
+        }
         match &out {
             Ok(_) => {}
             Err(AgentError::Cancelled) => session.close_open(session::STOPPED_CALL),
@@ -459,12 +477,35 @@ impl Agent {
                 .iter()
                 .map(|i| (i.call.clone(), i.clone()))
                 .collect();
+            let mut contexts = Vec::with_capacity(calls.len());
+            for call in &calls {
+                let (kind, body) = self.brief.registry.get(&call.name).map_or_else(
+                    || {
+                        (
+                            message::ModelRequest::Tool {
+                                name: call.name.clone(),
+                            },
+                            vec![message::Block::Data(call.args.clone())],
+                        )
+                    },
+                    |tool| tool.model_request(&call.args),
+                );
+                let request = input
+                    .tool_request(call, kind, body)
+                    .map_err(AgentError::Interaction)?;
+                contexts.push(ctx.clone().with_request(request));
+            }
             let (results, stopped) = self
-                .run_calls(&calls, &bad, ctx, voice, &mut totals)
+                .run_calls(&calls, &bad, &contexts, voice, &mut totals)
                 .instrument(span.clone())
                 .await;
-            let ids = session.push_previewed(results);
-            say_committed(session, voice, &ids);
+            let results = replies::reconcile(
+                &calls,
+                results,
+                input.completed_calls().map_err(AgentError::Interaction)?,
+                ctx,
+            )?;
+            replies::commit(session, voice, input, results)?;
             if stopped {
                 return Err(AgentError::Cancelled);
             }

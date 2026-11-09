@@ -1,30 +1,28 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use pi_core::driver::{Ended, Origin};
 use pi_core::execution::{Done, Kind, Request, RunError};
-use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
-use toolbox::background::{RunHandle, RunSink};
-use toolbox::channel::{Outcome, Response, Told};
+use pi_tools::background::{RunHandle, RunSink};
+use pi_tools::channel::{Outcome, Response, Told};
 
 use super::harness::*;
 use crate::tui::{Asked, Tui, Wake};
 
-fn bridge(tui: &Tui) -> (Arc<dyn RunHandle>, UnboundedReceiver<Told>) {
+fn bridge(tui: &Tui) -> (Arc<dyn RunHandle>, pi_tools::channel::Receiver) {
     let execution = pi_core::driver::background::Commands::new(tui.drivers.background()).start(
-        tui.core.lane().root().to_path_buf(),
-        toolbox::background::Invocation::shell("bridge"),
+        tui.core.lane().root().to_path_buf().into(),
+        pi_tools::background::Invocation::shell("bridge"),
         Default::default(),
     );
-    let (tx, rx) = unbounded_channel();
+    let (tx, rx) = pi_tools::channel::channel();
     execution.channel().listen(tx);
     (execution, rx)
 }
 
-async fn submit(tui: &mut Tui, execution: &dyn RunHandle, text: &str) -> UnboundedReceiver<Done> {
+async fn submit(tui: &mut Tui, execution: &dyn RunHandle, text: &str) {
     execution.channel().input(text.into(), String::new());
     let (origin, wake) = tui.driver_line().expect("the submission was received");
-    let (replies, inb) = crate::tui::run::Replies::channels();
+    let (replies, _inb) = crate::tui::run::Replies::channels();
     match wake {
         Wake::Do(Asked::Core(intent), line) => {
             tui.execute(intent, origin, line, &replies).await;
@@ -32,14 +30,16 @@ async fn submit(tui: &mut Tui, execution: &dyn RunHandle, text: &str) -> Unbound
         Wake::Nothing => {}
         _ => panic!("a submission must be admitted or queued"),
     }
-    inb.done
 }
 
-fn response(rx: &mut UnboundedReceiver<Told>) -> (u64, Response) {
-    let Told::Response { request, event } = rx.try_recv().expect("an operation response") else {
-        panic!("an operation response has its own identity");
-    };
-    (request, event)
+fn response(rx: &mut pi_tools::channel::Receiver) -> (u64, Response) {
+    loop {
+        match rx.try_recv().expect("an operation response") {
+            Told::Response { request, event } => return (request, event),
+            Told::Linked { request, .. } => assert!(!request.as_str().is_empty()),
+            other => panic!("expected an operation response, got {other:?}"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -148,14 +148,11 @@ async fn a_compact_with_nothing_to_shrink_still_finishes_its_request() {
         .return_session(agent::session::Session::default());
     tui.core.lane_mut().finish();
     let (execution, mut rx) = bridge(&tui);
-    let mut done = submit(&mut tui, execution.as_ref(), "/compact").await;
+    submit(&mut tui, execution.as_ref(), "/compact").await;
     let (id, event) = response(&mut rx);
     assert_eq!(event, Response::Started);
-    let completed = tokio::time::timeout(Duration::from_secs(2), done.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    tui.settle(completed).await;
+    let completed = completed_run(&mut tui).await;
+    tui.present_settlement(pi_core::execution::host::Settlement::Returned(completed));
     let (
         finished,
         Response::Finished {
@@ -309,7 +306,7 @@ async fn named_tool_failure_separates_diagnostics_before_any_rendering() {
     let request = Request::new(Origin::Typed, tui.core.lane().token());
     let completion = pi_core::execution::tool(
         request,
-        toolbox::builtin().get("read").unwrap(),
+        pi_tools::builtin().get("read").unwrap(),
         serde_json::json!({"path": "missing.txt"}),
         tui.core.lane().ctx().clone(),
     )
@@ -378,7 +375,7 @@ async fn bash_cancellation_and_refusal_do_not_become_reply_lines() {
         agent::session::Session::default(),
         tui.core.lane().ctx_for(cancel),
         "printf should-not-run".into(),
-        toolbox::bash::Bash::foreground(),
+        pi_tools::bash::Bash::foreground(),
     )
     .await;
     tui.settle(done).await;
@@ -422,15 +419,12 @@ async fn shell_exit_status_is_separate_from_actual_output() {
             .return_session(agent::session::Session::default());
         tui.core.lane_mut().finish();
         let (execution, mut rx) = bridge(&tui);
-        let mut done = submit(&mut tui, execution.as_ref(), command).await;
+        submit(&mut tui, execution.as_ref(), command).await;
         let (id, _) = response(&mut rx);
-        let completed = tokio::time::timeout(Duration::from_secs(3), done.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(completed.ran.as_ref().unwrap().1.is_err());
-        assert!(matches!(completed.ended(), Ended::Failed(_)));
-        tui.settle(completed).await;
+        let completed = completed_run(&mut tui).await;
+        assert!(completed.result.is_err());
+        assert!(matches!(completed.ended, Ended::Failed(_)));
+        tui.present_settlement(pi_core::execution::host::Settlement::Returned(completed));
         assert_eq!(
             response(&mut rx),
             (
@@ -499,30 +493,26 @@ async fn queued_prompts_and_shell_commands_keep_one_identity_until_completion() 
             .return_session(agent::session::Session::default());
         let (execution, mut rx) = bridge(&tui);
         execution.channel().follow();
-        let pending = submit(&mut tui, execution.as_ref(), line).await;
+        submit(&mut tui, execution.as_ref(), line).await;
         let (id, event) = response(&mut rx);
         assert_eq!(event, Response::Queued);
         assert!(
             rx.try_recv().is_err(),
             "the queued operation has not started"
         );
-        assert!(pending.is_closed(), "no task was spawned");
+        assert!(!tui.core.runtime_busy(), "no task was spawned");
         let queued = crate::tui::front_view(&mut tui.views, tui.core.lane())
             .queued
             .pop_front()
             .unwrap();
         assert_eq!(queued.request.id, id);
         tui.core.lane_mut().finish();
-        let (replies, inb) = crate::tui::run::Replies::channels();
-        let mut completed = inb.done;
+        let (replies, _inb) = crate::tui::run::Replies::channels();
         assert!(!tui.resume_queued(queued, &replies).await);
         assert_eq!(response(&mut rx), (id, Response::Started));
-        let done = tokio::time::timeout(Duration::from_secs(3), completed.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let done = completed_run(&mut tui).await;
         assert_eq!(done.request.id, id);
-        tui.settle(done).await;
+        tui.present_settlement(pi_core::execution::host::Settlement::Returned(done));
         let (finished, Response::Finished { text, outcome }) = response(&mut rx) else {
             panic!("a final reply")
         };
@@ -563,8 +553,7 @@ async fn a_queued_input_that_cannot_start_still_finishes_with_its_original_ident
         .pop_front()
         .unwrap();
     tui.core.lane_mut().finish();
-    let (replies, inb) = crate::tui::run::Replies::channels();
-    let mut completed = inb.done;
+    let (replies, _inb) = crate::tui::run::Replies::channels();
     assert!(!tui.resume_queued(queued, &replies).await);
     assert_eq!(response(&mut rx), (id, Response::Started));
     let (
@@ -579,8 +568,8 @@ async fn a_queued_input_that_cannot_start_still_finishes_with_its_original_ident
     };
     assert_eq!(finished, id);
     assert!(text.is_empty());
-    assert!(why.contains("no transcript"));
-    assert!(completed.try_recv().is_err());
+    assert!(why.contains("transcript is unavailable"));
+    assert!(!tui.core.runtime_busy());
     assert!(rx.try_recv().is_err());
 }
 
@@ -642,8 +631,7 @@ async fn shutdown_terminates_waiting_requests_before_stopping_their_bridge() {
     let (id, event) = response(&mut rx);
     assert_eq!(event, Response::Queued);
     tui.core.lane_mut().finish();
-    let (_done, mut pending) = unbounded_channel();
-    tui.settle_all(&mut pending, "shutdown").await;
+    tui.settle_all("shutdown").await;
     assert_eq!(
         response(&mut rx),
         (
@@ -671,12 +659,10 @@ async fn removing_a_lane_terminates_its_queued_requests() {
     submit(&mut tui, execution.as_ref(), "!true").await;
     let (id, event) = response(&mut rx);
     assert_eq!(event, Response::Queued);
-    let (done, _) = unbounded_channel();
     tui.deliver_prompt(
         crate::tui::clipboard::prompt("new direction".into(), None, &[]),
         Origin::Typed,
         Some("new direction".into()),
-        &done,
     );
     let queue = crate::tui::front_view(&mut tui.views, tui.core.lane())
         .queued
@@ -725,21 +711,19 @@ async fn remote_prompts_and_shell_commands_keep_their_own_async_response() {
         tui.core.lane_mut().finish();
         let (execution, mut rx) = bridge(&tui);
         execution.channel().follow();
-        let mut done = submit(&mut tui, execution.as_ref(), line).await;
+        submit(&mut tui, execution.as_ref(), line).await;
         let (id, event) = response(&mut rx);
         assert_eq!(event, Response::Started);
-        let completed = tokio::time::timeout(Duration::from_secs(3), done.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let completed = completed_run(&mut tui).await;
         if line.starts_with(' ') {
-            let (session, _) = completed
-                .ran
-                .as_ref()
+            let session = tui
+                .core
+                .lane()
+                .session()
                 .expect("the model returned its session");
             assert_eq!(session.last_prompt().unwrap().text, line);
         }
-        tui.settle(completed).await;
+        tui.present_settlement(pi_core::execution::host::Settlement::Returned(completed));
         let (finished, Response::Finished { text, outcome }) = response(&mut rx) else {
             panic!("a final answer")
         };

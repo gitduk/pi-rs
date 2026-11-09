@@ -13,10 +13,10 @@ use std::time::Duration;
 use agent::Event;
 use async_trait::async_trait;
 use pi_store::config::{Hook, HookOn};
+use pi_tools::channel::Ask;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tool::{Ctx, ToolOutput};
-use toolbox::channel::Ask;
 
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -386,11 +386,11 @@ fn warn(hook: &Hook, why: &str) {
 // The hook's exit code and what it printed, stdout then stderr. Run as a
 // script runs in its turn: fd 3 for its questions, and a stop ends it.
 async fn run(hook: &Hook, input: &[u8], ctx: &Ctx, ask: &dyn Ask) -> Result<(i32, String), String> {
-    let mut cmd = tokio::process::Command::new(toolbox::bash::SHELL);
+    let mut cmd = tokio::process::Command::new(pi_tools::bash::SHELL);
     cmd.arg("-c")
         .arg(&hook.command)
         .current_dir(ctx.workspace.root());
-    let exited = toolbox::scripts::run_asking("hook", cmd, input.to_vec(), WAIT, ctx, ask)
+    let exited = pi_tools::scripts::run_asking("hook", cmd, input.to_vec(), WAIT, ctx, ask)
         .await
         .map_err(|e| e.to_string())?;
     let said = [&exited.stdout.text, &exited.stderr.text]
@@ -408,7 +408,7 @@ mod tests {
     use agent::Hooks;
 
     fn shell(ctx: &Ctx, hooks: Vec<Hook>) -> Arc<dyn Hooks> {
-        of(&hooks, &ctx.workspace, Arc::new(toolbox::channel::NoOne))
+        of(&hooks, &ctx.workspace, Arc::new(pi_tools::channel::NoOne))
     }
 
     fn hook(on: HookOn, command: &str) -> Hook {
@@ -422,13 +422,13 @@ mod tests {
     // Answers every question with `picked` at once, as a person might.
     struct Says(&'static str);
 
-    impl toolbox::channel::Ask for Says {
+    impl pi_tools::channel::Ask for Says {
         fn ask(
             &self,
-            _root: std::path::PathBuf,
+            _scope: pi_tools::background::Scope,
             asker: &str,
-            asked: toolbox::channel::Asked,
-        ) -> Result<Option<toolbox::channel::Answer>, String> {
+            asked: pi_tools::channel::Asked,
+        ) -> Result<Option<pi_tools::channel::Answer>, String> {
             assert_eq!(asker, "hook");
             assert!(asked.back, "a gate waits on its answer");
             let (to, answer) = tokio::sync::oneshot::channel();
@@ -445,7 +445,7 @@ mod tests {
         let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
         let guard = hook(
             HookOn::ToolBefore,
-            r#"echo '{"choose":"run it?","options":["allow","deny"],"answer":"back"}' >&3
+            r#"echo '{"type":"runtime","command":{"type":"prompt","text":"run it?","options":["allow","deny"],"back":true}}' >&3
 read -r a <&3
 case "$a" in *'"allow"'*) exit 0;; *) echo "the user said no: $a"; exit 2;; esac"#,
         );

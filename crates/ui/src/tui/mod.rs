@@ -48,7 +48,7 @@ use std::sync::Arc;
 
 use crate::theme::following_terminal;
 use menu::Lists;
-use run::{Done, Replies};
+use run::Replies;
 use term::{HISTORY_KEEP, Hold, drop_shared_history, history_of, reader};
 use ui::{Mark, Tab, Ui, lane_name};
 use view::{Pending, Queued, View, Views, front_view, prune_views, view_at};
@@ -72,7 +72,6 @@ fn flash_for(line: &str) -> std::time::Duration {
 }
 
 // Shared text for several call sites, so a reword can't drift between them.
-const NO_TRANSCRIPT: &str = "this checkout has no transcript — /new or /resume first";
 const NOTHING_TO_REWIND: &str = "nothing to rewind to";
 // The line `esc esc` starts, whose completions are what the user said.
 const REWIND: &str = "/rewind ";
@@ -179,10 +178,8 @@ enum Wake {
     Do(Asked, Option<String>),
     // A waiting operation, with the identity assigned when it entered the queue.
     Queued(Queued),
-    // A line pi relays for the model: always a turn, never a command.
-    Relay(agent::session::Prompt),
     // A turn ended and has to be settled, whichever lane it belongs to.
-    Turn(Done),
+    Runtime(pi_core::execution::host::Event),
     // Something only the screen cares about.
     Nothing,
     // Leave. Not a `break` at the arm: the way out has lanes to settle.
@@ -419,15 +416,11 @@ impl Tui {
     // Take what every lane's run has posted since the last look into its own
     // view, drawn or not: its meter, filed rows and end happen when they do.
     async fn serve_lanes(&mut self) {
-        for lane in self.core.lanes.all_mut() {
-            while let Ok(event) = lane.inbox().try_recv() {
-                // Every lane, not just the one in front: a turn a command's input
-                // opened is still owed its answer after a switch.
-                self.drivers.observe(lane.token(), lane.root(), &event);
-                // Opened first: a banner drawn later would replace the rows.
-                let view = view::opened(&mut self.views, lane, &self.ui.paint);
-                self.ui.on_event(lane, view, event);
-            }
+        while let Some(event) = self.core.try_agent_event() {
+            let pi_core::execution::host::Event::Agent { lane, event } = event else {
+                unreachable!("agent event drain")
+            };
+            self.draw_agent(lane, event);
         }
     }
 
@@ -450,7 +443,7 @@ impl Tui {
                 } else {
                     match lane.run() {
                         // A driven lane between rounds: it has not finished.
-                        Run::Ended { ok: true, .. } if self.drivers.holds(lane.root()) => {
+                        Run::Ended { ok: true, .. } if self.drivers.holds_for(lane.ctx()) => {
                             Mark::Plain
                         }
                         Run::Ended { ok: true, .. } => Mark::Done,
@@ -490,7 +483,7 @@ impl Tui {
         // Back to front, stopping at a working lane: a run out of front is
         // still owed its answer.
         for lane in self.core.lanes.all().iter().rev() {
-            if lane.is_running() || self.drivers.holds(lane.root()) {
+            if lane.is_running() || self.drivers.holds_for(lane.ctx()) {
                 break;
             }
             if lane.token() == front {
@@ -516,7 +509,7 @@ impl Tui {
     }
 
     // The front lane's screen rebuilt from its transcript, for a swap or
-    // rewind. `NO_TRANSCRIPT` names a dead session rather than panicking.
+    // rewind. a missing transcript refuses the operation rather than panicking.
     fn rebuild_front(&mut self) {
         let Some(session) = self.core.lane().session() else {
             return;
@@ -662,26 +655,10 @@ impl Tui {
                 self.complete(
                     request,
                     pi_core::execution::Output::Notice(String::new()),
-                    toolbox::channel::Outcome::Failed(why.to_string()),
+                    pi_tools::channel::Outcome::Failed(why.to_string()),
                 );
                 Wake::Nothing
             }
-        }
-    }
-
-    // A command asked to stop the turn running in its checkout, as esc would;
-    // with none running there is nothing to say.
-    fn interrupt_at(&mut self, root: &std::path::Path) {
-        let Some(at) = self.core.lane_at(root) else {
-            return;
-        };
-        if !self.core.lanes[at].is_running() {
-            return;
-        }
-        if at == self.core.lanes.front() {
-            self.stop_current(false);
-        } else {
-            self.core.lanes.at_mut(at).stop(false);
         }
     }
 
@@ -707,7 +684,7 @@ impl Tui {
             && self.ui.editor.is_empty()
             && self.ui.background_open.is_none()
             && (self.views.values()).all(|v| v.draft.is_empty() && v.queued.is_empty())
-            && !(self.core.lanes.all().iter()).any(|lane| self.drivers.holds(lane.root()));
+            && !(self.core.lanes.all().iter()).any(|lane| self.drivers.holds_for(lane.ctx()));
         if !settled {
             return None;
         }
@@ -756,16 +733,13 @@ impl Tui {
             self.refresh_tabs();
             self.bar.poke(self.core.lane());
             let executions = self.drivers.background();
-            executions.relay_progress();
-            for root in executions.take_interrupts() {
-                self.interrupt_at(&root);
-            }
             // Taken down first, or the copy would put them back up.
             for question in std::mem::take(&mut self.ui.answered) {
                 executions.answer(question, None);
             }
-            self.ui
-                .sync_questions(executions.questions(self.core.lane().root()));
+            self.ui.sync_questions(
+                executions.questions_for(self.core.lane().root(), self.core.lane().ctx().session()),
+            );
             let root = self.core.lane().root();
             self.ui.sync_background(executions.background(root));
             self.ui.tools = Some(self.core.lane().agent().brief.clone());
@@ -796,6 +770,7 @@ impl Tui {
             let running = self.core.lane().is_running();
             let anywhere = self.core.lanes.all().iter().any(|lane| lane.is_running());
             let waiting = !view.queued.is_empty();
+            let host_waiting = view.queued.has_host_operation();
             // Who sent what is carried out this pass.
             let mut origin = Origin::Typed;
             // Results and driven lines wait for a free lane. User submissions
@@ -809,28 +784,27 @@ impl Tui {
                 ended = restart;
                 break "pi restarted into an update.";
             }
-            let lane = self.core.lane();
             let woke = if let Some((from, wake)) = driven {
                 origin = from;
                 wake
-            } else if !waiting || running {
+            } else if !host_waiting || running {
                 let bar_due = self.bar.due().map(tokio::time::Instant::from_std);
                 // A character held off the list shows in it once no pair took it back.
                 let held = self.ui.held().map(tokio::time::Instant::from_std);
                 // Only while the lane is free: a prompt due under a run would
                 // wake this loop again and again with nothing it may do.
                 let executions = self.drivers.background();
-                let due_back = free.then(|| executions.next_due(lane.root())).flatten();
+                let awaiting_models = self.core.awaiting_models();
                 // Every branch must be cancel-safe: a loser is dropped mid-poll.
                 // `recv()` and `tick()` are; a blocking read gets its own thread.
                 tokio::select! {
-                    Some(done) = inb.done.recv() => Wake::Turn(done),
+                    event = self.core.next_runtime_event() => Wake::Runtime(event),
                     Some(started) = inb.started.recv() => {
                         self.land_started(started);
                         Wake::Nothing
                     }
                     Some(fetched) = inb.fetched.recv() => {
-                        self.land_fetched(fetched, &replies.done);
+                        self.land_fetched(fetched);
                         Wake::Nothing
                     }
                     Some(removed) = inb.removed.recv() => {
@@ -840,7 +814,7 @@ impl Tui {
                     // Only while something runs, a flash is up or a model list
                     // is on its way: an idle loop waking ten times a second
                     // has nothing to spin.
-                    _ = tick.tick(), if anywhere || executions.working(lane.root()) || self.ui.flash.is_some() || self.ui.copied.is_some() || self.core.awaiting_models() => {
+                    _ = tick.tick(), if anywhere || executions.working(self.ui.at_root.as_path()) || self.ui.flash.is_some() || self.ui.copied.is_some() || awaiting_models => {
                         self.ui.spinner += 1;
                         Wake::Nothing
                     }
@@ -855,7 +829,6 @@ impl Tui {
                     _ = tokio::time::sleep_until(held.unwrap_or_else(tokio::time::Instant::now)),
                         if held.is_some() => Wake::Nothing,
                     // Something was left, cancelled or finished: look again.
-                    _ = executions.changed().notified() => Wake::Nothing,
                     // A different pi installed: the bar says so.
                     _ = update.notified() => Wake::Nothing,
                     // Left the way `/exit` leaves: runs settled, executions taken down.
@@ -863,8 +836,6 @@ impl Tui {
                         tracing::info!(target: "pi::session", "hung up");
                         Wake::Leave("The terminal hung up; pi exited.")
                     }
-                    _ = tokio::time::sleep_until(due_back.unwrap_or_else(tokio::time::Instant::now)),
-                        if due_back.is_some() => Wake::Nothing,
                     key = self.events.recv() => match key {
                         Some(key) => {
                             let lane = self.core.lane();
@@ -884,29 +855,24 @@ impl Tui {
                 // Joined as lines, a command+prompt would lose its first word.
                 let queued = front_view(&mut self.views, self.core.lane())
                     .queued
-                    .pop_front()
-                    .expect("something is waiting");
+                    .pop_host_operation()
+                    .expect("a host operation is waiting");
                 Wake::Queued(queued)
             };
             // Out here, where all of `self` is free again.
             let (asked, line) = match woke {
-                Wake::Turn(done) => {
-                    self.settle(done).await;
+                Wake::Runtime(event) => {
+                    self.runtime_event(event);
                     continue;
                 }
                 Wake::Nothing => continue,
                 Wake::Leave(why) => break why,
-                // Its driver hears nothing of the turn, so nothing follows.
-                Wake::Relay(ask) => {
-                    self.deliver_prompt(ask, Origin::Background, None, &replies.done);
-                    continue;
-                }
                 Wake::Queued(queued) => {
                     let origin = queued.request.origin;
                     if self.resume_queued(queued, &replies).await {
                         break match origin {
                             Origin::Typed => "The user exited pi.",
-                            Origin::Background | Origin::Input(_) => {
+                            Origin::Background | Origin::Input(_) | Origin::Message(_) => {
                                 "pi exited in response to a background command."
                             }
                         };
@@ -929,14 +895,14 @@ impl Tui {
             if self.execute(intent, origin, line, &replies).await {
                 break match origin {
                     Origin::Typed => "The user exited pi.",
-                    Origin::Background | Origin::Input(_) => {
+                    Origin::Background | Origin::Input(_) | Origin::Message(_) => {
                         "pi exited in response to a background command."
                     }
                 };
             }
         };
         self.save_history();
-        self.settle_all(&mut inb.done, leaving).await;
+        self.settle_all(leaving).await;
         self.core.hand_over_background();
         Ok(ended)
     }
@@ -945,41 +911,21 @@ impl Tui {
     // a relay opens a turn, anything else is read.
     fn driver_line(&mut self) -> Option<(Origin, Wake)> {
         let lane = self.core.lane();
-        let next = if lane.is_running() {
-            self.drivers.next_input(lane.root())?
+        let next = self.drivers.next_input(lane.root(), lane.ctx())?;
+        front_view(&mut self.views, self.core.lane())
+            .surface
+            .follow();
+        let intent = input::read(
+            &next.line,
+            &self.core.commands,
+            Some(&self.core.lane().agent().brief.registry),
+        );
+        let note = if intent.starts_turn(&self.core.commands) {
+            next.note
         } else {
-            self.drivers.next(lane.root(), lane.ctx())?
+            String::new()
         };
-        let view = front_view(&mut self.views, self.core.lane());
-        view.surface.follow();
-        // Results remain model input; a person's submission uses the same
-        // parser and admission rules as a submitted local line.
-        let wake = match next.label {
-            Some(label) => {
-                tracing::info!(
-                    target: "pi::session", origin = ?next.origin, lane = self.core.lane().token(), label = %label, "relay"
-                );
-                self.ui.submit_relayed(view, &label, &next.line);
-                Wake::Relay(agent::session::Prompt {
-                    text: next.line,
-                    shown: Some(label),
-                    relayed: Some(next.note),
-                    images: Vec::new(),
-                })
-            }
-            None => {
-                let intent = input::read(
-                    &next.line,
-                    &self.core.commands,
-                    Some(&self.core.lane().agent().brief.registry),
-                );
-                let note = match intent.starts_turn(&self.core.commands) {
-                    true => next.note,
-                    false => String::new(),
-                };
-                self.admit(Asked::Core(intent), next.origin, Some(next.line), &note)
-            }
-        };
+        let wake = self.admit(Asked::Core(intent), next.origin, Some(next.line), &note);
         Some((next.origin, wake))
     }
 

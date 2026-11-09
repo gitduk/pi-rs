@@ -7,6 +7,8 @@ rust-version.workspace = true
 description = "pi's session state and inputs: lanes, commands, drivers"
 
 [dependencies]
+message.workspace = true
+thiserror.workspace = true
 futures.workspace = true
 agent.workspace = true
 subagent.workspace = true
@@ -14,7 +16,7 @@ skills.workspace = true
 llm.workspace = true
 pi-store.workspace = true
 tool.workspace = true
-toolbox.workspace = true
+pi-tools.workspace = true
 mcp.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true

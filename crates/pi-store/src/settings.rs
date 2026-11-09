@@ -51,6 +51,7 @@ fn clear_replaced_credentials(base: &mut toml::Value, over: &toml::Value) {
 }
 
 /// The config files as this run read them.
+#[derive(Clone)]
 pub struct Settings {
     // The user's tree with the project's over it, as last read from disk.
     file: toml::Value,

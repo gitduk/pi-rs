@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use pi_tools::bash;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc::unbounded_channel, watch};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
-use toolbox::bash;
 
 use agent::session::Session;
 use agent::{Agent, AgentError, Archive, Briefing, Event, Retry};

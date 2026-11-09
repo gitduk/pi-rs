@@ -9,7 +9,7 @@ use tool::Tier;
 pub fn modifies(name: &str) -> bool {
     // Built-ins and memory only: no other source offers a tool at the write tier.
     static WRITERS: LazyLock<Vec<String>> = LazyLock::new(|| {
-        let tools = toolbox::builtin();
+        let tools = pi_tools::builtin();
         tools
             .names()
             .into_iter()
@@ -22,7 +22,7 @@ pub fn modifies(name: &str) -> bool {
 
 /// The lines of what the tool `name` printed that a screen shows.
 pub fn shown<'a>(name: &str, output: &'a str) -> impl Iterator<Item = &'a str> {
-    let bash = name == toolbox::bash::Bash::NAME;
+    let bash = name == pi_tools::bash::Bash::NAME;
     output
         .lines()
         .filter(move |l| !(bash && super::bash::is_stream_tag(l)))

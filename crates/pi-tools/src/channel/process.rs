@@ -1,8 +1,12 @@
-//! The duplex JSON protocol shared by scripts and bash background commands.
-use crate::background::{OutputMode, RunHandle};
-use crate::channel::{Answer, Ask, Asked, Told};
+//! Duplex fd 3 frames, with semantic observation pulled directly by the writer.
+use crate::background::{OutputMode, RunHandle, Scope};
+use crate::channel::wire::{self, Command as Control, Incoming};
+use crate::channel::{Answer, Ask, Observation, Receiver, Sender, Told};
 use crate::process::{Exited, Group, MAX_RUN, Streams, put_down, reap, spawn};
+use serde::Serialize;
+#[cfg(test)]
 use serde_json::Value;
+use serde_json::json;
 use std::os::fd::AsRawFd;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -10,34 +14,30 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::process::{Child, Command};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
 use tool::{Ctx, ToolError};
 
 pub const FD_VAR: &str = "PI_EVENTS_FD";
 const FD: i32 = 3;
-const MAX_LINE: usize = 1 << 20;
-
-enum Said {
-    Status(String),
-    Result(String),
-    Input { text: String, note: String },
-    Choose(Asked),
-    Answer { question: u64, picks: Vec<usize> },
-    Interrupt,
-    Follow,
-    Drive(bool),
-}
+// Detach a peer that stops draining its frames.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_LINE: usize = wire::MAX_FRAME_BYTES + 1;
 
 struct Process {
     child: Child,
     streams: Streams,
     fd3: Fd3,
-    told: UnboundedSender<Told>,
+    told: Sender,
+    out: Output,
     guard: Option<Group>,
 }
 
-fn start(mut cmd: Command, input: Vec<u8>, ctx: &Ctx) -> Result<Process, ToolError> {
+fn start(
+    mut cmd: Command,
+    input: Vec<u8>,
+    ctx: &Ctx,
+    owner: Option<crate::background::Owner>,
+) -> Result<Process, ToolError> {
     let (ours, theirs) = std::os::unix::net::UnixStream::pair()?;
     let fd = theirs.as_raw_fd();
     // SAFETY: only async-signal-safe calls between fork and exec.
@@ -55,6 +55,20 @@ fn start(mut cmd: Command, input: Vec<u8>, ctx: &Ctx) -> Result<Process, ToolErr
             }
             Ok(())
         });
+    }
+    if let Some(owner) = owner.or_else(|| Scope::from(ctx).owner) {
+        cmd.env(wire::SESSION_VAR, owner.session);
+        match owner.request {
+            Some(id) => {
+                cmd.env(wire::REQUEST_VAR, id.as_str());
+            }
+            None => {
+                cmd.env_remove(wire::REQUEST_VAR);
+            }
+        }
+    } else {
+        cmd.env_remove(wire::SESSION_VAR);
+        cmd.env_remove(wire::REQUEST_VAR);
     }
     cmd.env(FD_VAR, FD.to_string())
         .stdin(Stdio::piped())
@@ -83,19 +97,21 @@ fn start(mut cmd: Command, input: Vec<u8>, ctx: &Ctx) -> Result<Process, ToolErr
         skipping: false,
         open: true,
     };
-    let (told, hear) = unbounded_channel();
-    tokio::spawn(tell(write, hear));
+    let (told, hear) = crate::channel::channel();
+    let (out, output) = output();
+    tokio::spawn(tell(write, hear, output));
 
     Ok(Process {
         child,
         streams,
         fd3,
         told,
+        out,
         guard,
     })
 }
 
-/// Run a foreground script with its questions attached to the calling turn.
+/// Run a foreground capability; its prompts remain internal runtime interactions.
 pub async fn foreground(
     name: &str,
     cmd: Command,
@@ -108,65 +124,35 @@ pub async fn foreground(
         mut child,
         mut streams,
         mut fd3,
-        told,
+        told: _told,
+        out,
         guard: _guard,
-    } = start(cmd, input, ctx)?;
+    } = start(cmd, input, ctx, None)?;
     let group = child.id();
     let limit = timeout.min(MAX_RUN);
     let deadline = tokio::time::sleep(limit);
     tokio::pin!(deadline);
-    // Waiting on the person is not running long: the clock stops until the
-    // answer, then starts over.
     let mut waiting: Option<Answer> = None;
-    // The pipes too: what the script left running may hold them, and the
-    // deadline and a stop still have to reach that. Made once, so an event
-    // winning the race does not restart the wait for the pipes.
     let mut exit = Box::pin(async { (child.wait().await, streams.checked(group).await) });
     let late = loop {
-        tokio::select! {
-            // Stop and deadline take priority over a busy event channel.
-            // Events already buffered are read before observing process exit.
-            biased;
-            () = ctx.cancel.cancelled() => break false,
-            picked = async { waiting.as_mut().expect("guarded").await }, if waiting.is_some() => {
-                waiting = None;
-                let _ = told.send(Told::Answer(Ok(picked.ok().flatten())));
-                deadline.as_mut().reset(tokio::time::Instant::now() + limit);
+        tokio::select! {biased;
+            ()=ctx.cancel.cancelled()=>break false,
+            picked=async {waiting.as_mut().expect("guarded").await}, if waiting.is_some()=>{
+                waiting=None;
+                out.runtime(Told::Answer(Ok(picked.ok().flatten())));
+                deadline.as_mut().reset(tokio::time::Instant::now()+limit);
             }
-            () = &mut deadline, if waiting.is_none() => break true,
-            said = fd3.next() => match said {
-                Said::Status(text) => ctx.progress(text),
-                Said::Choose(asked) => {
-                    let root = ctx.workspace.root().to_path_buf();
-                    let put = match waiting {
-                        Some(_) if asked.back => {
-                            Err("one question at a time: the last is not answered yet".into())
-                        }
-                        _ => asks.ask(root, name, asked),
-                    };
-                    match put {
-                        Ok(Some(answer)) => waiting = Some(answer),
-                        Ok(None) => {
-                            let _ = told.send(Told::Asked);
-                        }
-                        Err(why) => {
-                            let _ = told.send(Told::Answer(Err(why)));
-                        }
-                    }
+            ()=&mut deadline, if waiting.is_none()=>break true,
+            frame=fd3.next()=> match frame {
+                Ok(Incoming::Runtime {command:Control::Status {text}})=>ctx.progress(text),
+                Ok(Incoming::Runtime {command:Control::Prompt {text,options,back}})=>{
+                    let put=if waiting.is_some() && back {Err("one prompt is already waiting".into())} else {asks.ask(ctx.into(),name,Control::asked(text,options,back))};
+                    match put {Ok(Some(answer))=>waiting=Some(answer), Ok(None)=>out.runtime(Told::Asked), Err(why)=>out.runtime(Told::Answer(Err(why)))}
                 }
-                Said::Result(_)
-                | Said::Input { .. }
-                | Said::Answer { .. }
-                | Said::Interrupt
-                | Said::Follow
-                | Said::Drive(_) => tracing::warn!(
-                    target: "pi::scripts", script = name, "session message requires background=true, dropped"
-                ),
+                Ok(Incoming::Message {..}) | Ok(Incoming::Observe {..}) | Ok(Incoming::Runtime {command:Control::Command {..} | Control::Answer {..} | Control::AnswerText {..} | Control::Serve {} | Control::Interrupt {} | Control::Watch {} | Control::Drive {..}})=>out.reject("this frame requires a background execution"),
+                Err(why)=>out.reject(why),
             },
-            (status, captures) = &mut exit => {
-                let (stdout, stderr) = captures?;
-                return Ok(Exited { status: status?, stdout, stderr });
-            }
+            (status,captures)=&mut exit=>{let (stdout,stderr)=captures?;return Ok(Exited {status:status?,stdout,stderr});}
         }
     };
     drop(exit);
@@ -174,14 +160,12 @@ pub async fn foreground(
     if !late {
         return Err(ToolError::Cancelled);
     }
-    let printed = streams.printed().await;
     Err(ToolError::Timeout {
         ms: limit.as_millis() as u64,
-        printed,
+        printed: streams.printed().await,
     })
 }
 
-/// Start one already-registered command and attach its session channel.
 pub(crate) fn background(
     cmd: Command,
     input: Vec<u8>,
@@ -195,47 +179,57 @@ pub(crate) fn background(
         mut streams,
         mut fd3,
         told,
+        out,
         guard,
-    } = start(cmd, input, ctx)?;
+    } = start(cmd, input, ctx, execution.owner())?;
     execution.watch(streams.peek());
-    execution.channel().listen(told.clone());
+    execution.channel().listen(told);
     tokio::spawn(async move {
         let _guard = guard;
         let group = child.id();
+        let mut service = false;
         let status = loop {
-            tokio::select! {
-                biased;
-                () = stop.cancelled() => { put_down(&mut child, group).await; return; }
-                event = fd3.next() => match event {
-                    Said::Status(text) => execution.channel().status(text),
-                    Said::Result(text) => execution.channel().result(text),
-                    Said::Input { text, note } => execution.channel().input(text, note),
-                    Said::Choose(asked) if asked.back => {
-                        let _ = told.send(Told::Answer(Err("a background command cannot wait for a foreground answer".into())));
-                    }
-                    Said::Choose(asked) => execution.channel().choose(asked),
-                    Said::Answer {question,picks} => execution.channel().answer(question,picks),
-                    Said::Interrupt => execution.channel().interrupt(),
-                    Said::Follow => execution.channel().follow(),
-                    Said::Drive(on) => execution.channel().drive(on),
+            tokio::select! {biased;
+                ()=stop.cancelled()=>{put_down(&mut child,group).await;return;}
+                frame=fd3.next()=>match frame {
+                    Ok(Incoming::Message {message})=>{
+                        let id=message.id.clone();
+                        let request=match &message.kind {message::WireKind::Request(_)=>id.clone(),message::WireKind::Response {request,..}=>request.clone()};
+                        match execution.channel().message(message) {
+                            Ok(receipt)=>out.accepted(&id,&receipt), Err(why)=>out.value(&json!({"type":"error","id":id,"request":request,"message":why})),
+                        }
+                    },
+                    Ok(Incoming::Observe {session,cursor})=>match execution.channel().observe(session,cursor) {
+                        Ok(observation)=>out.observe(observation), Err(why)=>out.error(why),
+                    },
+                    Ok(Incoming::Runtime {command})=>match command {
+                        Control::Serve {}=>if !service {service=true;tracing::info!(target:"pi::scripts",execution=execution.id(),"channel service declared");},
+                        Control::Status {text}=>execution.channel().status(text),
+                        Control::Command {line}=>execution.channel().input(line,String::new()),
+                        Control::Prompt {back:true,..}=>out.reject("a background execution cannot wait for an internal foreground prompt"),
+                        Control::Prompt {text,options,back:false}=>execution.channel().choose(Control::asked(text,options,false)),
+                        Control::Answer {question,picks}=>execution.channel().answer(question,picks),
+                        Control::AnswerText {question,text}=>execution.channel().answer_text(question,text),
+                        Control::Interrupt {}=>execution.channel().interrupt(),
+                        Control::Watch {}=>execution.channel().watch_prompts(),
+                        Control::Drive {enabled}=>execution.channel().drive(enabled),
+                    },
+                    Err(why)=>out.reject(why),
                 },
-                status = child.wait() => break status,
+                status=child.wait()=>break status,
             }
         };
-        let captures = tokio::select! {
-            biased;
-            // The child is gone, but what it started may still be draining
-            // the pipes — and holding what a restart needs.
-            () = stop.cancelled() => { reap(group).await; return; }
-            captures = streams.checked(group) => captures,
+        let captures = tokio::select! {biased;
+            ()=stop.cancelled()=>{reap(group).await;return;}
+            captures=streams.checked(group)=>captures,
         };
         let result = match (status, captures) {
-            (Ok(status), Ok((out, err))) => {
+            (Ok(status), Ok((stdout, stderr))) => {
                 let code = status.code().unwrap_or(-1);
                 let body = if output == OutputMode::Stdout && status.success() {
-                    out.noted()
+                    stdout.noted()
                 } else {
-                    crate::bash::body(&out, &err)
+                    crate::bash::body(&stdout, &stderr)
                 };
                 if body.is_empty() {
                     format!("exited {code}, no output")
@@ -246,82 +240,174 @@ pub(crate) fn background(
             (_, Err(error)) => error.to_string(),
             (Err(error), _) => format!("could not wait for the command: {error}"),
         };
-        execution.channel().result(result);
+        if !service {
+            execution.channel().result(result);
+        } else {
+            execution.channel().status(result);
+        }
         execution.end();
     });
     Ok(())
 }
 
-// A script that never reads fd 3 must not stall command supervision.
-async fn tell(mut to: OwnedWriteHalf, mut hear: UnboundedReceiver<Told>) {
-    while let Some(told) = hear.recv().await {
-        let line = match told {
-            Told::Response { request, event } => match event {
-                crate::channel::Response::Queued => {
-                    serde_json::json!({ "request": request, "queued": true })
-                }
-                crate::channel::Response::Started => {
-                    serde_json::json!({ "request": request, "started": true })
-                }
-                crate::channel::Response::Progress(text) => {
-                    serde_json::json!({ "request": request, "progress": text })
-                }
-                crate::channel::Response::Finished { text, outcome } => match outcome {
-                    crate::channel::Outcome::Done => {
-                        serde_json::json!({ "request": request, "reply": text, "status": "done" })
-                    }
-                    crate::channel::Outcome::Stopped(reason) => {
-                        serde_json::json!({
-                            "request": request, "reply": text, "status": "stopped", "reason": reason
-                        })
-                    }
-                    crate::channel::Outcome::Failed(error) => {
-                        serde_json::json!({
-                            "request": request, "reply": text, "status": "failed", "error": error
-                        })
-                    }
-                    crate::channel::Outcome::Exited(code) => {
-                        serde_json::json!({
-                            "request": request, "reply": text, "exit_code": code,
-                            "status": if code == 0 { "done" } else { "failed" }
-                        })
-                    }
+#[derive(Clone)]
+struct Output {
+    to: tokio::sync::mpsc::Sender<Queued>,
+    budget: Arc<tokio::sync::Semaphore>,
+    closed: CancellationToken,
+}
+struct Queued {
+    frame: Outgoing,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+enum Outgoing {
+    Bytes(Vec<u8>),
+    Observe(Box<dyn Observation>),
+}
+struct OutputIn {
+    from: tokio::sync::mpsc::Receiver<Queued>,
+    closed: CancellationToken,
+}
+fn output() -> (Output, OutputIn) {
+    let (to, from) = tokio::sync::mpsc::channel(super::events::COUNT);
+    let closed = CancellationToken::new();
+    (
+        Output {
+            to,
+            budget: Arc::new(tokio::sync::Semaphore::new(super::events::BYTES)),
+            closed: closed.clone(),
+        },
+        OutputIn { from, closed },
+    )
+}
+impl Output {
+    fn put(&self, frame: Outgoing, bytes: usize) {
+        let permit = if bytes <= super::events::BYTES {
+            self.budget
+                .clone()
+                .try_acquire_many_owned(bytes as u32)
+                .ok()
+        } else {
+            None
+        };
+        if let Some(permit) = permit
+            && self
+                .to
+                .try_send(Queued {
+                    frame,
+                    _permit: permit,
+                })
+                .is_ok()
+        {
+            return;
+        }
+        self.closed.cancel();
+    }
+    fn value(&self, value: &impl Serialize) {
+        match wire::encode(value) {
+            Ok(bytes) => {
+                let size = bytes.len();
+                self.put(Outgoing::Bytes(bytes), size)
+            }
+            Err(why) => {
+                tracing::warn!(target:"pi::scripts",%why,"cannot encode frame");
+                self.closed.cancel();
+            }
+        }
+    }
+    fn error(&self, why: impl Into<String>) {
+        self.value(&wire::error(why));
+    }
+    fn reject(&self, why: impl Into<String>) {
+        let why = why.into();
+        tracing::warn!(target: "pi::scripts", %why, "frame rejected");
+        self.error(why);
+    }
+    fn runtime(&self, told: Told) {
+        if let Some(value) = wire::runtime(told) {
+            self.value(&value)
+        }
+    }
+    fn observe(&self, observation: Box<dyn Observation>) {
+        self.put(Outgoing::Observe(observation), 1);
+    }
+    fn accepted(&self, id: &message::MessageId, receipt: &crate::channel::Receipt) {
+        #[derive(Serialize)]
+        struct Accepted<'a> {
+            r#type: &'static str,
+            id: &'a message::MessageId,
+            request: &'a message::RequestId,
+            cursor: &'a crate::channel::Cursor,
+            response: Option<&'a message::Message>,
+        }
+        self.value(&Accepted {
+            r#type: "accepted",
+            id,
+            request: &receipt.request,
+            cursor: &receipt.cursor,
+            response: receipt.response.as_deref(),
+        });
+    }
+}
+
+async fn write(to: &mut OwnedWriteHalf, value: &impl Serialize) -> Result<(), String> {
+    let bytes = wire::encode(value)?;
+    tokio::time::timeout(WRITE_TIMEOUT, to.write_all(&bytes))
+        .await
+        .map_err(|_| "frame receiver stopped reading".to_string())?
+        .map_err(|e| e.to_string())
+}
+async fn tell(mut to: OwnedWriteHalf, mut hear: Receiver, mut output: OutputIn) {
+    let mut observation: Option<Box<dyn Observation>> = None;
+    let mut model_operations = std::collections::HashSet::new();
+    let disconnected = hear.disconnection();
+    loop {
+        tokio::select! {biased;
+            ()=output.closed.cancelled()=>return,
+            ()=disconnected.cancelled()=>return,
+            frame=output.from.recv()=>match frame {
+                None=>return,
+                Some(queued)=>match queued.frame {
+                    Outgoing::Bytes(bytes)=>if !matches!(tokio::time::timeout(WRITE_TIMEOUT,to.write_all(&bytes)).await,Ok(Ok(()))){return},
+                    Outgoing::Observe(next)=>{if write(&mut to,&json!({"type":"observing","cursor":next.cursor()})).await.is_err(){return} observation=Some(next);}
                 },
             },
-            Told::Started => serde_json::json!({ "started": true }),
-            Told::Progress(text) => serde_json::json!({ "progress": text }),
-            Told::Reply(text) => serde_json::json!({ "reply": text }),
-            Told::Asked => serde_json::json!({ "asked": true }),
-            Told::Answer(Ok(picked)) => serde_json::json!({ "answer": picked }),
-            Told::Answer(Err(why)) => serde_json::json!({ "answer": null, "error": why }),
-            Told::Question { id, asked } => serde_json::json!({ "question": {
-                "id": id,
-                "text": asked.question,
-                "options": asked.options,
-                "back": asked.back,
-            }}),
-            Told::Closed(id) => serde_json::json!({ "closed": id }),
-            Told::Refused { question, why } => {
-                serde_json::json!({ "refused": question, "why": why })
-            }
-        };
-        if to.write_all(format!("{line}\n").as_bytes()).await.is_err() {
-            return;
+            event=hear.recv()=>{
+                let Some(mut event)=event else{return};
+                let mut model_final=false;
+                match &mut event {
+                    Told::Linked {operation,..}=>{model_operations.insert(*operation);},
+                    Told::Response {request,event} if model_operations.contains(request)=>match event {
+                        crate::channel::Response::Progress(_)=>continue,
+                        crate::channel::Response::Finished {text,..}=>{text.clear();model_operations.remove(request);model_final=true;},
+                        crate::channel::Response::Queued | crate::channel::Response::Started=>{},
+                    },
+                    Told::Response {..} | Told::Started | Told::Progress(_) | Told::Reply(_) | Told::Asked | Told::Answer(_) | Told::Question {..} | Told::Closed(_) | Told::Refused {..}=>{},
+                }
+                if let Some(mut value)=wire::runtime(event) {
+                    if model_final {value["event"]["model"]=json!(true);}
+                    if write(&mut to,&value).await.is_err(){return}
+                }
+            },
+            event=async {observation.as_mut().expect("guarded").next().await},if observation.is_some()=>match event {
+                Ok(event)=>{
+                    #[derive(Serialize)] struct MessageFrame<'a>{r#type:&'static str,cursor:&'a crate::channel::Cursor,message:&'a message::Message}
+                    if write(&mut to,&MessageFrame {r#type:"message",cursor:&event.cursor,message:&event.message}).await.is_err(){return}
+                }
+                Err(why)=>{observation=None;if write(&mut to,&wire::error(why)).await.is_err(){return}}
+            },
         }
     }
 }
 
-// A closed event channel must not keep winning the supervisor’s select.
 struct Fd3 {
     reader: BufReader<OwnedReadHalf>,
-    // The line so far, kept here so a read cut short by `select!` loses nothing.
     line: Vec<u8>,
     skipping: bool,
     open: bool,
 }
-
 impl Fd3 {
-    async fn next(&mut self) -> Said {
+    async fn next(&mut self) -> Result<Incoming, String> {
         while self.open {
             let room = (MAX_LINE + 1 - self.line.len()) as u64;
             let read = (&mut self.reader)
@@ -336,76 +422,26 @@ impl Fd3 {
                 self.skipping = true;
                 continue;
             } else if self.line.last() != Some(&b'\n') {
-                // The last line, cut by the close: still said, once read whole.
                 continue;
             }
             let line = std::mem::take(&mut self.line);
-            if std::mem::take(&mut self.skipping) {
-                tracing::warn!(target: "pi::scripts", "a line on fd 3 past {MAX_LINE} bytes, dropped");
-                continue;
+            if std::mem::take(&mut self.skipping) || line.len() > MAX_LINE {
+                return Err("frame exceeds the byte limit".into());
             }
-            if let Some(said) = std::str::from_utf8(&line).ok().and_then(parse) {
-                return said;
+            if line.is_empty() && ended {
+                return Err("frame connection closed".into());
             }
+            return serde_json::from_slice(&line).map_err(|e| format!("invalid frame: {e}"));
         }
         std::future::pending().await
     }
-}
-
-// One line from fd 3; anything else on it is ignored, not fatal.
-fn parse(line: &str) -> Option<Said> {
-    let v: Value = serde_json::from_str(line).ok()?;
-    let text = |key| v.get(key).and_then(Value::as_str).map(str::to_string);
-    if v.get("interrupt").and_then(Value::as_bool) == Some(true) {
-        return Some(Said::Interrupt);
-    }
-    if v.get("follow").and_then(Value::as_bool) == Some(true) {
-        return Some(Said::Follow);
-    }
-    if let Some(on) = v.get("drive").and_then(Value::as_bool) {
-        return Some(Said::Drive(on));
-    }
-    if let Some(question) = text("choose") {
-        let options = (v
-            .get("options")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten())
-        .filter_map(|o| o.as_str().map(str::to_string))
-        .collect();
-        let back = v.get("answer").and_then(Value::as_str) == Some("back");
-        return Some(Said::Choose(Asked {
-            question,
-            options,
-            back,
-        }));
-    }
-    if let Some(question) = v.get("answer").and_then(Value::as_u64) {
-        let picks = (v
-            .get("picks")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten())
-        .map(|p| p.as_u64().map(|p| p as usize))
-        .collect::<Option<_>>()?;
-        return Some(Said::Answer { question, picks });
-    }
-    text("result")
-        .map(Said::Result)
-        .or_else(|| {
-            text("input").map(|line| Said::Input {
-                text: line,
-                note: text("note").unwrap_or_default(),
-            })
-        })
-        .or_else(|| text("status").map(Said::Status))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bash::Bash;
-    use crate::channel::{NoOne, Outcome, Response};
+    use crate::channel::{Asked, NoOne, Outcome, Response};
     use crate::testing::{Sink, ctx};
     use std::sync::{Arc, Mutex};
     use tool::Tool;
@@ -423,7 +459,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cmd = script(
             dir.path(),
-            "while :; do echo '{\"status\":\"busy\"}' >&3; done",
+            "while :; do echo '{\"type\":\"runtime\",\"command\":{\"type\":\"status\",\"text\":\"busy\"}}' >&3; done",
         );
         let ended = tokio::time::timeout(
             3 * SECOND,
@@ -474,7 +510,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cmd = script(
             dir.path(),
-            "exec 1>&-; (sleep 0.2; echo '{\"status\":\"late\"}' >&3; sleep 0.2) & exit 0",
+            "exec 1>&-; (sleep 0.2; echo '{\"type\":\"runtime\",\"command\":{\"type\":\"status\",\"text\":\"late\"}}' >&3; sleep 0.2) & exit 0",
         );
         let ended = foreground(
             "late",
@@ -498,7 +534,7 @@ mod tests {
         let cmd = script(
             dir.path(),
             &format!(
-                "head -c {} /dev/zero | tr '\\0' x >&3; echo >&3; echo '{{\"status\":\"after\"}}' >&3",
+                "head -c {} /dev/zero | tr '\\0' x >&3; echo >&3; echo '{{\"type\":\"runtime\",\"command\":{{\"type\":\"status\",\"text\":\"after\"}}}}' >&3",
                 MAX_LINE * 3
             ),
         );
@@ -513,7 +549,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(Sink::default());
         let ctx = ctx(dir.path());
-        let body = r#"echo '{"choose":"run it?","options":["allow","deny"],"answer":"back"}' >&3
+        let body = r#"echo '{"type":"runtime","command":{"type":"prompt","text":"run it?","options":["allow","deny"],"back":true}}' >&3
 read -r a <&3
 printf '%s\n' "$a" > heard"#;
         let ran = {
@@ -538,14 +574,20 @@ printf '%s\n' "$a" > heard"#;
         to.send(Some("deny".into())).unwrap();
         assert!(ran.await.unwrap().unwrap().status.success());
         let heard = std::fs::read_to_string(dir.path().join("heard")).unwrap();
-        assert_eq!(heard, "{\"answer\":\"deny\"}\n");
+        let frame: Value = serde_json::from_str(&heard).unwrap();
+        assert_eq!(
+            frame,
+            json!({"type":"runtime","event":{"type":"answer","text":"deny"}})
+        );
 
         let cmd = script(dir.path(), body);
         foreground("guard", cmd, Vec::new(), 5 * SECOND, &ctx, &NoOne)
             .await
             .unwrap();
         let heard = std::fs::read_to_string(dir.path().join("heard")).unwrap();
-        assert!(heard.starts_with("{\"answer\":null,\"error\":"), "{heard}");
+        let frame: Value = serde_json::from_str(&heard).unwrap();
+        assert_eq!(frame["event"]["type"], "error");
+        assert!(frame["event"]["message"].is_string());
     }
 
     #[tokio::test]
@@ -555,12 +597,12 @@ printf '%s\n' "$a" > heard"#;
         let ctx = ctx(dir.path());
         let _cmd = script(
             dir.path(),
-            r#"echo '{"drive":true}' >&3
-echo '{"input":"why did it fail","note":"round 2"}' >&3
-echo '{"choose":"the task changed","options":["summarize","go on"]}' >&3
-echo '{"answer":3,"picks":[1]}' >&3
-echo '{"interrupt":true}' >&3
-echo '{"follow":true}' >&3
+            r#"echo '{"type":"runtime","command":{"type":"drive","enabled":true}}' >&3
+echo '{"type":"runtime","command":{"type":"command","line":"host operation"}}' >&3
+echo '{"type":"runtime","command":{"type":"prompt","text":"the task changed","options":["summarize","go on"],"back":false}}' >&3
+echo '{"type":"runtime","command":{"type":"answer","question":3,"picks":[1]}}' >&3
+echo '{"type":"runtime","command":{"type":"interrupt"}}' >&3
+echo '{"type":"runtime","command":{"type":"watch"}}' >&3
 read -r a <&3; read -r b <&3; read -r c <&3; read -r d <&3; read -r e <&3; read -r f <&3
 printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" "$e" "$f" > heard"#,
         );
@@ -581,7 +623,12 @@ printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" "$e" "$f" > heard"#,
             options: vec!["yes".into()],
             back: false,
         };
-        told.send(Told::Question { id: 3, asked }).unwrap();
+        told.send(Told::Question {
+            id: 3,
+            asked,
+            request: None,
+        })
+        .unwrap();
         told.send(Told::Closed(3)).unwrap();
         told.send(Told::Refused {
             question: 3,
@@ -595,38 +642,38 @@ printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" "$e" "$f" > heard"#,
             sink.said.lock().unwrap()[1..7],
             [
                 "drive true",
-                "input why did it fail (round 2)",
+                "input host operation",
                 "choose the task changed: summarize | go on",
                 "answer 3: [1]",
                 "interrupt",
-                "follow"
+                "watch"
             ]
         );
         let heard = std::fs::read_to_string(dir.path().join("heard")).unwrap();
         let heard: Vec<Value> = (heard.lines())
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
+        assert_eq!(heard[0]["type"], "runtime");
         assert_eq!(
-            heard,
+            heard
+                .iter()
+                .map(|v| v["event"]["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
             [
-                serde_json::json!({ "started": true }),
-                serde_json::json!({ "progress": "checking" }),
-                serde_json::json!({ "reply": "parse.rs:40" }),
-                serde_json::json!({ "question": {
-                    "id": 3, "text": "go on?", "options": ["yes"], "back": false,
-                }}),
-                serde_json::json!({ "closed": 3 }),
-                serde_json::json!({ "refused": 3, "why": "it is no longer up" }),
+                "started", "progress", "finished", "prompt", "closed", "refused"
             ]
         );
+        assert_eq!(heard[2]["event"]["text"], "parse.rs:40");
+        assert_eq!(heard[3]["event"]["question"], 3);
     }
 
     #[tokio::test]
     async fn overlapping_operations_keep_their_identity_on_the_wire() {
         let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
         let (_, write) = ours.into_split();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let writer = tokio::spawn(tell(write, rx));
+        let (tx, rx) = crate::channel::channel();
+        let (_out, output) = output();
+        let writer = tokio::spawn(tell(write, rx, output));
         for (request, event) in [
             (7, Response::Queued),
             (7, crate::channel::Response::Started),
@@ -700,23 +747,34 @@ printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" "$e" "$f" > heard"#,
         }
         drop(tx);
         let mut lines = BufReader::new(theirs).lines();
-        for expected in [
-            serde_json::json!({"request": 7, "queued": true}),
-            serde_json::json!({"request": 7, "started": true}),
-            serde_json::json!({"request": 8, "started": true}),
-            serde_json::json!({"request": 8, "reply": "status", "status": "done"}),
-            serde_json::json!({"request": 7, "progress": "working"}),
-            serde_json::json!({"request": 7, "reply": "done", "status": "done"}),
-            serde_json::json!({"request": 9, "reply": "stopped", "status": "done"}),
-            serde_json::json!({"request": 10, "reply": "partial answer", "status": "stopped", "reason": ""}),
-            serde_json::json!({"request": 11, "reply": "partial answer", "status": "failed", "error": "connection lost"}),
-            serde_json::json!({"request": 12, "reply": "", "status": "stopped", "reason": "run it again"}),
-            serde_json::json!({"request": 13, "reply": "", "status": "failed", "error": "connection lost"}),
-            serde_json::json!({"request": 14, "reply": "", "status": "done", "exit_code": 0}),
-            serde_json::json!({"request": 15, "reply": "exit 3", "status": "failed", "exit_code": 3}),
+        for (id, phase, text, status) in [
+            (7, "queued", None, None),
+            (7, "started", None, None),
+            (8, "started", None, None),
+            (8, "finished", Some("status"), Some("done")),
+            (7, "progress", Some("working"), None),
+            (7, "finished", Some("done"), Some("done")),
+            (9, "finished", Some("stopped"), Some("done")),
+            (10, "finished", Some("partial answer"), Some("stopped")),
+            (11, "finished", Some("partial answer"), Some("failed")),
+            (12, "finished", Some(""), Some("stopped")),
+            (13, "finished", Some(""), Some("failed")),
+            (14, "finished", Some(""), Some("done")),
+            (15, "finished", Some("exit 3"), Some("failed")),
         ] {
             let line = lines.next_line().await.unwrap().unwrap();
-            assert_eq!(serde_json::from_str::<Value>(&line).unwrap(), expected);
+            let frame: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(frame["type"], "runtime");
+            assert_eq!(frame["event"]["type"], "operation");
+            assert_eq!(frame["event"]["operation"], id);
+            let value = &frame["event"]["phase"];
+            assert_eq!(value["type"], phase);
+            if let Some(text) = text {
+                assert_eq!(value["text"], text)
+            }
+            if let Some(status) = status {
+                assert_eq!(value["status"]["type"], status)
+            }
         }
         writer.await.unwrap();
         assert!(lines.next_line().await.unwrap().is_none());

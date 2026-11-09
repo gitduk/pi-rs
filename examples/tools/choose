@@ -5,8 +5,8 @@
 # question = "Write one short sentence, in your own voice."
 # options = "Supply 2 to 9 meaningful alternatives, one per line. Each option is the exact one-line message the user sends, in their voice."
 # ---
-# The question goes to pi on fd 3 and the call ends: pi answers each `choose`
-# with one line, `{"asked": true}` once it is up, or an `error` saying why not.
+# This script uses an internal runtime prompt. Prefer the built-in input tool
+# for model-owned requests that wait for a response.
 import json
 import os
 import sys
@@ -34,16 +34,22 @@ def main():
     if fd is None:
         fail("not run by pi: there is no one here to ask")
     asked = {
-        "choose": call.get("question") or "",
-        "options": options,
+        "type": "runtime",
+        "command": {
+            "type": "prompt",
+            "text": call.get("question") or "",
+            "options": options,
+            "back": False,
+        },
     }
     # A socket, so no "r+": that wants a file it can seek. One end each way.
     with os.fdopen(os.dup(int(fd)), "w", buffering=1) as to_pi:
         to_pi.write(json.dumps(asked) + "\n")
     with os.fdopen(os.dup(int(fd)), "r") as from_pi:
         said = json.loads(from_pi.readline() or "{}")
-    if not said.get("asked"):
-        fail(f"not put to the user: {said.get('error', 'pi gave no answer')}")
+    event = said.get("event", {}) if said.get("type") == "runtime" else {}
+    if event.get("type") != "prompted":
+        fail(f"not put to the user: {event.get('message', 'pi gave no answer')}")
     print(f"Put to the user with {len(options)} options. End your turn now.")
 
 

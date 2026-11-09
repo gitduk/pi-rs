@@ -20,6 +20,34 @@ use tool::Tier;
 pub trait Input: Send + Sync {
     fn take(&self) -> Option<crate::session::Prompt>;
 
+    /// Register a model call before its executor can run.
+    fn tool_request(
+        &self,
+        _call: &llm::message::ToolCall,
+        _kind: message::ModelRequest,
+        _body: Vec<message::Block>,
+    ) -> Result<Option<std::sync::Arc<message::Message>>, String> {
+        Ok(None)
+    }
+
+    /// Deliver the complete result after it has been retained in native history.
+    fn tool_response(&self, _result: &llm::message::ToolResult) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// User results accepted independently of an executing capability future.
+    fn completed_calls(&self) -> Result<Vec<llm::message::ToolResult>, String> {
+        Ok(vec![])
+    }
+
+    /// Seal unanswered user requests before native cancellation closes open calls.
+    fn settle_calls(
+        &self,
+        _status: message::Status,
+    ) -> Result<Vec<llm::message::ToolResult>, String> {
+        Ok(vec![])
+    }
+
     /// A note for the model, filed only on the way to a request so none sits
     /// unread at the end of a run.
     fn note(&self) -> Option<Note> {

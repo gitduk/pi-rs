@@ -1,71 +1,100 @@
-# fd 3 events
+# fd 3 frames
 
-A script sends events to pi through file descriptor 3 (fd 3), one JSON object per line.
-When pi listens, `PI_EVENTS_FD` is `3`.
+Scripts exchange one JSON object per line through fd 3. `PI_EVENTS_FD=3`
+indicates the connection. `PI_SESSION_ID` identifies the captured session;
+`PI_REQUEST_ID`, when set, identifies the model request that launched the tool.
+A restart retains the original ownership. Never route to a newly active session.
+Only the frames below are accepted. There is no legacy decoder.
 
-| Event | Meaning |
+## Model messages
+
+A background script submits the same message structure used inside the agent:
+
+```json
+{"type":"message","message":{"id":"unique-input-id","session":"session-id","by":null,"at":1790000000000,"kind":{"type":"request","value":{"direction":"to_model","request":"user"}},"body":[{"type":"text","value":"Hello"}]}}
+```
+
+Use `user` only for a person's input, regardless of its source. Text is literal;
+it does not execute host commands. For task or timer input, use `automatic` and
+include a data block `{"type":"data","value":{"source":"timer-id","reason":"timer elapsed","event":"tick-id"}}`.
+`source` identifies the producer, `reason` explains the trigger, and `event`
+identifies this occurrence.
+Assign a unique message ID before sending. A retry must retain the ID and payload.
+`at` is Unix time in milliseconds. `by` is an optional causal message ID.
+
+Acceptance returns `{"type":"accepted","id":"...","request":"...","cursor":{"session":"...","next":0},"response":null}`.
+A completed retry may include its full stored `response`. Rejection returns
+`{"type":"error","id":"...","request":"...","message":"..."}`.
+Acceptance does not mean that execution has started or finished.
+
+Subscribe with `{"type":"observe","session":"...","cursor":null}`.
+The connection first receives `{"type":"observing","cursor":{...}}`, then
+`{"type":"message","cursor":{...},"message":{...}}` for each complete message.
+With no cursor, observation starts at the oldest unfinished model input, or at
+the current end when idle. Use the acceptance cursor to include a submitted
+input even if it completed before subscription. Save each received cursor to
+resume later. A cursor describes the next position. One connection observes one
+session; a new subscription replaces the previous one.
+
+Messages retain their original ID, body, request association, and status.
+A final model response contains the **complete** answer, including text produced
+before tool calls. It is not a remainder after progress. Render each message once
+by ID. Do not echo tool results as model answers. Observe the original input
+request to associate its final response; do not treat every response as a root answer.
+
+A model request to collect user input has this kind:
+
+```json
+{"type":"request","value":{"direction":"from_model","request":{"type":"ask","options":["Allow","Deny"]}}}
+```
+
+Show its body and options while the parent input is running. Submit a response
+whose kind is `{"type":"response","value":{"request":"original-ask-id","status":{"type":"done"}}}`.
+Use the same message envelope with a new ID, the original session, and text or
+image body. Selected options are their original text, not numeric indexes.
+Free text is also valid. Closing without an answer uses `{"type":"stopped"}`
+and an empty body. The first valid response wins. Observe the accepted response
+to close other displays. Model and tool responses cannot be supplied by a channel.
+
+## Runtime operations
+
+Runtime management is separate from model messages:
+
+| Frame | Meaning |
 |---|---|
-| `{"status": "..."}` | Report progress. In foreground mode, this is call progress. In background mode, it is command status. Each new status replaces the previous status. |
-| `{"result": "..."}` | In background mode, deliver one result as a separate turn in the command's checkout. Stdout at exit supplies the final result. |
-| `{"input": "..."}` | Submit a person's line through the session's input parser, including commands. A leading space sends slash-prefixed text as prose. An optional `note` reaches the model before that turn. |
-| `{"interrupt": true}` | Stop the active turn in the command's checkout, as a user stop would. |
-| `{"follow": true}` | Receive replies for all subsequent turns in the command's checkout, including turns opened by other inputs. |
-| `{"drive": true}` | Claim the checkout's turns, or release them with `false`. While claimed, a turn that ends is not the last one, since this command owes it another. |
-| `{"choose": "...", "options": [...]}` | Ask the person a question, as with the `choose` tool: up to 9 options, each the line the person would send. Stopping the command withdraws it. |
-| `{"answer": <id>, "picks": [0]}` | Answer a question a following script was asked, by option position. |
+| `{"type":"runtime","command":{"type":"status","text":"..."}}` | Replace execution progress. Also supported in foreground mode. |
+| `{"type":"runtime","command":{"type":"serve"}}` | Declare a channel or producer service. Send immediately on startup. Exit updates execution status without creating another model input. |
+| `{"type":"runtime","command":{"type":"interrupt"}}` | Stop the captured session's active run. |
+| `{"type":"runtime","command":{"type":"command","line":"..."}}` | Explicitly invoke the host input parser. Use only for a deliberate host operation. |
+| `{"type":"runtime","command":{"type":"watch"}}` | Observe internal runtime prompts, separately from model requests. |
+| `{"type":"runtime","command":{"type":"prompt","text":"...","options":["allow","deny"],"back":true}}` | Collect internal input for a foreground tool or hook. Waits without consuming its execution timeout. |
+| `{"type":"runtime","command":{"type":"answer","question":17,"picks":[0]}}` | Answer an internal runtime prompt by option index. |
+| `{"type":"runtime","command":{"type":"answer_text","question":17,"text":"..."}}` | Answer an internal runtime prompt with text. |
+| `{"type":"runtime","command":{"type":"drive","enabled":true}}` | Claim continuing work for this execution; release with `false`. |
 
-Send content only the person needs, such as a QR code, to stderr.
-The person opens the command to read it.
+Foreground scripts accept only `status` and `prompt`. A background script can
+publish a nonwaiting internal prompt with `back:false`; it cannot wait on a
+foreground prompt. Internal prompts are not model-owned `Ask` requests.
 
-## What pi writes back
+Runtime events use `{"type":"runtime","event":{...}}`:
 
-pi reports each turn opened by an input through fd 3.
-After `follow`, it also reports other turns in the checkout.
-The sequence is `started`, optional `{"progress": "..."}` messages, then `reply`.
+- `{"type":"prompted"}` confirms publication of a nonwaiting internal prompt.
+- `{"type":"answer","text":"allow"}` returns a waiting tool's answer;
+  `text:null` means it was closed. Failure uses `{"type":"error","message":"..."}`.
+- Watchers receive `{"type":"prompt","question":17,"text":"...","options":[...],"back":true}`,
+  then `{"type":"closed","question":17}`. A rejected answer produces
+  `{"type":"refused","question":17,"message":"..."}`.
+- Host operation events carry `type:"operation"`, numeric `operation`, and a
+  `phase` with `type:"queued"`, `"started"`, `"progress"`, or `"finished"`.
+  A finished phase carries text, typed status, and optional numeric `exit_code`.
+  A `linked` event associates a host operation with its semantic input request.
+  Completion marked `model:true` carries no answer; use the semantic response.
 
-When an input must wait, pi writes `{"request": 17, "queued": true}` back through the same fd.
-When execution starts, it writes `{"request": 17, "started": true}` with the same ID.
-pi omits the queued message for inputs that can run immediately.
+Ordinary background commands report stdout at exit as one automatic input;
+a failing exit also includes stderr. A service that submits its own messages
+must declare `serve` to avoid an additional exit input. Startup, reconnect,
+observation, and status updates never open a model turn.
 
-It then writes `{"request": 17, "reply": "...", "status": "done"}`.
-`reply` contains the remaining answer or command output, excluding text already sent as progress.
-It can be empty.
-The final `status` is `done`, `stopped`, or `failed`.
-
-- A stopped response includes `reason`, which can be empty.
-- A runtime failure includes `error`.
-- A shell exit includes numeric `exit_code`.
-  Its `status` is `done` for zero or `failed` otherwise.
-
-Do not parse an exit code from an error message.
-Render completion notices from these fields.
-Do not infer status from `reply`.
-
-Progress messages carry the same `request` ID.
-Progress includes completed model text before tool calls and changed tool or command output.
-pi paces these updates while work continues.
-Track each ID independently when operations overlap.
-Each input receives one reply.
-An input cancelled while queued receives a final stopped reply without a started message.
-After `follow`, the script also receives one reply for every other turn in its checkout, without duplicates.
-
-## Questions
-
-pi answers each `choose` on fd 3 with `{"asked": true}` when the question appears, or with an `error` that explains the failure.
-By default, pi submits the selection as if the person typed it.
-Add `"answer": "back"` to receive the selection instead:
-
-- `{"answer": "<option>"}` for a selected option.
-- The person's own words if they wrote an answer.
-- `{"answer": null}` when the person closes the question.
-
-Use `"answer": "back"` for a script that waits for the person, such as approval before a command runs.
-
-A following script also receives each question in the checkout:
-
-1. `{"question": {"id", "text", "options", "back"}}` when the question appears.
-2. `{"closed": <id>}` when someone answers or withdraws it.
-
-pi submits the answer as if the person typed it.
-If pi rejects it, the script receives `{"refused": <id>, "why"}`.
-An `input` closes every question that does not wait.
+Frames are bounded in size and count. A slow receiver is disconnected; accepted
+requests remain owned by the session. Reconnect with a saved cursor or retry the
+original message. This does not promise automatic retries across host restarts.

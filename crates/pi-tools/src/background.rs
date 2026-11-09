@@ -100,13 +100,64 @@ pub struct Environment {
     pub arguments: Vec<(String, String)>,
 }
 
+/// The checkout and original conversation a command belongs to. A command
+/// started without a conversation can serve its checkout as a runtime service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scope {
+    pub root: PathBuf,
+    pub owner: Option<Owner>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Owner {
+    pub session: String,
+    pub request: Option<message::MessageId>,
+}
+
+impl From<&tool::Ctx> for Scope {
+    fn from(ctx: &tool::Ctx) -> Self {
+        let owner = match ctx.request() {
+            Some(request) => Some(Owner {
+                session: request.session().as_str().to_owned(),
+                request: Some(request.id().clone()),
+            }),
+            None => ctx.session().map(|session| Owner {
+                session: session.to_owned(),
+                request: None,
+            }),
+        };
+        Self {
+            root: ctx.workspace.root().to_path_buf(),
+            owner,
+        }
+    }
+}
+
+impl From<PathBuf> for Scope {
+    fn from(root: PathBuf) -> Self {
+        Self { root, owner: None }
+    }
+}
+
+impl From<&std::path::Path> for Scope {
+    fn from(root: &std::path::Path) -> Self {
+        root.to_path_buf().into()
+    }
+}
+
+impl From<&str> for Scope {
+    fn from(root: &str) -> Self {
+        PathBuf::from(root).into()
+    }
+}
+
 /// Where a call that will outlive its turn is kept: an execution of the checkout at
 /// `root`, which the host lists, stops through `stop`, and delivers from.
 /// Session messages use the handle’s channel.
 pub trait RunSink: Send + Sync {
     fn start(
         &self,
-        root: PathBuf,
+        scope: Scope,
         invocation: Invocation,
         stop: CancellationToken,
     ) -> Arc<dyn RunHandle>;
@@ -128,6 +179,9 @@ pub trait Controls: Send + Sync {
 /// One running command's lifecycle and output.
 pub trait RunHandle: Send + Sync {
     fn id(&self) -> u64;
+    fn owner(&self) -> Option<Owner> {
+        None
+    }
     fn channel(&self) -> &dyn crate::channel::Channel;
     fn watch(&self, output: Peek);
     fn rerun(&self, _how: Rerun, _again: Again) {}

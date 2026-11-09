@@ -1,24 +1,25 @@
-//! One run's life, armed to closed: starting a turn, a `!` line, or a
-//! `/compact` off the loop, and putting the transcript back when it returns.
+//! Present executions owned by the core: starting a turn, a `!` line, or a
+//! `/compact`, and drawing their events and completed results.
 //! Beside them, what is asked off the loop without lending the transcript:
 //! a tool named directly, and an MCP prompt's text.
 
-use agent::session::{Entry as LogEntry, Prompt, Session};
+use agent::session::{Entry as LogEntry, Prompt};
 use ratatui::text::{Line, Span};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
+use super::Tui;
 use super::term::{Deafened, EXIT_GRACE, external_editor, scratch_file};
 use super::view::{Doing, Work, front_view, tail_of, view_at};
-use super::{NO_TRANSCRIPT, Tui};
-use pi_core::driver::{Ended, Origin};
-use pi_core::execution::{self, Change, Output, Request, RunError, RunResult};
-pub(super) use pi_core::execution::{Done, Fetched, Kind, RemovedWorktrees, Started};
-use toolbox::channel::Outcome;
+use pi_core::driver::Origin;
+#[cfg(test)]
+pub(super) use pi_core::execution::Done;
+use pi_core::execution::{self, Change, Output, Request, RunResult};
+pub(super) use pi_core::execution::{Fetched, Kind, RemovedWorktrees, Started};
+use pi_tools::channel::Outcome;
 
 // Where off-loop work reports back: one channel per kind of result.
 pub(super) struct Replies {
-    pub done: UnboundedSender<Done>,
     pub fetched: UnboundedSender<Fetched>,
     pub started: UnboundedSender<Started>,
     pub removed: UnboundedSender<RemovedWorktrees>,
@@ -26,7 +27,6 @@ pub(super) struct Replies {
 
 // The receiving halves of [`Replies`]; the loop reads them.
 pub(super) struct RepliesIn {
-    pub done: UnboundedReceiver<Done>,
     pub fetched: UnboundedReceiver<Fetched>,
     pub started: UnboundedReceiver<Started>,
     pub removed: UnboundedReceiver<RemovedWorktrees>,
@@ -34,19 +34,16 @@ pub(super) struct RepliesIn {
 
 impl Replies {
     pub(super) fn channels() -> (Self, RepliesIn) {
-        let (done, done_rx) = tokio::sync::mpsc::unbounded_channel();
         let (fetched, fetched_rx) = tokio::sync::mpsc::unbounded_channel();
         let (started, started_rx) = tokio::sync::mpsc::unbounded_channel();
         let (removed, removed_rx) = tokio::sync::mpsc::unbounded_channel();
         (
             Self {
-                done,
                 fetched,
                 started,
                 removed,
             },
             RepliesIn {
-                done: done_rx,
                 fetched: fetched_rx,
                 started: started_rx,
                 removed: removed_rx,
@@ -56,22 +53,6 @@ impl Replies {
 }
 
 impl Tui {
-    // The front lane's transcript, for `request`'s run about to start on it.
-    // Missing only when a panic took the transcript and the archive won't
-    // read back; then `request` fails here.
-    fn take_carried(&mut self, request: Request) -> Option<(Session, Request)> {
-        let Some(carried) = self.core.lane_mut().take_session() else {
-            self.ui.flash(NO_TRANSCRIPT);
-            self.complete(
-                request,
-                Output::Notice(String::new()),
-                Outcome::Failed(NO_TRANSCRIPT.into()),
-            );
-            return None;
-        };
-        Some((carried, request))
-    }
-
     // Hands the view to a run about to start: clock running, run figures
     // at zero.
     pub(super) fn arm_view(&mut self, doing: Doing) {
@@ -80,15 +61,15 @@ impl Tui {
         self.core.lane_mut().seed_meter();
     }
 
+    #[cfg(test)]
     pub(super) fn deliver_prompt(
         &mut self,
         ask: Prompt,
         origin: Origin,
         line: Option<String>,
-        done: &UnboundedSender<Done>,
     ) -> bool {
         let request = Request::new(origin, self.core.lane().token());
-        self.deliver_prompt_for(ask, request, line, done)
+        self.deliver_prompt_for(ask, request, line)
     }
 
     pub(super) fn deliver_prompt_for(
@@ -96,11 +77,38 @@ impl Tui {
         ask: Prompt,
         request: Request,
         line: Option<String>,
-        done: &UnboundedSender<Done>,
     ) -> bool {
-        if self.core.lane().is_running() {
+        let admitted = match self.core.lane().messages().admit(request.origin, ask) {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                self.complete(
+                    request,
+                    Output::Notice(String::new()),
+                    Outcome::Failed(error.to_string()),
+                );
+                return false;
+            }
+        };
+        self.deliver_admitted(admitted, request, line)
+    }
+
+    pub(super) fn deliver_admitted(
+        &mut self,
+        admitted: pi_core::execution::messages::AdmittedInput,
+        request: Request,
+        line: Option<String>,
+    ) -> bool {
+        if admitted.message().session().as_str() != self.core.lane().id() {
+            self.cancel_queued(request, "the input belongs to a different session");
+            if request.origin == Origin::Typed {
+                self.ui
+                    .flash("queued input stopped because its session changed");
+            }
+            return false;
+        }
+        if self.core.lane().is_running() || !admitted.is_next() {
             self.enqueue(super::view::Queued {
-                input: super::view::Pending::Prompt(ask),
+                input: super::view::Pending::Prompt(admitted),
                 request,
                 line,
                 note: String::new(),
@@ -109,117 +117,143 @@ impl Tui {
         }
         if let Some(line) = line {
             self.echo(&line);
+        } else if matches!(request.origin, Origin::Message(_)) {
+            let prompt = admitted.prompt();
+            match &prompt.shown {
+                Some(label) => {
+                    let view = front_view(&mut self.views, self.core.lane());
+                    self.ui.submit_relayed(view, label, &prompt.text);
+                }
+                None => self.echo(&prompt.text),
+            }
         }
-        self.start_turn_for(ask, request, done)
+        self.start_turn_for(admitted, request)
     }
 
     #[cfg(test)]
-    pub(super) fn start_turn(&mut self, ask: Prompt, done: &UnboundedSender<Done>) {
+    pub(super) fn start_turn(&mut self, ask: Prompt) {
         let request = Request::new(Origin::Typed, self.core.lane().token());
-        self.start_turn_for(ask, request, done);
+        self.deliver_prompt_for(ask, request, None);
     }
 
     fn start_turn_for(
         &mut self,
-        ask: Prompt,
+        admitted: pi_core::execution::messages::AdmittedInput,
         request: Request,
-        done: &UnboundedSender<Done>,
     ) -> bool {
-        if let Some(said) = self.core.refresh_model_config() {
-            let view = front_view(&mut self.views, self.core.lane());
-            self.ui.adopt_config(&self.core, view);
-            self.notice(pi_core::input::notice(said));
-        }
-        if let Some(said) = self.core.refresh_prompt_files() {
-            self.notice(pi_core::input::notice(said));
-        }
-        if let Some(note) = self.core.lane().drift() {
-            let lane = self.core.lane_mut();
-            let view = front_view(&mut self.views, lane);
-            self.ui.say_note(lane, view, &note);
-        }
-        // Lent to the run for the turn's length.
-        let Some((mut carried, request)) = self.take_carried(request) else {
-            return false;
+        self.drivers
+            .respond(request, pi_tools::channel::Response::Started);
+        self.start_model_on(admitted, request)
+    }
+
+    fn start_model_on(
+        &mut self,
+        admitted: pi_core::execution::messages::AdmittedInput,
+        request: Request,
+    ) -> bool {
+        let started = match self.core.start_model(admitted, request) {
+            Ok(started) => started,
+            Err(why) => {
+                self.complete(request, Output::Notice(String::new()), Outcome::Failed(why));
+                return false;
+            }
         };
-        let id = carried.send(ask);
-        // The stop note the send filed is an entry now:
-        // derive rows like any commit so they show without a rebuild.
-        let view = front_view(&mut self.views, self.core.lane());
-        view.surface.scrollback.bind_prompt(id);
-        let tail = view.surface.tail;
-        let fresh: Vec<LogEntry> = carried
-            .entries()
-            .iter()
-            .filter(|e| tail.is_none_or(|t| e.id() > t) && !matches!(e, LogEntry::Ask { .. }))
-            .cloned()
+        self.present_started(started);
+        true
+    }
+
+    fn present_started(&mut self, started: execution::host::Started) {
+        let request = started.request;
+        let Some(at) = self.core.position_of(request.lane) else {
+            return;
+        };
+        if at == self.core.lanes.front() {
+            if started.reconfigured {
+                let view = front_view(&mut self.views, self.core.lane());
+                self.ui.adopt_config(&self.core, view);
+            }
+            for notice in &started.notices {
+                self.notice(notice.clone());
+            }
+        }
+        self.drivers.link(request, started.message.id().clone());
+        let lane = &self.core.lanes[at];
+        let view = super::view::opened(&mut self.views, lane, &self.ui.paint);
+        view.queued = lane.queue().clone();
+        view.surface.scrollback.bind_prompt(started.input);
+        let fresh: Vec<_> = started
+            .entries
+            .into_iter()
+            .filter(|entry| !matches!(entry, LogEntry::Ask { .. }))
             .collect();
         self.ui.adopt(view, &fresh);
-        let cancel = CancellationToken::new();
-        let ctx = self.core.lane().ctx_for(cancel.clone());
-
-        self.arm_view(Doing::Turn { committed: false });
-        // Read while the agent is still reachable: `/model` may replace it
-        // while this run works, and the run keeps the one it started on.
-        front_view(&mut self.views, self.core.lane()).model_name =
-            self.core.lane_mut().model_name().to_string();
-
-        let agent = self.core.lane_mut().agent().clone();
-        let sent = self.core.lane_mut().sender().clone();
-        let done = done.clone();
-        // Read where the run starts, not carried on the agent: a reload
-        // between two turns reaches the next one this way.
-        let retry = pi_core::core::retry(&self.core.config);
-        let queued = front_view(&mut self.views, self.core.lane()).queued.clone();
-        let input = pi_core::driver::input::Input::new(
-            self.core.lane().root().to_path_buf(),
-            self.drivers.background(),
-            ctx.clone(),
-            move || queued.take_prompt(),
-            self.core.lane().notes(),
-        );
+        view.state.work = Some(Work::new(Doing::Turn { committed: false }));
+        view.model_name = started.model;
         self.drivers.started(request, true);
-        let turn = execution::Turn {
-            request,
-            session: carried,
-            agent,
-            ctx,
-            events: sent,
-            retry,
-            input,
+    }
+
+    pub(super) fn draw_agent(&mut self, token: u64, event: agent::Event) {
+        let Some(at) = self.core.position_of(token) else {
+            return;
         };
-        tokio::spawn(async move {
-            let _ = done.send(turn.run().await);
-        });
-        self.core.lane_mut().begin(cancel);
-        true
+        let lane = self.core.lanes.at_mut(at);
+        self.drivers.observe_for(token, lane.ctx(), &event);
+        let view = super::view::opened(&mut self.views, lane, &self.ui.paint);
+        self.ui.render_event(lane, view, event);
+    }
+
+    pub(super) fn runtime_event(&mut self, event: execution::host::Event) {
+        use execution::host::Event;
+        match event {
+            Event::Activity => {}
+            Event::Started(started) => {
+                if let Some(at) = self.core.position_of(started.request.lane) {
+                    let lane = &self.core.lanes[at];
+                    let view = super::view::opened(&mut self.views, lane, &self.ui.paint);
+                    if let Some(LogEntry::Ask { ask, .. }) = started
+                        .entries
+                        .iter()
+                        .find(|entry| entry.id() == started.input)
+                    {
+                        match (&started.line, &ask.shown) {
+                            (Some(line), _) => self.ui.submit(view, line),
+                            (None, Some(label)) => self.ui.submit_relayed(view, label, &ask.text),
+                            (None, None) => self.ui.submit(view, &ask.text),
+                        }
+                    }
+                }
+                self.present_started(started);
+            }
+            Event::Agent { lane, event } => self.draw_agent(lane, event),
+            Event::Settled(settled) => self.present_settlement(settled),
+            Event::Deferred(deferred) => {
+                if let Some(at) = self.core.position_of(deferred.lane) {
+                    self.say_notice_of(
+                        at,
+                        &format!("background result is waiting: {}", deferred.message),
+                    );
+                }
+            }
+            Event::Rejected { request, message } => self.complete(
+                request,
+                Output::Notice(String::new()),
+                Outcome::Failed(message),
+            ),
+            Event::Stopping { lane } => {
+                if let Some(work) = &mut view_at(&mut self.views, lane).state.work {
+                    work.stopping = true;
+                }
+            }
+        }
     }
 
     // Runs a `!` command off the loop, so the screen stays live. Borrows
     // the transcript like a turn — the result is filed in it meanwhile.
-    pub(super) fn start_bash(
-        &mut self,
-        command: String,
-        request: Request,
-        done: &UnboundedSender<Done>,
-    ) {
-        let Some((carried, request)) = self.take_carried(request) else {
-            return;
-        };
-        let cancel = CancellationToken::new();
-        let ctx = self.core.lane_mut().ctx_for(cancel.clone());
-        // A `!` forecloses `Deed::Unsend`, the only writer of
-        // `Run::Running.unsend`, which it has no prompt to honour.
-        self.arm_view(Doing::Bash);
-
-        let done = done.clone();
-        let shell = toolbox::bash::Bash::new(std::sync::Arc::new(
-            pi_core::driver::background::Commands::new(self.drivers.background()),
-        ));
-        tokio::spawn(async move {
-            let _ = done.send(execution::bash(request, carried, ctx, command, shell).await);
-        });
-        self.core.lane_mut().begin(cancel);
+    pub(super) fn start_bash(&mut self, command: String, request: Request) {
+        match self.core.start_bash(request, command) {
+            Ok(()) => self.arm_view(Doing::Bash),
+            Err(why) => self.complete(request, Output::Notice(String::new()), Outcome::Failed(why)),
+        }
     }
 
     // Runs the tool the user named off the loop, beside whatever turn is going.
@@ -336,7 +370,7 @@ impl Tui {
 
     // A fetched prompt starts its turn only on the lane it was asked on,
     // still in front and idle; otherwise it is dropped, and said so.
-    pub(super) fn land_fetched(&mut self, fetched: Fetched, done: &UnboundedSender<Done>) {
+    pub(super) fn land_fetched(&mut self, fetched: Fetched) {
         let Fetched {
             request,
             typed,
@@ -350,10 +384,15 @@ impl Tui {
             }
             Ok(send) if front && !self.core.lane().is_running() => {
                 self.echo(&typed);
-                self.start_turn_for(
-                    super::clipboard::prompt(send, Some(typed), &self.ui.images),
+                let images = if request.origin == Origin::Typed {
+                    &self.ui.images[..]
+                } else {
+                    &[]
+                };
+                self.deliver_prompt_for(
+                    super::clipboard::prompt(send, Some(typed), images),
                     request,
-                    done,
+                    None,
                 );
             }
             Ok(_) if !front => {
@@ -379,26 +418,11 @@ impl Tui {
 
     // Runs `/compact` off the loop — summarizing what it drops is a model
     // call — while the lane keeps drawing and serving the others.
-    pub(super) fn start_compact(
-        &mut self,
-        focus: Option<String>,
-        request: Request,
-        done: &UnboundedSender<Done>,
-    ) {
-        let Some((carried, request)) = self.take_carried(request) else {
-            return;
-        };
-        let cancel = CancellationToken::new();
-        self.arm_view(Doing::Compact);
-        let agent = self.core.lane().agent().clone();
-        let session_id = Some(self.core.lane().id().to_string());
-        let done = done.clone();
-        let stop = cancel.clone();
-        tokio::spawn(async move {
-            let _ = done
-                .send(execution::compact(request, carried, agent, focus, session_id, stop).await);
-        });
-        self.core.lane_mut().begin(cancel);
+    pub(super) fn start_compact(&mut self, focus: Option<String>, request: Request) {
+        match self.core.start_compact(request, focus) {
+            Ok(()) => self.arm_view(Doing::Compact),
+            Err(why) => self.complete(request, Output::Notice(String::new()), Outcome::Failed(why)),
+        }
     }
 
     // Hands the terminal to `$EDITOR` on `path`, on its own thread (a
@@ -414,7 +438,7 @@ impl Tui {
         let _parked = self.hold.park().await;
         let _deaf = Deafened::new();
         self.ui.screen.leave();
-        let ran = tokio::task::spawn_blocking({
+        let mut editor = tokio::task::spawn_blocking({
             let path = path.to_path_buf();
             move || {
                 if let Some(parent) = path.parent() {
@@ -435,8 +459,13 @@ impl Tui {
                 }
                 cmd.status()
             }
-        })
-        .await;
+        });
+        let ran = loop {
+            tokio::select! {
+                result = &mut editor => break result,
+                event = self.core.next_runtime_event() => self.runtime_event(event),
+            }
+        };
         let resumed = self.ui.screen.resume();
         self.ui.show_mode();
         let ran = match ran {
@@ -548,53 +577,53 @@ impl Tui {
 
     // A run came home. Every kind settles on the lane that lent it the
     // transcript, whichever lane is on screen by the time it lands.
+    #[cfg(test)]
     pub(super) async fn settle(&mut self, done: Done) {
         // Events arrive before the end that follows them, so both race;
         // take what's waiting first, or a tool row freezes mid-abandon.
         self.serve_lanes().await;
-        let completion = done.completion();
-        let Some(lane) = self.core.position_of(done.request.lane) else {
-            if let Some(completion) = completion {
-                self.present(completion);
-            }
-            return;
-        };
-        let unsend = self.core.lanes.at_mut(lane).finish();
+        let settled = self.core.settle_execution(done);
+        self.present_settlement(settled);
+    }
 
-        match done.kind {
-            Kind::Turn | Kind::Bash { .. } | Kind::BashBackground { .. } => {
-                self.settle_run(lane, done, unsend).await
+    pub(super) fn present_settlement(&mut self, settled: execution::host::Settlement) {
+        use execution::host::Settlement;
+        let settled = match settled {
+            Settlement::Ignored => return,
+            Settlement::Removed(completion) => {
+                if let Some(completion) = completion {
+                    self.present(completion);
+                }
+                return;
             }
-            Kind::Compact(_) => self.settle_compact(lane, done).await,
+            Settlement::Returned(settled) => settled,
+        };
+        let completion = settled.completion();
+        self.show_recovery(&settled);
+        match settled.kind {
+            Kind::Turn | Kind::Bash { .. } | Kind::BashBackground { .. } => {
+                self.settle_run(settled)
+            }
+            Kind::Compact(_) => self.settle_compact(settled),
         }
         if let Some(completion) = completion {
             self.present(completion);
         }
     }
 
-    // A turn or `!` ended: puts the transcript back and saves it; shows
-    // the end only if that lane is on screen. Saving can't wait for that.
-    async fn settle_run(&mut self, lane: usize, done: Done, unsend: bool) {
-        let how = if unsend { Ended::Unsent } else { done.ended() };
-        let Done { ran, kind, .. } = done;
-        // Only a turn is a request the model was working on, and only a turn's
-        // ending is worth telling it about.
+    // Draw the end after the core has restored and saved the owning session.
+    fn settle_run(&mut self, settled: execution::host::Returned) {
+        let execution::host::Returned {
+            lane,
+            kind,
+            result: out,
+            ended: how,
+            unsend,
+            returned: ran_back,
+            ..
+        } = settled;
         let was_turn = matches!(kind, Kind::Turn);
         let was_bash = matches!(kind, Kind::Bash { .. } | Kind::BashBackground { .. });
-
-        // Only a run that came back says why it ended; the archive rebuild
-        // below has the same transcript and knows nothing about the run.
-        let ran_back = ran.is_some();
-
-        // A panic drops the carried transcript; the archive is the last
-        // good copy, so recovering it instead avoids overwriting it later.
-        let (recovered, out) = match ran {
-            Some((session, out)) => {
-                self.core.lanes.at_mut(lane).return_session(session);
-                (true, out)
-            }
-            None => (self.recover_session(lane, "run"), Err(RunError::Crashed)),
-        };
 
         // The view drew every row the run left, in front or not, so its cursor
         // is the end of what came home — or the next adopt draws them again.
@@ -611,19 +640,6 @@ impl Tui {
             surface.tail = session.and_then(tail_of);
         }
 
-        // A panic, or an unsent prompt, has nothing to tell the model; nor
-        // does a user-stopped `!`, which was never the model's request.
-        if ran_back && !unsend && was_turn && self.core.lanes[lane].session().is_some() {
-            self.core.lanes.at_mut(lane).note_ended(&how);
-        }
-
-        // Saved either way — an interrupted turn is worth keeping — unless
-        // the transcript never came back, which would overwrite the disk copy.
-        // A failure shows on the bar until a save lands; the error is in `/status`.
-        if recovered {
-            self.core.save_lane_behind(lane);
-        }
-
         // A `!` draws its own rows as it lands, so its cursor is wherever the
         // transcript that came home ends: the archive's end if it panicked.
         if was_bash && let Some(session) = self.core.lanes[lane].session() {
@@ -634,14 +650,6 @@ impl Tui {
         // Before the split, so an off-screen round still comes due. A run
         // that never came back is named the failure it stood in for.
         let token = self.core.lanes[lane].token();
-        match &how {
-            Ended::Done => tracing::info!(target: "pi::loop", lane = token, "run ended"),
-            Ended::Stopped => tracing::info!(target: "pi::loop", lane = token, "run stopped"),
-            Ended::Unsent => tracing::info!(target: "pi::loop", lane = token, "run unsent"),
-            Ended::Failed(why) => {
-                tracing::warn!(target: "pi::loop", lane = token, error = %why, "run failed")
-            }
-        }
         self.drivers.turn_ended(token, &how);
 
         let ok = out.is_ok();
@@ -669,60 +677,29 @@ impl Tui {
         // a row landed before it would go with the old drawing.
     }
 
-    async fn settle_compact(&mut self, lane: usize, done: Done) {
-        let Done { ran, kind, .. } = done;
-        let Kind::Compact(report) = kind else {
-            unreachable!("only a compact settles here")
-        };
-        // The lane it was started on may not be the one on screen any more;
-        // give it back its transcript either way.
-        let back = match ran {
-            Some((session, _)) => {
-                self.core.lanes.at_mut(lane).return_session(session);
-                true
-            }
-            None => self.recover_session(lane, "compaction"),
-        };
-
-        if report.is_some() && back {
-            self.core.save_lane_behind(lane);
-        }
-        // The pass is over, so the clock stops. What it was driving — the
-        // live region — already went with the turn.
-        view_at(&mut self.views, self.core.lanes[lane].token())
+    fn settle_compact(&mut self, settled: execution::host::Returned) {
+        view_at(&mut self.views, self.core.lanes[settled.lane].token())
             .state
             .work = None;
     }
 
-    // Puts back the archive when a run never returned the borrowed
-    // transcript, naming it `verb`. Says if it's safe to save over.
-    fn recover_session(&mut self, lane: usize, verb: &str) -> bool {
-        let on = &self.core.lanes[lane];
-        // This lane's own copy, the one it saves to.
-        let path = self.core.store.path_of(on.root(), on.id());
-        match pi_store::session::Store::read(&path) {
-            Ok(stored) => {
-                self.core
-                    .lanes
-                    .at_mut(lane)
-                    .return_session(stored.into_session());
-                self.say_notice_of(
-                    lane,
-                    &format!("the {verb} did not finish — back to the transcript as last saved"),
-                );
-                true
+    fn show_recovery(&mut self, settled: &execution::host::Returned) {
+        use execution::host::Recovery;
+        let verb = if matches!(settled.kind, Kind::Compact(_)) {
+            "compaction"
+        } else {
+            "run"
+        };
+        let text = match &settled.recovery {
+            Recovery::Unneeded => return,
+            Recovery::Restored => {
+                format!("the {verb} did not finish — back to the transcript as last saved")
             }
-            Err(why) => {
-                self.say_notice_of(
-                    lane,
-                    &format!(
-                        "the {verb} did not finish and its transcript could not be read back \
-                         ({why}) — /new or /resume to use this checkout again"
-                    ),
-                );
-                false
-            }
-        }
+            Recovery::Failed(why) => format!(
+                "the {verb} did not finish and its transcript could not be read back ({why}) — /new or /resume to use this checkout again"
+            ),
+        };
+        self.say_notice_of(settled.lane, &text);
     }
 
     // Draw the end of a run into its lane's view, on screen or not.
@@ -764,57 +741,29 @@ impl Tui {
     }
 
     // Shutdown must preserve transcripts and the cause of stopped executions.
-    pub(super) async fn settle_all(&mut self, done: &mut UnboundedReceiver<Done>, why: &str) {
-        for view in self.views.values() {
-            while let Some(queued) = view.queued.pop_front() {
-                self.cancel_queued(queued.request, why);
-            }
+    pub(super) async fn settle_all(&mut self, why: &str) {
+        for request in self.core.stop_runtime() {
+            self.cancel_queued(request, why);
         }
-        // A note filed while idle would otherwise wait for a turn that never comes.
         self.core.save_filed();
-        let mut left = 0;
-        for lane in self.core.lanes.all() {
-            if lane.is_running() {
-                lane.cancel();
-                left += 1;
-            }
-        }
-        if left > 0 {
+        if self.core.runtime_busy() {
             self.notice("stopping — saving what the runs have written".to_string());
             self.ui.flush(
                 self.core.lane(),
                 front_view(&mut self.views, self.core.lane()),
             );
             let waited = tokio::time::timeout(EXIT_GRACE, async {
-                while left > 0 {
-                    match done.recv().await {
-                        Some(ended) => {
-                            self.settle(ended).await;
-                            left -= 1;
-                        }
-                        None => break,
-                    }
+                while self.core.runtime_busy() {
+                    let event = self.core.next_runtime_event().await;
+                    self.runtime_event(event);
                 }
             })
             .await;
             if waited.is_err() {
-                // A transcript still held by a run cannot be saved here.
                 self.ui.screen.leave();
-                eprintln!("{left} run(s) did not stop in time; their last save is what is on disk");
+                eprintln!("some runs did not stop in time; their last save is what is on disk");
             }
         }
-        // A settling turn may start another command before shutdown completes.
-        let executions = self.drivers.background();
-        for lane in self.core.lanes.all_mut() {
-            let stopped = executions.stop_running(lane.root(), why);
-            if !stopped.is_empty() {
-                lane.push_note(&format!(
-                    "{why} pi stopped running background commands {} during shutdown. \
-                     They did not finish normally; their results will not be reported.",
-                    stopped.join(", ")
-                ));
-            }
-        }
-        self.core.save_filed();
+        self.core.finish_runtime_shutdown(why);
     }
 }

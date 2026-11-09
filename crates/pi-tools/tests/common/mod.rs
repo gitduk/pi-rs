@@ -4,12 +4,12 @@
 //! binary does not call is not dead — it is another binary's.
 #![allow(dead_code)]
 
+use pi_tools::read::Read;
 use tool::{Ctx, Tool, Workspace};
-use toolbox::read::Read;
 
 /// A shell for short command tests; a detached process would be a test leak.
-pub fn bash() -> toolbox::bash::Bash {
-    toolbox::bash::Bash::foreground()
+pub fn bash() -> pi_tools::bash::Bash {
+    pi_tools::bash::Bash::foreground()
 }
 
 /// A file as a model would read it, which is also what lets a later edit run.

@@ -20,7 +20,7 @@ async fn nothing_is_elided_without_somewhere_to_recover_it_from() {
     let (mut elided, mut whole) = (false, false);
     for pad in 0..900 {
         std::fs::write(&path, format!("{bulk}{}\n", "y".repeat(pad))).unwrap();
-        let out = toolbox::read::Read
+        let out = pi_tools::read::Read
             .execute(json!({ "path": "a.txt", "limit": 2000 }), &c)
             .await
             .unwrap()

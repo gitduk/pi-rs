@@ -6,9 +6,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use pi_core::driver::background::{self, Commands, State, Table};
+use pi_tools::background::{Again, RunSink};
 use tokio_util::sync::CancellationToken;
 use tool::{Ctx, Workspace};
-use toolbox::background::{Again, RunSink};
 
 use super::*;
 
@@ -100,11 +100,11 @@ fn carry_command(stopped: bool) {
             cwd: root.to_path_buf(),
             ..Again::default()
         };
-        let rerun = toolbox::bash::rerun(again.clone(), &ctx);
+        let rerun = pi_tools::bash::rerun(again.clone(), &ctx);
         let stop = CancellationToken::new();
         let execution = Commands::new(table.clone()).start(
-            root.to_path_buf(),
-            toolbox::background::Invocation::shell("serve"),
+            root.to_path_buf().into(),
+            pi_tools::background::Invocation::shell("serve"),
             stop.clone(),
         );
         let id = execution.id();
@@ -139,7 +139,7 @@ fn carry_command(stopped: bool) {
         let execution = carried.into_iter().next().unwrap();
         let id = execution.id;
         assert!(execution.stopped);
-        let rerun = toolbox::bash::rerun(execution.again.clone(), &ctx);
+        let rerun = pi_tools::bash::rerun(execution.again.clone(), &ctx);
         table.revive(execution, rerun);
         assert_eq!(table.background(root)[0].state, State::Stopped);
         table.restart(root, id).unwrap();
@@ -171,8 +171,8 @@ async fn foreground_shells_are_isolated_and_cancel_with_their_owner() {
     let _second = second.cancel.clone().drop_guard();
     let mut runs = Vec::new();
     for (index, ctx) in [&first, &second].into_iter().enumerate() {
-        let registry = core::shells::foreground(toolbox::builtin());
-        let shell = registry.get(toolbox::bash::Bash::NAME).unwrap();
+        let registry = core::shells::foreground(pi_tools::builtin());
+        let shell = registry.get(pi_tools::bash::Bash::NAME).unwrap();
         let command = format!("trap '' TERM; sleep 30 & echo \"$$ $!\" > pids{index}; wait");
         let context = ctx.clone();
         let call = tokio::spawn(async move {
@@ -214,8 +214,8 @@ async fn cancelling_a_foreground_shell_stops_the_process_group() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
         let _stop = ctx.cancel.clone().drop_guard();
-        let registry = core::shells::foreground(toolbox::builtin());
-        let bash = registry.get(toolbox::bash::Bash::NAME).unwrap();
+        let registry = core::shells::foreground(pi_tools::builtin());
+        let bash = registry.get(pi_tools::bash::Bash::NAME).unwrap();
         let call = {
             let ctx = ctx.clone();
             tokio::spawn(async move {

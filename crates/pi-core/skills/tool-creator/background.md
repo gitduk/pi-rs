@@ -22,23 +22,43 @@ Read `events.md` for the protocol.
 # [required]
 # url = "The page to watch."
 # ---
-import hashlib, json, os, sys, time, urllib.request
+import hashlib, json, os, sys, time, urllib.request, uuid
 
 if os.environ.get("PI_EVENTS_FD") != "3":
     sys.exit("needs pi to keep it running")
-url = json.load(sys.stdin)["url"]
-fd3 = os.fdopen(3, "w")
+fd3 = os.fdopen(os.dup(3), "w")
+replies = os.fdopen(os.dup(3), "r")
 def say(**m):
     fd3.write(json.dumps(m) + "\n"); fd3.flush()
 
-say(status=f"watching {url}; each change arrives as a turn")
+say(type="runtime", command={"type":"serve"})
+url = json.load(sys.stdin)["url"]
+say(type="runtime", command={"type":"status", "text":f"watching {url}"})
+source = "watch:" + uuid.uuid4().hex
 seen = None
 while True:
     digest = hashlib.sha256(urllib.request.urlopen(url).read()).hexdigest()
     if seen and digest != seen:
-        say(result=f"{url} changed")
+        message_id = uuid.uuid4().hex
+        say(type="message", message={
+            "id":message_id, "session":os.environ["PI_SESSION_ID"],
+            "by":os.environ.get("PI_REQUEST_ID"), "at":time.time_ns() // 1_000_000,
+            "kind":{"type":"request", "value":{"direction":"to_model", "request":"automatic"}},
+            "body":[{"type":"text", "value":f"{url} changed"},
+                    {"type":"data", "value":{"source":source, "reason":"content changed", "event":uuid.uuid4().hex}}],
+        })
+        # Drain the receipt before producing another occurrence.
+        while True:
+            line = replies.readline()
+            if not line:
+                sys.exit("host frame connection closed")
+            reply = json.loads(line)
+            if reply.get("type") == "error":
+                sys.exit(reply["message"])
+            if reply.get("type") == "accepted" and reply.get("id") == message_id:
+                break
     seen = digest
-    say(status=f"checked {time.strftime('%H:%M')}")
+    say(type="runtime", command={"type":"status", "text":f"checked {time.strftime('%H:%M')}"})
     time.sleep(300)
 ```
 
@@ -51,8 +71,9 @@ A stop request sends SIGTERM, then SIGKILL, to the command's process group.
 Use bash controls to read output, stop, or restart the command.
 Restart reuses the original JSON input and reloads the tool directory’s `.env`.
 
-The events `result`, `input`, `interrupt`, and `follow` require background mode.
-At exit, stdout becomes the command's final result.
+Model `message`, `observe`, and runtime controls require background mode.
+Without `serve`, stdout at exit becomes the command's final automatic input.
+A producer that submits its own messages declares `serve`; its exit is status only.
 A nonzero exit also includes stderr.
 
 In background mode, `status` and stderr are for the user during execution.
@@ -62,11 +83,11 @@ Only a failing exit sends stderr to the model.
 
 The script manages its own persistent state under `$PI_HOME`.
 Restrict saved login tokens to owner access.
-Use `input` only for words a person typed to this session.
-Send data discovered by the command as `result`.
+Use `ToModel(user)` for words a person typed to this session.
+Use `ToModel(automatic)` with a stable source and event for discovered data.
 
 One-shot invocations and subagents do not offer background script wrappers.
-Foreground scripts can still use `status` and `choose`.
+Foreground scripts can use runtime `status` and internal `prompt`.
 
 To check the event protocol manually, redirect fd 3 to the terminal:
 `echo '{"url":"https://example.com"}' | PI_EVENTS_FD=3 python3 <tools-dir>/watch 3>&1`.

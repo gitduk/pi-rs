@@ -6,9 +6,9 @@
 mod common;
 
 use common::spilling as ctx;
+use pi_tools::fetch::Fetch;
 use serde_json::json;
 use tool::{Tool, ToolError};
-use toolbox::fetch::Fetch;
 
 // Serve `response` verbatim to one caller, and give back the URL to call.
 async fn serving(response: &'static str) -> String {

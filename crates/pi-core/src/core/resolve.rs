@@ -21,6 +21,8 @@ use pi_store::{config, journal};
 /// command line fixed for the whole run. A reload recomputes exactly this.
 #[derive(Clone)]
 pub struct Resolved {
+    /// Request policy resolved for this workspace, retained when another is selected.
+    pub retry: agent::Retry,
     /// What the agent runs on: the tools, the prompt, the ceiling, the effort.
     /// A subagent derives its own from this one.
     pub brief: std::sync::Arc<agent::Briefing>,
@@ -53,7 +55,7 @@ pub struct Resolved {
     pub catalog_generation: super::catalog::Generation,
     /// The script directories `brief` reads, for a lane to swap for ones whose
     /// background wrappers are armed: the subagent keeps these.
-    pub scripts: Vec<Arc<toolbox::scripts::Dir>>,
+    pub scripts: Vec<Arc<pi_tools::scripts::Dir>>,
     /// What the prompt was told from files, held through every reload.
     pub prompt_files: Arc<PromptFiles>,
     /// Where skills are read from, live; `None` under `--no-skills`.
@@ -265,7 +267,7 @@ pub fn resolve(
     let read_from = watched(pinned, root);
 
     // Sources offer their tools in order, built-ins first.
-    let mut registry = toolbox::builtin();
+    let mut registry = pi_tools::builtin();
     // Whether two directories are the one directory, seen from different
     // routes: a home that is the checkout's own `.pi` would otherwise be read
     // twice and every skill and script in it reported as colliding with itself.
@@ -331,12 +333,12 @@ pub fn resolve(
     let home_tools = pi_store::dir().map(|root| root.join("tools"));
     let project_tools = config::project_dir(root, "tools")
         .filter(|dir| !home_tools.as_deref().is_some_and(|home| same(dir, home)));
-    let script_dirs: Vec<(Arc<toolbox::scripts::Dir>, bool)> =
+    let script_dirs: Vec<(Arc<pi_tools::scripts::Dir>, bool)> =
         project_first(project_tools.as_ref(), home_tools)
             .into_iter()
             .map(|(dir, project)| {
-                notes.extend(toolbox::scripts::env::loose(&dir));
-                (Arc::new(toolbox::scripts::Dir::new(dir)), project)
+                notes.extend(pi_tools::scripts::env::loose(&dir));
+                (Arc::new(pi_tools::scripts::Dir::new(dir)), project)
             })
             .collect();
     let mut project_scripts = Vec::new();
@@ -441,13 +443,14 @@ pub fn resolve(
 
     let hooks = crate::core::hooks::Declared::new(&config.hooks, workspace);
     Ok(Resolved {
+        retry: crate::core::retry(config),
         brief: std::sync::Arc::new(agent::Briefing {
             registry: registry.within(tier),
             system,
             summarize: prompt_files.prompt("summarize").into_owned(),
             effort,
             approver: std::sync::Arc::new(agent::Ceiling(tier)),
-            hooks: hooks.arm(std::sync::Arc::new(toolbox::channel::NoOne)),
+            hooks: hooks.arm(std::sync::Arc::new(pi_tools::channel::NoOne)),
         }),
         prompt_blocks,
         hooks,
@@ -1043,7 +1046,7 @@ mod tests {
                 .expect("a tool example");
             std::fs::write(dir.path().join(filename), example).unwrap();
         }
-        let (found, skipped) = toolbox::scripts::discover_in(dir.path());
+        let (found, skipped) = pi_tools::scripts::discover_in(dir.path());
         assert!(skipped.is_empty(), "{skipped:?}");
         assert_eq!(found.len(), 2);
         for script in found {

@@ -290,11 +290,11 @@ async fn a_panicked_bang_does_not_lay_its_transcript_down_again() {
         ran: None,
     })
     .await;
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    tui.start_turn(
-        crate::tui::clipboard::prompt("the next question".into(), None, &[]),
-        &tx,
-    );
+    tui.start_turn(crate::tui::clipboard::prompt(
+        "the next question".into(),
+        None,
+        &[],
+    ));
 
     let rows = lane_rows(&mut tui, token);
     assert_eq!(
@@ -717,10 +717,10 @@ fn a_driven_lane_has_not_finished() {
     let (_run_dir, mut behind) = a_running_lane();
     behind.set_worktree(Some("fix-mem".into()));
     behind.end(true, false);
-    let execution = toolbox::background::RunSink::start(
+    let execution = pi_tools::background::RunSink::start(
         &pi_core::driver::background::Commands::new(tui.drivers.background()),
-        behind.root().to_path_buf(),
-        toolbox::background::Invocation::shell("driver"),
+        behind.root().to_path_buf().into(),
+        pi_tools::background::Invocation::shell("driver"),
         Default::default(),
     );
     execution.channel().drive(true);
@@ -1074,15 +1074,13 @@ async fn leaving_with_a_run_in_flight_takes_the_transcript_back() {
 
     let mut carried = Session::new();
     carried.prompt("go");
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    tx.send(crate::tui::run::Done {
+    tui.core.fixture_completion(crate::tui::run::Done {
         request: pi_core::execution::Request::new(pi_core::driver::Origin::Typed, token),
         kind: crate::tui::run::Kind::Turn,
         ran: Some((carried, Ok(llm::stream::Usage::default()))),
-    })
-    .expect("the execution reports");
+    });
 
-    tui.settle_all(&mut rx, "The user exited pi.").await;
+    tui.settle_all("The user exited pi.").await;
 
     assert!(!tui.core.lane().is_running(), "the lane is idle again");
     assert_eq!(
@@ -1181,12 +1179,10 @@ async fn a_queued_line_remembers_the_command_it_came_from() {
         None,
         "",
     );
-    let (done, _) = tokio::sync::mpsc::unbounded_channel();
     tui.deliver_prompt(
         crate::tui::clipboard::prompt("typed here".into(), None, &[]),
         Origin::Typed,
         None,
-        &done,
     );
 
     let from: Vec<_> = view_at(&mut tui.views, token)
@@ -1219,7 +1215,6 @@ async fn a_typed_followup_waits_for_the_run_and_survives_cancellation() {
         wake,
         crate::tui::Wake::Do(Asked::Core(Intent::Prompt(_)), _)
     ));
-    let (done, mut ended) = tokio::sync::mpsc::unbounded_channel();
     let ask = agent::session::Prompt {
         text: "model text".into(),
         shown: Some("new direction".into()),
@@ -1228,13 +1223,8 @@ async fn a_typed_followup_waits_for_the_run_and_survives_cancellation() {
         }],
         relayed: Some("original provenance".into()),
     };
-    assert!(!tui.deliver_prompt(
-        ask.clone(),
-        Origin::Typed,
-        Some("new direction".into()),
-        &done
-    ));
-    assert!(ended.try_recv().is_err(), "no second run was started");
+    assert!(!tui.deliver_prompt(ask.clone(), Origin::Typed, Some("new direction".into()),));
+    assert!(!tui.core.runtime_busy(), "no second run was started");
     assert!(tui.core.lane_mut().stop(false));
     tui.settle(crate::tui::run::Done {
         request: pi_core::execution::Request::new(pi_core::driver::Origin::Typed, token),
@@ -1260,24 +1250,19 @@ async fn a_typed_followup_waits_for_the_run_and_survives_cancellation() {
     let crate::tui::view::Pending::Prompt(waited) = queued.input else {
         panic!("the prompt waits as it was read");
     };
-    assert_eq!(waited, ask);
-    assert!(tui.deliver_prompt_for(waited, queued.request, queued.line, &done));
-    let completed = tokio::time::timeout(std::time::Duration::from_secs(2), ended.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    tui.settle(completed).await;
+    assert_eq!(waited.prompt(), &ask);
+    assert!(tui.deliver_admitted(waited, queued.request, queued.line));
+    let completed = completed_run(&mut tui).await;
+    tui.present_settlement(pi_core::execution::host::Settlement::Returned(completed));
     assert_eq!(tui.core.lane().session().unwrap().last_prompt(), Some(&ask));
 }
 
-// Steering can pass waiting operations, preserves its own order and prompt
-// content, and never consumes another lane's messages or remote input.
+// New inputs retain admission order and remain isolated from other lanes.
 #[test]
-fn followups_pass_waiting_commands_and_remote_input_without_entering_another_lane() {
+fn followups_wait_behind_commands_and_remote_input_in_their_own_lane() {
     let dir = tempfile::tempdir().unwrap();
     let mut tui = surface(dir.path());
     let queue = front_view(&mut tui.views, tui.core.lane()).queued.clone();
-    let (done, _) = tokio::sync::mpsc::unbounded_channel();
     tui.admit(
         Asked::Core(Intent::Bash("echo first".into())),
         Origin::Typed,
@@ -1294,12 +1279,11 @@ fn followups_pass_waiting_commands_and_remote_input_without_entering_another_lan
     ask.images.push(llm::message::Image::Url {
         url: "https://example.test/image.png".into(),
     });
-    tui.deliver_prompt(ask.clone(), Origin::Typed, Some("after bash".into()), &done);
+    tui.deliver_prompt(ask.clone(), Origin::Typed, Some("after bash".into()));
     tui.deliver_prompt(
         crate::tui::clipboard::prompt("second direction".into(), None, &[]),
         Origin::Typed,
         Some("second direction".into()),
-        &done,
     );
     assert_eq!(queue.lock().len(), 4);
 
@@ -1308,7 +1292,6 @@ fn followups_pass_waiting_commands_and_remote_input_without_entering_another_lan
         crate::tui::clipboard::prompt("another lane".into(), None, &[]),
         Origin::Typed,
         Some("another lane".into()),
-        &done,
     );
     assert_eq!(
         front_view(&mut tui.views, tui.core.lane())
@@ -1318,25 +1301,26 @@ fn followups_pass_waiting_commands_and_remote_input_without_entering_another_lan
         1
     );
 
-    assert_eq!(queue.take_prompt(), Some(ask));
-    assert_eq!(queue.take_prompt().unwrap().text, "second direction");
-    assert!(
-        queue.take_prompt().is_none(),
-        "remote input is not steering"
-    );
     assert!(matches!(
         queue.pop_front().unwrap().input,
         crate::tui::view::Pending::Intent(Intent::Bash(_))
     ));
     assert_eq!(queue.pop_front().unwrap().request.origin, Origin::Input(1));
+    let crate::tui::view::Pending::Prompt(pending) = queue.pop_front().unwrap().input else {
+        panic!("expected prompt")
+    };
+    assert_eq!(pending.prompt(), &ask);
+    let crate::tui::view::Pending::Prompt(pending) = queue.pop_front().unwrap().input else {
+        panic!("expected prompt")
+    };
+    assert_eq!(pending.prompt().text, "second direction");
     assert!(queue.is_empty());
     assert_eq!(
         front_view(&mut tui.views, tui.core.lane())
             .queued
-            .take_prompt()
-            .unwrap()
-            .text,
-        "another lane"
+            .lock()
+            .len(),
+        1
     );
 }
 
@@ -1346,7 +1330,6 @@ async fn up_inside_a_multiline_draft_keeps_steering_and_waiting_commands() {
 
     let dir = tempfile::tempdir().unwrap();
     let mut tui = surface(dir.path());
-    let (done, _) = tokio::sync::mpsc::unbounded_channel();
     tui.admit(
         Asked::Core(Intent::Bash("echo first".into())),
         Origin::Typed,
@@ -1357,7 +1340,6 @@ async fn up_inside_a_multiline_draft_keeps_steering_and_waiting_commands() {
         crate::tui::clipboard::prompt("new direction".into(), None, &[]),
         Origin::Typed,
         Some("new direction".into()),
-        &done,
     );
     let queue = front_view(&mut tui.views, tui.core.lane()).queued.clone();
     tui.ui.editor.set_line("first line\nsecond line");
@@ -1374,11 +1356,14 @@ async fn up_inside_a_multiline_draft_keeps_steering_and_waiting_commands() {
         "the caret moved to the first line"
     );
     assert_eq!(queue.lock().len(), 2, "neither queue was recalled");
-    assert_eq!(queue.take_prompt().unwrap().text, "new direction");
     assert!(matches!(
         queue.pop_front().unwrap().input,
         crate::tui::view::Pending::Intent(Intent::Bash(_))
     ));
+    let crate::tui::view::Pending::Prompt(pending) = queue.pop_front().unwrap().input else {
+        panic!("expected prompt")
+    };
+    assert_eq!(pending.prompt().text, "new direction");
 }
 
 #[tokio::test]
@@ -1387,7 +1372,6 @@ async fn recalling_steering_and_waiting_commands_keeps_submission_order_and_remo
 
     let dir = tempfile::tempdir().unwrap();
     let mut tui = surface(dir.path());
-    let (done, _) = tokio::sync::mpsc::unbounded_channel();
     tui.admit(
         Asked::Core(Intent::Bash("echo first".into())),
         Origin::Typed,
@@ -1398,7 +1382,6 @@ async fn recalling_steering_and_waiting_commands_keeps_submission_order_and_remo
         crate::tui::clipboard::prompt("first direction".into(), None, &[]),
         Origin::Typed,
         Some("first direction".into()),
-        &done,
     );
     tui.admit(
         Asked::Core(Intent::Prompt("remote input".into())),
@@ -1416,7 +1399,6 @@ async fn recalling_steering_and_waiting_commands_keeps_submission_order_and_remo
         crate::tui::clipboard::prompt("second direction".into(), None, &[]),
         Origin::Typed,
         Some("second direction".into()),
-        &done,
     );
     let queue = front_view(&mut tui.views, tui.core.lane()).queued.clone();
     let ids: Vec<_> = queue
@@ -1442,44 +1424,41 @@ async fn recalling_steering_and_waiting_commands_keeps_submission_order_and_remo
         "!echo first\nfirst direction\n!echo second\nsecond direction\ndraft"
     );
     assert!(tui.core.lane().is_running());
-    assert!(
-        queue.take_prompt().is_none(),
-        "recalled steering cannot be consumed"
-    );
     assert_eq!(queue.pop_front().unwrap().request.origin, Origin::Input(1));
     assert!(queue.is_empty());
 }
 
-// Queued results open one turn under their batch label, even output that
-// reads like a command: it is the execution's output, never something typed.
+// Background output is an automatic input; command-like output is literal.
 #[tokio::test]
 async fn queued_command_results_open_one_turn_under_their_label() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     tui.core.lane_mut().finish();
-    let execution = toolbox::background::RunSink::start(
+    tui.core
+        .lane_mut()
+        .return_session(agent::session::Session::new());
+    tui.core.enable_background(tui.drivers.background());
+    let execution = pi_tools::background::RunSink::start(
         &pi_core::driver::background::Commands::new(tui.drivers.background()),
-        dir.path().to_path_buf(),
-        toolbox::background::Invocation::shell("build"),
+        dir.path().to_path_buf().into(),
+        pi_tools::background::Invocation::shell("build"),
         Default::default(),
     );
-    execution.channel().result("check the build".into());
-    execution.channel().result("/compact".into());
+    for text in ["check the build", "/compact"] {
+        execution.channel().result(text.into());
+    }
     execution.end();
-
-    let Some((Origin::Background, crate::tui::Wake::Relay(ask))) = tui.driver_line() else {
-        panic!("the results are relayed together");
-    };
-    assert!(ask.text.contains("check the build"), "{}", ask.text);
-    assert!(ask.text.ends_with("/compact"), "{}", ask.text);
-    assert_eq!(ask.shown.as_deref(), Some("2 background command results"));
-    assert!(tui.driver_line().is_none(), "one turn takes both results");
-    let token = tui.core.lane().token();
-    assert!(
-        lane_rows(&mut tui, token)
-            .iter()
-            .any(|r| r.contains("2 background command results"))
-    );
+    for text in ["check the build", "/compact"] {
+        let event = tui.core.next_runtime_event().await;
+        let pi_core::execution::host::Event::Started(started) = &event else {
+            panic!("the core starts automatic input")
+        };
+        assert!(started.entries.iter().any(|entry|matches!(entry,agent::session::Entry::Ask {ask,..} if ask.text.contains(text) && ask.shown.is_some())));
+        tui.runtime_event(event);
+        let completed = completed_run(&mut tui).await;
+        tui.present_settlement(pi_core::execution::host::Settlement::Returned(completed));
+    }
+    assert!(tui.driver_line().is_none());
 }
 
 // Remote submissions share command parsing, including the leading-space
@@ -1489,10 +1468,10 @@ async fn remote_submissions_use_the_same_parser_as_local_lines() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     tui.core.lane_mut().finish();
-    let execution = toolbox::background::RunSink::start(
+    let execution = pi_tools::background::RunSink::start(
         &pi_core::driver::background::Commands::new(tui.drivers.background()),
-        dir.path().to_path_buf(),
-        toolbox::background::Invocation::shell("wechat"),
+        dir.path().to_path_buf().into(),
+        pi_tools::background::Invocation::shell("wechat"),
         Default::default(),
     );
     for line in ["/compact", "!echo hello", " /compact"] {
@@ -1530,10 +1509,10 @@ async fn a_note_is_filed_only_for_a_line_that_starts_a_turn() {
     tui.core
         .lane_mut()
         .return_session(agent::session::Session::new());
-    let execution = toolbox::background::RunSink::start(
+    let execution = pi_tools::background::RunSink::start(
         &pi_core::driver::background::Commands::new(tui.drivers.background()),
-        dir.path().to_path_buf(),
-        toolbox::background::Invocation::shell("driver"),
+        dir.path().to_path_buf().into(),
+        pi_tools::background::Invocation::shell("driver"),
         Default::default(),
     );
 
@@ -1574,10 +1553,10 @@ async fn a_note_is_filed_only_for_a_line_that_starts_a_turn() {
 async fn a_queued_line_keeps_its_note_off_the_running_turn() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    let execution = toolbox::background::RunSink::start(
+    let execution = pi_tools::background::RunSink::start(
         &pi_core::driver::background::Commands::new(tui.drivers.background()),
-        dir.path().to_path_buf(),
-        toolbox::background::Invocation::shell("driver"),
+        dir.path().to_path_buf().into(),
+        pi_tools::background::Invocation::shell("driver"),
         Default::default(),
     );
 
@@ -1614,16 +1593,14 @@ async fn leaving_saves_what_an_idle_lane_filed() {
         .lane_mut()
         .return_session(agent::session::Session::new());
     let path = tui.core.store.path_of(dir.path(), tui.core.lane().id());
-    let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-
     // Nothing said: leaving writes no empty session to be offered back.
-    tui.settle_all(&mut rx, "The user exited pi.").await;
+    tui.settle_all("The user exited pi.").await;
     assert!(!path.exists());
 
     tui.core
         .lane_mut()
         .push_note("The user stopped background command #2.");
-    tui.settle_all(&mut rx, "The user exited pi.").await;
+    tui.settle_all("The user exited pi.").await;
     let stored = pi_store::session::Store::read(&path).expect("saved on the way out");
     assert!(stored.session.entries().iter().any(|e| matches!(
         e,
@@ -1635,24 +1612,22 @@ async fn leaving_saves_what_an_idle_lane_filed() {
 // when the transcript was lent to a turn as shutdown began.
 #[tokio::test]
 async fn leaving_with_a_command_preserves_its_stop_cause_on_resume() {
-    use toolbox::background::{Again, RunSink as _};
+    use pi_tools::background::{Again, RunSink as _};
 
     for running in [false, true] {
         let dir = tempfile::tempdir().expect("a checkout");
         let mut tui = surface(dir.path());
         let mut carried = agent::session::Session::new();
         carried.prompt("run sleep 30 in the background");
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         if running {
-            tx.send(crate::tui::run::Done {
+            tui.core.fixture_completion(crate::tui::run::Done {
                 request: pi_core::execution::Request::new(
                     pi_core::driver::Origin::Typed,
                     tui.core.lane().token(),
                 ),
                 kind: crate::tui::run::Kind::Turn,
                 ran: Some((carried, Err(agent::AgentError::Cancelled.into()))),
-            })
-            .unwrap();
+            });
         } else {
             tui.core.lane_mut().finish();
             tui.core.lane_mut().return_session(carried);
@@ -1661,7 +1636,7 @@ async fn leaving_with_a_command_preserves_its_stop_cause_on_resume() {
         let stop = tokio_util::sync::CancellationToken::new();
         let execution = pi_core::driver::background::Commands::new(tui.drivers.background()).start(
             dir.path().into(),
-            toolbox::background::Invocation::shell("sleep 30; echo done"),
+            pi_tools::background::Invocation::shell("sleep 30; echo done"),
             stop.clone(),
         );
         execution.rerun(
@@ -1674,7 +1649,7 @@ async fn leaving_with_a_command_preserves_its_stop_cause_on_resume() {
         );
         let path = tui.core.store.path_of(dir.path(), tui.core.lane().id());
 
-        tui.settle_all(&mut rx, "The user exited pi.").await;
+        tui.settle_all("The user exited pi.").await;
         tui.core.hand_over_background();
         assert!(stop.is_cancelled());
 

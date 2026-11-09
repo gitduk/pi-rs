@@ -59,11 +59,21 @@ pub(crate) fn now<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -
         .expect("the transcript saver answers every job it takes")
 }
 
+/// Await the same writer without occupying a blocking worker while it runs.
+pub(crate) async fn wait<T: Send + 'static>(
+    job: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, tokio::sync::oneshot::error::RecvError> {
+    let (done, answer) = tokio::sync::oneshot::channel();
+    behind(move || {
+        let _ = done.send(job());
+    });
+    answer.await
+}
+
 /// Wait for every write handed over so far. Called as the process leaves: a
 /// save still queued is exactly the one leaving would have dropped.
 pub async fn flush() {
-    // The wait is a blocking receive, so it goes off the runtime's own threads.
-    let _ = tokio::task::spawn_blocking(|| now(|| ())).await;
+    let _ = wait(|| ()).await;
 }
 
 #[cfg(test)]
@@ -101,5 +111,25 @@ mod tests {
         let after = ran.clone();
         let seen = now(move || after.load(Ordering::SeqCst));
         assert_eq!(seen, 1);
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_async_wait_does_not_cancel_the_queued_write() {
+        let written = Arc::new(AtomicUsize::new(0));
+        let began = Arc::new(tokio::sync::Notify::new());
+        let (release, ready) = channel();
+        let saved = written.clone();
+        let started = began.clone();
+        let waiter = tokio::spawn(wait(move || {
+            started.notify_one();
+            let _ = ready.recv();
+            saved.store(1, Ordering::SeqCst);
+        }));
+        began.notified().await;
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        flush().await;
+        assert_eq!(written.load(Ordering::SeqCst), 1);
     }
 }

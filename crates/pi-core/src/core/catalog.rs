@@ -540,6 +540,7 @@ max_output_tokens = 2048
         let mut ring = crate::core::lanes::Lanes::of(lanes.next().expect("a first lane"));
         ring.push(lanes.next().expect("a second lane"));
         let mut core = Core {
+            runtime: Default::default(),
             store: pi_store::session::Store::new(root.join("state")),
             catalog,
             config: Arc::new(config),

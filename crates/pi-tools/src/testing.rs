@@ -4,7 +4,6 @@
 use std::sync::{Arc, Mutex};
 
 use crate::background::{Invocation, Peek, RunHandle};
-use crate::channel::Told;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tool::Ctx;
@@ -14,14 +13,14 @@ pub(crate) struct Sink {
     pub(crate) said: Arc<Mutex<Vec<String>>>,
     pub(crate) ended: Arc<Notify>,
     pub(crate) stop: Mutex<Option<CancellationToken>>,
-    pub(crate) told: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Told>>>>,
+    pub(crate) told: Arc<Mutex<Option<crate::channel::Sender>>>,
     pub(crate) output: Arc<Mutex<Option<Peek>>>,
     // Where the answer to the question last asked with `back` goes.
     pub(crate) answer: Mutex<Option<tokio::sync::oneshot::Sender<Option<String>>>>,
 }
 
 struct Handle {
-    told: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Told>>>>,
+    told: Arc<Mutex<Option<crate::channel::Sender>>>,
     said: Arc<Mutex<Vec<String>>>,
     ended: Arc<Notify>,
     output: Arc<Mutex<Option<Peek>>>,
@@ -30,7 +29,7 @@ struct Handle {
 impl crate::channel::Ask for Sink {
     fn ask(
         &self,
-        _root: std::path::PathBuf,
+        _scope: crate::background::Scope,
         asker: &str,
         asked: crate::channel::Asked,
     ) -> Result<Option<crate::channel::Answer>, String> {
@@ -50,7 +49,7 @@ impl crate::channel::Ask for Sink {
 impl crate::background::RunSink for Sink {
     fn start(
         &self,
-        _root: std::path::PathBuf,
+        _scope: crate::background::Scope,
         invocation: Invocation,
         stop: CancellationToken,
     ) -> Arc<dyn RunHandle> {
@@ -86,7 +85,29 @@ impl RunHandle for Handle {
 }
 
 impl crate::channel::Channel for Handle {
-    fn listen(&self, to: tokio::sync::mpsc::UnboundedSender<Told>) {
+    fn watch_prompts(&self) {
+        self.said.lock().unwrap().push("watch".into());
+    }
+    fn answer_text(&self, question: u64, text: String) {
+        self.said
+            .lock()
+            .unwrap()
+            .push(format!("answer {question}: {text}"));
+    }
+
+    fn message(&self, _: message::WireMessage) -> Result<crate::channel::Receipt, String> {
+        Err("no conversation is registered".into())
+    }
+
+    fn observe(
+        &self,
+        _: message::SessionId,
+        _: Option<crate::channel::Cursor>,
+    ) -> Result<Box<dyn crate::channel::Observation>, String> {
+        Err("no conversation is registered".into())
+    }
+
+    fn listen(&self, to: crate::channel::Sender) {
         *self.told.lock().unwrap() = Some(to);
     }
 

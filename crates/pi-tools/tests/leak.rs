@@ -12,7 +12,7 @@ async fn a_timeout_takes_the_whole_process_group() {
     let c = Ctx::new(Workspace::new(dir.path()).unwrap());
     let pidfile = dir.path().join("gpid");
 
-    let err = match toolbox::bash::run(
+    let err = match pi_tools::bash::run(
         &format!("sleep 30 & echo $! > {}; sleep 30", pidfile.display()),
         c.workspace.root(),
         Some(std::time::Duration::from_millis(400)),
@@ -48,7 +48,7 @@ async fn a_timeout_takes_the_whole_process_group() {
 async fn a_command_runs_in_a_session_of_its_own() {
     let dir = tempfile::tempdir().unwrap();
     let c = Ctx::new(Workspace::new(dir.path()).unwrap());
-    let out = toolbox::bash::foreground(
+    let out = pi_tools::bash::foreground(
         "read -r _ _ _ _ _ sid _ < /proc/$$/stat; [ \"$sid\" = \"$$\" ] && echo leader",
         ".",
         &c,

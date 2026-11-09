@@ -81,7 +81,7 @@ fn encode_assistant(content: &[AssistantContent], spec: &ModelSpec, out: &mut Ve
             // DeepSeek's chat wire 400s a tools request whose earlier turns
             // omit the thinking it streamed, so the author's goes back.
             AssistantContent::Reasoning(r) => {
-                if let Replay::Prose { text } = r.replay_for(spec) {
+                if let Replay::Prose { text } = crate::message::replay_for(r, spec) {
                     thinking.push_str(&text);
                 }
             }

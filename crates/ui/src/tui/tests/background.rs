@@ -59,13 +59,13 @@ async fn named_scripts_use_bash_background_with_original_input_and_environment()
         dir.path().join("later"),
         "#!/bin/sh\n# ---\n# description = \"Keep a prompt\"\n# background = true\n# [optional]\n\
          # after = \"A delay\"\n# prompt = \"What to do\"\n# ---\n\
-         cat > received\nprintf '%s\\n' '{\"status\":\"waiting\"}' >&3\nsleep 30\n",
+         cat > received\nprintf '%s\\n' '{\"type\":\"runtime\",\"command\":{\"type\":\"status\",\"text\":\"waiting\"}}' >&3\nsleep 30\n",
     )
     .unwrap();
     let table = Arc::new(pi_core::driver::background::Table::default());
     let sink = Arc::new(pi_core::driver::background::Commands::new(table.clone()));
-    let shell = Arc::new(toolbox::bash::Bash::new(sink.clone()));
-    let scripts = toolbox::scripts::Dir::new(dir.path()).with_shell(shell, sink);
+    let shell = Arc::new(pi_tools::bash::Bash::new(sink.clone()));
+    let scripts = pi_tools::scripts::Dir::new(dir.path()).with_shell(shell, sink);
     let script = scripts.tools().pop().unwrap();
     let ctx = tool::Ctx::new(tool::Workspace::new(dir.path()).unwrap());
     let mut ui = test_ui(160, 24);
@@ -153,8 +153,8 @@ printf '%s\n' 'private stderr' >&2
     std::fs::write(&env, "PI_BACKGROUND_TEST_VALUE=from-file\n").unwrap();
     let table = Arc::new(pi_core::driver::background::Table::default());
     let host = Arc::new(pi_core::driver::background::Commands::new(table.clone()));
-    let shell = Arc::new(toolbox::bash::Bash::new(host.clone()).with_controls(host.clone()));
-    let scripts = toolbox::scripts::Dir::new(&tools).with_shell(shell.clone(), host);
+    let shell = Arc::new(pi_tools::bash::Bash::new(host.clone()).with_controls(host.clone()));
+    let scripts = pi_tools::scripts::Dir::new(&tools).with_shell(shell.clone(), host);
     let ctx = tool::Ctx::new(tool::Workspace::new(dir.path()).unwrap());
     let args = serde_json::json!({"PI_BACKGROUND_TEST_VALUE":"original argument\nwith newline"});
     scripts.tools()[0]
@@ -189,7 +189,7 @@ printf '%s\n' 'private stderr' >&2
     let table = Arc::new(pi_core::driver::background::Table::default());
     let restored: Vec<pi_core::driver::background::Carried> = serde_json::from_str(&saved).unwrap();
     for carried in restored {
-        let rerun = toolbox::bash::rerun(carried.again.clone(), &ctx);
+        let rerun = pi_tools::bash::rerun(carried.again.clone(), &ctx);
         table.revive(carried, rerun);
     }
     assert_eq!(
@@ -294,7 +294,7 @@ async fn background_commands_share_shell_colours_and_keep_status_muted() {
     let sink = Arc::new(pi_core::driver::background::Commands::new(table.clone()));
     let ctx = tool::Ctx::new(tool::Workspace::new(dir.path()).unwrap());
     let command = "python3 .pi/tmp/monitor.py 600 --label 'watch'";
-    toolbox::bash::Bash::new(sink.clone())
+    pi_tools::bash::Bash::new(sink.clone())
         .execute(
             serde_json::json!({ "command": command, "background": true }),
             &ctx,
@@ -424,7 +424,7 @@ fn focus_tracks_ids_and_keeps_stopped_rows_available_for_restart() {
 #[test]
 fn insert_mode_menus_and_pages_keep_their_keys() {
     use pi_core::core::question::Question;
-    use toolbox::channel::Asked as QuestionText;
+    use pi_tools::channel::Asked as QuestionText;
 
     let mut ui = vim_ui();
     let (_dir, lane) = a_running_lane();
@@ -489,8 +489,8 @@ fn leaving_the_lane_or_disabling_vim_releases_command_focus() {
 
 #[tokio::test]
 async fn focused_controls_use_the_existing_driver_and_preserve_restartability() {
+    use pi_tools::background::{RunHandle, RunSink};
     use std::sync::Arc;
-    use toolbox::background::{RunHandle, RunSink};
 
     let dir = tempfile::tempdir().unwrap();
     let mut tui = surface(dir.path());
@@ -499,13 +499,13 @@ async fn focused_controls_use_the_existing_driver_and_preserve_restartability() 
     let sink = pi_core::driver::background::Commands::new(table.clone());
     let stop = tokio_util::sync::CancellationToken::new();
     let first = sink.start(
-        root.clone(),
-        toolbox::background::Invocation::shell("first"),
+        root.clone().into(),
+        pi_tools::background::Invocation::shell("first"),
         stop.clone(),
     );
     let second = sink.start(
-        root.clone(),
-        toolbox::background::Invocation::shell("second"),
+        root.clone().into(),
+        pi_tools::background::Invocation::shell("second"),
         Default::default(),
     );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Arc<dyn RunHandle>>();
@@ -647,10 +647,10 @@ async fn waiting_results_expand_and_open_the_original_output_without_delivering_
     let table = tui.drivers.background();
     let sink = pi_core::driver::background::Commands::new(table.clone());
     let command = format!("python3 -c '{}'", "long command ".repeat(30));
-    let execution = toolbox::background::RunSink::start(
+    let execution = pi_tools::background::RunSink::start(
         &sink,
-        root.clone(),
-        toolbox::background::Invocation::shell(command.clone()),
+        root.clone().into(),
+        pi_tools::background::Invocation::shell(command.clone()),
         Default::default(),
     );
     let output = "exited 1:\nTraceback (most recent call last):\nKeyError: 'agentId'";

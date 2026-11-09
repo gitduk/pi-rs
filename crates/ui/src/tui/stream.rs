@@ -109,7 +109,13 @@ impl Ui {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn on_event(&mut self, lane: &mut Lane, view: &mut View, event: Event) {
+        lane.note(&event);
+        self.render_event(lane, view, event);
+    }
+
+    pub(super) fn render_event(&mut self, lane: &mut Lane, view: &mut View, event: Event) {
         // Anything the model produces spends the chance to unsend: past this
         // the prompt has been answered, not merely sent. A prompt that joined
         // the run spends it too — one unsend would hand back that prompt and
@@ -129,9 +135,7 @@ impl Ui {
                 work.retry = None;
             }
         }
-        // Every number either status line shows is read here, once. The arms
-        // below decide only what reaches the scrollback.
-        lane.note(&event);
+        // The core has recorded usage; these arms project the event into rows.
         match &event {
             Event::TextDelta(d) => self.write(view, d, false),
             Event::ReasoningDelta(d) => self.write(view, d, true),

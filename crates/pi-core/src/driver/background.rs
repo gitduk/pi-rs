@@ -7,22 +7,27 @@
 //! The table also owns foreground questions and routes answers from the user
 //! or from commands that follow the checkout.
 
+mod answers;
+mod delivery;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
+pub use pi_tools::background::Invocation;
+use pi_tools::background::{
+    Again, Controls, Owner, Peek, Printed, Rerun, RunHandle, RunSink, Scope,
+};
+use pi_tools::channel::Sender;
+use pi_tools::channel::{Answer, Ask, Asked, Told};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tool::{Ctx, ToolError, ToolOutput};
-pub use toolbox::background::Invocation;
-use toolbox::background::{Again, Controls, Peek, Printed, Rerun, RunHandle, RunSink};
-use toolbox::channel::{Answer, Ask, Asked, Told};
 
 use crate::core::question::{Asker, Question};
 
@@ -46,11 +51,39 @@ struct Inner {
     progress_at: Option<Instant>,
     next_id: u64,
     items: Vec<Item>,
+    inputs: HashMap<message::SessionId, std::sync::Weak<crate::execution::ingress::Ingress>>,
+    user_inputs: HashMap<message::MessageId, answers::UserInput>,
     next_question: u64,
     // Every question up and not yet answered, by checkout, oldest first.
     standing: Vec<(PathBuf, Question)>,
     // Where the answer to each question asked with `back` goes.
     answers: HashMap<u64, oneshot::Sender<Option<String>>>,
+}
+
+#[derive(Clone, Copy)]
+enum Delivery<'a> {
+    Checkout,
+    Session(Option<&'a str>),
+}
+
+impl<'a> Delivery<'a> {
+    fn from_source(session: Option<&'a str>) -> Self {
+        match session {
+            Some(session) => Self::Session(Some(session)),
+            None => Self::Checkout,
+        }
+    }
+
+    fn accepts(self, item: &Item) -> bool {
+        self.accepts_owner(item.owner.as_ref().map(|owner| owner.session.as_str()))
+    }
+
+    fn accepts_owner(self, owner: Option<&str>) -> bool {
+        match self {
+            Self::Checkout => true,
+            Self::Session(session) => owner.is_none_or(|owner| Some(owner) == session),
+        }
+    }
 }
 
 impl Inner {
@@ -62,7 +95,19 @@ impl Inner {
             .collect();
         for id in gone {
             self.answers.remove(&id);
-            self.close(id, "its asker stopped waiting");
+            let request = self
+                .standing
+                .iter()
+                .find(|(_, q)| q.id == id)
+                .and_then(|(_, q)| q.request.clone());
+            if let Some(request) = request {
+                if let Err(error) = self.answer_text(&request, None) {
+                    tracing::warn!(target: "pi::background", question = id, %error, "user input could not be stopped");
+                    self.close(id, "its asker stopped waiting");
+                }
+            } else {
+                self.close(id, "its asker stopped waiting");
+            }
         }
     }
 
@@ -73,19 +118,25 @@ impl Inner {
         let told = Told::Question {
             id: question.id,
             asked: question.asked(),
+            request: question.request.clone(),
         };
+        let session = question.session.clone();
         let stale = (self.standing.iter()).position(|(at, q)| {
-            *at == root && q.from == question.from && !q.back && !question.back
+            *at == root
+                && q.session == question.session
+                && q.from == question.from
+                && !q.back
+                && !question.back
         });
         match stale {
             Some(at) => {
                 let old = std::mem::replace(&mut self.standing[at].1, question).id;
                 tracing::info!(target: "pi::background", question = old, why = "asked again", "closed");
-                self.tell_followers(&root, Told::Closed(old));
+                self.tell_followers(&root, session.as_deref(), Told::Closed(old));
             }
             None => self.standing.push((root.clone(), question)),
         }
-        self.tell_followers(&root, told);
+        self.tell_followers(&root, session.as_deref(), told);
     }
 
     // Take question `id` down, if it is still up, and say so to every execution
@@ -94,13 +145,27 @@ impl Inner {
         let at = self.standing.iter().position(|(_, q)| q.id == id)?;
         let (root, question) = self.standing.remove(at);
         tracing::info!(target: "pi::background", question = id, why, "closed");
-        self.tell_followers(&root, Told::Closed(id));
+        self.tell_followers(&root, question.session.as_deref(), Told::Closed(id));
         Some(question)
     }
 
     // Take question `id` down as answered: the pick goes to an asker that
     // waits on it. What comes back is the pick still to go out as typed.
     fn answered(&mut self, id: u64, why: &str, picked: Option<String>) -> Option<String> {
+        if picked.as_ref().is_some_and(|text| text.trim().is_empty()) {
+            return None;
+        }
+        if let Some(request) = self
+            .standing
+            .iter()
+            .find(|(_, q)| q.id == id)
+            .and_then(|(_, q)| q.request.clone())
+        {
+            if let Err(error) = self.answer_text(&request, picked) {
+                tracing::warn!(target: "pi::background", question = id, %error, "answer rejected");
+            }
+            return None;
+        }
         let question = self.close(id, why)?;
         match self.answers.remove(&id) {
             Some(to) => {
@@ -137,12 +202,28 @@ impl Inner {
     }
 
     // The running executions on `root` told of every turn there.
-    fn followers<'a>(&'a self, root: &'a Path) -> impl Iterator<Item = &'a Item> {
-        (self.items.iter()).filter(move |i| i.root == root && i.running() && i.listens.follows())
+    fn followers<'a>(
+        &'a self,
+        root: &'a Path,
+        delivery: Delivery<'a>,
+    ) -> impl Iterator<Item = &'a Item> {
+        (self.items.iter()).filter(move |i| {
+            i.root == root && delivery.accepts(i) && i.running() && i.listens.follows()
+        })
     }
 
-    fn tell_followers(&self, root: &Path, told: Told) {
-        for to in self.followers(root).filter_map(|i| i.listens.to()) {
+    fn tell_followers(&self, root: &Path, session: Option<&str>, told: Told) {
+        for to in self
+            .items
+            .iter()
+            .filter(|i| {
+                i.root == root
+                    && i.running()
+                    && Delivery::from_source(session).accepts(i)
+                    && matches!(i.listens, Listens::Turns(_) | Listens::Prompts(_))
+            })
+            .filter_map(|i| i.listens.to())
+        {
             let _ = to.send(told.clone());
         }
     }
@@ -152,15 +233,23 @@ impl Inner {
         (self.items.iter()).position(|i| i.id == id && i.run == run)
     }
 
-    fn back_at(&self, root: &Path, results_only: bool) -> Option<(usize, usize)> {
+    fn back_at(
+        &self,
+        root: &Path,
+        results_only: bool,
+        delivery: Delivery<'_>,
+    ) -> Option<(usize, usize)> {
         self.items
             .iter()
             .enumerate()
-            .filter(|(_, item)| item.root == root)
+            .filter(|(_, item)| item.root == root && delivery.accepts(item) && !item.delivering)
             .find_map(|(at, item)| {
                 item.waiting
                     .iter()
-                    .position(|back| !results_only || matches!(back, Back::Result(_)))
+                    .position(|back| match back {
+                        Back::Input { .. } => !results_only,
+                        Back::Result(_) => item.delivery_error.is_none(),
+                    })
                     .map(|back| (at, back))
             })
     }
@@ -168,6 +257,9 @@ impl Inner {
     // One queued message, with the same bookkeeping for results and inputs.
     fn take_back(&mut self, at: usize, back: usize) -> Option<(u64, Back)> {
         let item = &mut self.items[at];
+        if item.delivering {
+            return None;
+        }
         let id = item.id;
         let mut back = item.waiting.remove(back)?;
         if item.waiting.is_empty() && item.dropped > 0 {
@@ -227,6 +319,7 @@ struct Item {
     id: u64,
     // The checkout it comes back to: one lane holds one.
     root: PathBuf,
+    owner: Option<Owner>,
     invocation: Arc<Invocation>,
     progress: String,
     started: Instant,
@@ -236,6 +329,8 @@ struct Item {
     // What it said that is not yet delivered, oldest first. A command leaves the
     // table once it has stopped running and these are gone.
     waiting: VecDeque<Back>,
+    delivering: bool,
+    delivery_error: Option<String>,
     // What arrived while `waiting` was full.
     dropped: usize,
     listens: Listens,
@@ -276,9 +371,10 @@ struct Restart {
 enum Listens {
     Never,
     // The turns its inputs opened.
-    Inputs(UnboundedSender<Told>),
+    Inputs(Sender),
     // Every turn on its checkout, not just its inputs': it asked to follow.
-    Turns(UnboundedSender<Told>),
+    Turns(Sender),
+    Prompts(Sender),
 }
 
 #[derive(PartialEq, Eq)]
@@ -288,10 +384,10 @@ enum RequestPhase {
 }
 
 impl Listens {
-    fn to(&self) -> Option<&UnboundedSender<Told>> {
+    fn to(&self) -> Option<&Sender> {
         match self {
             Listens::Never => None,
-            Listens::Inputs(to) | Listens::Turns(to) => Some(to),
+            Listens::Inputs(to) | Listens::Turns(to) | Listens::Prompts(to) => Some(to),
         }
     }
 
@@ -315,12 +411,15 @@ impl Item {
         Item {
             id,
             root,
+            owner: None,
             invocation: Arc::new(invocation),
             progress: String::new(),
             started: Instant::now(),
             started_at: SystemTime::now(),
             phase,
             waiting: VecDeque::new(),
+            delivering: false,
+            delivery_error: None,
             dropped: 0,
             listens: Listens::Never,
             requests: HashMap::new(),
@@ -376,6 +475,8 @@ impl Item {
         self.told = false;
         self.progress.clear();
         self.waiting.clear();
+        self.delivering = false;
+        self.delivery_error = None;
         self.dropped = 0;
         self.driving = false;
     }
@@ -389,6 +490,8 @@ impl Item {
         let (id, name) = (self.id, self.invocation.title());
         let first = text.lines().next().unwrap_or("").trim();
         Due {
+            event: crate::execution::messages::new_id(),
+            at: agent::session::now(),
             line: format!("Background command #{id} ({name}) reports:\n\n{text}"),
             note: format!(
                 "This turn is a result of background command #{id} ({name}), which you \
@@ -448,6 +551,7 @@ fn settle(items: &mut Vec<Item>, at: usize) {
 pub struct Carried {
     pub id: u64,
     pub root: PathBuf,
+    pub owner: Option<Owner>,
     pub invocation: Invocation,
     /// Stopped by the user or by pi leaving, not ended by itself.
     pub stopped: bool,
@@ -557,7 +661,10 @@ impl Back {
 
 /// What a lane is sent when something it left comes back: the line to
 /// submit and the note before it.
+#[derive(Clone)]
 pub struct Due {
+    event: message::MessageId,
+    at: u64,
     pub line: String,
     pub note: String,
     /// What the screen names the turn by, since nobody typed it.
@@ -598,10 +705,75 @@ impl Due {
 }
 
 impl Table {
+    fn ingress_for(
+        &self,
+        execution: u64,
+        run: u64,
+        session: &message::SessionId,
+    ) -> Result<Arc<crate::execution::ingress::Ingress>, String> {
+        let inner = self.lock();
+        let at = inner
+            .mine(execution, run)
+            .ok_or("execution is no longer current")?;
+        let item = &inner.items[at];
+        if !item.running() {
+            return Err("execution has ended".into());
+        }
+        if item
+            .owner
+            .as_ref()
+            .is_some_and(|owner| owner.session != session.as_str())
+        {
+            return Err("message belongs to another session".into());
+        }
+        let ingress = inner
+            .inputs
+            .get(session)
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or("message session is not open")?;
+        if ingress.root != item.root {
+            return Err("message session belongs to another checkout".into());
+        }
+        Ok(ingress)
+    }
+
+    pub(crate) fn bind_inputs(
+        &self,
+        root: PathBuf,
+        lane: u64,
+        messages: crate::execution::messages::Messages,
+        queue: crate::execution::queue::Queue,
+    ) -> Arc<crate::execution::ingress::Ingress> {
+        let session = messages.session();
+        let ingress = Arc::new(crate::execution::ingress::Ingress::new(
+            root, lane, messages, queue,
+        ));
+        let mut inner = self.lock();
+        inner.inputs.retain(|_, input| input.strong_count() > 0);
+        inner.inputs.insert(session, Arc::downgrade(&ingress));
+        ingress
+    }
+
     /// Signalled whenever an execution starts, moves, reports, ends or goes, so a
     /// surface drawing them can look again.
     pub fn changed(&self) -> &Notify {
         &self.changed
+    }
+
+    pub(crate) fn progress_due(&self) -> Option<Instant> {
+        let inner = self.lock();
+        if !inner
+            .items
+            .iter()
+            .any(|item| item.running() && item.listens.follows())
+        {
+            return None;
+        }
+        Some(
+            inner
+                .progress_at
+                .map_or_else(Instant::now, |last| last + PROGRESS_EVERY),
+        )
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -615,18 +787,34 @@ impl Table {
     /// Whether a running execution of `root` claimed its turns: a lane that
     /// ends meanwhile is not done.
     pub fn driving(&self, root: &Path) -> bool {
+        self.driving_selected(root, Delivery::Checkout)
+    }
+
+    pub fn driving_for(&self, root: &Path, session: Option<&str>) -> bool {
+        self.driving_selected(root, Delivery::Session(session))
+    }
+
+    fn driving_selected(&self, root: &Path, delivery: Delivery<'_>) -> bool {
         self.lock()
             .items
             .iter()
-            .any(|i| i.root == root && i.driving && i.running())
+            .any(|i| i.root == root && delivery.accepts(i) && i.driving && i.running())
     }
 
     /// Now, if an execution for `root` has something waiting.
-    pub fn next_due(&self, root: &Path) -> Option<Instant> {
+    pub fn next_due(&self, root: &Path, session: Option<&str>) -> Option<Instant> {
         self.lock()
             .items
             .iter()
-            .any(|i| i.root == root && !i.waiting.is_empty())
+            .any(|i| {
+                i.root == root
+                    && Delivery::Session(session).accepts(i)
+                    && !i.delivering
+                    && i.waiting.iter().any(|back| match back {
+                        Back::Input { .. } => true,
+                        Back::Result(_) => i.delivery_error.is_none(),
+                    })
+            })
             .then(Instant::now)
     }
 
@@ -634,18 +822,25 @@ impl Table {
     /// into one turn. A person's input stays separate, in its original place.
     /// The id names the first result's execution, or the input's sender.
     pub fn take_back(&self, root: &Path) -> Option<(u64, Back)> {
-        self.take_next(root, false)
+        self.take_next(root, false, Delivery::Checkout)
+    }
+
+    /// Deliver only to the conversation captured when the execution started.
+    /// Checkout services without a conversation binding can serve any session.
+    pub fn take_back_for(&self, root: &Path, session: Option<&str>) -> Option<(u64, Back)> {
+        self.take_next(root, false, Delivery::Session(session))
     }
 
     /// User submissions may be admitted while a run is working. Results stay
     /// available to that run at its next request boundary.
-    pub fn take_input(&self, root: &Path) -> Option<(u64, Back)> {
+    pub fn take_input(&self, root: &Path, session: Option<&str>) -> Option<(u64, Back)> {
+        let delivery = Delivery::Session(session);
         let mut inner = self.lock();
         let (at, back) = inner
             .items
             .iter()
             .enumerate()
-            .filter(|(_, item)| item.root == root)
+            .filter(|(_, item)| item.root == root && delivery.accepts(item) && !item.delivering)
             .find_map(|(at, item)| {
                 item.waiting
                     .iter()
@@ -660,15 +855,24 @@ impl Table {
     /// Results for an active run. Person-originated inputs keep their own
     /// turns; they do not hold back results the active run may depend on.
     pub fn take_ready_results(&self, root: &Path) -> Option<Due> {
-        match self.take_next(root, true)? {
+        match self.take_next(root, true, Delivery::Checkout)? {
             (_, Back::Result(due)) => Some(due),
             (_, Back::Input { .. }) => unreachable!("only results were requested"),
         }
     }
 
-    fn take_next(&self, root: &Path, results_only: bool) -> Option<(u64, Back)> {
+    fn take_next(
+        &self,
+        root: &Path,
+        results_only: bool,
+        delivery: Delivery<'_>,
+    ) -> Option<(u64, Back)> {
         let mut inner = self.lock();
-        let (at, back) = inner.back_at(root, results_only)?;
+        let (at, back) = inner.back_at(root, results_only, delivery)?;
+        let owner = inner.items[at]
+            .owner
+            .as_ref()
+            .map(|owner| owner.session.clone());
         let (id, back) = inner.take_back(at, back)?;
         let mut due = match back {
             Back::Result(due) => due,
@@ -679,7 +883,10 @@ impl Table {
         };
         let mut executions = vec![id];
         // Hold the lock through the snapshot; later arrivals form another batch.
-        while let Some((at, back)) = inner.back_at(root, results_only) {
+        while let Some((at, back)) = inner.back_at(root, results_only, delivery) {
+            if inner.items[at].owner.as_ref().map(|owner| &owner.session) != owner.as_ref() {
+                break;
+            }
             match inner.items[at].waiting.get(back) {
                 Some(Back::Result(_)) => {}
                 Some(Back::Input { .. }) | None => break,
@@ -710,21 +917,34 @@ impl Table {
         Some((id, Back::Result(due)))
     }
 
-    /// Checkouts whose running turn an execution asked to stop since last asked.
-    pub fn take_interrupts(&self) -> Vec<PathBuf> {
+    /// Execution scopes that asked to stop their conversation since last asked.
+    pub fn take_interrupts(&self) -> Vec<Scope> {
         self.lock()
             .items
             .iter_mut()
-            .filter_map(|i| std::mem::take(&mut i.interrupt).then(|| i.root.clone()))
+            .filter_map(|i| {
+                std::mem::take(&mut i.interrupt).then(|| Scope {
+                    root: i.root.clone(),
+                    owner: i.owner.clone(),
+                })
+            })
             .collect()
     }
 
     /// The questions up at `root`, oldest first.
     pub fn questions(&self, root: &Path) -> Vec<Question> {
+        self.questions_selected(root, Delivery::Checkout)
+    }
+
+    pub fn questions_for(&self, root: &Path, session: Option<&str>) -> Vec<Question> {
+        self.questions_selected(root, Delivery::Session(session))
+    }
+
+    fn questions_selected(&self, root: &Path, delivery: Delivery<'_>) -> Vec<Question> {
         let mut inner = self.lock();
         inner.sweep();
         (inner.standing.iter())
-            .filter(|(at, _)| at == root)
+            .filter(|(at, q)| at == root && delivery.accepts_owner(q.session.as_deref()))
             .map(|(_, q)| q.clone())
             .collect()
     }
@@ -747,7 +967,7 @@ impl Table {
                 return;
             };
             if let Told::Response { request, event } = &told {
-                use toolbox::channel::Response;
+                use pi_tools::channel::Response;
                 match event {
                     Response::Queued => {
                         if let std::collections::hash_map::Entry::Vacant(entry) =
@@ -780,16 +1000,16 @@ impl Table {
         };
         match &told {
             Told::Response { request, event } => match event {
-                toolbox::channel::Response::Queued => {
+                pi_tools::channel::Response::Queued => {
                     tracing::info!(target: "pi::background", execution = id, request, "request queued")
                 }
-                toolbox::channel::Response::Started => {
+                pi_tools::channel::Response::Started => {
                     tracing::info!(target: "pi::background", execution = id, request, "request started")
                 }
-                toolbox::channel::Response::Progress(text) => {
+                pi_tools::channel::Response::Progress(text) => {
                     tracing::info!(target: "pi::background", execution = id, request, chars = text.chars().count(), "request progress")
                 }
-                toolbox::channel::Response::Finished { text, outcome } => {
+                pi_tools::channel::Response::Finished { text, outcome } => {
                     tracing::info!(target: "pi::background", execution = id, request, ?outcome, chars = text.chars().count(), "request finished")
                 }
             },
@@ -808,6 +1028,9 @@ impl Table {
             }
             // Said where they happen: a question up or down, an answer refused.
             Told::Question { .. } | Told::Closed(_) | Told::Refused { .. } => {}
+            Told::Linked { operation, request } => {
+                tracing::info!(target:"pi::background", execution=id, operation, request=request.as_str(), "operation linked")
+            }
         }
         if let Some(to) = to {
             let _ = to.send(told);
@@ -858,10 +1081,12 @@ impl Table {
                     continue;
                 }
                 inner.items[at].last_output = latest.clone();
+                let session = inner.items[at]
+                    .owner
+                    .as_ref()
+                    .map(|owner| owner.session.as_str());
                 inner
-                    .items
-                    .iter()
-                    .filter(|i| i.root == root && i.listens.follows())
+                    .followers(&root, Delivery::from_source(session))
                     .map(|i| i.id)
                     .collect::<Vec<_>>()
             };
@@ -873,8 +1098,10 @@ impl Table {
     }
 
     /// The running executions on `root` told of every turn there.
-    pub fn followers(&self, root: &Path) -> Vec<u64> {
-        (self.lock().followers(root)).map(|i| i.id).collect()
+    pub fn followers(&self, root: &Path, session: Option<&str>) -> Vec<u64> {
+        (self.lock().followers(root, Delivery::Session(session)))
+            .map(|i| i.id)
+            .collect()
     }
 
     /// The executions for `root`, oldest first.
@@ -1014,9 +1241,21 @@ impl Table {
     /// it last asked, running on by themselves. Asked once per request, so
     /// several started together are told of together.
     pub fn untold(&self, root: &Path) -> Option<String> {
+        self.untold_selected(root, Delivery::Checkout)
+    }
+
+    pub fn untold_for(&self, root: &Path, session: Option<&str>) -> Option<String> {
+        self.untold_selected(root, Delivery::Session(session))
+    }
+
+    fn untold_selected(&self, root: &Path, delivery: Delivery<'_>) -> Option<String> {
         let mut inner = self.lock();
         let mut ids = Vec::new();
-        for item in inner.items.iter_mut().filter(|i| i.root == root && !i.told) {
+        for item in inner
+            .items
+            .iter_mut()
+            .filter(|i| i.root == root && delivery.accepts(i) && !i.told)
+        {
             item.told = true;
             if item.running() {
                 ids.push(format!("#{}", item.id));
@@ -1169,6 +1408,7 @@ impl Table {
                 Some(Carried {
                     id: i.id,
                     root: i.root.clone(),
+                    owner: i.owner.clone(),
                     invocation: i.invocation.as_ref().clone(),
                     stopped,
                     started_at: i.started_at,
@@ -1191,12 +1431,13 @@ impl Table {
         let ago = execution.started_at.elapsed().unwrap_or_default();
         tracing::info!(
             target: "pi::background", execution = execution.id, invocation = ?execution.invocation,
-            root = %execution.root.display(), command = %execution.again.command, cwd = %execution.again.cwd.display(), "carried over"
+            root = %execution.root.display(), owner = ?execution.owner, command = %execution.again.command, cwd = %execution.again.cwd.display(), "carried over"
         );
         let phase = Phase::Over {
             stopped: execution.stopped,
         };
         let item = Item {
+            owner: execution.owner,
             started: Instant::now().checked_sub(ago).unwrap_or_else(Instant::now),
             started_at: execution.started_at,
             rerun: Some(Restart {
@@ -1251,6 +1492,13 @@ impl Table {
             tracing::info!(target: "pi::background", execution = item.id, to = %to.display(), "rehomed");
             item.root = to.to_path_buf();
         }
+        for input in inner
+            .user_inputs
+            .values_mut()
+            .filter(|input| input.root == from)
+        {
+            input.root = to.to_path_buf();
+        }
         for (at, _) in inner.standing.iter_mut().filter(|(at, _)| at == from) {
             *at = to.to_path_buf();
         }
@@ -1291,17 +1539,21 @@ impl Table {
 
     fn add(
         &self,
-        root: PathBuf,
+        scope: Scope,
         invocation: Invocation,
         stop: CancellationToken,
     ) -> (u64, CancellationToken) {
+        let Scope { root, owner } = scope;
         let mut inner = self.lock();
         inner.next_id += 1;
         let id = inner.next_id;
         tracing::info!(
-            target: "pi::background", execution = id, invocation = ?invocation, root = %root.display(), "started"
+            target: "pi::background", execution = id, invocation = ?invocation, root = %root.display(), owner = ?owner, "started"
         );
-        let item = Item::blank(id, root.clone(), invocation, Phase::Running { stop });
+        let item = Item {
+            owner,
+            ..Item::blank(id, root.clone(), invocation, Phase::Running { stop })
+        };
         let gone = item.gone.clone();
         inner.items.push(item);
         inner.forget_ended(&root);
@@ -1340,17 +1592,101 @@ impl Commands {
 }
 
 impl Ask for Commands {
-    fn ask(&self, root: PathBuf, asker: &str, asked: Asked) -> Result<Option<Answer>, String> {
+    fn response(
+        &self,
+        request: &message::RequestId,
+    ) -> Result<Option<Arc<message::Message>>, String> {
+        self.table.user_response(request.message())
+    }
+
+    fn ask(&self, scope: Scope, asker: &str, asked: Asked) -> Result<Option<Answer>, String> {
+        self.put_question(scope, None, asker, asked)
+    }
+
+    fn user_input(
+        &self,
+        scope: Scope,
+        request: &message::RequestId,
+        asker: &str,
+        asked: Asked,
+    ) -> Result<Option<Answer>, String> {
+        self.put_question(scope, Some(request), asker, asked)
+    }
+}
+
+impl Commands {
+    fn put_question(
+        &self,
+        scope: Scope,
+        request: Option<&message::RequestId>,
+        asker: &str,
+        asked: Asked,
+    ) -> Result<Option<Answer>, String> {
+        let Scope { mut root, owner } = scope;
         let from = Asker::Tool {
             name: asker.to_string(),
         };
-        let question = Question::of(from, &asked)?;
+        let mut question = Question::of(from, &asked)?;
+        question.session = owner.as_ref().map(|owner| owner.session.clone());
         let mut inner = self.table.lock();
+        inner.sweep();
+        if let Some(request) = request {
+            let owner = owner
+                .as_ref()
+                .ok_or("model input has no conversation scope")?;
+            let id = request.message();
+            if owner.request.as_ref() != Some(id) {
+                return Err("model input does not match its invocation".into());
+            }
+            let input = inner
+                .model_input(&owner.session, id)
+                .ok_or("model input has no response port")?;
+            root = input.root.clone();
+            let original = input.port.request();
+            let message::Kind::Request(message::Request::FromModel(message::ModelRequest::Ask {
+                options,
+            })) = original.kind()
+            else {
+                unreachable!("registered user input")
+            };
+            let text = original
+                .body()
+                .iter()
+                .filter_map(|block| match block {
+                    message::Block::Text(text) => Some(text.as_str()),
+                    message::Block::Image(_)
+                    | message::Block::Data(_)
+                    | message::Block::Reasoning(_) => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !asked.back || options != &asked.options || text != asked.question {
+                return Err("user input display does not match its request".into());
+            }
+            if let Some(response) = input.port.response().map_err(|e| e.to_string())? {
+                let (to, answer) = oneshot::channel();
+                let _ = to.send(answers::text(&response));
+                return Ok(Some(answer));
+            }
+            if inner
+                .standing
+                .iter()
+                .any(|(_, q)| q.request.as_ref() == Some(id))
+            {
+                return Err("user input is already waiting".into());
+            }
+            question.request = Some(id.clone());
+        }
         let question = inner.number(question);
-        tracing::info!(
-            target: "pi::background", tool = asker, question = question.id, back = asked.back,
-            text = %question.text, options = ?question.options, "ask"
-        );
+        match &question.request {
+            Some(request) => {
+                tracing::info!(target: "pi::background", tool = asker, question = question.id, request = request.as_str(), "user input displayed")
+            }
+            None => tracing::info!(
+                target: "pi::background", tool = asker, question = question.id, owner = ?owner, back = asked.back,
+                text = %question.text, options = ?question.options, "ask"
+            ),
+        }
         let answer = asked.back.then(|| {
             let (to, answer) = oneshot::channel();
             inner.answers.insert(question.id, to);
@@ -1366,11 +1702,11 @@ impl Ask for Commands {
 impl RunSink for Commands {
     fn start(
         &self,
-        root: PathBuf,
+        scope: Scope,
         invocation: Invocation,
         stop: CancellationToken,
     ) -> Arc<dyn RunHandle> {
-        let (id, gone) = self.table.add(root, invocation, stop);
+        let (id, gone) = self.table.add(scope, invocation, stop);
         Arc::new(Handle {
             id,
             run: 0,
@@ -1402,7 +1738,14 @@ impl Drop for Handle {
 }
 
 impl RunHandle for Handle {
-    fn channel(&self) -> &dyn toolbox::channel::Channel {
+    fn owner(&self) -> Option<Owner> {
+        let inner = self.table.lock();
+        inner
+            .mine(self.id, self.run)
+            .and_then(|at| inner.items[at].owner.clone())
+    }
+
+    fn channel(&self) -> &dyn pi_tools::channel::Channel {
         self
     }
 
@@ -1435,8 +1778,115 @@ impl RunHandle for Handle {
     }
 }
 
-impl toolbox::channel::Channel for Handle {
-    fn listen(&self, to: UnboundedSender<Told>) {
+impl pi_tools::channel::Channel for Handle {
+    fn watch_prompts(&self) {
+        let mut inner = self.table.lock();
+        let Some(at) = inner.mine(self.id, self.run) else {
+            return;
+        };
+        let item = &mut inner.items[at];
+        let to = match &item.listens {
+            Listens::Never => return,
+            Listens::Inputs(to) | Listens::Turns(to) | Listens::Prompts(to) => to.clone(),
+        };
+        if !matches!(item.listens, Listens::Prompts(_)) {
+            tracing::info!(target: "pi::background", execution = self.id, "watching runtime prompts");
+        }
+        item.listens = Listens::Prompts(to.clone());
+        let root = item.root.clone();
+        let session = item.owner.as_ref().map(|o| o.session.clone());
+        let delivery = Delivery::from_source(session.as_deref());
+        for (_, q) in inner
+            .standing
+            .iter()
+            .filter(|(r, q)| *r == root && delivery.accepts_owner(q.session.as_deref()))
+        {
+            let _ = to.send(Told::Question {
+                id: q.id,
+                asked: q.asked(),
+                request: q.request.clone(),
+            });
+        }
+    }
+    fn answer_text(&self, question: u64, text: String) {
+        let mut inner = self.table.lock();
+        let Some(at) = inner.mine(self.id, self.run) else {
+            return;
+        };
+        let item = &inner.items[at];
+        let delivery = Delivery::Session(item.owner.as_ref().map(|o| o.session.as_str()));
+        if inner.standing.iter().any(|(r, q)| {
+            r == &item.root
+                && q.id == question
+                && q.back
+                && delivery.accepts_owner(q.session.as_deref())
+        }) && !text.trim().is_empty()
+        {
+            tracing::info!(target: "pi::background", execution = self.id, question, chars = text.chars().count(), "runtime text answer");
+            inner.answered(question, "answered through a channel", Some(text));
+        } else {
+            let why = if text.trim().is_empty() {
+                "answer text must not be blank"
+            } else {
+                "input is no longer waiting"
+            };
+            tracing::warn!(target: "pi::background", execution = self.id, question, why, "runtime text answer refused");
+            if let Some(to) = item.listens.to() {
+                let _ = to.send(Told::Refused {
+                    question,
+                    why: why.into(),
+                });
+            }
+        }
+        drop(inner);
+        self.table.wake();
+    }
+
+    fn message(&self, wire: message::WireMessage) -> Result<pi_tools::channel::Receipt, String> {
+        let id = wire.id.clone();
+        let session = wire.session.clone();
+        let result = self
+            .table
+            .ingress_for(self.id, self.run, &session)
+            .and_then(|ingress| match &wire.kind {
+                message::WireKind::Request(_) => ingress.submit(self.id, wire),
+                message::WireKind::Response { .. } => {
+                    self.table.accept_user_response(&ingress.messages, wire)
+                }
+            });
+        match &result {
+            Ok(receipt) => {
+                tracing::info!(target: "pi::background", execution = self.id, input = id.as_str(), request = receipt.request.message().as_str(), session = session.as_str(), "model message accepted");
+                self.table.wake();
+            }
+            Err(why) => {
+                tracing::warn!(target: "pi::background", execution = self.id, input = id.as_str(), session = session.as_str(), %why, "model message rejected")
+            }
+        }
+        result
+    }
+
+    fn observe(
+        &self,
+        session: message::SessionId,
+        cursor: Option<pi_tools::channel::Cursor>,
+    ) -> Result<Box<dyn pi_tools::channel::Observation>, String> {
+        let result = self
+            .table
+            .ingress_for(self.id, self.run, &session)
+            .and_then(|ingress| ingress.messages.observe(cursor).map_err(|e| e.to_string()));
+        match &result {
+            Ok(observation) => {
+                tracing::info!(target: "pi::background", execution = self.id, session = session.as_str(), next = observation.cursor().next, "observing model messages")
+            }
+            Err(why) => {
+                tracing::warn!(target: "pi::background", execution = self.id, session = session.as_str(), %why, "model observation rejected")
+            }
+        }
+        result.map(|observation| Box::new(observation) as Box<dyn pi_tools::channel::Observation>)
+    }
+
+    fn listen(&self, to: Sender) {
         self.table
             .update(self.id, self.run, |i| i.listens = Listens::Inputs(to));
     }
@@ -1467,8 +1917,16 @@ impl toolbox::channel::Channel for Handle {
             return;
         };
         let root = inner.items[at].root.clone();
+        let session = inner.items[at]
+            .owner
+            .as_ref()
+            .map(|owner| owner.session.as_str());
         let lapsed: Vec<u64> = (inner.standing.iter())
-            .filter(|(r, q)| *r == root && !q.back)
+            .filter(|(r, q)| {
+                *r == root
+                    && !q.back
+                    && Delivery::Session(session).accepts_owner(q.session.as_deref())
+            })
             .map(|(_, q)| q.id)
             .collect();
         for id in lapsed {
@@ -1489,8 +1947,12 @@ impl toolbox::channel::Channel for Handle {
             id: item.id,
             name: item.name(),
         };
+        let session = item.owner.as_ref().map(|owner| owner.session.clone());
         let question = match Question::of(from, &asked) {
-            Ok(q) => inner.number(q),
+            Ok(mut q) => {
+                q.session = session;
+                inner.number(q)
+            }
             Err(why) => {
                 tracing::warn!(target: "pi::background", execution = self.id, %why, "a question dropped");
                 return;
@@ -1512,9 +1974,15 @@ impl toolbox::channel::Channel for Handle {
         let Some(at) = inner.mine(self.id, self.run) else {
             return;
         };
-        let root = &inner.items[at].root;
+        let item = &inner.items[at];
+        let delivery = match &item.owner {
+            Some(owner) => Delivery::Session(Some(&owner.session)),
+            None => Delivery::Checkout,
+        };
         let picked = (inner.standing.iter())
-            .find(|(r, q)| r == root && q.id == question)
+            .find(|(r, q)| {
+                r == &item.root && delivery.accepts_owner(q.session.as_deref()) && q.id == question
+            })
             .ok_or_else(|| "it is no longer up".to_string())
             .and_then(|(_, q)| q.picked(&picks));
         let picked = match picked {
@@ -1553,17 +2021,24 @@ impl toolbox::channel::Channel for Handle {
         };
         let item = &mut inner.items[at];
         // One that never listens has nowhere to be told.
-        let (Listens::Inputs(to) | Listens::Turns(to)) =
+        let (Listens::Inputs(to) | Listens::Turns(to) | Listens::Prompts(to)) =
             std::mem::replace(&mut item.listens, Listens::Never)
         else {
             return;
         };
         item.listens = Listens::Turns(to.clone());
         let root = item.root.clone();
-        for (_, q) in inner.standing.iter().filter(|(at, _)| *at == root) {
+        let session = item.owner.as_ref().map(|owner| owner.session.clone());
+        let delivery = Delivery::from_source(session.as_deref());
+        for (_, q) in inner
+            .standing
+            .iter()
+            .filter(|(at, q)| *at == root && delivery.accepts_owner(q.session.as_deref()))
+        {
             let _ = to.send(Told::Question {
                 id: q.id,
                 asked: q.asked(),
+                request: q.request.clone(),
             });
         }
         drop(inner);
@@ -1582,7 +2057,7 @@ impl Controls for Commands {
         "Call without `command` to list background commands. \
              Use `output` to read a command's latest output. \
              Use `stop` to stop commands. \
-             Use `restart` to run a command again under its existing ID. \
+             Use `restart` to run a command again under its existing ID, instead of starting a duplicate. \
              A restart stops the previous run first. \
              Each control accepts one command ID, a list of IDs, or \"all\".\n\n\
              Results arrive automatically before the next model request. \
@@ -1919,7 +2394,7 @@ mod tests {
         let (dir, ctx) = context();
         let table = Arc::new(Table::default());
         let control = Arc::new(Commands::new(table.clone()));
-        let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        let executions = pi_tools::bash::Bash::new(control.clone()).with_controls(control);
         executions
             .execute(
                 json!({"background": true, "command": "sleep 0.3; echo started >> starts"}),
@@ -1970,7 +2445,7 @@ mod tests {
         let (dir, ctx) = context();
         let table = Arc::new(Table::default());
         let control = Arc::new(Commands::new(table.clone()));
-        let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        let executions = pi_tools::bash::Bash::new(control.clone()).with_controls(control);
         std::fs::create_dir(dir.path().join("subdir")).unwrap();
         let args = json!({"background": true, "command": "echo made > result; echo failed >&2; exit 3", "cwd": "subdir"});
         executions.execute(args, &ctx).await.unwrap();
@@ -1994,7 +2469,7 @@ mod tests {
         let (_dir, ctx) = context();
         let table = Arc::new(Table::default());
         let control = Arc::new(Commands::new(table.clone()));
-        let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        let executions = pi_tools::bash::Bash::new(control.clone()).with_controls(control);
         let _stop = ctx.cancel.clone().drop_guard();
         let command = "echo one; sleep 1; echo two; sleep 1";
         executions
@@ -2027,7 +2502,7 @@ mod tests {
         let (_dir, ctx) = context();
         let table = Arc::new(Table::default());
         let control = Arc::new(Commands::new(table.clone()));
-        let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        let executions = pi_tools::bash::Bash::new(control.clone()).with_controls(control);
         let _stop = ctx.cancel.clone().drop_guard();
         for command in ["sleep 5", "sleep 5", "true"] {
             executions
@@ -2063,7 +2538,7 @@ mod tests {
     async fn wait_goes_only_with_output() {
         let (_dir, ctx) = context();
         let control = Arc::new(Commands::new(Arc::new(Table::default())));
-        let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        let executions = pi_tools::bash::Bash::new(control.clone()).with_controls(control);
         for args in [json!({"wait": true}), json!({"stop": 1, "wait": true})] {
             let refused = executions.execute(args, &ctx).await;
             assert!(matches!(refused, Err(ToolError::Invalid(_))), "{refused:?}");
@@ -2075,7 +2550,7 @@ mod tests {
         let (_dir, ctx) = context();
         let table = Arc::new(Table::default());
         let control = Arc::new(Commands::new(table.clone()));
-        let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        let executions = pi_tools::bash::Bash::new(control.clone()).with_controls(control);
         let _stop = ctx.cancel.clone().drop_guard();
         for _ in 0..2 {
             executions
@@ -2122,7 +2597,7 @@ mod tests {
         let (dir, ctx) = context();
         let table = Arc::new(Table::default());
         let control = Arc::new(Commands::new(table.clone()));
-        let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        let executions = pi_tools::bash::Bash::new(control.clone()).with_controls(control);
         let marker = dir.path().join("starts");
         for args in [
             json!({"wait": [10], "timeout_ms": 420000}),
@@ -2154,7 +2629,7 @@ mod tests {
         let (_dir, ctx) = context();
         let table = Arc::new(Table::default());
         let control = Arc::new(Commands::new(table.clone()));
-        let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        let executions = pi_tools::bash::Bash::new(control.clone()).with_controls(control);
         executions
             .execute(
                 json!({"background": true, "command": "echo started", "cwd": "missing"}),
@@ -2175,18 +2650,18 @@ mod tests {
         let table = Arc::new(Table::default());
         let root = Path::new("/checkout");
         let sink = Commands::new(table.clone());
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = pi_tools::channel::channel();
         let follower = sink.start(
             root.into(),
-            toolbox::background::Invocation::shell("bridge"),
+            pi_tools::background::Invocation::shell("bridge"),
             Default::default(),
         );
         follower.channel().listen(tx);
         follower.channel().follow();
-        let (elsewhere, mut quiet) = tokio::sync::mpsc::unbounded_channel();
+        let (elsewhere, mut quiet) = pi_tools::channel::channel();
         let other = sink.start(
             "/other".into(),
-            toolbox::background::Invocation::shell("bridge"),
+            pi_tools::background::Invocation::shell("bridge"),
             Default::default(),
         );
         other.channel().listen(elsewhere);
@@ -2226,11 +2701,421 @@ mod tests {
         assert!(quiet.try_recv().is_err(), "another checkout hears nothing");
     }
 
+    #[tokio::test]
+    async fn explicit_messages_keep_their_ids_and_return_complete_semantic_history() {
+        use crate::execution::messages::{Messages, new_id};
+        use crate::execution::queue::{Pending, Queue};
+        use message::{Block, Request, Status, WireKind, WireMessage};
+        let table = Arc::new(Table::default());
+        let root = PathBuf::from("/checkout");
+        let messages = Messages::new(message::SessionId::new("message-session".into()).unwrap());
+        let queue = Queue::default();
+        let binding = table.bind_inputs(root.clone(), 17, messages.clone(), queue.clone());
+        let commands = Commands::new(table.clone());
+        let execution = commands.start(
+            Scope {
+                root: root.clone(),
+                owner: Some(Owner {
+                    session: messages.session().as_str().into(),
+                    request: None,
+                }),
+            },
+            Invocation::shell("channel"),
+            Default::default(),
+        );
+        let wire = WireMessage {
+            id: new_id(),
+            session: messages.session(),
+            by: None,
+            at: 1,
+            kind: WireKind::Request(Request::ToModel(message::InputKind::User)),
+            body: vec![Block::Text("/new".into())],
+        };
+        let receipt = execution.channel().message(wire.clone()).unwrap();
+        assert_eq!(receipt.request.message(), &wire.id);
+        assert!(receipt.response.is_none());
+        assert_eq!(
+            execution.channel().message(wire.clone()).unwrap().request,
+            receipt.request
+        );
+        assert_eq!(queue.lock().len(), 1, "a retry has no second execution");
+        let queued = queue.pop_front().unwrap();
+        assert_eq!(queued.request.lane, 17);
+        assert_eq!(
+            queued.request.origin,
+            crate::driver::Origin::Message(execution.id())
+        );
+        assert!(queued.line.is_none());
+        let Pending::Prompt(input) = queued.input else {
+            panic!()
+        };
+        assert_eq!(
+            input.prompt().text,
+            "/new",
+            "semantic input bypasses command parsing"
+        );
+        let (_, mut responder) = input.start().unwrap();
+        let tool_wire = WireMessage {
+            id: new_id(),
+            session: messages.session(),
+            by: Some(wire.id.clone()),
+            at: 2,
+            kind: WireKind::Request(Request::FromModel(message::ModelRequest::Tool {
+                name: "read".into(),
+            })),
+            body: vec![Block::Data(json!({"path":"file"}))],
+        };
+        let mut tool = messages
+            .child(
+                &receipt.request,
+                tool_wire.clone(),
+                Some("native-call".into()),
+            )
+            .unwrap();
+        let tool_response = tool
+            .complete(Status::Done, vec![Block::Text("file contents".into())])
+            .unwrap();
+        let response = responder
+            .complete(Status::Done, vec![Block::Text("complete answer".into())])
+            .unwrap();
+        // Attach after completion: the acceptance cursor closes the race.
+        let mut observer = execution
+            .channel()
+            .observe(messages.session(), Some(receipt.cursor))
+            .unwrap();
+        for id in [&wire.id, &tool_wire.id, tool_response.id(), response.id()] {
+            assert_eq!(observer.next().await.unwrap().message.id(), id);
+        }
+        assert_eq!(observer.cursor(), &messages.cursor());
+        let retry = execution.channel().message(wire.clone()).unwrap();
+        assert_eq!(retry.response.unwrap(), response);
+        assert!(queue.is_empty());
+        let mut conflict = wire.clone();
+        conflict.body = vec![Block::Text("different".into())];
+        assert!(execution.channel().message(conflict).is_err());
+        let mut wrong = wire.clone();
+        wrong.session = message::SessionId::new("another".into()).unwrap();
+        assert!(execution.channel().message(wrong).is_err());
+        let unrelated = commands.start(
+            PathBuf::from("/elsewhere").into(),
+            Invocation::shell("other"),
+            Default::default(),
+        );
+        assert!(unrelated.channel().message(wire.clone()).is_err());
+        assert!(
+            unrelated
+                .channel()
+                .observe(messages.session(), None)
+                .is_err()
+        );
+        drop(binding);
+        assert!(
+            execution.channel().message(wire.clone()).is_err(),
+            "a closed session is never retargeted"
+        );
+        assert!(
+            execution
+                .channel()
+                .observe(messages.session(), None)
+                .is_err()
+        );
+        execution.end();
+        assert!(execution.channel().message(wire).is_err());
+    }
+
+    #[tokio::test]
+    async fn fd3_messages_retain_ownership_and_service_exit_does_not_open_a_turn() {
+        use crate::execution::messages::Messages;
+        use crate::execution::queue::{Pending, Queue};
+        use message::{Block, InputKind, Status};
+        let (dir, ctx) = context();
+        let messages = Messages::new(message::SessionId::new("wire-session".into()).unwrap());
+        let admitted = messages
+            .admit(
+                crate::driver::Origin::Typed,
+                agent::session::Prompt {
+                    text: "launch".into(),
+                    images: vec![],
+                    shown: None,
+                    relayed: None,
+                },
+            )
+            .unwrap();
+        let (_, mut owner) = admitted.start().unwrap();
+        let ctx = ctx.with_request(Some(owner.request()));
+        let table = Arc::new(Table::default());
+        let queue = Queue::default();
+        let _binding = table.bind_inputs(dir.path().into(), 17, messages.clone(), queue.clone());
+        let control = Arc::new(Commands::new(table.clone()));
+        let executions = pi_tools::bash::Bash::new(control.clone()).with_controls(control);
+        std::fs::write(
+            dir.path().join("service.py"),
+            r#"import json, os
+fd = int(os.environ["PI_EVENTS_FD"])
+to = os.fdopen(os.dup(fd), "w", buffering=1)
+from_pi = os.fdopen(os.dup(fd), "r")
+session = os.environ["PI_SESSION_ID"]
+request = os.environ["PI_REQUEST_ID"]
+def send(frame):
+    to.write(json.dumps(frame) + "\n")
+send({"type":"runtime","command":{"type":"serve"}})
+send({"type":"observe","session":session,"cursor":None})
+send({"type":"message","message":{
+    "id":"external-input","session":session,"by":request,"at":1,
+    "kind":{"type":"request","value":{"direction":"to_model","request":"user"}},
+    "body":[{"type":"text","value":"/new"}]}})
+with open("frames", "w") as frames:
+    for line in from_pi:
+        frames.write(line)
+        frames.flush()
+        frame = json.loads(line)
+        message = frame.get("message", {}) if frame["type"] == "message" else {}
+        kind = message.get("kind", {})
+        if kind.get("type") == "response" and kind["value"]["request"] == "external-input":
+            break
+print("service exit is not another model input")
+"#,
+        )
+        .unwrap();
+        executions
+            .execute(
+                json!({"background":true,"command":"python3 service.py"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let queued = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(queued) = queue.pop_front() {
+                    break queued;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(queued.request.origin, crate::driver::Origin::Message(1));
+        assert!(queued.line.is_none());
+        let Pending::Prompt(input) = queued.input else {
+            panic!()
+        };
+        assert_eq!(input.prompt().text, "/new");
+        assert_eq!(input.message().id().as_str(), "external-input");
+        assert_eq!(input.message().by(), Some(owner.request().id()));
+        assert!(matches!(
+            input.message().kind(),
+            message::Kind::Request(message::Request::ToModel(InputKind::User))
+        ));
+        owner
+            .complete(Status::Done, vec![Block::Text("launched".into())])
+            .unwrap();
+        let (_, mut responder) = input.start().unwrap();
+        let body = vec![
+            Block::Text("before tool\nafter tool".into()),
+            Block::Data(json!({"value":7})),
+        ];
+        let answer = responder.complete(Status::Done, body).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while table.background(dir.path())[0].state == State::Running {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(queue.is_empty());
+        assert!(
+            table.take_back(dir.path()).is_none(),
+            "service completion is runtime state only"
+        );
+        let frames = std::fs::read_to_string(dir.path().join("frames")).unwrap();
+        let frames: Vec<Value> = frames
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame["type"] == "accepted" && frame["request"] == "external-input")
+        );
+        assert!(
+            frames.iter().any(|frame| frame["type"] == "message"
+                && frame["message"]["id"] == owner.request().id().as_str()),
+            "subscription includes the active owner input"
+        );
+        let responses: Vec<_> = frames
+            .iter()
+            .filter(|frame| {
+                frame["type"] == "message" && frame["message"]["id"] == answer.id().as_str()
+            })
+            .collect();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(
+            responses[0]["message"],
+            serde_json::to_value(answer.as_ref()).unwrap()
+        );
+    }
+
+    #[test]
+    fn queued_deliveries_keep_their_original_conversation() {
+        let table = Arc::new(Table::default());
+        let sink = Commands::new(table.clone());
+        let root = PathBuf::from("/checkout");
+        let scoped = |session: &str| Scope {
+            root: root.clone(),
+            owner: Some(Owner {
+                session: session.into(),
+                request: None,
+            }),
+        };
+        let old = sink.start(
+            scoped("old"),
+            Invocation::shell("build"),
+            Default::default(),
+        );
+        let new = sink.start(
+            scoped("new"),
+            Invocation::shell("phone"),
+            Default::default(),
+        );
+        old.channel().result("old result".into());
+        old.channel().input("old input".into(), String::new());
+        new.channel().result("new result".into());
+        new.channel().input("new input".into(), String::new());
+        assert!(table.take_input(&root, None).is_none());
+        let (_, Back::Input { text, .. }) = table.take_input(&root, Some("new")).unwrap() else {
+            panic!()
+        };
+        assert_eq!(text, "new input");
+        let (_, Back::Result(due)) = table.take_back_for(&root, Some("new")).unwrap() else {
+            panic!()
+        };
+        assert_eq!(due.text, "new result");
+        assert!(table.take_back_for(&root, Some("new")).is_none());
+        assert!(table.next_due(&root, Some("new")).is_none());
+        assert!(table.next_due(&root, Some("old")).is_some());
+        assert!(
+            table
+                .untold_for(&root, Some("new"))
+                .unwrap()
+                .contains(&format!("#{}", new.id()))
+        );
+        assert!(
+            table
+                .untold_for(&root, Some("old"))
+                .unwrap()
+                .contains(&format!("#{}", old.id()))
+        );
+        let (_, Back::Result(due)) = table.take_back_for(&root, Some("old")).unwrap() else {
+            panic!()
+        };
+        assert_eq!(due.text, "old result");
+        let (_, Back::Input { text, .. }) = table.take_back_for(&root, Some("old")).unwrap() else {
+            panic!()
+        };
+        assert_eq!(text, "old input");
+    }
+
+    #[test]
+    fn observers_questions_and_controls_keep_their_conversation_scope() {
+        let table = Arc::new(Table::default());
+        let commands = Commands::new(table.clone());
+        let root = PathBuf::from("/checkout");
+        let scope = |session: &str| Scope {
+            root: root.clone(),
+            owner: Some(Owner {
+                session: session.into(),
+                request: None,
+            }),
+        };
+        let old = commands.start(scope("old"), Invocation::shell("old"), Default::default());
+        let new = commands.start(scope("new"), Invocation::shell("new"), Default::default());
+        let service = commands.start(
+            root.clone().into(),
+            Invocation::shell("service"),
+            Default::default(),
+        );
+        let listen = |execution: &dyn RunHandle| {
+            let (to, hear) = pi_tools::channel::channel();
+            execution.channel().listen(to);
+            execution.channel().follow();
+            hear
+        };
+        let mut old_events = listen(old.as_ref());
+        let mut new_events = listen(new.as_ref());
+        let mut all_events = listen(service.as_ref());
+        assert_eq!(
+            table.followers(&root, Some("old")),
+            [old.id(), service.id()]
+        );
+        assert_eq!(
+            table.followers(&root, Some("new")),
+            [new.id(), service.id()]
+        );
+        let mut old_answer = commands
+            .ask(scope("old"), "guard", asked("old choice", &["yes"], true))
+            .unwrap()
+            .unwrap();
+        let mut new_answer = commands
+            .ask(scope("new"), "guard", asked("new choice", &["no"], true))
+            .unwrap()
+            .unwrap();
+        let old_id = table.questions_for(&root, Some("old"))[0].id;
+        let new_id = table.questions_for(&root, Some("new"))[0].id;
+        assert_ne!(old_id, new_id);
+        assert_eq!(table.questions_for(&root, Some("old")).len(), 1);
+        assert_eq!(table.questions_for(&root, Some("new")).len(), 1);
+        assert!(matches!(old_events.try_recv(), Ok(Told::Question {id, ..}) if id == old_id));
+        assert!(matches!(new_events.try_recv(), Ok(Told::Question {id, ..}) if id == new_id));
+        assert!(old_events.try_recv().is_err());
+        assert!(new_events.try_recv().is_err());
+        assert!(matches!(all_events.try_recv(), Ok(Told::Question {id, ..}) if id == old_id));
+        assert!(matches!(all_events.try_recv(), Ok(Told::Question {id, ..}) if id == new_id));
+        new.channel().answer(old_id, vec![0]);
+        assert!(
+            matches!(new_events.try_recv(), Ok(Told::Refused {question, ..}) if question == old_id)
+        );
+        assert!(old_answer.try_recv().is_err());
+        old.channel().answer(old_id, vec![0]);
+        assert_eq!(old_answer.try_recv(), Ok(Some("yes".into())));
+        assert_eq!(old_events.try_recv(), Ok(Told::Closed(old_id)));
+        assert_eq!(all_events.try_recv(), Ok(Told::Closed(old_id)));
+        assert!(new_events.try_recv().is_err());
+        assert!(new_answer.try_recv().is_err());
+
+        let worker = commands.start(
+            scope("old"),
+            Invocation::shell("worker"),
+            Default::default(),
+        );
+        worker.watch(Peek::text("old progress".into()));
+        table.relay_progress();
+        let progress = Told::Progress(format!("#{}: old progress", worker.id()));
+        assert_eq!(old_events.try_recv(), Ok(progress.clone()));
+        assert_eq!(all_events.try_recv(), Ok(progress));
+        assert!(new_events.try_recv().is_err());
+        old.channel().drive(true);
+        assert!(table.driving_for(&root, Some("old")));
+        assert!(!table.driving_for(&root, Some("new")));
+        old.channel().interrupt();
+        assert_eq!(table.take_interrupts(), [scope("old")]);
+        assert!(table.take_interrupts().is_empty());
+
+        commands
+            .ask(
+                root.clone().into(),
+                "runtime",
+                asked("global", &["ok"], false),
+            )
+            .unwrap();
+        assert!(matches!(old_events.try_recv(), Ok(Told::Question { .. })));
+        assert!(matches!(new_events.try_recv(), Ok(Told::Question { .. })));
+    }
+
     fn start(table: &Arc<Table>, root: &Path, name: &str) -> Arc<dyn RunHandle> {
         RunSink::start(
             &Commands::new(table.clone()),
-            root.to_path_buf(),
-            toolbox::background::Invocation::shell(name),
+            root.to_path_buf().into(),
+            pi_tools::background::Invocation::shell(name),
             CancellationToken::new(),
         )
     }
@@ -2279,7 +3164,7 @@ mod tests {
         let table = Arc::new(Table::default());
         let root = Path::new("/checkout");
         let execution = kept(&table, root, "serve");
-        let (to, mut heard) = tokio::sync::mpsc::unbounded_channel();
+        let (to, mut heard) = pi_tools::channel::channel();
         execution.channel().listen(to);
         execution.end();
         assert_eq!(table.background(root).len(), 1);
@@ -2379,11 +3264,11 @@ mod tests {
     async fn an_input_waits_in_line_and_its_command_hears_of_its_turn() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = pi_tools::channel::channel();
         let execution = RunSink::start(
             &Commands::new(table.clone()),
-            root.clone(),
-            toolbox::background::Invocation::shell("wechat"),
+            root.clone().into(),
+            pi_tools::background::Invocation::shell("wechat"),
             CancellationToken::new(),
         );
         execution.channel().listen(tx);
@@ -2488,7 +3373,11 @@ mod tests {
             .channel()
             .choose(asked("first?", &["/new"], false));
         executions
-            .ask(root.clone(), "choose", asked("which?", &["a"], false))
+            .ask(
+                root.clone().into(),
+                "choose",
+                asked("which?", &["a"], false),
+            )
             .unwrap();
         execution
             .channel()
@@ -2500,7 +3389,13 @@ mod tests {
         };
         assert_eq!(texts(&table), ["second?", "which?"]);
         let _waits = (0..2)
-            .map(|_| executions.ask(root.clone(), "guard", asked("allow?", &["yes"], true)))
+            .map(|_| {
+                executions.ask(
+                    root.clone().into(),
+                    "guard",
+                    asked("allow?", &["yes"], true),
+                )
+            })
             .collect::<Vec<_>>();
         assert_eq!(texts(&table), ["second?", "which?", "allow?", "allow?"]);
     }
@@ -2524,14 +3419,18 @@ mod tests {
         let root = PathBuf::from("/checkout");
         let mut answer = executions
             .ask(
-                root.clone(),
+                root.clone().into(),
                 "guard",
                 asked("run rm -rf?", &["allow", "deny"], true),
             )
             .unwrap()
             .expect("it waits");
         let fire = executions
-            .ask(root.clone(), "choose", asked("which?", &["a"], false))
+            .ask(
+                root.clone().into(),
+                "choose",
+                asked("which?", &["a"], false),
+            )
             .unwrap();
         assert!(
             fire.is_none(),
@@ -2553,7 +3452,11 @@ mod tests {
         table.answer(up[1].id, None);
         assert!(table.questions(&root).is_empty(), "answered, so down");
 
-        let gone = executions.ask(root.clone(), "guard", asked("again?", &["yes"], true));
+        let gone = executions.ask(
+            root.clone().into(),
+            "guard",
+            asked("again?", &["yes"], true),
+        );
         drop(gone);
         assert!(
             table.questions(&root).is_empty(),
@@ -2561,10 +3464,110 @@ mod tests {
         );
         assert!(
             executions
-                .ask(root, "guard", asked("?", &[], true))
+                .ask(root.into(), "guard", asked(" ", &[], true))
                 .is_err(),
             "one that cannot be put says why"
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_prompt_text_refusal_keeps_the_original_answer_port_open() {
+        let table = Arc::new(Table::default());
+        let commands = Commands::new(table.clone());
+        let root = PathBuf::from("/checkout");
+        let mut answer = commands
+            .ask(
+                root.clone().into(),
+                "guard",
+                asked("allow?", &["allow", "deny"], true),
+            )
+            .unwrap()
+            .unwrap();
+        let execution = commands.start(
+            root.clone().into(),
+            Invocation::shell("channel"),
+            Default::default(),
+        );
+        let (to, mut from) = pi_tools::channel::channel();
+        execution.channel().listen(to);
+        execution.channel().watch_prompts();
+        let Told::Question {
+            id, request: None, ..
+        } = from.try_recv().unwrap()
+        else {
+            panic!()
+        };
+        execution.channel().answer_text(id, "  ".into());
+        assert!(matches!(from.try_recv().unwrap(), Told::Refused {question,..} if question == id));
+        assert_eq!(table.questions(&root).len(), 1);
+        assert!(matches!(
+            answer.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        execution.channel().answer_text(id, "allow once".into());
+        assert_eq!(answer.try_recv(), Ok(Some("allow once".into())));
+        assert_eq!(from.try_recv().unwrap(), Told::Closed(id));
+        assert!(table.questions(&root).is_empty());
+        assert!(table.take_back(&root).is_none());
+        execution.end();
+    }
+
+    #[test]
+    fn prompt_watch_replays_the_same_sessions_it_follows() {
+        let table = Arc::new(Table::default());
+        let commands = Commands::new(table.clone());
+        let root = PathBuf::from("/checkout");
+        let scope = |session: Option<&str>| Scope {
+            root: root.clone(),
+            owner: session.map(|session| Owner {
+                session: session.into(),
+                request: None,
+            }),
+        };
+        let put = |session, text: &str| {
+            commands
+                .ask(scope(Some(session)), "guard", asked(text, &["yes"], true))
+                .unwrap()
+                .unwrap()
+        };
+        let before_a = put("a", "before a");
+        let before_b = put("b", "before b");
+        let workspace = commands.start(
+            scope(None),
+            Invocation::shell("workspace"),
+            Default::default(),
+        );
+        let selected = commands.start(
+            scope(Some("a")),
+            Invocation::shell("selected"),
+            Default::default(),
+        );
+        let (to_workspace, mut from_workspace) = pi_tools::channel::channel();
+        let (to_selected, mut from_selected) = pi_tools::channel::channel();
+        workspace.channel().listen(to_workspace);
+        selected.channel().listen(to_selected);
+        workspace.channel().watch_prompts();
+        selected.channel().watch_prompts();
+
+        let next_text = |receiver: &mut pi_tools::channel::Receiver| {
+            let Told::Question { asked, .. } = receiver.try_recv().unwrap() else {
+                panic!("expected a prompt");
+            };
+            asked.question
+        };
+        assert_eq!(next_text(&mut from_workspace), "before a");
+        assert_eq!(next_text(&mut from_workspace), "before b");
+        assert!(from_workspace.try_recv().is_err());
+        assert_eq!(next_text(&mut from_selected), "before a");
+        assert!(from_selected.try_recv().is_err());
+
+        let after_b = put("b", "after b");
+        assert_eq!(next_text(&mut from_workspace), "after b");
+        assert!(from_selected.try_recv().is_err());
+        let after_a = put("a", "after a");
+        assert_eq!(next_text(&mut from_workspace), "after a");
+        assert_eq!(next_text(&mut from_selected), "after a");
+        drop((before_a, before_b, after_a, after_b));
     }
 
     // A command that follows is told each question up on its checkout — even one
@@ -2577,16 +3580,16 @@ mod tests {
         let root = PathBuf::from("/checkout");
         executions
             .ask(
-                root.clone(),
+                root.clone().into(),
                 "choose",
                 asked("which?", &["/compact", "go on"], false),
             )
             .unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = pi_tools::channel::channel();
         let bridge = RunSink::start(
             &executions,
-            root.clone(),
-            toolbox::background::Invocation::shell("telegram"),
+            root.clone().into(),
+            pi_tools::background::Invocation::shell("telegram"),
             CancellationToken::new(),
         );
         bridge.channel().listen(tx);
@@ -2616,11 +3619,15 @@ mod tests {
         );
 
         let mut waits = executions
-            .ask(root.clone(), "guard", asked("allow?", &["yes", "no"], true))
+            .ask(
+                root.clone().into(),
+                "guard",
+                asked("allow?", &["yes", "no"], true),
+            )
             .unwrap()
             .expect("it waits");
         executions
-            .ask(root.clone(), "choose", asked("next?", &["a"], false))
+            .ask(root.clone().into(), "choose", asked("next?", &["a"], false))
             .unwrap();
         let up = table.questions(&root);
         for q in &up {
@@ -2648,7 +3655,7 @@ mod tests {
         let execution = start(&table, Path::new("/checkout"), "wechat");
         execution.channel().interrupt();
         execution.channel().interrupt();
-        assert_eq!(table.take_interrupts(), [PathBuf::from("/checkout")]);
+        assert_eq!(table.take_interrupts(), [PathBuf::from("/checkout").into()]);
         assert!(table.take_interrupts().is_empty());
     }
 
@@ -2674,8 +3681,8 @@ mod tests {
         let stop = CancellationToken::new();
         let execution = RunSink::start(
             &Commands::new(table.clone()),
-            root.clone(),
-            toolbox::background::Invocation::shell("long execution"),
+            root.clone().into(),
+            pi_tools::background::Invocation::shell("long execution"),
             stop.clone(),
         );
         assert!(table.stop(Path::new("/elsewhere"), execution.id()).is_err());
@@ -2698,8 +3705,8 @@ mod tests {
         let root = PathBuf::from("/checkout");
         let execution = RunSink::start(
             &Commands::new(table.clone()),
-            root.clone(),
-            toolbox::background::Invocation::shell("crawl"),
+            root.clone().into(),
+            pi_tools::background::Invocation::shell("crawl"),
             CancellationToken::new(),
         );
         execution.channel().status("1/2 pages".into());
@@ -2739,8 +3746,8 @@ mod tests {
         let root = PathBuf::from("/checkout");
         let execution = RunSink::start(
             &Commands::new(table.clone()),
-            root.clone(),
-            toolbox::background::Invocation::shell("flood"),
+            root.clone().into(),
+            pi_tools::background::Invocation::shell("flood"),
             CancellationToken::new(),
         );
         for n in 0..MAX_WAITING + 3 {
@@ -2774,8 +3781,8 @@ mod tests {
         let root = PathBuf::from("/checkout");
         let execution = RunSink::start(
             &Commands::new(table.clone()),
-            root.clone(),
-            toolbox::background::Invocation::shell("quiet"),
+            root.clone().into(),
+            pi_tools::background::Invocation::shell("quiet"),
             Default::default(),
         );
         execution.end();
@@ -2788,12 +3795,12 @@ mod tests {
         let table = Arc::new(Table::default());
         let (a, _) = table.add(
             "/repo.worktrees/a".into(),
-            toolbox::background::Invocation::shell("a"),
+            pi_tools::background::Invocation::shell("a"),
             Default::default(),
         );
         table.add(
             "/repo".into(),
-            toolbox::background::Invocation::shell("main"),
+            pi_tools::background::Invocation::shell("main"),
             Default::default(),
         );
         let stop = match &table.lock().items[0].phase {
@@ -2835,7 +3842,7 @@ mod tests {
         let stop = CancellationToken::new();
         let plain = Commands::new(table.clone()).start(
             root.into(),
-            toolbox::background::Invocation::shell("plain"),
+            pi_tools::background::Invocation::shell("plain"),
             stop.clone(),
         );
         let elsewhere = start(&table, Path::new("/elsewhere"), "elsewhere");
@@ -2910,8 +3917,15 @@ mod tests {
             name: "serve".into(),
             args: json!({"port":"8080", "prompt":"line one\nline two"}),
         };
+        let owner = Owner {
+            session: "original-session".into(),
+            request: Some(message::MessageId::new("original-request".into()).unwrap()),
+        };
         let execution = Commands::new(old.clone()).start(
-            root.clone(),
+            Scope {
+                root: root.clone(),
+                owner: Some(owner.clone()),
+            },
             invocation.clone(),
             CancellationToken::new(),
         );
@@ -2930,6 +3944,7 @@ mod tests {
         assert_eq!(carried.len(), 2, "{carried:?}");
         assert_eq!((carried[0].id, carried[0].stopped), (execution.id(), true));
         assert_eq!((carried[1].id, carried[1].stopped), (running.id(), true));
+        assert_eq!(carried[0].owner.as_ref(), Some(&owner));
         assert_eq!(carried[0].again, again);
         assert_eq!(carried[0].invocation, invocation);
         assert!(old.carried(Path::new("/elsewhere")).is_empty());
@@ -2951,6 +3966,7 @@ mod tests {
                 }),
             );
         }
+        assert_eq!(new.carried(&root)[0].owner.as_ref(), Some(&owner));
         let listed = new.background(&root);
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].invocation.as_ref(), &invocation);

@@ -1,5 +1,5 @@
 [package]
-name = "toolbox"
+name = "pi-tools"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "The tools a run acts through"
 
 [dependencies]
+message.workspace = true
 llm.workspace = true
 tool.workspace = true
 async-trait.workspace = true

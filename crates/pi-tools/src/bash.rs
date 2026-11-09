@@ -251,7 +251,7 @@ async fn schedule(
     again.environment = call.environment;
     again.output = call.output;
     let stop = tokio_util::sync::CancellationToken::new();
-    let execution = executions.start(ctx.workspace.root().to_path_buf(), invocation, stop.clone());
+    let execution = executions.start(ctx.into(), invocation, stop.clone());
     let id = execution.id();
     execution.watch(crate::background::Peek::text(String::new()));
     let launch = rerun(again.clone(), ctx);
@@ -449,7 +449,7 @@ impl Bash {
                 _ = requests.recv() => {
                     unbounded.cancel();
                     let execution = executions.start(
-                        ctx.workspace.root().to_path_buf(), invocation, stop,
+                        ctx.into(), invocation, stop,
                     );
                     let id = execution.id();
                     execution.watch(peek);

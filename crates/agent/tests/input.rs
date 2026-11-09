@@ -213,7 +213,7 @@ async fn new_input_waits_for_the_whole_reply_then_continues_without_a_tool_call(
     assert!(second.messages.iter().any(|m| matches!(m, Message::Assistant { content, .. }
         if content.iter().any(|b| matches!(b, AssistantContent::Reasoning(r)
             if r.text() == "complete reasoning"
-                && matches!(r.replay_for(&common::spec()), llm::message::Replay::Thinking { signature: Some("intact") }))))));
+                && matches!(llm::message::replay_for(r, &common::spec()), llm::message::Replay::Thinking { signature: Some("intact") }))))));
     assert_eq!(
         session
             .entries()
@@ -263,7 +263,7 @@ async fn input_after_a_tool_call_follows_its_result_before_the_next_request() {
         requests: req_tx,
     });
     let mut agent = Agent::new(wire, common::spec());
-    Arc::make_mut(&mut agent.brief).registry = toolbox::builtin();
+    Arc::make_mut(&mut agent.brief).registry = pi_tools::builtin();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("data"), "result").unwrap();
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
@@ -347,7 +347,7 @@ async fn notes_go_with_the_next_request_and_only_unshown_ones_are_said() {
         requests: req_tx,
     });
     let mut agent = Agent::new(wire, common::spec());
-    Arc::make_mut(&mut agent.brief).registry = toolbox::builtin();
+    Arc::make_mut(&mut agent.brief).registry = pi_tools::builtin();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("data"), "result").unwrap();
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());

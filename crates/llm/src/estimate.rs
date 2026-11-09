@@ -159,7 +159,7 @@ fn replayed_reasoning(r: &Reasoning, spec: &ModelSpec) -> usize {
             })
             .sum()
     };
-    match r.replay_for(spec) {
+    match crate::message::replay_for(r, spec) {
         Replay::Thinking { signature } => text() + signature.map_or(0, of),
         Replay::Encrypted { id, encrypted } => of(id) + of(encrypted),
         Replay::Redacted { data } => of(data),

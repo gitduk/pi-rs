@@ -5,64 +5,303 @@ use std::sync::Arc;
 
 use agent::seams::Note;
 use agent::session::Prompt;
-use tool::Ctx;
 
 use super::background::Table;
 use crate::core::lane::Notes;
 
-/// The user's messages first, then what the checkout's background commands
-/// have ready. Who holds the user's messages, and in what order they may go,
-/// is the caller's: `prompts` is asked each time and gives none it must keep.
-///
-/// Notes follow: those filed for the lane while the run has its transcript,
-/// already shown, then the background commands it has not been told of.
+/// Notes for an active run. New inputs remain queued until that run ends.
 pub struct Input {
     root: PathBuf,
     executions: Arc<Table>,
-    // The run's context, which knows what it wrote since a command started.
-    ctx: Ctx,
-    prompts: Box<dyn agent::seams::Input>,
     notes: Option<Notes>,
+    messages: Option<Calls>,
+}
+
+struct Calls {
+    messages: crate::execution::messages::Messages,
+    parent: message::RequestId,
+    pending: std::sync::Mutex<std::collections::HashMap<String, Call>>,
+}
+
+struct Call {
+    name: String,
+    reply: Reply,
+}
+
+enum Reply {
+    Tool(crate::execution::messages::Responder),
+    User(message::RequestId),
+}
+
+/// Project a validated user answer into the native tool result representation.
+pub(crate) fn answer_content(body: &[message::Block]) -> Vec<llm::message::ToolResultContent> {
+    body.iter()
+        .map(|block| match block {
+            message::Block::Text(text) => {
+                llm::message::ToolResultContent::Text(llm::message::Text { text: text.clone() })
+            }
+            message::Block::Image(image) => llm::message::ToolResultContent::Image(image.clone()),
+            message::Block::Data(_) | message::Block::Reasoning(_) => {
+                unreachable!("validated user response")
+            }
+        })
+        .collect()
 }
 
 impl Input {
-    pub fn new(
-        root: PathBuf,
-        executions: Arc<Table>,
-        ctx: Ctx,
-        prompts: impl agent::seams::Input + 'static,
-        notes: Option<Notes>,
-    ) -> Self {
+    pub fn new(root: PathBuf, executions: Arc<Table>, notes: Option<Notes>) -> Self {
         Self {
             root,
             executions,
-            ctx,
-            prompts: Box::new(prompts),
             notes,
+            messages: None,
         }
+    }
+    pub fn with_messages(
+        mut self,
+        messages: crate::execution::messages::Messages,
+        parent: message::RequestId,
+    ) -> Self {
+        self.abandon_calls();
+        self.messages = Some(Calls {
+            messages,
+            parent,
+            pending: Default::default(),
+        });
+        self
+    }
+
+    pub fn close_calls(&self, status: message::Status) -> Result<(), String> {
+        if let Some(calls) = &self.messages {
+            let mut pending = calls
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for call in pending.values_mut() {
+                match &mut call.reply {
+                    Reply::Tool(port) => {
+                        port.complete(status.clone(), Vec::new())
+                            .map_err(|e| e.to_string())?;
+                    }
+                    Reply::User(request) => {
+                        self.executions.seal_user_input(
+                            request.message(),
+                            status.clone(),
+                            vec![],
+                        )?;
+                        self.executions.retire_user_input(request.message())?;
+                    }
+                }
+            }
+            pending.clear();
+        }
+        Ok(())
+    }
+}
+
+impl Input {
+    fn user_results(
+        &self,
+        closing: Option<message::Status>,
+    ) -> Result<Vec<llm::message::ToolResult>, String> {
+        let Some(calls) = &self.messages else {
+            return Ok(vec![]);
+        };
+        let pending = calls
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut results = Vec::new();
+        for (native, call) in pending.iter() {
+            let Reply::User(request) = &call.reply else {
+                continue;
+            };
+            let response = match &closing {
+                Some(status) => Some(self.executions.seal_user_input(
+                    request.message(),
+                    status.clone(),
+                    vec![],
+                )?),
+                None => self.executions.user_response(request.message())?,
+            };
+            let Some(response) = response else { continue };
+            let mut content = answer_content(response.body());
+            let message::Kind::Response { status, .. } = response.kind() else {
+                unreachable!("stored response")
+            };
+            let notice = match status {
+                message::Status::Done => None,
+                message::Status::Stopped => Some(agent::session::STOPPED_CALL.to_owned()),
+                message::Status::Failed(failure) => {
+                    Some(format!("{} [code: {}]", failure.message, failure.code))
+                }
+            };
+            if let Some(text) = notice {
+                content.push(llm::message::ToolResultContent::Text(llm::message::Text {
+                    text,
+                }));
+            }
+            results.push(llm::message::ToolResult {
+                call: native.clone(),
+                name: call.name.clone(),
+                content,
+                is_error: !matches!(status, message::Status::Done),
+            });
+        }
+        Ok(results)
+    }
+}
+
+impl Input {
+    fn abandon_calls(&mut self) {
+        if let Some(calls) = &mut self.messages {
+            let pending = calls
+                .pending
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for call in pending.values() {
+                if let Reply::User(request) = &call.reply {
+                    self.executions.abandon_user_input(request.message());
+                }
+            }
+            pending.clear();
+        }
+    }
+}
+
+impl Drop for Input {
+    fn drop(&mut self) {
+        self.abandon_calls();
     }
 }
 
 impl agent::seams::Input for Input {
     fn take(&self) -> Option<Prompt> {
-        if let Some(prompt) = self.prompts.take() {
-            return Some(prompt);
+        None
+    }
+
+    fn tool_request(
+        &self,
+        call: &llm::message::ToolCall,
+        kind: message::ModelRequest,
+        body: Vec<message::Block>,
+    ) -> Result<Option<Arc<message::Message>>, String> {
+        let Some(calls) = &self.messages else {
+            return Ok(None);
+        };
+        let mut pending = calls
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending.contains_key(&call.id) {
+            return Err("duplicate active native tool call identifier".into());
         }
-        let due = self.executions.take_ready_results(&self.root)?;
-        let note = due.note_for(&self.ctx);
-        Some(Prompt {
-            text: due.line,
-            images: Vec::new(),
-            shown: Some(due.label),
-            relayed: Some(note),
-        })
+        let user = matches!(&kind, message::ModelRequest::Ask { .. });
+        let wire = message::WireMessage {
+            id: crate::execution::messages::new_id(),
+            session: calls.messages.session(),
+            by: Some(calls.parent.message().clone()),
+            at: agent::session::now(),
+            kind: message::WireKind::Request(message::Request::FromModel(kind)),
+            body,
+        };
+        let (request, reply) = if user {
+            let request = self.executions.user_request(
+                self.root.clone(),
+                &calls.messages,
+                &calls.parent,
+                wire,
+                call.id.clone(),
+            )?;
+            let reply = Reply::User(request.request_id().expect("model user input"));
+            (request, reply)
+        } else {
+            let port = calls
+                .messages
+                .child(&calls.parent, wire, Some(call.id.clone()))
+                .map_err(|e| e.to_string())?;
+            (port.request(), Reply::Tool(port))
+        };
+        pending.insert(
+            call.id.clone(),
+            Call {
+                name: call.name.clone(),
+                reply,
+            },
+        );
+        Ok(Some(request))
+    }
+
+    fn tool_response(&self, result: &llm::message::ToolResult) -> Result<(), String> {
+        let Some(calls) = &self.messages else {
+            return Ok(());
+        };
+        let mut pending = calls
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let call = pending
+            .get_mut(&result.call)
+            .ok_or("result has no active tool request")?;
+        if call.name != result.name {
+            return Err("result tool name does not match its request".into());
+        }
+        let body = result
+            .content
+            .iter()
+            .map(|block| match block {
+                llm::message::ToolResultContent::Text(text) => {
+                    message::Block::Text(text.text.clone())
+                }
+                llm::message::ToolResultContent::Image(image) => {
+                    message::Block::Image(image.clone())
+                }
+                llm::message::ToolResultContent::Json { value } => {
+                    message::Block::Data(value.clone())
+                }
+            })
+            .collect();
+        let status = if result.is_error {
+            message::Status::Failed(message::Failure {
+                code: "TOOL_FAILED".into(),
+                message: "tool could not complete the request".into(),
+            })
+        } else {
+            message::Status::Done
+        };
+        match &mut call.reply {
+            Reply::Tool(port) => {
+                port.complete(status, body).map_err(|e| e.to_string())?;
+            }
+            Reply::User(request) => {
+                self.executions
+                    .seal_user_input(request.message(), status, body)?;
+                self.executions.retire_user_input(request.message())?;
+            }
+        }
+        pending.remove(&result.call);
+        Ok(())
+    }
+
+    fn completed_calls(&self) -> Result<Vec<llm::message::ToolResult>, String> {
+        self.user_results(None)
+    }
+
+    fn settle_calls(
+        &self,
+        status: message::Status,
+    ) -> Result<Vec<llm::message::ToolResult>, String> {
+        self.user_results(Some(status))
     }
 
     fn note(&self) -> Option<Note> {
         if let Some(text) = self.notes.as_ref().and_then(Notes::take) {
             return Some(Note { text, shown: true });
         }
-        let text = self.executions.untold(&self.root)?;
+        let session = self.messages.as_ref().map(|calls| calls.messages.session());
+        let text = self
+            .executions
+            .untold_for(&self.root, session.as_ref().map(message::SessionId::as_str))?;
         Some(Note { text, shown: false })
     }
 }
@@ -71,26 +310,17 @@ impl agent::seams::Input for Input {
 mod tests {
     use super::*;
     use agent::seams::Input as _;
-    use toolbox::background::RunSink as _;
-
-    fn prompt(text: &str) -> Prompt {
-        Prompt {
-            text: text.into(),
-            images: Vec::new(),
-            shown: None,
-            relayed: None,
-        }
-    }
+    use pi_tools::background::RunSink as _;
 
     #[tokio::test]
-    async fn results_join_the_active_run_once_without_taking_other_checkouts_or_user_inputs() {
+    async fn results_wait_for_the_next_run_without_entering_the_active_run() {
         let root = PathBuf::from("/checkout");
         let other = PathBuf::from("/elsewhere");
         let executions = Arc::new(Table::default());
         let sink = crate::driver::background::Commands::new(executions.clone());
         let phone = sink.start(
-            root.clone(),
-            toolbox::background::Invocation::shell("phone"),
+            root.clone().into(),
+            pi_tools::background::Invocation::shell("phone"),
             Default::default(),
         );
         phone
@@ -98,18 +328,18 @@ mod tests {
             .input("a remote question".into(), String::new());
         phone.channel().result("phone result".into());
         let first = sink.start(
-            root.clone(),
-            toolbox::background::Invocation::shell("build"),
+            root.clone().into(),
+            pi_tools::background::Invocation::shell("build"),
             Default::default(),
         );
         let elsewhere = sink.start(
-            other.clone(),
-            toolbox::background::Invocation::shell("other"),
+            other.clone().into(),
+            pi_tools::background::Invocation::shell("other"),
             Default::default(),
         );
         let second = sink.start(
-            root.clone(),
-            toolbox::background::Invocation::shell("test"),
+            root.clone().into(),
+            pi_tools::background::Invocation::shell("test"),
             Default::default(),
         );
         first.channel().result("built".into());
@@ -119,28 +349,12 @@ mod tests {
         elsewhere.channel().result("unrelated".into());
         elsewhere.end();
 
-        let typed = std::sync::Mutex::new(Some(prompt("typed direction")));
-        let ctx = Ctx::new(tool::Workspace::new(std::env::temp_dir()).unwrap());
-        let input = Input::new(
-            root.clone(),
-            executions.clone(),
-            ctx,
-            move || typed.lock().unwrap().take(),
-            None,
-        );
-        assert_eq!(input.take().unwrap().text, "typed direction");
-        let results = input.take().unwrap();
-        assert!(results.text.contains("phone result"));
-        assert!(results.text.contains("built") && results.text.contains("tested"));
-        assert!(!results.text.contains("unrelated"));
-        assert!(
-            results.relayed.is_some(),
-            "execution output is not attributed to the user"
-        );
-        assert!(
-            input.take().is_none(),
-            "the active run consumes the batch once"
-        );
+        let input = Input::new(root.clone(), executions.clone(), None);
+        assert!(input.take().is_none());
+        let results = executions.take_ready_results(&root).unwrap();
+        assert!(results.line.contains("phone result"));
+        assert!(results.line.contains("built") && results.line.contains("tested"));
+        assert!(!results.line.contains("unrelated"));
         let (_, super::super::background::Back::Input { text, .. }) =
             executions.take_back(&root).unwrap()
         else {
@@ -150,7 +364,62 @@ mod tests {
         assert!(executions.take_back(&root).is_none());
         assert!(executions.take_back(&other).is_some());
         phone.channel().result("later".into());
-        assert!(input.take().unwrap().text.contains("later"));
         assert!(input.take().is_none());
+        assert!(
+            executions
+                .take_ready_results(&root)
+                .unwrap()
+                .line
+                .contains("later")
+        );
+        assert!(input.take().is_none());
+    }
+    #[test]
+    fn tool_result_closes_its_parent_dependency_once() {
+        use crate::execution::messages::Messages;
+        use agent::seams::Input as _;
+        let messages = Messages::new(message::SessionId::new("session".into()).unwrap());
+        let prompt = Prompt {
+            text: "run".into(),
+            images: vec![],
+            shown: None,
+            relayed: None,
+        };
+        let (_, mut owner) = messages
+            .admit(crate::driver::Origin::Typed, prompt)
+            .unwrap()
+            .start()
+            .unwrap();
+        let input = Input::new(PathBuf::from("/checkout"), Arc::default(), None)
+            .with_messages(messages, owner.request().request_id().unwrap());
+        let call = llm::message::ToolCall {
+            id: "native-1".into(),
+            name: "bash".into(),
+            args: serde_json::json!({"command": "false"}),
+        };
+        input
+            .tool_request(
+                &call,
+                message::ModelRequest::Tool {
+                    name: call.name.clone(),
+                },
+                vec![message::Block::Data(call.args.clone())],
+            )
+            .unwrap();
+        assert!(matches!(
+            owner.complete(message::Status::Done, vec![]),
+            Err(crate::execution::messages::Error::Children)
+        ));
+        let result = llm::message::ToolResult {
+            call: call.id,
+            name: call.name,
+            content: vec![llm::message::ToolResultContent::Json {
+                value: serde_json::json!({"exit_code": 1}),
+            }],
+            is_error: false,
+        };
+        input.tool_response(&result).unwrap();
+        assert!(input.tool_response(&result).is_err());
+        owner.complete(message::Status::Done, vec![]).unwrap();
     }
 }

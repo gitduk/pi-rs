@@ -31,7 +31,7 @@ impl Agent {
         &self,
         calls: &[ToolCall],
         bad: &HashMap<String, InvalidToolArgs>,
-        ctx: &Ctx,
+        contexts: &[Ctx],
         voice: &Voice,
         spent: &mut Usage,
     ) -> (Vec<(ToolResult, Drawn)>, bool) {
@@ -68,8 +68,8 @@ impl Agent {
             })
             .collect();
         // Hooks decide beside the approver, so a refusal is a denial like its.
-        let refusals = futures::future::join_all(calls.iter().zip(&actions).map(
-            |(call, action)| async move {
+        let refusals = futures::future::join_all(calls.iter().zip(&actions).zip(contexts).map(
+            |((call, action), ctx)| async move {
                 match action {
                     Action::Run(_) => self
                         .brief
@@ -111,7 +111,8 @@ impl Agent {
         let futures: Vec<_> = calls
             .iter()
             .zip(&actions)
-            .map(|(call, action)| {
+            .zip(contexts)
+            .map(|((call, action), ctx)| {
                 async move {
                     match action {
                         Action::Reject(why) => Landed::Answered(

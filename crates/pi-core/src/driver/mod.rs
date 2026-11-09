@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use crate::execution::Request;
 use agent::Event;
+use pi_tools::channel::Response;
+use pi_tools::channel::Told;
 use tool::Ctx;
-use toolbox::channel::Response;
-use toolbox::channel::Told;
 
 /// Who sent a line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +23,8 @@ pub enum Origin {
     /// A line an execution submitted, as if typed: the operation's answer
     /// goes back to it.
     Input(u64),
+    /// An explicit semantic message; replies use its canonical message identity.
+    Message(u64),
 }
 
 /// How a turn ended, as every driver that began it is told.
@@ -37,11 +39,11 @@ pub enum Ended {
 }
 
 impl Ended {
-    pub fn outcome(&self) -> toolbox::channel::Outcome {
+    pub fn outcome(&self) -> pi_tools::channel::Outcome {
         match self {
-            Self::Done => toolbox::channel::Outcome::Done,
-            Self::Stopped | Self::Unsent => toolbox::channel::Outcome::Stopped(String::new()),
-            Self::Failed(why) => toolbox::channel::Outcome::Failed(why.clone()),
+            Self::Done => pi_tools::channel::Outcome::Done,
+            Self::Stopped | Self::Unsent => pi_tools::channel::Outcome::Stopped(String::new()),
+            Self::Failed(why) => pi_tools::channel::Outcome::Failed(why.clone()),
         }
     }
 }
@@ -87,9 +89,9 @@ struct Owed {
 
 impl Drivers {
     /// Take a submitted user line without consuming background results.
-    pub fn next_input(&self, root: &std::path::Path) -> Option<Next> {
+    pub fn next_input(&self, root: &std::path::Path, ctx: &Ctx) -> Option<Next> {
         let (execution, background::Back::Input { text, note }) =
-            self.executions.take_input(root)?
+            self.executions.take_input(root, ctx.session())?
         else {
             unreachable!("only user submissions were requested")
         };
@@ -107,10 +109,22 @@ impl Drivers {
             self.running.insert(request.lane, request);
             match request.origin {
                 Origin::Input(execution) => self.owe_request(execution, request.lane, request.id),
-                Origin::Typed | Origin::Background => {}
+                Origin::Typed | Origin::Background | Origin::Message(_) => {}
             }
         } else {
             self.respond(request, Response::Started);
+        }
+    }
+
+    pub fn link(&self, operation: Request, request: message::MessageId) {
+        if let Origin::Input(execution) = operation.origin {
+            self.executions.tell(
+                execution,
+                Told::Linked {
+                    operation: operation.id,
+                    request,
+                },
+            );
         }
     }
 
@@ -141,7 +155,7 @@ impl Drivers {
     /// Queued execution results first: they were due already, and an input of
     /// a driving execution can wait one turn. Inputs keep their own turns.
     pub fn next(&mut self, root: &std::path::Path, ctx: &Ctx) -> Option<Next> {
-        Some(match self.executions.take_back(root)? {
+        Some(match self.executions.take_back_for(root, ctx.session())? {
             (_, background::Back::Result(due)) => Next {
                 note: due.note_for(ctx),
                 line: due.line,
@@ -160,6 +174,21 @@ impl Drivers {
     /// One event from any lane's run, on the checkout at `root`; each driver
     /// keeps its own turns'.
     pub fn observe(&mut self, lane: u64, root: &std::path::Path, event: &Event) {
+        self.observe_selected(lane, root, None, event);
+    }
+
+    /// Observe a run in its captured conversation, including scoped followers.
+    pub fn observe_for(&mut self, lane: u64, ctx: &Ctx, event: &Event) {
+        self.observe_selected(lane, ctx.workspace.root(), ctx.session(), event);
+    }
+
+    fn observe_selected(
+        &mut self,
+        lane: u64,
+        root: &std::path::Path,
+        session: Option<&str>,
+        event: &Event,
+    ) {
         // Each request, not just the run's first: one that follows from
         // mid-run still hears how the run ends.
         if let Event::TurnStart { .. } = event {
@@ -167,7 +196,7 @@ impl Drivers {
                 .running
                 .entry(lane)
                 .or_insert_with(|| Request::new(Origin::Background, lane));
-            for execution in self.executions.followers(root) {
+            for execution in self.executions.followers(root, session) {
                 self.owe_request(execution, lane, request.id);
             }
         }
@@ -220,6 +249,11 @@ impl Drivers {
     /// Whether a driver will send the lane at `root` more: it has not finished.
     pub fn holds(&self, root: &std::path::Path) -> bool {
         self.executions.driving(root)
+    }
+
+    pub fn holds_for(&self, ctx: &Ctx) -> bool {
+        self.executions
+            .driving_for(ctx.workspace.root(), ctx.session())
     }
 
     /// End the runs of lanes that are gone.
@@ -320,9 +354,9 @@ impl Drivers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pi_tools::background::RunSink as _;
+    use pi_tools::channel::Outcome;
     use tool::Tool as _;
-    use toolbox::background::RunSink as _;
-    use toolbox::channel::Outcome;
 
     // A background command belongs to the execution. Ending the turn that
     // started it does not cancel it; completion opens a later turn through the
@@ -338,7 +372,7 @@ mod tests {
         let mut drivers = Drivers::default();
         let table = drivers.background();
         let control = Arc::new(background::Commands::new(table.clone()));
-        let executions = toolbox::bash::Bash::new(control.clone()).with_controls(control);
+        let executions = pi_tools::bash::Bash::new(control.clone()).with_controls(control);
         let marker = root.join("started");
         let out = tokio::time::timeout(
             Duration::from_millis(500),
@@ -384,17 +418,17 @@ mod tests {
         let sink = background::Commands::new(table.clone());
         let first = sink.start(
             root.into(),
-            toolbox::background::Invocation::shell("build"),
+            pi_tools::background::Invocation::shell("build"),
             Default::default(),
         );
         let other = sink.start(
             elsewhere.into(),
-            toolbox::background::Invocation::shell("other"),
+            pi_tools::background::Invocation::shell("other"),
             Default::default(),
         );
         let second = sink.start(
             root.into(),
-            toolbox::background::Invocation::shell("test"),
+            pi_tools::background::Invocation::shell("test"),
             Default::default(),
         );
         // Arrival order differs from registration order, as it can in a run.
@@ -440,7 +474,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         let build = sink.start(
             root.into(),
-            toolbox::background::Invocation::shell("build"),
+            pi_tools::background::Invocation::shell("build"),
             Default::default(),
         );
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -465,12 +499,12 @@ mod tests {
         let sink = background::Commands::new(drivers.background());
         let execution = sink.start(
             root.into(),
-            toolbox::background::Invocation::shell("watch"),
+            pi_tools::background::Invocation::shell("watch"),
             Default::default(),
         );
         let other = sink.start(
             root.into(),
-            toolbox::background::Invocation::shell("build"),
+            pi_tools::background::Invocation::shell("build"),
             Default::default(),
         );
         execution.channel().result("first".into());
@@ -517,7 +551,7 @@ mod tests {
         let sink = background::Commands::new(drivers.background());
         let execution = sink.start(
             root.into(),
-            toolbox::background::Invocation::shell("driver"),
+            pi_tools::background::Invocation::shell("driver"),
             Default::default(),
         );
         execution.channel().drive(true);
@@ -536,10 +570,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let mut drivers = Drivers::default();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = pi_tools::channel::channel();
         let execution = background::Commands::new(drivers.background()).start(
-            root.clone(),
-            toolbox::background::Invocation::shell("bridge"),
+            root.clone().into(),
+            pi_tools::background::Invocation::shell("bridge"),
             Default::default(),
         );
         execution.channel().listen(tx);
@@ -647,11 +681,11 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut drivers = Drivers::default();
             let execution = background::Commands::new(drivers.background()).start(
-                dir.path().to_path_buf(),
-                toolbox::background::Invocation::shell("bridge"),
+                dir.path().to_path_buf().into(),
+                pi_tools::background::Invocation::shell("bridge"),
                 Default::default(),
             );
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, mut rx) = pi_tools::channel::channel();
             execution.channel().listen(tx);
             let request = Request::new(Origin::Input(execution.id()), 1);
             drivers.started(request, true);
@@ -679,10 +713,10 @@ mod tests {
         let root = dir.path().to_path_buf();
         let ctx = Ctx::new(tool::Workspace::new(&root).unwrap());
         let mut drivers = Drivers::default();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = pi_tools::channel::channel();
         let execution = background::Commands::new(drivers.background()).start(
-            root.clone(),
-            toolbox::background::Invocation::shell("wechat"),
+            root.clone().into(),
+            pi_tools::background::Invocation::shell("wechat"),
             Default::default(),
         );
         execution.channel().listen(tx);
@@ -725,11 +759,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let drivers = Drivers::default();
         let execution = background::Commands::new(drivers.background()).start(
-            dir.path().to_path_buf(),
-            toolbox::background::Invocation::shell("bridge"),
+            dir.path().to_path_buf().into(),
+            pi_tools::background::Invocation::shell("bridge"),
             Default::default(),
         );
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = pi_tools::channel::channel();
         execution.channel().listen(tx);
         let request = Request::new(Origin::Input(execution.id()), 1);
         for event in [
@@ -797,8 +831,8 @@ mod tests {
         let root = dir.path().to_path_buf();
         let drivers = Drivers::default();
         let execution = background::Commands::new(drivers.background()).start(
-            root.clone(),
-            toolbox::background::Invocation::shell("http.server 8080"),
+            root.clone().into(),
+            pi_tools::background::Invocation::shell("http.server 8080"),
             Default::default(),
         );
         let Said::Noted(_, note) = drivers.stop_commands(&root, &[execution.id()]) else {
@@ -822,10 +856,10 @@ mod tests {
         let root = dir.path().to_path_buf();
         let ctx = Ctx::new(tool::Workspace::new(&root).unwrap());
         let mut drivers = Drivers::default();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = pi_tools::channel::channel();
         let execution = background::Commands::new(drivers.background()).start(
-            root.clone(),
-            toolbox::background::Invocation::shell("wechat"),
+            root.clone().into(),
+            pi_tools::background::Invocation::shell("wechat"),
             Default::default(),
         );
         execution.channel().listen(tx);
@@ -878,17 +912,17 @@ mod tests {
         let ctx = Ctx::new(tool::Workspace::new(&root).unwrap());
         let mut drivers = Drivers::default();
         let sink = background::Commands::new(drivers.background());
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = pi_tools::channel::channel();
         let execution = sink.start(
-            root.clone(),
-            toolbox::background::Invocation::shell("wechat"),
+            root.clone().into(),
+            pi_tools::background::Invocation::shell("wechat"),
             Default::default(),
         );
         execution.channel().listen(tx);
-        let (quiet_tx, mut quiet) = tokio::sync::mpsc::unbounded_channel();
+        let (quiet_tx, mut quiet) = pi_tools::channel::channel();
         let _quiet = sink.start(
-            root.clone(),
-            toolbox::background::Invocation::shell("build"),
+            root.clone().into(),
+            pi_tools::background::Invocation::shell("build"),
             Default::default(),
         );
         _quiet.channel().listen(quiet_tx);

@@ -40,6 +40,7 @@ pub enum Run {
     // Nothing running, nothing waiting to be looked at.
     Idle,
     Running {
+        operation: Option<crate::execution::Request>,
         // What a stop cancels, and only for the lane in front.
         cancel: CancellationToken,
         // A stop caught the prompt on its way out: end the run, then unsend it.
@@ -88,15 +89,18 @@ pub(super) type ReadAt = (String, Option<EntryId>);
 // One session: replaced whole by `/new` and `/resume`, so nothing of the one
 // being left survives into the next.
 struct Conversation {
+    queue: crate::execution::queue::Queue,
+    ingress: Option<Arc<crate::execution::ingress::Ingress>>,
+    messages: crate::execution::messages::Messages,
     transcript: Transcript,
     id: String,
     // When this session began. Held rather than read back: going to disk for
     // it made every save parse the whole transcript to recover one integer.
     created: u64,
     // Keeps another pi from saving over this session while it is open here.
-    _claim: Option<session::Claim>,
+    _claim: Option<Arc<session::Claim>>,
     // What the user calls this session, if anything.
-    name: Option<String>,
+    name: Arc<Mutex<Option<String>>>,
     // What the run in flight has cost so far, seeded when a run
     // arms; the status lines read this run alone, `/status` the session.
     tally: Tally,
@@ -172,7 +176,7 @@ impl Notes {
 impl Conversation {
     // Held under another root now; the transcript and its figures stay.
     fn reclaim(&mut self, claim: Option<session::Claim>) {
-        self._claim = claim;
+        self._claim = claim.map(Arc::new);
     }
 
     fn new(
@@ -182,12 +186,18 @@ impl Conversation {
         name: Option<String>,
         claim: Option<session::Claim>,
     ) -> Self {
+        let id = if id.is_empty() { session::new_id() } else { id };
         Self {
+            queue: Default::default(),
+            ingress: None,
+            messages: crate::execution::messages::Messages::new(
+                message::SessionId::new(id.clone()).expect("session identifier"),
+            ),
             transcript: session.map_or_else(|| Transcript::Lent(Arc::default()), Transcript::Home),
             id,
             created,
-            _claim: claim,
-            name,
+            _claim: claim.map(Arc::new),
+            name: Arc::new(Mutex::new(name)),
             tally: Tally::default(),
             unsaved: Arc::default(),
             filed: false,
@@ -198,60 +208,101 @@ impl Conversation {
 // One lane's transcript, ready to be written anywhere: nothing of it borrows
 // the lane, so it can outlive the frame that asked for the save.
 struct Written {
+    save: Save,
+    spent: Totals,
+    session: Session,
+    messages: crate::execution::messages::Snapshot,
+}
+
+/// Captured destination for an execution's writes; never follows another session.
+pub(crate) struct Save {
+    _claim: Option<Arc<session::Claim>>,
     store: Store,
     root: std::path::PathBuf,
     id: String,
     model: String,
-    name: Option<String>,
+    name: Arc<Mutex<Option<String>>>,
     created: u64,
-    spent: Totals,
-    session: Session,
-    // Where the outcome goes: the bar and `/status` read it from the lane.
     unsaved: Arc<Mutex<Option<String>>>,
 }
 
-impl Written {
-    // The lane's transcript, or `None` when a run has it — it saves its own on
-    // the way back, and writing a stale copy now would undo that.
-    fn of(lane: &Lane, store: &Store) -> Option<Self> {
-        let session = lane.talk.transcript.home()?;
-        Some(Self {
+impl Save {
+    pub(crate) fn of(lane: &Lane, store: &Store) -> Self {
+        Self {
+            _claim: lane.talk._claim.clone(),
             store: store.clone(),
-            root: lane.checkout.ctx.workspace.root().to_path_buf(),
+            root: lane.root().to_path_buf(),
             id: lane.talk.id.clone(),
-            model: lane.checkout.agent.spec().model.clone(),
+            model: lane.model().into(),
             name: lane.talk.name.clone(),
             created: lane.talk.created,
-            spent: lane.spent(),
-            session: session.clone(),
             unsaved: lane.talk.unsaved.clone(),
-        })
+        }
     }
 
-    // Write it whole, and say what that made of it.
-    fn run(&self) -> anyhow::Result<()> {
+    pub(crate) fn write(
+        &self,
+        session: &Session,
+        messages: &crate::execution::messages::Snapshot,
+        spent: Totals,
+    ) -> anyhow::Result<()> {
+        let name = self
+            .name
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let header = session::Header {
             id: &self.id,
             model: &self.model,
-            name: self.name.as_deref(),
+            name: name.as_deref(),
             created: self.created,
-            spent: self.spent,
+            spent,
         };
-        let saved = self.store.save(&self.root, header, &self.session);
+        let saved = self
+            .store
+            .save(&self.root, header, session)
+            .and_then(|path| {
+                messages.save(&session::messages::path(&path))?;
+                Ok(())
+            });
+        self.record(saved)
+    }
+
+    pub(crate) fn write_messages(
+        &self,
+        messages: &crate::execution::messages::Snapshot,
+    ) -> anyhow::Result<()> {
+        self.record(messages.save(&session::messages::path(
+            &self.store.path_of(&self.root, &self.id),
+        )))
+    }
+
+    fn record(&self, saved: anyhow::Result<()>) -> anyhow::Result<()> {
         *self
             .unsaved
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             saved.as_ref().err().map(|e| format!("{e:#}"));
         if let Err(e) = &saved {
-            tracing::warn!(
-                target: "pi::session",
-                id = %self.id,
-                error = %format!("{e:#}"),
-                "transcript not saved"
-            );
+            tracing::warn!(target: "pi::session", id = %self.id, error = %format!("{e:#}"), "transcript not saved");
         }
-        saved.map(drop)
+        saved
+    }
+}
+
+impl Written {
+    fn of(lane: &Lane, store: &Store) -> Option<Self> {
+        let session = lane.talk.transcript.home()?;
+        Some(Self {
+            save: Save::of(lane, store),
+            session: session.clone(),
+            spent: lane.spent(),
+            messages: lane.talk.messages.snapshot(),
+        })
+    }
+
+    fn run(&self) -> anyhow::Result<()> {
+        self.save.write(&self.session, &self.messages, self.spent)
     }
 }
 
@@ -286,9 +337,9 @@ pub fn arm(
     let executions =
         executions.map(|table| Arc::new(crate::driver::background::Commands::new(table)));
     // Hooks ask where executions are kept, a child's gates as the lane's do.
-    let ask: Arc<dyn toolbox::channel::Ask> = match &executions {
+    let ask: Arc<dyn pi_tools::channel::Ask> = match &executions {
         Some(executions) => executions.clone(),
-        None => Arc::new(toolbox::channel::NoOne),
+        None => Arc::new(pi_tools::channel::NoOne),
     };
     let mut brief = resolved.brief.clone();
     Arc::make_mut(&mut brief).hooks = resolved.hooks.arm(ask.clone());
@@ -307,6 +358,14 @@ pub fn arm(
     // Changed from here on a fresh `Arc`, since the child holds this one: it
     // runs on the registry it came from, and only the lane's copy carries the tool.
     offer_builtin(Arc::make_mut(&mut brief), Arc::new(subagent), &mut said);
+    if executions.is_some() {
+        offer_builtin(
+            Arc::make_mut(&mut brief),
+            Arc::new(super::ask::AskUser(ask.clone())),
+            &mut said,
+        );
+    }
+
     // The lane's copy only: a child never hears the user, whose words are
     // the only ones memory keeps.
     if resolved.remembers {
@@ -325,7 +384,7 @@ pub fn arm(
     {
         let patch = Arc::make_mut(&mut brief);
         let shell = Arc::new(
-            toolbox::bash::Bash::new(executions.clone()).with_controls(executions.clone()),
+            pi_tools::bash::Bash::new(executions.clone()).with_controls(executions.clone()),
         );
         offer_builtin(patch, shell.clone(), &mut said);
         for dir in &resolved.scripts {
@@ -363,8 +422,9 @@ fn offer_builtin(brief: &mut agent::Briefing, tool: Arc<dyn tool::Tool>, said: &
 #[cfg(any(test, feature = "testing"))]
 pub fn a_resolved(standing: &str) -> Arc<Resolved> {
     Arc::new(Resolved {
+        retry: agent::Retry::default(),
         brief: Arc::new(agent::Briefing {
-            registry: toolbox::builtin(),
+            registry: pi_tools::builtin(),
             system: String::new(),
             summarize: agent::compaction::SUMMARIZE.to_string(),
             effort: llm::request::Effort::Off,
@@ -483,12 +543,41 @@ impl Lane {
         matches!(self.runner.run, Run::Running { .. })
     }
 
+    pub(crate) fn ready_for_input(&self) -> bool {
+        matches!(
+            self.runner.run,
+            Run::Idle | Run::Ended { unsend: false, .. }
+        )
+    }
+
     /// A run has taken this lane.
     pub fn begin(&mut self, cancel: CancellationToken) {
         self.runner.run = Run::Running {
+            operation: None,
             cancel,
             unsend: false,
         };
+    }
+
+    /// Bind the borrowed transcript to the operation allowed to return it.
+    pub fn begin_for(&mut self, operation: crate::execution::Request, cancel: CancellationToken) {
+        self.runner.run = Run::Running {
+            operation: Some(operation),
+            cancel,
+            unsend: false,
+        };
+    }
+
+    pub(crate) fn accepts_completion(&self, operation: crate::execution::Request) -> bool {
+        if let Run::Running {
+            operation: Some(active),
+            ..
+        } = self.runner.run
+            && active != operation
+        {
+            return false;
+        }
+        self.session().is_none()
     }
 
     /// Ask the run under way to stop, and say whether there was one. `unsend`
@@ -537,9 +626,21 @@ impl Lane {
         executions: Option<Arc<crate::driver::background::Table>>,
         change: impl FnOnce(&mut Agent),
     ) {
+        if let Some(table) = &executions {
+            self.bind_inputs(table);
+        }
         let agent = Arc::make_mut(&mut self.checkout.agent);
         change(agent);
         self.checkout.resolved = arm(agent, resolved, archive, retry, executions);
+    }
+
+    pub(super) fn bind_inputs(&mut self, table: &Arc<crate::driver::background::Table>) {
+        self.talk.ingress = Some(table.bind_inputs(
+            self.root().to_path_buf(),
+            self.token(),
+            self.messages(),
+            self.queue().clone(),
+        ));
     }
 
     /// Replace what was decided where the agent holds none of it — the
@@ -601,9 +702,7 @@ impl Lane {
         self.checkout.worktree.as_deref()
     }
 
-    /// The transcript, or `None` while a run has it. Both readers answer that
-    /// way: the states a lane can be in are named (`NO_TRANSCRIPT`,
-    /// `NOTHING_TO_REWIND`) rather than one of them being a panic.
+    /// The transcript is unavailable while an execution owns it.
     pub fn session(&self) -> Option<&Session> {
         self.talk.transcript.home()
     }
@@ -624,9 +723,9 @@ impl Lane {
     }
 
     /// The diff of each file the model has seen that changed on disk since,
-    /// told once; see `toolbox::drift`.
+    /// told once; see `pi_tools::drift`.
     pub fn drift(&self) -> Option<String> {
-        toolbox::drift::drift(&self.checkout.ctx)
+        pi_tools::drift::drift(&self.checkout.ctx)
     }
 
     /// The context runs start from. A run already going keeps its own copy.
@@ -639,7 +738,24 @@ impl Lane {
         self.checkout.ctx.clone().with_cancel(cancel)
     }
 
-    /// What the views of this lane are keyed by.
+    /// Semantic interactions belonging to the current conversation.
+    pub fn messages(&self) -> crate::execution::messages::Messages {
+        self.talk.messages.clone()
+    }
+
+    /// Stop new input admission while preserving response and observation ports.
+    pub(crate) fn close_inputs(&self) {
+        if let Some(ingress) = &self.talk.ingress {
+            ingress.close();
+        }
+    }
+
+    /// Pending operations submitted to this lane.
+    pub fn queue(&self) -> &crate::execution::queue::Queue {
+        &self.talk.queue
+    }
+
+    /// Stable identifier for this lane.
     pub fn token(&self) -> u64 {
         self.token
     }
@@ -676,7 +792,11 @@ impl Lane {
     }
 
     pub fn set_name(&mut self, name: Option<String>) {
-        self.talk.name = name;
+        *self
+            .talk
+            .name
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = name;
     }
 
     /// Why the transcript on disk is behind this one, while it is.
@@ -747,17 +867,6 @@ impl Lane {
         }
     }
 
-    /// What a run's ending should leave in the transcript.
-    pub fn note_ended(&mut self, ended: &crate::driver::Ended) {
-        if let Some(session) = self.talk.transcript.home_mut() {
-            match ended {
-                crate::driver::Ended::Done | crate::driver::Ended::Unsent => {}
-                crate::driver::Ended::Stopped => session.note_user_stop(),
-                crate::driver::Ended::Failed(why) => session.note_failure(why.clone()),
-            }
-        }
-    }
-
     /// A line pi filed rather than the model: a command's note, read back
     /// with the rest of the transcript; held when a run has the transcript.
     ///
@@ -814,6 +923,22 @@ impl Lane {
 }
 
 impl Core {
+    /// Initialize interaction history before publishing a session's input endpoint.
+    pub fn restore_messages(&mut self) -> anyhow::Result<()> {
+        for lane in self.lanes.all_mut() {
+            anyhow::ensure!(
+                !lane.is_running() && lane.queue().is_empty() && lane.talk.ingress.is_none(),
+                "cannot restore message history after serving starts"
+            );
+            let path = self.store.path_of(lane.root(), lane.id());
+            lane.talk.messages = crate::execution::messages::Messages::load(
+                message::SessionId::new(lane.id().to_owned())?,
+                &session::messages::path(&path),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Take a lane out by its token, and its session record with it: a run
     /// that saved after its checkout went must not outlive it on disk.
     ///
@@ -907,6 +1032,7 @@ impl Core {
     // follow it, replaced whole — nothing of the old session carries over.
     fn becomes(&mut self, talk: Conversation) {
         let lane = self.lane_mut();
+        lane.close_inputs();
         lane.talk = talk;
         // In place, not a new `Arc`: the subagent tool holds this one. A command
         // of the old session still out charges the new one from here.
@@ -918,6 +1044,9 @@ impl Core {
             .with_session(&lane.talk.id, pi_store::spill_root());
         // What the old session's model saw, this one never did.
         lane.checkout.ctx.viewed = Default::default();
+        if let Some(table) = self.executions.clone() {
+            self.lane_mut().bind_inputs(&table);
+        }
         let path = self
             .store
             .journal_path(self.lane().root(), &self.lane().talk.id);
@@ -963,23 +1092,38 @@ impl Core {
     }
     // Take a stored transcript as the running one — entries, name and id.
     // Parting with what is being left is the caller's; they differ on when.
-    fn adopt_session(&mut self, stored: Stored, claim: session::Claim) -> Vec<String> {
+    fn adopt_session(
+        &mut self,
+        stored: Stored,
+        claim: session::Claim,
+    ) -> Result<Vec<String>, String> {
         let (id, name, created) = (stored.id.clone(), stored.name.clone(), stored.created);
+        let messages = crate::execution::messages::Messages::load(
+            message::SessionId::new(id.clone()).map_err(|e| refused("resume", e.into()))?,
+            &session::messages::path(&self.store.path_of(self.lane().root(), &id)),
+        )
+        .map_err(|e| refused("resume", e))?;
         let spent = stored.spent;
-        self.becomes(Conversation::new(
-            id,
-            created,
-            Some(stored.into_session()),
-            name,
-            Some(claim),
-        ));
+        let mut talk =
+            Conversation::new(id, created, Some(stored.into_session()), name, Some(claim));
+        talk.messages = messages;
+        self.becomes(talk);
         self.lane().checkout.agent.meter.reset(spent);
         // The id (timestamp+pid) is nothing to read; only a name — what the
         // user called it — is worth a line.
-        match self.lane().talk.name.as_deref() {
-            Some(name) => vec![format!("resumed “{name}”")],
-            None => Vec::new(),
-        }
+        Ok(
+            match self
+                .lane()
+                .talk
+                .name
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_deref()
+            {
+                Some(name) => vec![format!("resumed “{name}”")],
+                None => Vec::new(),
+            },
+        )
     }
     /// `/mv`: the conversation in front carries on in `dir`, and all the tree
     /// decides is decided again there; whole or not at all.
@@ -1026,6 +1170,8 @@ impl Core {
 
         // The record follows under the same id: one rename takes the
         // transcript, its journal and its subagents along.
+        let messages = self.lane().messages();
+        let previous_archive = messages.detach_archive();
         self.lane_mut().talk.reclaim(None);
         let claim = if self.store.filed(&from, &id) {
             match self.store.relocate(&to, &id) {
@@ -1040,9 +1186,19 @@ impl Core {
             self.store.claim(&to, &id).ok()
         };
         self.lane_mut().talk.reclaim(claim);
+        if let Some(previous) = previous_archive {
+            let moved = session::messages::path(&self.store.path_of(&to, &id));
+            let path = if moved.join("index.json").exists() {
+                &moved
+            } else {
+                &previous
+            };
+            messages.attach_archive(path).map_err(failed)?;
+        }
         journal::switched(&self.store.journal_path(&to, &id), &id);
-        if let Some(executions) = &self.executions {
+        if let Some(executions) = self.executions.clone() {
             executions.rehome(&from, &to);
+            self.lane_mut().bind_inputs(&executions);
         }
         // Earlier calls name paths against the old root; nothing rewrites them.
         self.lane_mut().push_note(&format!(
@@ -1100,6 +1256,9 @@ impl Core {
             worktree,
             ..Opening::new(Arc::new(ag), resolved, ctx)
         }));
+        if let Some(table) = self.executions.clone() {
+            self.lane_mut().bind_inputs(&table);
+        }
         if let Some(notes) = self.refresh_model_config() {
             Arc::make_mut(&mut self.lane_mut().checkout.resolved)
                 .notes
@@ -1114,7 +1273,10 @@ impl Core {
         // by the same key it was stored by.
         // One open in another pi stays there; this lane starts its own.
         match self.store.take_latest(self.lane().root()) {
-            Ok((stored, claim)) => self.adopt_session(stored, claim),
+            Ok((stored, claim)) => self.adopt_session(stored, claim).unwrap_or_else(|why| {
+                self.fresh_session();
+                vec![why]
+            }),
             Err(e) => {
                 // Nothing recorded for this tree is the ordinary case; an
                 // archive that will not load is not, and says so only here.
@@ -1160,8 +1322,16 @@ impl Core {
             match self.store.take(self.lane().root(), id) {
                 Ok((stored, claim)) => {
                     let model = stored.model.clone();
-                    self.adopt_session(stored, claim);
-                    said.extend(self.rejoin(&model));
+                    match self.adopt_session(stored, claim) {
+                        Ok(notes) => {
+                            said.extend(notes);
+                            said.extend(self.rejoin(&model));
+                        }
+                        Err(why) => {
+                            self.fresh_session();
+                            said.push(why);
+                        }
+                    }
                 }
                 Err(e) => {
                     self.fresh_session();
@@ -1220,7 +1390,7 @@ impl Core {
             .store
             .take(self.lane().root(), id)
             .map_err(|e| refused("resume", e))?;
-        Ok(self.adopt_session(stored, claim))
+        self.adopt_session(stored, claim)
     }
 }
 
@@ -1257,6 +1427,22 @@ mod tests {
         };
         assert!(said("started afresh", &other), "{notes:?}");
         assert!(said("not reopened", &gone), "{notes:?}");
+    }
+
+    #[test]
+    fn a_save_keeps_the_session_claim_after_its_owner_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
+        let id = core.lane().id().to_string();
+        let store = core.store.clone();
+        core.lane_mut()
+            .talk
+            .reclaim(Some(store.claim(dir.path(), &id).unwrap()));
+        let save = super::Save::of(core.lane(), &store);
+        drop(core);
+        assert!(store.claim(dir.path(), &id).is_err());
+        drop(save);
+        assert!(store.claim(dir.path(), &id).is_ok());
     }
 
     // A turn's save is handed off and a command's waits. The one that waited
@@ -1332,6 +1518,50 @@ mod tests {
         let fresh = core.lane().id().to_string();
         assert_ne!(fresh, first);
         assert_eq!(core.lane().ctx().session(), Some(fresh.as_str()));
+    }
+
+    #[test]
+    fn changing_conversation_closes_its_input_binding_and_owns_a_new_queue() {
+        use pi_tools::background::RunSink as _;
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
+        let table = std::sync::Arc::new(crate::driver::background::Table::default());
+        core.enable_background(table.clone());
+        let service = crate::driver::background::Commands::new(table).start(
+            core.lane().root().to_path_buf().into(),
+            pi_tools::background::Invocation::shell("service"),
+            Default::default(),
+        );
+        let old_messages = core.lane().messages();
+        let wire = message::WireMessage {
+            id: crate::execution::messages::new_id(),
+            session: old_messages.session(),
+            by: None,
+            at: 1,
+            kind: message::WireKind::Request(message::Request::ToModel(message::InputKind::User)),
+            body: vec![message::Block::Text("work".into())],
+        };
+        let receipt = service.channel().message(wire.clone()).unwrap();
+        assert_eq!(core.lane().queue().lock().len(), 1);
+        core.fresh_session();
+        assert!(core.lane().queue().is_empty());
+        assert!(matches!(
+            old_messages
+                .response(&receipt.request)
+                .unwrap()
+                .unwrap()
+                .kind(),
+            message::Kind::Response {
+                status: message::Status::Stopped,
+                ..
+            }
+        ));
+        assert!(service.channel().message(wire.clone()).is_err());
+        let mut next = wire;
+        next.id = crate::execution::messages::new_id();
+        next.session = core.lane().messages().session();
+        service.channel().message(next).unwrap();
+        assert_eq!(core.lane().queue().lock().len(), 1);
     }
 
     // A view carried over would let the next session edit unread, and tell
@@ -1441,7 +1671,7 @@ mod tests {
         use std::sync::Arc;
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join(name), script).unwrap();
-        let scripts = Arc::new(toolbox::scripts::Dir::new(dir));
+        let scripts = Arc::new(pi_tools::scripts::Dir::new(dir));
         let mut resolved = Arc::try_unwrap(super::a_resolved("standing")).ok().unwrap();
         Arc::make_mut(&mut resolved.brief)
             .registry
@@ -1496,7 +1726,11 @@ mod tests {
 
         let (agent, _) = armed(super::a_resolved(""), Some(Arc::default()));
         assert!(agent.brief.registry.get("job").is_none());
-        let shell = agent.brief.registry.get(toolbox::bash::Bash::NAME).unwrap();
+        let shell = agent
+            .brief
+            .registry
+            .get(pi_tools::bash::Bash::NAME)
+            .unwrap();
         let schema = shell.schema();
         for control in ["stop", "restart", "output"] {
             assert!(schema["properties"].get(control).is_some(), "{control}");
@@ -1519,7 +1753,7 @@ mod tests {
         for name in [
             subagent::Subagent::NAME,
             crate::core::memory::Remember::NAME,
-            toolbox::bash::Bash::NAME,
+            pi_tools::bash::Bash::NAME,
         ] {
             let dir = tempfile::tempdir().unwrap();
             let mut resolved = with_script(

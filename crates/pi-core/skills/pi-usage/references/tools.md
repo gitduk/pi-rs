@@ -192,8 +192,8 @@ pi queues these hooks separately from the run, one at a time.
 Their output does not reach the model.
 A subagent's calls pass the same gates, but its events stay with the subagent.
 A hook has fd 3, as a script does.
-It can use `choose` with `"answer": "back"` and wait for the person without a
-time limit.
+It can send a runtime `prompt` with `back: true` and wait for the person
+without a time limit. See `references/events.md` for the frame format.
 The repository's `examples/hooks/ask-first` holds an irreversible `bash` call
 until the person permits it.
 The `pi-setup` skill's own `settings.toml` shows the configuration format.

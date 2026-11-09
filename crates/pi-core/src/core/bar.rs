@@ -10,7 +10,7 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Run the script at `path`, `input` on its stdin, and read what it printed.
 pub async fn run(path: &Path, input: Vec<u8>, ctx: &tool::Ctx) -> Result<Layout, String> {
-    toolbox::scripts::run_script(path, input, TIMEOUT, ctx)
+    pi_tools::scripts::run_script(path, input, TIMEOUT, ctx)
         .await
         .and_then(|out| parse(&out))
 }

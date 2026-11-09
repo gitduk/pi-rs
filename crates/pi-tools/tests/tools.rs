@@ -8,7 +8,7 @@ use tool::{Ctx, Tier, Tool, ToolError};
 // Read-before-edit is tracked by the session, so nothing is passed for it.
 async fn read_then_edit(c: &Ctx, path: &str, old: &str, new: &str) -> Result<String, ToolError> {
     view(c, path).await;
-    toolbox::edit::Edit
+    pi_tools::edit::Edit
         .execute(
             json!({ "path": path, "edits": [{ "old_string": old, "new_string": new }] }),
             c,
@@ -34,13 +34,13 @@ async fn read_leaves_the_workspace_but_write_bash_and_edit_do_not() {
     let o = outside.path();
     std::fs::write(o.join("x.txt"), "hi\n").unwrap();
 
-    let a = toolbox::read::Read
+    let a = pi_tools::read::Read
         .execute(json!({ "path": o.join("x.txt").to_str().unwrap() }), &c)
         .await
         .unwrap();
     assert!(a.flatten().contains("hi"), "{a:?}");
 
-    let b = toolbox::write::Write
+    let b = pi_tools::write::Write
         .execute(
             json!({ "path": o.join("y.rs").to_str().unwrap(), "content": "fn y() {}\n" }),
             &c,
@@ -54,7 +54,7 @@ async fn read_leaves_the_workspace_but_write_bash_and_edit_do_not() {
         .await;
     assert!(matches!(d, Err(ToolError::Escape(_))), "{d:?}");
 
-    let e = toolbox::edit::Edit
+    let e = pi_tools::edit::Edit
         .execute(
             json!({ "path": o.join("z.rs").to_str().unwrap(), "edits": [{ "old_string": "x", "new_string": "y" }] }),
             &c,
@@ -69,7 +69,7 @@ async fn read_huge_limit_stays_inside_the_file() {
     let (_d, c) = ctx();
     std::fs::write(c.workspace.root().join("a.txt"), "one\ntwo\nthree\n").unwrap();
     let out = run(
-        &toolbox::read::Read,
+        &pi_tools::read::Read,
         json!({ "path": "a.txt", "offset": 2, "limit": u64::MAX }),
         &c,
     )
@@ -80,7 +80,7 @@ async fn read_huge_limit_stays_inside_the_file() {
 #[tokio::test]
 async fn a_bounded_command_times_out_without_hanging_the_caller() {
     let (_d, c) = ctx();
-    let err = toolbox::bash::run(
+    let err = pi_tools::bash::run(
         "sleep 5",
         c.workspace.root(),
         Some(std::time::Duration::from_millis(150)),
@@ -97,7 +97,7 @@ async fn a_bounded_command_times_out_without_hanging_the_caller() {
 async fn a_timeout_returns_even_when_an_escaped_process_holds_the_output() {
     let (_d, c) = ctx();
     let started = std::time::Instant::now();
-    let err = toolbox::bash::run(
+    let err = pi_tools::bash::run(
         "echo before; setsid sleep 12 & sleep 5",
         c.workspace.root(),
         Some(std::time::Duration::from_millis(150)),
@@ -116,7 +116,7 @@ async fn a_timeout_returns_even_when_an_escaped_process_holds_the_output() {
 #[tokio::test]
 async fn a_command_cut_off_still_reports_what_it_printed() {
     let (_d, c) = ctx();
-    let err = toolbox::bash::run(
+    let err = pi_tools::bash::run(
         "echo half the work; sleep 5",
         c.workspace.root(),
         Some(std::time::Duration::from_millis(300)),
@@ -143,7 +143,7 @@ async fn bash_without_cwd_runs_in_the_workspace_root() {
 // The gate the loop checks before a call is made.
 #[test]
 fn registry_tiers_name_what_each_tool_may_reach() {
-    let r = toolbox::builtin().with(common::bash());
+    let r = pi_tools::builtin().with(common::bash());
     assert_eq!(r.get("edit").unwrap().tier(), Tier::Write);
     assert_eq!(r.get("bash").unwrap().tier(), Tier::Exec);
     assert_eq!(r.get("read").unwrap().tier(), Tier::Read);
@@ -158,7 +158,7 @@ async fn a_huge_file_is_refused_before_it_is_read_into_memory() {
     f.set_len((10 << 20) + 1).unwrap();
     drop(f);
 
-    let out = toolbox::read::Read
+    let out = pi_tools::read::Read
         .execute(json!({ "path": "big.log" }), &c)
         .await
         .unwrap();
@@ -196,7 +196,7 @@ async fn an_edit_that_would_break_the_file_is_refused_and_writes_nothing() {
 
     // The whole-file counterpart: content that ran out mid-file, losing the
     // tail of a working file.
-    toolbox::write::Write
+    pi_tools::write::Write
         .execute(
             json!({ "path": "a.rs", "content": "pub fn a() -> i32 {\n    1\n" }),
             &c,
@@ -239,21 +239,21 @@ async fn the_parse_gate_leaves_files_it_has_no_standing_to_refuse() {
     )
     .unwrap();
     run(
-        &toolbox::write::Write,
+        &pi_tools::write::Write,
         json!({ "path": "w.rs", "content": "pub fn a() -> i32 {\n    2\n" }),
         &c,
     )
     .await;
 
     run(
-        &toolbox::write::Write,
+        &pi_tools::write::Write,
         json!({ "path": "b.toml", "content": "[a\n" }),
         &c,
     )
     .await;
 
     run(
-        &toolbox::write::Write,
+        &pi_tools::write::Write,
         json!({ "path": "stub.rs", "content": "pub fn a() -> i32 {\n" }),
         &c,
     )
@@ -261,7 +261,7 @@ async fn the_parse_gate_leaves_files_it_has_no_standing_to_refuse() {
 
     std::fs::write(c.workspace.root().join("e.rs"), THREE_FNS).unwrap();
     run(
-        &toolbox::write::Write,
+        &pi_tools::write::Write,
         json!({ "path": "e.rs", "content": "" }),
         &c,
     )
@@ -275,14 +275,14 @@ async fn write_drops_only_the_header_of_the_file_it_writes() {
     let root = c.workspace.root().to_path_buf();
     let toml = "[package]\nname = \"x\"\n";
     let args = json!({ "path": "Cargo.toml", "content": toml });
-    run(&toolbox::write::Write, args, &c).await;
+    run(&pi_tools::write::Write, args, &c).await;
     assert_eq!(
         std::fs::read_to_string(root.join("Cargo.toml")).unwrap(),
         toml
     );
 
     let args = json!({ "path": "a.txt", "content": "[a.txt]\n1:one\n2:two\n" });
-    run(&toolbox::write::Write, args, &c).await;
+    run(&pi_tools::write::Write, args, &c).await;
     assert_eq!(
         std::fs::read_to_string(root.join("a.txt")).unwrap(),
         "one\ntwo\n"
@@ -298,14 +298,14 @@ async fn a_second_edit_right_after_the_first_applies_without_a_reread() {
     std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
     view(&c, "a.rs").await;
 
-    toolbox::edit::Edit
+    pi_tools::edit::Edit
         .execute(
             json!({ "path": "a.rs", "edits": [{ "insert_after": "one\n", "new_string": "one!\n" }] }),
             &c,
         )
         .await
         .unwrap();
-    toolbox::edit::Edit
+    pi_tools::edit::Edit
         .execute(
             json!({ "path": "a.rs", "edits": [{ "insert_after": "three\n", "new_string": "three!\n" }] }),
             &c,
@@ -327,7 +327,7 @@ async fn an_edit_answers_for_a_file_that_changed_since_its_view() {
     view(&c, "a.rs").await;
     std::fs::write(c.workspace.root().join("a.rs"), "changed\nmore\n").unwrap();
 
-    let out = toolbox::edit::Edit
+    let out = pi_tools::edit::Edit
         .execute(
             json!({ "path": "a.rs", "edits": [
                 { "insert_after": "changed\n", "new_string": "changed twice\n" }
@@ -342,7 +342,7 @@ async fn an_edit_answers_for_a_file_that_changed_since_its_view() {
     std::fs::write(c.workspace.root().join("b.rs"), "one\ntwo\n").unwrap();
     view(&c, "b.rs").await;
     std::fs::write(c.workspace.root().join("b.rs"), "something else\n").unwrap();
-    let refused = toolbox::edit::Edit
+    let refused = pi_tools::edit::Edit
         .execute(
             json!({ "path": "b.rs", "edits": [{ "old_string": "two\n", "new_string": "" }] }),
             &c,
@@ -365,7 +365,7 @@ async fn an_edit_that_misses_leaves_its_sibling_unapplied() {
     std::fs::write(&path, "a\nb\n").unwrap();
     view(&c, "a.rs").await;
 
-    let out = toolbox::edit::Edit
+    let out = pi_tools::edit::Edit
         .execute(
             json!({ "path": "a.rs", "edits": [
                 { "insert_after": "a\n", "new_string": "A\n" },
@@ -387,11 +387,11 @@ async fn two_edits_to_one_file_in_the_same_turn_do_not_clobber_each_other() {
     std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
     view(&c, "a.rs").await;
 
-    let first = toolbox::edit::Edit.execute(
+    let first = pi_tools::edit::Edit.execute(
         json!({ "path": "a.rs", "edits": [{ "insert_after": "one\n", "new_string": "ONE\n" }] }),
         &c,
     );
-    let second = toolbox::edit::Edit.execute(
+    let second = pi_tools::edit::Edit.execute(
         json!({ "path": "a.rs", "edits": [{ "insert_after": "three\n", "new_string": "THREE\n" }] }),
         &c,
     );
@@ -412,7 +412,7 @@ async fn a_whole_block_anchor_resolves_through_its_annotation() {
     std::fs::write(&path, "#[inline]\nfn f() {\n    1\n}\n").unwrap();
     view(&c, "a.rs").await;
 
-    toolbox::edit::Edit
+    pi_tools::edit::Edit
         .execute(
             json!({ "path": "a.rs", "edits": [
                 { "old_string": "fn f() {", "new_string": "fn f() {\n    2\n}", "whole_block": true }
@@ -435,7 +435,7 @@ async fn a_whole_block_anchor_may_name_the_annotation() {
     std::fs::write(&path, "#[inline]\nfn f() {\n    1\n}\n").unwrap();
     view(&c, "a.rs").await;
 
-    toolbox::edit::Edit
+    pi_tools::edit::Edit
         .execute(
             json!({ "path": "a.rs", "edits": [
                 { "old_string": "#[inline]", "new_string": "#[inline]\nfn f() {\n    2\n}", "whole_block": true }
@@ -503,7 +503,7 @@ async fn read_spills_an_over_long_view_without_splitting_a_row() {
     let big: String = (1..=30_000).map(|i| format!("line {i}\n")).collect();
     std::fs::write(c.workspace.root().join("big.txt"), &big).unwrap();
 
-    let out = toolbox::read::Read
+    let out = pi_tools::read::Read
         .execute(
             json!({ "path": "big.txt", "limit": 30_000, "outline": false }),
             &c,
@@ -562,7 +562,7 @@ async fn text_that_is_not_utf8_is_refused_rather_than_mangled() {
     bytes.extend_from_slice(&b"pr\xe9cis \xe0 la carte\n".repeat(40));
     std::fs::write(c.workspace.root().join("latin.txt"), &bytes).unwrap();
 
-    let out = toolbox::read::Read
+    let out = pi_tools::read::Read
         .execute(json!({ "path": "latin.txt" }), &c)
         .await
         .unwrap();
@@ -583,14 +583,14 @@ async fn what_a_run_wrote_is_recorded_as_it_writes() {
     assert!(c.writes().is_empty(), "nothing written yet");
 
     run(
-        &toolbox::write::Write,
+        &pi_tools::write::Write,
         json!({ "path": "b.rs", "content": "pub fn g() {}\n" }),
         &c,
     )
     .await;
     view(&c, "a.rs").await;
     run(
-        &toolbox::edit::Edit,
+        &pi_tools::edit::Edit,
         json!({ "path": "a.rs", "edits": [{ "old_string": "    1\n", "new_string": "    2\n" }] }),
         &c,
     )
@@ -613,13 +613,13 @@ async fn a_run_with_its_own_record_writes_nothing_into_its_parents() {
     let child = parent.clone().with_own_writes();
 
     run(
-        &toolbox::write::Write,
+        &pi_tools::write::Write,
         json!({ "path": "c.rs", "content": "x\n" }),
         &child,
     )
     .await;
     run(
-        &toolbox::write::Write,
+        &pi_tools::write::Write,
         json!({ "path": "p.rs", "content": "y\n" }),
         &parent,
     )
@@ -633,7 +633,7 @@ async fn a_run_with_its_own_record_writes_nothing_into_its_parents() {
     // A plain clone shares it, which is what makes the opt-in necessary.
     let sharing = parent.clone();
     run(
-        &toolbox::write::Write,
+        &pi_tools::write::Write,
         json!({ "path": "s.rs", "content": "z\n" }),
         &sharing,
     )
@@ -656,7 +656,7 @@ async fn an_outline_does_not_show_the_byte_order_mark() {
     )
     .unwrap();
 
-    let out = toolbox::read::Read
+    let out = pi_tools::read::Read
         .execute(json!({ "path": "a.rs", "outline": true }), &c)
         .await
         .unwrap();
@@ -673,7 +673,7 @@ async fn a_whole_block_anchor_may_name_the_row_it_meant() {
     view(&c, "a.rs").await;
 
     // Without the address the two are one text, and the answer says so.
-    let refused = toolbox::edit::Edit
+    let refused = pi_tools::edit::Edit
         .execute(
             json!({ "path": "a.rs", "edits": [
                 { "old_string": "fn f() {", "new_string": "fn f() {\n    9\n}", "whole_block": true }
@@ -686,7 +686,7 @@ async fn a_whole_block_anchor_may_name_the_row_it_meant() {
         "two blocks open on that line: {refused:?}"
     );
 
-    toolbox::edit::Edit
+    pi_tools::edit::Edit
         .execute(
             json!({ "path": "a.rs", "edits": [
                 { "old_string": "5:fn f() {", "new_string": "fn f() {\n    3\n}", "whole_block": true }
@@ -710,7 +710,7 @@ async fn a_whole_block_anchor_matching_two_rows_of_one_annotation_is_not_ambiguo
     std::fs::write(&path, "/**\nfn f() {\n*/\nfn f() {\n    1\n}\n").unwrap();
     view(&c, "a.rs").await;
 
-    toolbox::edit::Edit
+    pi_tools::edit::Edit
         .execute(
             json!({ "path": "a.rs", "edits": [
                 { "old_string": "fn f() {", "new_string": "fn f() {\n    2\n}", "whole_block": true }
@@ -750,7 +750,7 @@ async fn a_whole_block_anchor_copied_from_the_outline_resolves() {
         let path = c.workspace.root().join(file);
         std::fs::write(&path, body).unwrap();
         let outline = run(
-            &toolbox::read::Read,
+            &pi_tools::read::Read,
             json!({ "path": file, "outline": true }),
             &c,
         )
@@ -764,7 +764,7 @@ async fn a_whole_block_anchor_copied_from_the_outline_resolves() {
             "the row is the annotation's: {anchor}"
         );
 
-        toolbox::edit::Edit
+        pi_tools::edit::Edit
             .execute(
                 json!({ "path": file, "edits": [
                     { "old_string": anchor, "new_string": with, "whole_block": true }
@@ -785,7 +785,7 @@ async fn a_whole_block_address_does_not_reach_into_a_nested_block() {
     std::fs::write(&path, "impl X {\n    fn g(&self) {\n        1;\n    }\n}\n").unwrap();
     view(&c, "a.rs").await;
 
-    let refused = toolbox::edit::Edit
+    let refused = pi_tools::edit::Edit
         .execute(
             json!({ "path": "a.rs", "edits": [
                 { "old_string": "1:fn g(&self) {", "new_string": "fn z() {}", "whole_block": true }
@@ -814,7 +814,7 @@ async fn a_missed_block_anchor_lists_the_declarations_to_copy() {
             { "old_string": anchor, "new_string": "fn z() {}", "whole_block": true }
         ]})
     };
-    let err = toolbox::edit::Edit
+    let err = pi_tools::edit::Edit
         .execute(edit("fn h() {"), &c)
         .await
         .expect_err("no block opens with it")
@@ -824,7 +824,7 @@ async fn a_missed_block_anchor_lists_the_declarations_to_copy() {
         "{err}"
     );
 
-    toolbox::edit::Edit
+    pi_tools::edit::Edit
         .execute(edit("1-5:pub fn f() {"), &c)
         .await
         .expect("the row the refusal offered names its block");
@@ -859,7 +859,7 @@ async fn a_byte_order_mark_survives_an_edit() {
 async fn reading_an_empty_file_says_it_is_empty() {
     let (_d, c) = ctx();
     std::fs::write(c.workspace.root().join("e.txt"), "").unwrap();
-    let out = run(&toolbox::read::Read, json!({ "path": "e.txt" }), &c).await;
+    let out = run(&pi_tools::read::Read, json!({ "path": "e.txt" }), &c).await;
     assert!(out.contains("is empty"), "{out}");
     assert!(!out.contains("past the end"), "{out}");
 }
@@ -881,7 +881,7 @@ async fn only_a_new_script_is_made_executable() {
     };
 
     run(
-        &toolbox::write::Write,
+        &pi_tools::write::Write,
         json!({ "path": "new.sh", "content": "#!/bin/sh\necho hi\n" }),
         &c,
     )
@@ -893,7 +893,7 @@ async fn only_a_new_script_is_made_executable() {
     std::fs::write(root.join("old.sh"), "echo old\n").unwrap();
     std::fs::set_permissions(root.join("old.sh"), std::fs::Permissions::from_mode(0o600)).unwrap();
     run(
-        &toolbox::write::Write,
+        &pi_tools::write::Write,
         json!({ "path": "old.sh", "content": "#!/bin/sh\necho new\n" }),
         &c,
     )
@@ -921,7 +921,7 @@ async fn reading_a_spill_stops_at_the_window_it_was_asked_for() {
 
     // The locator our own writer mints: `<namespace>/<name>`.
     let locator = "spill:s1/big".to_string();
-    let out = toolbox::read::Read
+    let out = pi_tools::read::Read
         .execute(json!({ "path": locator, "offset": 1, "limit": 3 }), &c)
         .await
         .unwrap()
@@ -950,7 +950,7 @@ async fn a_range_read_of_a_long_file_names_what_it_left() {
     let body: String = (0..50_000).map(|i| format!("row {i:05}\n")).collect();
     std::fs::write(dir.path().join("long.txt"), &body).unwrap();
     let out = common::run(
-        &toolbox::read::Read,
+        &pi_tools::read::Read,
         json!({ "path": "long.txt", "offset": 20_000, "limit": 2 }),
         &c,
     )

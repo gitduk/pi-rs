@@ -763,8 +763,8 @@ impl Session {
         self.interrupted = Some(cause);
     }
 
-    // The last answer's calls that no result answers yet, as (id, name).
-    fn open_calls(&self) -> Vec<(String, String)> {
+    /// Calls in the latest assistant reply without a retained result, in call order.
+    pub fn open_calls(&self) -> Vec<(String, String)> {
         let answered: HashSet<&str> = self
             .entries
             .iter()

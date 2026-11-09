@@ -1,8 +1,7 @@
-//! A question put to the user with a few options, each the line they would
-//! send to pick it: a prompt for the model, or a command for pi. One that
-//! takes several picks sends them as one prompt, a line each. A script asks
-//! with `choose` on fd 3; the pick goes out as if typed, and nothing waits
-//! for it — unless the script asked to have the answer back, and waits.
+//! A host-managed input prompt. Model-owned requests carry their semantic
+//! request ID; tools can also collect internal input through runtime prompts.
+//! Waiting prompts deliver an answer to their original owner. Nonwaiting
+//! suggestions submit selected text through the host input path.
 
 /// The most options one question offers.
 pub const MAX_OPTIONS: usize = 9;
@@ -31,6 +30,10 @@ pub struct Question {
     /// Numbered by whoever keeps it, so an answer or a withdrawal can name it.
     pub id: u64,
     pub from: Asker,
+    /// Captured at admission; None for a checkout service.
+    pub session: Option<String>,
+    /// Present only for a model-directed input request.
+    pub request: Option<message::MessageId>,
     pub text: String,
     pub options: Vec<String>,
     /// The answer goes back to the asker, which waits on it, not out as typed.
@@ -39,15 +42,31 @@ pub struct Question {
 
 impl Question {
     /// The question a tool asked, checked as `new` checks one.
-    pub fn of(from: Asker, asked: &toolbox::channel::Asked) -> Result<Self, String> {
-        let mut question = Self::new(from, &asked.question, &asked.options)?;
+    pub fn of(from: Asker, asked: &pi_tools::channel::Asked) -> Result<Self, String> {
+        let mut question = if asked.back && asked.options.is_empty() {
+            let text = pi_store::text::collapsed(&asked.question);
+            if text.is_empty() {
+                return Err("the question is empty".into());
+            }
+            Self {
+                id: 0,
+                from,
+                session: None,
+                request: None,
+                text,
+                options: vec![],
+                back: true,
+            }
+        } else {
+            Self::new(from, &asked.question, &asked.options)?
+        };
         question.back = asked.back;
         Ok(question)
     }
 
     /// The question as an execution that follows is told it.
-    pub fn asked(&self) -> toolbox::channel::Asked {
-        toolbox::channel::Asked {
+    pub fn asked(&self) -> pi_tools::channel::Asked {
+        pi_tools::channel::Asked {
             question: self.text.clone(),
             options: self.options.clone(),
             back: self.back,
@@ -70,7 +89,7 @@ impl Question {
         if let Some(command) = lines
             .iter()
             .find(|l| !crate::input::plain(l))
-            .filter(|_| lines.len() > 1)
+            .filter(|_| !self.back && lines.len() > 1)
         {
             return Err(format!("`{command}` is a command, so it goes alone"));
         }
@@ -97,6 +116,8 @@ impl Question {
         Ok(Self {
             id: 0,
             from,
+            session: None,
+            request: None,
             text,
             options,
             back: false,

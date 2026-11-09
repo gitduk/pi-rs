@@ -12,7 +12,7 @@ pub struct Bashed {
     pub text: String,
     /// Actual output lines, without placeholders or execution diagnostics.
     pub output: Vec<String>,
-    pub completion: toolbox::bash::Completion,
+    pub completion: pi_tools::bash::Completion,
 }
 
 /// Run what `!` named to completion; `ctx` carries its cancellation token.
@@ -22,7 +22,7 @@ pub struct Bashed {
 pub async fn run_bash(
     ctx: &tool::Ctx,
     command: &str,
-    shell: &toolbox::bash::Bash,
+    shell: &pi_tools::bash::Bash,
 ) -> Result<Bashed, ToolError> {
     let out = shell.foreground_result(command, ".", ctx).await?;
     let output = out

@@ -271,6 +271,8 @@ pub struct Ctx {
     session: Option<String>,
     // Where over-long outputs land, `<root>/<session>/<n>.log`.
     spill_root: std::path::PathBuf,
+    // The immutable semantic request assigned before this call can execute.
+    request: Option<std::sync::Arc<message::Message>>,
     // Where a running call says how far it has got; set per call by the loop.
     progress: Option<Progress>,
     // Only calls already listening receive a request; an idle request must
@@ -307,6 +309,7 @@ impl Ctx {
             writes: Default::default(),
             session: None,
             spill_root: spill::temp(),
+            request: None,
             progress: None,
             background: tokio::sync::broadcast::channel(1).0,
         }
@@ -342,8 +345,21 @@ impl Ctx {
         spill_root: impl Into<std::path::PathBuf>,
     ) -> Self {
         self.session = Some(state::file_stem(&id.into()));
+        self.request = None;
         self.spill_root = spill_root.into();
         self
+    }
+
+    /// Bind this invocation to its original semantic request. Passing `None`
+    /// clears an inherited call when the host does not register requests.
+    pub fn with_request(mut self, request: Option<std::sync::Arc<message::Message>>) -> Self {
+        self.request = request;
+        self
+    }
+
+    /// The model request this invocation executes, when registered by its host.
+    pub fn request(&self) -> Option<&message::Message> {
+        self.request.as_deref()
     }
 
     /// Where spills land, overriding the session default. Tests and alternate
@@ -467,6 +483,16 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
     fn schema(&self) -> Value;
     fn tier(&self) -> Tier;
+
+    /// The semantic model request represented by this capability invocation.
+    fn model_request(&self, args: &Value) -> (message::ModelRequest, Vec<message::Block>) {
+        (
+            message::ModelRequest::Tool {
+                name: self.name().into(),
+            },
+            vec![message::Block::Data(args.clone())],
+        )
+    }
 
     fn concurrency(&self) -> Concurrency {
         Concurrency::Shared

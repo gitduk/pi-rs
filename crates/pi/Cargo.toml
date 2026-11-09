@@ -22,9 +22,9 @@ anyhow.workspace = true
 clap.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+tempfile = "3"
 tokio.workspace = true
 
 [dev-dependencies]
-toolbox.workspace = true
+pi-tools.workspace = true
 serde_json.workspace = true
-tempfile = "3"

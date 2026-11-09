@@ -83,12 +83,16 @@ impl Core {
 
     /// The same, with a refusal as `Err`: why nothing was reloaded.
     pub fn try_reload(&mut self) -> Result<Vec<String>, String> {
+        self.try_reload_with_mcp(true)
+    }
+
+    pub(super) fn try_reload_with_mcp(&mut self, sync_mcp: bool) -> Result<Vec<String>, String> {
         let root = self.lane().root().to_path_buf();
         // Held apart until adopted: a reload refused leaves the files in force.
         let settings = Settings::load(self.pinned.config.as_deref(), &root)
             .map_err(|e| format!("nothing reloaded — {}", refused("reload", e)))?;
         let before = self.lane().resolved().endpoint.clone();
-        let mut said = self.rebuilt(Some(settings))?;
+        let mut said = self.rebuilt_with_mcp(Some(settings), sync_mcp)?;
         // What the run stands on is shown once, so a moved endpoint is said here.
         // An edit needs no such line: it names the value it wrote.
         let after = &self.lane().resolved().endpoint;
@@ -106,6 +110,17 @@ impl Core {
         workspace: tool::Workspace,
         settings: Option<Settings>,
         prompt_files: Option<std::sync::Arc<resolve::PromptFiles>>,
+    ) -> Result<Vec<String>, String> {
+        self.adopt_with_mcp(config, workspace, settings, prompt_files, true)
+    }
+
+    fn adopt_with_mcp(
+        &mut self,
+        config: Config,
+        workspace: tool::Workspace,
+        settings: Option<Settings>,
+        prompt_files: Option<std::sync::Arc<resolve::PromptFiles>>,
+        sync_mcp: bool,
     ) -> Result<Vec<String>, String> {
         let config = self
             .catalog
@@ -184,7 +199,9 @@ impl Core {
             self.settings = settings;
         }
         self.in_force();
-        crate::core::mcp::sync(&config, &root);
+        if sync_mcp {
+            crate::core::mcp::sync(&config, &root);
+        }
         self.config = std::sync::Arc::new(config);
         tracing::info!(
             target: "pi::session",
@@ -201,6 +218,14 @@ impl Core {
     // Recompute the config from the file trees — `settings`', else those in
     // force — and adopt it, saying why when nothing could be adopted.
     pub(super) fn rebuilt(&mut self, settings: Option<Settings>) -> Result<Vec<String>, String> {
+        self.rebuilt_with_mcp(settings, true)
+    }
+
+    fn rebuilt_with_mcp(
+        &mut self,
+        settings: Option<Settings>,
+        sync_mcp: bool,
+    ) -> Result<Vec<String>, String> {
         let config = (settings.as_ref().unwrap_or(&self.settings))
             .config()
             .map_err(|e| format!("nothing reloaded — {}", refused("settings", e)))?;
@@ -209,7 +234,7 @@ impl Core {
             .and_then(|ws| resolve::fence(ws, &config, &self.pinned))
             .map_err(|e| format!("nothing reloaded — {}", refused("reload", e.into())))?;
         let prompt_files = self.lane().resolved().prompt_files.clone();
-        self.adopt(config, workspace, settings, Some(prompt_files))
+        self.adopt_with_mcp(config, workspace, settings, Some(prompt_files), sync_mcp)
     }
     /// `/edit`: bare, the files it offers; with a name, that file to open.
     pub(super) fn edit(&self, name: &str) -> Step {

@@ -1,13 +1,18 @@
 //! A submitted operation, its execution plan, and its outputs. Surfaces render
 //! these values; neither the sender nor the renderer defines command behavior.
 
+pub mod host;
+pub(crate) mod ingress;
+pub mod messages;
+pub mod queue;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::core::Core;
 use crate::driver::{Ended, Origin};
 use crate::input::{Intent, Rewound, Step};
 use pi_store::listing::Listing;
-use toolbox::channel::Outcome;
+use pi_tools::channel::Outcome;
 
 /// Identity remains attached to an operation while other operations run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,36 +229,46 @@ impl Done {
     }
 
     pub fn outcome(&self) -> Outcome {
-        match &self.ran {
-            Some((_, Ok(_))) if matches!(self.kind, Kind::Bash { .. }) => Outcome::Exited(0),
-            Some((_, Ok(_))) => Outcome::Done,
-            Some((_, Err(error))) => error.outcome(),
-            None => RunError::Crashed.outcome(),
-        }
+        operation_outcome(&self.kind, self.ran.as_ref().map(|(_, result)| result))
     }
 
-    /// Model text already streams as events. Other tasks return their complete
-    /// output here, including failures and operations which changed nothing.
+    /// Model text streams separately; other tasks retain their complete output.
     pub fn completion(&self) -> Option<Completion> {
-        let outcome = self.outcome();
-        let output = match &self.kind {
-            Kind::Turn => return None,
-            Kind::Compact(report)
-                if self.ran.as_ref().is_some_and(|(_, result)| result.is_ok()) =>
-            {
-                compaction_output(*report)
-            }
-            Kind::Compact(_) => Output::Notice(String::new()),
-            Kind::Bash { lines, .. } | Kind::BashBackground { lines, .. } => {
-                Output::Text(lines.join("\n"))
-            }
-        };
-        Some(Completion {
-            request: self.request,
-            output,
-            outcome,
-        })
+        operation_completion(
+            self.request,
+            &self.kind,
+            self.ran.as_ref().map(|(_, result)| result),
+        )
     }
+}
+
+fn operation_outcome(kind: &Kind, result: Option<&RunResult>) -> Outcome {
+    match result {
+        Some(Ok(_)) if matches!(kind, Kind::Bash { .. }) => Outcome::Exited(0),
+        Some(Ok(_)) => Outcome::Done,
+        Some(Err(error)) => error.outcome(),
+        None => RunError::Crashed.outcome(),
+    }
+}
+
+fn operation_completion(
+    request: Request,
+    kind: &Kind,
+    result: Option<&RunResult>,
+) -> Option<Completion> {
+    let output = match kind {
+        Kind::Turn => return None,
+        Kind::Compact(report) if result.is_some_and(Result::is_ok) => compaction_output(*report),
+        Kind::Compact(_) => Output::Notice(String::new()),
+        Kind::Bash { lines, .. } | Kind::BashBackground { lines, .. } => {
+            Output::Text(lines.join("\n"))
+        }
+    };
+    Some(Completion {
+        request,
+        output,
+        outcome: operation_outcome(kind, result),
+    })
 }
 
 thread_local! {
@@ -334,21 +349,21 @@ pub async fn bash(
     mut session: agent::session::Session,
     ctx: tool::Ctx,
     command: String,
-    shell: toolbox::bash::Bash,
+    shell: pi_tools::bash::Bash,
 ) -> Done {
     let out = guard(async move {
         let (kind, result) = match crate::core::bash::run_bash(&ctx, &command, &shell).await {
             Ok(out) => {
                 crate::core::bash::record_bash(&mut session, &command, out.text);
                 match out.completion {
-                    toolbox::bash::Completion::Background { id } => (
+                    pi_tools::bash::Completion::Background { id } => (
                         Kind::BashBackground {
                             id,
                             lines: out.output,
                         },
                         Ok(llm::stream::Usage::default()),
                     ),
-                    toolbox::bash::Completion::Exited(code) => {
+                    pi_tools::bash::Completion::Exited(code) => {
                         let result = if ctx.cancel.is_cancelled() {
                             Err(agent::AgentError::Cancelled.into())
                         } else if code != 0 {
@@ -381,9 +396,10 @@ pub async fn bash(
     Done { request, kind, ran }
 }
 
-/// Resources lent to one model run. A host provides queued input through the
-/// existing seam; it does not define the execution or its failure handling.
+/// Resources lent to one admitted model run. Its response owner is created
+/// before execution; retries never create a second semantic input.
 pub struct Turn {
+    pub responder: messages::Responder,
     pub request: Request,
     pub session: agent::session::Session,
     pub agent: agent::Agent,
@@ -396,6 +412,7 @@ pub struct Turn {
 impl Turn {
     pub async fn run(self) -> Done {
         let Self {
+            mut responder,
             request,
             mut session,
             agent,
@@ -404,7 +421,71 @@ impl Turn {
             retry,
             input,
         } = self;
+        let messages = responder.messages();
+        let input = input.with_messages(
+            messages,
+            responder
+                .request()
+                .request_id()
+                .expect("model input request"),
+        );
         let out = guard(agent.run_with_input(&mut session, &ctx, &events, &retry, &input)).await;
+        let status = match &out {
+            Some(Ok(_)) => message::Status::Done,
+            Some(Err(agent::AgentError::Cancelled)) => message::Status::Stopped,
+            Some(Err(error)) => message::Status::Failed(message::Failure {
+                code: "MODEL_FAILED".into(),
+                message: error.to_string(),
+            }),
+            None => message::Status::Failed(message::Failure {
+                code: "RUN_CRASHED".into(),
+                message: "model run exited unexpectedly".into(),
+            }),
+        };
+        if let Err(error) = input.close_calls(match &status {
+            message::Status::Done => message::Status::Failed(message::Failure {
+                code: "MISSING_TOOL_RESULT".into(),
+                message: "model run ended without a tool result".into(),
+            }),
+            status => status.clone(),
+        }) {
+            return Done {
+                request,
+                kind: Kind::Turn,
+                ran: Some((session, Err(RunError::Failed(error)))),
+            };
+        }
+        let body = session
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                agent::session::Entry::Answer { blocks, .. } => Some(
+                    blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            llm::message::AssistantContent::Text(text) => {
+                                Some(message::Block::Text(text.text.clone()))
+                            }
+                            llm::message::AssistantContent::Reasoning(reasoning) => {
+                                Some(message::Block::Reasoning(reasoning.clone()))
+                            }
+                            llm::message::AssistantContent::ToolCall(_) => None,
+                        })
+                        .collect(),
+                ),
+                agent::session::Entry::Ask { .. } => Some(Vec::new()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        if let Err(error) = responder.complete(status, body) {
+            return Done {
+                request,
+                kind: Kind::Turn,
+                ran: Some((session, Err(RunError::Failed(error.to_string())))),
+            };
+        };
+
         Done {
             request,
             kind: Kind::Turn,
@@ -513,7 +594,7 @@ mod tests {
                 agent::session::Session::default(),
                 ctx.clone(),
                 format!("exit {code}"),
-                toolbox::bash::Bash::foreground(),
+                pi_tools::bash::Bash::foreground(),
             )
             .await;
             assert!(matches!(done.outcome(), Outcome::Exited(actual) if actual == code));
@@ -532,7 +613,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = tool::Ctx::new(tool::Workspace::new(dir.path()).unwrap());
         let table = Arc::new(crate::driver::background::Table::default());
-        let shell = toolbox::bash::Bash::new(Arc::new(crate::driver::background::Commands::new(
+        let shell = pi_tools::bash::Bash::new(Arc::new(crate::driver::background::Commands::new(
             table.clone(),
         )));
         let command = "echo ready > started; while [ ! -f release ]; do sleep 0.01; done; exit 3";

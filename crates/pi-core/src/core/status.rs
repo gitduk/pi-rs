@@ -126,13 +126,13 @@ impl Core {
             ]));
         }
         rows.push(Row::new(["pi", concat!("v", env!("CARGO_PKG_VERSION"))]));
-        rows.push(match toolbox::rtk::state() {
-            toolbox::rtk::State::On(version) => Row::new(["rtk".into(), version]),
-            toolbox::rtk::State::Off => Row::new(["rtk", "off"]).noting("RTK_DISABLED=1"),
-            toolbox::rtk::State::Missing => {
+        rows.push(match pi_tools::rtk::state() {
+            pi_tools::rtk::State::On(version) => Row::new(["rtk".into(), version]),
+            pi_tools::rtk::State::Off => Row::new(["rtk", "off"]).noting("RTK_DISABLED=1"),
+            pi_tools::rtk::State::Missing => {
                 Row::new(["rtk", "not found"]).noting("commands run as written")
             }
-            toolbox::rtk::State::Unknown => Row::new(["rtk", "not asked yet"]),
+            pi_tools::rtk::State::Unknown => Row::new(["rtk", "not asked yet"]),
         });
         let servers = crate::core::mcp::summary();
         if !servers.is_empty() {

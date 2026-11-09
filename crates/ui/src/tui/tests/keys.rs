@@ -104,15 +104,15 @@ async fn an_echoed_prompt_gets_its_rewind_position_when_sent() {
         )),
     })
     .await;
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     crate::tui::view::opened(&mut tui.views, tui.core.lane(), &tui.ui.paint);
     tui.echo("a prompt\nwith two lines");
-    tui.start_turn(
-        crate::tui::clipboard::prompt("a prompt\nwith two lines".into(), None, &[]),
-        &tx,
-    );
-    let done = rx.recv().await.expect("the run returned");
-    let id = done.ran.as_ref().unwrap().0.last_ask().unwrap();
+    tui.start_turn(crate::tui::clipboard::prompt(
+        "a prompt\nwith two lines".into(),
+        None,
+        &[],
+    ));
+    let done = completed_run(&mut tui).await;
+    let id = tui.core.lane().last_ask().unwrap();
     assert_eq!(
         view_at(&mut tui.views, token)
             .surface
@@ -122,7 +122,7 @@ async fn an_echoed_prompt_gets_its_rewind_position_when_sent() {
             .count(),
         2
     );
-    tui.settle(done).await;
+    tui.present_settlement(pi_core::execution::host::Settlement::Returned(done));
     tui.open_rewind();
     tui.ui
         .flush(tui.core.lane(), view_at(&mut tui.views, token));

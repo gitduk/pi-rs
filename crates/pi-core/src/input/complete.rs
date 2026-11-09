@@ -65,7 +65,7 @@ pub fn candidates(query: &str, root: &Path) -> Vec<FileEntry> {
     // The tools' walk, so `@` offers what grep and glob would find. The scope
     // never leaves the root, so the global gitignore applies.
     let mut raw: Vec<(String, bool)> = Vec::new();
-    let walk = toolbox::walk::walker_at(&scope, true, None)
+    let walk = pi_tools::walk::walker_at(&scope, true, None)
         .max_depth(Some(1))
         .build();
     for entry in walk.flatten() {

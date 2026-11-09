@@ -61,72 +61,7 @@ pub enum ToolResultContent {
     Json { value: Value },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "source", rename_all = "snake_case")]
-pub enum Image {
-    Base64 { media_type: String, data: String },
-    Url { url: String },
-}
-
-// Under Anthropic's 5 MB per-image cap even counted as base64.
-const IMAGE_MAX: usize = 3_750_000;
-
-impl Image {
-    /// The formats every vision endpoint takes, named by their magic bytes.
-    pub fn media_type(bytes: &[u8]) -> Option<&'static str> {
-        if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-            Some("image/png")
-        } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-            Some("image/jpeg")
-        } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-            Some("image/gif")
-        } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-            Some("image/webp")
-        } else {
-            None
-        }
-    }
-
-    /// `bytes` as an image a model can be sent, or why not: not a format every
-    /// vision endpoint takes, or over the size one will.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        use base64::Engine;
-        let media_type = Self::media_type(bytes).ok_or("not a PNG, JPEG, GIF or WebP image")?;
-        if bytes.len() > IMAGE_MAX {
-            return Err(format!(
-                "a {media_type} of {} bytes, over the {IMAGE_MAX}-byte image limit",
-                bytes.len()
-            ));
-        }
-        Ok(Self::Base64 {
-            media_type: media_type.to_string(),
-            data: base64::engine::general_purpose::STANDARD.encode(bytes),
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Reasoning {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    pub content: Vec<ReasoningContent>,
-    /// Which model produced it, as the endpoint names it. Absent means locally
-    /// synthesized or cut off before the wire closed it. Only an exact match against the target replays, so a
-    /// different model does not inherit the previous model's scratch work.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub by: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "content", rename_all = "snake_case")]
-pub enum ReasoningContent {
-    Text {
-        text: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        signature: Option<String>,
-    },
-    Encrypted(String),
-}
+pub use message::{Image, Reasoning, ReasoningContent};
 
 /// How a stored reasoning block goes back out to one model.
 ///
@@ -147,69 +82,52 @@ pub enum Replay<'a> {
     Dropped,
 }
 
-impl Reasoning {
-    /// The prose halves, joined.
-    pub fn text(&self) -> String {
-        self.content
-            .iter()
-            .filter_map(|c| match c {
-                ReasoningContent::Text { text, .. } => Some(text.as_str()),
-                ReasoningContent::Encrypted(_) => None,
-            })
-            .collect()
-    }
-
-    /// Which way this block leaves for `spec`.
-    ///
-    /// Keyed on the target's format, not the calling transport: the estimate
-    /// has no transport, and both agree only because format picks it too.
-    pub fn replay_for(&self, spec: &ModelSpec) -> Replay<'_> {
-        if self.by.as_deref() == Some(spec.model.as_str()) {
-            match spec.format {
-                Format::Anthropic { .. } => {
-                    let signature = self.content.iter().find_map(|c| match c {
-                        ReasoningContent::Text { signature, .. } => signature.as_deref(),
-                        ReasoningContent::Encrypted(_) => None,
-                    });
-                    if self
-                        .content
-                        .iter()
-                        .any(|c| matches!(c, ReasoningContent::Text { .. }))
-                    {
-                        return Replay::Thinking { signature };
-                    }
-                    if let Some(data) = self.content.iter().find_map(|c| match c {
-                        ReasoningContent::Encrypted(s) => Some(s.as_str()),
-                        ReasoningContent::Text { .. } => None,
-                    }) {
-                        return Replay::Redacted { data };
-                    }
+pub fn replay_for<'a>(reasoning: &'a Reasoning, spec: &ModelSpec) -> Replay<'a> {
+    if reasoning.by.as_deref() == Some(spec.model.as_str()) {
+        match spec.format {
+            Format::Anthropic { .. } => {
+                let signature = reasoning.content.iter().find_map(|c| match c {
+                    ReasoningContent::Text { signature, .. } => signature.as_deref(),
+                    ReasoningContent::Encrypted(_) => None,
+                });
+                if reasoning
+                    .content
+                    .iter()
+                    .any(|c| matches!(c, ReasoningContent::Text { .. }))
+                {
+                    return Replay::Thinking { signature };
                 }
-                Format::OpenAi => {
-                    let encrypted = self.content.iter().find_map(|c| match c {
-                        ReasoningContent::Encrypted(s) => Some(s.as_str()),
-                        ReasoningContent::Text { .. } => None,
-                    });
-                    // `id` and the ciphertext are both required, or the
-                    // endpoint refuses the item — missing either demotes.
-                    if let (Some(id), Some(encrypted)) = (self.id.as_deref(), encrypted) {
-                        return Replay::Encrypted { id, encrypted };
-                    }
+                if let Some(data) = reasoning.content.iter().find_map(|c| match c {
+                    ReasoningContent::Encrypted(s) => Some(s.as_str()),
+                    ReasoningContent::Text { .. } => None,
+                }) {
+                    return Replay::Redacted { data };
                 }
-                // With tools in play the chat wire requires its thinking back,
-                // or the model loses the thread between sub-turns.
-                Format::Chat => {
-                    let text = self.text();
-                    if !text.is_empty() {
-                        return Replay::Prose { text };
-                    }
+            }
+            Format::OpenAi => {
+                let encrypted = reasoning.content.iter().find_map(|c| match c {
+                    ReasoningContent::Encrypted(s) => Some(s.as_str()),
+                    ReasoningContent::Text { .. } => None,
+                });
+                // `id` and the ciphertext are both required, or the
+                // endpoint refuses the item — missing either demotes.
+                if let (Some(id), Some(encrypted)) = (reasoning.id.as_deref(), encrypted) {
+                    return Replay::Encrypted { id, encrypted };
+                }
+            }
+            // With tools in play the chat wire requires its thinking back,
+            // or the model loses the thread between sub-turns.
+            Format::Chat => {
+                let text = reasoning.text();
+                if !text.is_empty() {
+                    return Replay::Prose { text };
                 }
             }
         }
-
-        // Foreign or without a shape this format can replay: left out.
-        Replay::Dropped
     }
+
+    // Foreign or without a shape this format can replay: left out.
+    Replay::Dropped
 }
 
 /// Every image swapped for a line saying why, for a model that takes none:

@@ -117,11 +117,14 @@ pub(super) fn running_lane(dir: &std::path::Path) -> Lane {
         can_force_tool: true,
         pricing: llm::model::Pricing::default(),
     };
+    let mut resolved = pi_core::core::lane::a_resolved("");
+    std::sync::Arc::make_mut(&mut resolved).watched =
+        pi_core::core::resolve::watched(&pi_core::args::Pinned::default(), dir);
     let mut lane = Lane::opened(pi_core::core::lane::Opening {
         id: "s1".into(),
         ..pi_core::core::lane::Opening::new(
             std::sync::Arc::new(agent::Agent::new(std::sync::Arc::new(Mute), spec)),
-            pi_core::core::lane::a_resolved(""),
+            resolved,
             tool::Ctx::new(ws),
         )
     });
@@ -132,6 +135,7 @@ pub(super) fn running_lane(dir: &std::path::Path) -> Lane {
 
 pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
     let core = Core {
+        runtime: Default::default(),
         store: Store::new(dir.join("state")),
         catalog: Default::default(),
         config: std::sync::Arc::new(pi_store::config::Config::default()),
@@ -238,4 +242,21 @@ pub(super) fn current_hit(ui: &crate::tui::Ui) -> Option<(usize, String)> {
     };
     let y = (0..buf.area.height).find(|&y| marked(y))? as usize;
     Some((y, ui.drawn[y].trim().to_string()))
+}
+
+// Wait through the same core event source used by the application.
+pub(super) async fn completed_run(tui: &mut crate::tui::Tui) -> pi_core::execution::host::Returned {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let event = tui.core.next_runtime_event().await;
+            match event {
+                pi_core::execution::host::Event::Settled(
+                    pi_core::execution::host::Settlement::Returned(settled),
+                ) => return settled,
+                event => tui.runtime_event(event),
+            }
+        }
+    })
+    .await
+    .expect("the core returns the execution")
 }
