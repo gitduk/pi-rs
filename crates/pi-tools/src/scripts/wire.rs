@@ -1,6 +1,6 @@
 //! The sole fd 3 codec. Model messages and runtime operations are separate frames.
 
-use super::{Asked, Cursor, Outcome, Response, Told};
+use crate::runtime::channel::{Asked, Cursor, Outcome, Response, Told};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 

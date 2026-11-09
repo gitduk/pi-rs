@@ -36,6 +36,7 @@ pub enum Spec {
 /// The servers of one config, running.
 pub struct Servers {
     servers: Vec<Arc<Server>>,
+    generation: Arc<AtomicU64>,
 }
 
 struct Server {
@@ -47,6 +48,7 @@ struct Server {
     // it replaced cannot land a late word over the new one's.
     epoch: AtomicU64,
     task: Mutex<Option<tokio::task::AbortHandle>>,
+    generation: Arc<AtomicU64>,
 }
 
 /// One server, as a person is shown it.
@@ -79,15 +81,6 @@ impl std::fmt::Debug for Prompt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.word())
     }
-}
-
-// Moves on whenever any server's state does, so a holder of its prompts
-// knows to ask again.
-static GENERATION: AtomicU64 = AtomicU64::new(0);
-
-/// Which change to the servers' lists this is; equal means nothing moved.
-pub fn generation() -> u64 {
-    GENERATION.load(Ordering::SeqCst)
 }
 
 impl Prompt {
@@ -125,6 +118,7 @@ impl Prompt {
 impl Servers {
     /// Start every server in the background, stdio ones in `cwd`.
     pub fn start(specs: Vec<(String, Spec)>, cwd: PathBuf) -> Self {
+        let generation = Arc::new(AtomicU64::new(0));
         let servers = specs
             .into_iter()
             .map(|(name, spec)| {
@@ -135,12 +129,21 @@ impl Servers {
                     state: Mutex::new(State::Starting),
                     epoch: AtomicU64::new(0),
                     task: Mutex::new(None),
+                    generation: generation.clone(),
                 });
                 connect(&server);
                 server
             })
             .collect();
-        Self { servers }
+        Self {
+            servers,
+            generation,
+        }
+    }
+
+    /// The revision of this set's lists; another set cannot advance it.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 
     /// Drop the connection to `name`, or to every server when `None`, and
@@ -162,7 +165,7 @@ impl Servers {
                 let mut state = lock(&server.state);
                 server.epoch.fetch_add(1, Ordering::SeqCst);
                 *state = State::Starting;
-                GENERATION.fetch_add(1, Ordering::SeqCst);
+                server.generation.fetch_add(1, Ordering::SeqCst);
             }
             connect(server);
         }
@@ -246,7 +249,6 @@ impl Servers {
 impl Drop for Servers {
     // A dropped connection stops its server: a stdio child is killed with it.
     fn drop(&mut self) {
-        GENERATION.fetch_add(1, Ordering::SeqCst);
         for server in &self.servers {
             if let Some(task) = lock(&server.task).take() {
                 task.abort();
@@ -292,7 +294,7 @@ fn set(server: &Server, epoch: u64, state: State) {
     let mut now = lock(&server.state);
     if server.epoch.load(Ordering::SeqCst) == epoch {
         *now = state;
-        GENERATION.fetch_add(1, Ordering::SeqCst);
+        server.generation.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -746,6 +748,52 @@ impl Tool for Down {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_one_server_set_does_not_change_another_sets_generation() {
+        let first = Servers::start(Vec::new(), PathBuf::from("/first"));
+        let second = Servers::start(Vec::new(), PathBuf::from("/second"));
+        let before = second.generation();
+        drop(first);
+        assert_eq!(second.generation(), before);
+    }
+
+    #[test]
+    fn server_notifications_advance_only_their_own_set() {
+        let generation = Arc::new(AtomicU64::new(0));
+        let server = Arc::new(Server {
+            name: "fixture".into(),
+            spec: Spec::Stdio {
+                command: "unused".into(),
+                args: Vec::new(),
+                env: Vec::new(),
+            },
+            cwd: PathBuf::from("/fixture"),
+            state: Mutex::new(State::Starting),
+            epoch: AtomicU64::new(0),
+            task: Mutex::new(None),
+            generation: generation.clone(),
+        });
+        let first = Servers {
+            servers: vec![server.clone()],
+            generation,
+        };
+        let second = Servers::start(Vec::new(), PathBuf::from("/other"));
+        set(&server, 0, State::Down("fixture stopped".into()));
+        assert_eq!(first.generation(), 1);
+        assert_eq!(second.generation(), 0);
+        assert_eq!(
+            tool::Source::tools(&first).len(),
+            1,
+            "the advertised stand-in changed with the revision"
+        );
+        set(&server, 1, State::Starting);
+        assert_eq!(
+            first.generation(),
+            1,
+            "a stale connection cannot publish a revision"
+        );
+    }
 
     #[test]
     fn typed_words_fill_a_prompts_arguments_in_turn() {

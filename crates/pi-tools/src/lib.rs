@@ -1,9 +1,7 @@
 use tool::Registry;
 
-pub mod background;
 pub mod bash;
 mod blocks;
-pub mod channel;
 pub mod drift;
 pub mod edit;
 pub mod fetch;
@@ -14,6 +12,7 @@ pub mod process;
 pub mod read;
 mod rows;
 pub mod rtk;
+pub mod runtime;
 pub mod scripts;
 mod syntax;
 #[cfg(test)]

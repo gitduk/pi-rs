@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use message::{Block, ModelRequest};
-use pi_tools::channel::{Ask, Asked};
+use pi_tools::runtime::channel::{Ask, Asked};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};

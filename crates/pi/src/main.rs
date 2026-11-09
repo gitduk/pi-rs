@@ -176,6 +176,7 @@ struct Start {
     words: &'static [pi_core::input::commands::Command],
     ag: agent::Agent,
     resolved: Arc<pi_core::core::resolve::Resolved>,
+    mcp: core::mcp::Live,
 }
 
 // Everything up to the first turn. Each step that can refuse to start comes
@@ -259,7 +260,9 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
 
     // Only the terminal answers its own words; a one-shot run has none.
     let words: &'static [_] = if interactive { tui::WORDS } else { &[] };
-    let mut resolved = resolve(&pinned, &workspace, &config, &settings, None, words)?;
+    let mcp = core::mcp::Live::default();
+    mcp.sync(&config, workspace.root());
+    let mut resolved = resolve(&pinned, &workspace, &config, &settings, None, words, &mcp)?;
     resolved.catalog_generation = catalog.generation();
     resolved.notes.extend(discovery_notes.iter().cloned());
     resolved.notes.extend(replaced.clone());
@@ -268,7 +271,6 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
             .notes
             .push(format!("using {named} from discovered models"));
     }
-    pi_core::core::mcp::sync(&config, workspace.root());
     pi_core::core::warm_rtk();
     if interactive {
         // Said under the banner: printed here, they would wait behind the
@@ -364,6 +366,7 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
         words,
         ag,
         resolved,
+        mcp,
     })
 }
 
@@ -446,10 +449,11 @@ async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended
         words,
         ag,
         resolved,
+        mcp,
         ..
     } = start;
-    // `commands` is the Core's copy for the front lane; `resolved` keeps its own.
-    let commands = resolved.commands.clone();
+    let environment =
+        core::environment::Environment::new(config, settings, resolved.commands.clone(), mcp);
     let ctx = tool::Ctx::new(workspace).with_session(&id, pi_store::spill_root());
     let mut first = lane::Lane::opened(lane::Opening {
         id,
@@ -457,20 +461,15 @@ async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended
         name,
         worktree,
         claim,
-        ..lane::Opening::new(Arc::new(ag), resolved, ctx)
+        ..lane::Opening::new(Arc::new(ag), resolved, ctx, environment)
     });
     first.return_session(carried);
     let mut core = Core {
         runtime: Default::default(),
         store,
         catalog,
-        config,
         pinned,
-        commands,
-        prompts_seen: 0,
-        settings,
         lanes: pi_core::core::lanes::Lanes::of(first),
-        refused: Default::default(),
         executions: None,
         removals: Default::default(),
         surface: words,
@@ -514,10 +513,11 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         catalog,
         pinned,
         words,
+        mcp,
         ..
     } = start;
     // One request, so the servers get a moment to list their tools first.
-    pi_core::core::mcp::settled(std::time::Duration::from_secs(10)).await;
+    mcp.settled(std::time::Duration::from_secs(10)).await;
 
     // Skill names expand into input; host control words stay literal model input.
     let prompt = match expand(&resolved.commands, &prompt) {
@@ -564,20 +564,25 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         name: name.clone(),
         claim,
         worktree: worktree.clone(),
-        ..lane::Opening::new(Arc::new(ag), resolved.clone(), ctx)
+        ..lane::Opening::new(
+            Arc::new(ag),
+            resolved.clone(),
+            ctx,
+            core::environment::Environment::new(
+                config.clone(),
+                settings,
+                resolved.commands.clone(),
+                mcp,
+            ),
+        )
     });
     first.return_session(carried);
     let mut core = Core {
         runtime: Default::default(),
         store: host_store,
         catalog,
-        config: config.clone(),
         pinned,
-        commands: resolved.commands.clone(),
-        prompts_seen: 0,
-        settings,
         lanes: pi_core::core::lanes::Lanes::of(first),
-        refused: Default::default(),
         executions: None,
         removals: Default::default(),
         surface: words,

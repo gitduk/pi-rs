@@ -1,13 +1,12 @@
 //! Session messages carried alongside command execution.
 
-#[cfg(unix)]
-pub(crate) mod process;
-
-use crate::background::Scope;
+use crate::runtime::background::Scope;
 use tokio::sync::oneshot;
 mod events;
-pub mod wire;
 pub use events::{Receiver, Sender, channel};
+
+pub(crate) const EVENT_COUNT: usize = 128;
+pub(crate) const EVENT_BYTES: usize = 64 << 20;
 
 /// Where a call still in its turn puts a question to the person.
 pub trait Ask: Send + Sync {

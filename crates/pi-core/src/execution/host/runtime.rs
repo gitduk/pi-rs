@@ -150,35 +150,13 @@ impl Core {
     }
 
     fn prepare_model_lane(&mut self, at: usize) -> (Vec<String>, bool) {
-        let front = self.lanes.front();
-        // Configuration is presented for the selected workspace. Refresh a hidden
-        // workspace using its own settings without replacing that presentation.
-        let selected = (at != front).then(|| {
-            (
-                self.config.clone(),
-                self.settings.clone(),
-                self.commands.clone(),
-                self.prompts_seen,
-            )
-        });
-        self.lanes.show(at);
-        let refreshed = self.refresh_config_with_mcp(at == front);
+        let refreshed = self.refresh_config_at(at);
         let reconfigured = refreshed.is_some();
         let mut notices = refreshed.unwrap_or_default();
-        if self.settings.project() == pi_store::config::project_file(self.lane().root()).as_deref()
-        {
-            notices.extend(self.refresh_prompt_files().unwrap_or_default());
+        notices.extend(self.refresh_prompt_files_at(at).unwrap_or_default());
+        if let Some(note) = self.lanes[at].drift() {
+            self.lanes.at_mut(at).push_note(&note);
         }
-        if let Some(note) = self.lane().drift() {
-            self.lane_mut().push_note(&note);
-        }
-        if let Some((config, settings, commands, prompts_seen)) = selected {
-            self.config = config;
-            self.settings = settings;
-            self.commands = commands;
-            self.prompts_seen = prompts_seen;
-        }
-        self.lanes.show(front);
         (notices, reconfigured)
     }
 
@@ -276,7 +254,10 @@ impl Core {
         }
     }
 
-    pub fn interrupt_session(&mut self, scope: &pi_tools::background::Scope) -> Option<u64> {
+    pub fn interrupt_session(
+        &mut self,
+        scope: &pi_tools::runtime::background::Scope,
+    ) -> Option<u64> {
         let at = self.lane_at(&scope.root)?;
         let lane = self.lanes.at_mut(at);
         if let Some(owner) = &scope.owner

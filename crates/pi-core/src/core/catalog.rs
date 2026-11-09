@@ -380,8 +380,10 @@ impl Core {
             .iter()
             .map(|lane| lane.agent().spec().model.clone())
             .collect();
-        names.extend(self.config.model.clone());
-        names.extend(self.config.summarize_model.clone());
+        for lane in self.lanes.all() {
+            names.extend(lane.environment().config.model.clone());
+            names.extend(lane.environment().config.summarize_model.clone());
+        }
         names
     }
 
@@ -393,7 +395,8 @@ impl Core {
     /// Poll discovery without blocking a caller; new facts rebuild the active agent.
     pub fn refresh_models(&mut self) -> Option<Vec<String>> {
         let in_use = self.models_in_use();
-        let refresh = self.catalog.poll(&self.pinned, &self.config, &in_use)?;
+        let config = self.config().clone();
+        let refresh = self.catalog.poll(&self.pinned, &config, &in_use)?;
         let mut notes = refresh.notes;
         for note in &notes {
             tracing::warn!(target: "pi::session", reason = %note, "model discovery failed");
@@ -404,7 +407,7 @@ impl Core {
                     notes.extend(more);
                     notes.push(format!(
                         "models refreshed — {} available",
-                        self.config.names().len()
+                        self.config().names().len()
                     ));
                 }
                 Err(why) => notes.push(why),
@@ -413,7 +416,11 @@ impl Core {
             // No list came, so what the files leave unstated is a guess again;
             // a start that skipped the wait said nothing about it then.
             let spec = self.lane().agent().spec();
-            notes.extend(crate::core::dial::assumed(&self.pinned, &self.config, spec));
+            notes.extend(crate::core::dial::assumed(
+                &self.pinned,
+                self.config(),
+                spec,
+            ));
         }
         (!notes.is_empty()).then_some(notes)
     }
@@ -524,15 +531,24 @@ max_output_tokens = 2048
             crate::core::dial::dial(&pinned, &config, "local/m", config::ModelOrigin::Global)
                 .unwrap();
         let agent = Arc::new(agent::Agent::new(dialled.transport, dialled.spec));
+        let config = Arc::new(config);
         let lanes = ["one", "two"]
             .into_iter()
             .map(|name| {
                 let root = root.join(name);
                 std::fs::create_dir_all(root.join(".git")).unwrap();
+                let resolved = a_resolved("");
+                let environment = crate::core::environment::Environment::new(
+                    config.clone(),
+                    settings.clone(),
+                    resolved.commands.clone(),
+                    crate::core::mcp::Live::default(),
+                );
                 Lane::opened(Opening::new(
                     agent.clone(),
-                    a_resolved(""),
+                    resolved,
                     tool::Ctx::new(tool::Workspace::new(root).unwrap()),
+                    environment,
                 ))
             })
             .collect::<Vec<_>>();
@@ -543,13 +559,8 @@ max_output_tokens = 2048
             runtime: Default::default(),
             store: pi_store::session::Store::new(root.join("state")),
             catalog,
-            config: Arc::new(config),
             pinned,
-            settings,
             lanes: ring,
-            commands: Arc::new(Vec::new()),
-            prompts_seen: 0,
-            refused: Default::default(),
             executions: None,
             removals: Default::default(),
             surface: &[],

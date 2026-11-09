@@ -68,6 +68,7 @@ pub struct Lane {
 
 // What the tree and the config decide; lives as long as the lane.
 struct Checkout {
+    environment: super::environment::Environment,
     // Shared so a run can take it along; `rearm` goes through `make_mut`, so
     // a run in flight keeps the agent it started on.
     agent: Arc<Agent>,
@@ -337,9 +338,9 @@ pub fn arm(
     let executions =
         executions.map(|table| Arc::new(crate::driver::background::Commands::new(table)));
     // Hooks ask where executions are kept, a child's gates as the lane's do.
-    let ask: Arc<dyn pi_tools::channel::Ask> = match &executions {
+    let ask: Arc<dyn pi_tools::runtime::channel::Ask> = match &executions {
         Some(executions) => executions.clone(),
-        None => Arc::new(pi_tools::channel::NoOne),
+        None => Arc::new(pi_tools::runtime::channel::NoOne),
     };
     let mut brief = resolved.brief.clone();
     Arc::make_mut(&mut brief).hooks = resolved.hooks.arm(ask.clone());
@@ -458,6 +459,7 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
 /// What a lane is opened with. The rest is the empty state every lane starts
 /// in, transcript included: `return_session` is what installs one.
 pub struct Opening {
+    pub environment: super::environment::Environment,
     pub agent: std::sync::Arc<Agent>,
     pub resolved: Arc<Resolved>,
     pub ctx: Ctx,
@@ -471,8 +473,14 @@ pub struct Opening {
 
 impl Opening {
     /// The three a lane cannot be without; the rest is left undecided.
-    pub fn new(agent: std::sync::Arc<Agent>, resolved: Arc<Resolved>, ctx: Ctx) -> Self {
+    pub fn new(
+        agent: std::sync::Arc<Agent>,
+        resolved: Arc<Resolved>,
+        ctx: Ctx,
+        environment: super::environment::Environment,
+    ) -> Self {
         Self {
+            environment,
             agent,
             resolved,
             ctx,
@@ -485,6 +493,12 @@ impl Opening {
     }
 }
 impl Lane {
+    pub fn environment(&self) -> &super::environment::Environment {
+        &self.checkout.environment
+    }
+    pub(crate) fn environment_mut(&mut self) -> &mut super::environment::Environment {
+        &mut self.checkout.environment
+    }
     /// A lane before anything has run in it: its own channel, and no transcript
     /// until one is handed back with `return_session`.
     pub fn opened(parts: Opening) -> Self {
@@ -492,6 +506,7 @@ impl Lane {
         Self {
             token: next_token(),
             checkout: Checkout {
+                environment: parts.environment,
                 agent: parts.agent,
                 resolved: parts.resolved,
                 ctx: parts.ctx,
@@ -1221,40 +1236,64 @@ impl Core {
     ) -> Result<(), String> {
         let root = ws.root().to_path_buf();
         let failed = |e| format!("nothing opened — {}", refused("worktree", e));
+        let settings = Settings::load(self.pinned.config.as_deref(), &root).map_err(failed)?;
+        let config = settings.config().map_err(failed)?;
+        let config = self
+            .catalog
+            .enrich(&settings, &self.pinned, config)
+            .map_err(failed)?;
+        let ws = crate::core::resolve::fence(ws, &config, &self.pinned)
+            .map_err(|e| failed(anyhow::anyhow!(e)))?;
+        let mcp = super::mcp::Live::default();
         let mut resolved = crate::core::resolve::resolve(
             &self.pinned,
             &ws,
-            &self.config,
-            &self.settings,
+            &config,
+            &settings,
             None,
             self.surface,
+            &mcp,
         )
         .map_err(failed)?;
-        // Built from the config in force, which already carries the facts
-        // discovery last returned; only the project file can still differ.
         resolved.catalog_generation = self.catalog.generation();
 
         // The model travels; what the root decides does not. A switch changes
         // trees, and which model is answering was a decision made elsewhere.
         let agent = &self.lanes[like].checkout.agent;
-        let archive = self.archive(root, agent.spec().model.clone());
+        let archive = self.archive(root.clone(), agent.spec().model.clone());
         let mut ag = (**agent).clone();
         // Before `arm`, which hands the meter on to the subagent it builds.
         ag.meter = Arc::default();
+        let (replacement, notes) =
+            super::dial::replacement(&self.pinned, &config, &ag.spec().model);
+        resolved.notes.extend(notes);
+        if let Some(dialled) = replacement {
+            ag.retarget(dialled.transport, dialled.spec);
+        }
+        let retry = crate::core::retry(&config);
+        let writer = crate::core::dial::summary_writer(&self.pinned, &config).map_err(failed)?;
+        ag.compactor = Arc::new(agent::Summarizing::new(writer, retry.idle));
         let resolved = arm(
             &mut ag,
             Arc::new(resolved),
             archive,
-            crate::core::retry(&self.config),
+            retry,
             self.executions.clone(),
         );
 
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
         // absolute paths in one tree, and none of that lane's describe this.
         let ctx = tool::Ctx::new(ws);
+        mcp.sync(&config, &root);
+        let environment = super::environment::Environment::new(
+            Arc::new(config),
+            settings,
+            resolved.commands.clone(),
+            mcp,
+        );
         self.lanes.push_ahead(Lane::opened(Opening {
             worktree,
-            ..Opening::new(Arc::new(ag), resolved, ctx)
+            ..Opening::new(Arc::new(ag), resolved, ctx, environment)
         }));
         if let Some(table) = self.executions.clone() {
             self.lane_mut().bind_inputs(&table);
@@ -1296,9 +1335,7 @@ impl Core {
         let mut order = Vec::new();
         let mut said = Vec::new();
         for (root, id) in lanes {
-            let ws = match tool::Workspace::new(root)
-                .and_then(|ws| crate::core::resolve::fence(ws, &self.config, &self.pinned))
-            {
+            let ws = match tool::Workspace::new(root) {
                 Ok(ws) => ws,
                 Err(e) => {
                     said.push(format!("{}: not reopened — {e}", root.display()));
@@ -1522,14 +1559,14 @@ mod tests {
 
     #[test]
     fn changing_conversation_closes_its_input_binding_and_owns_a_new_queue() {
-        use pi_tools::background::RunSink as _;
+        use pi_tools::runtime::background::RunSink as _;
         let dir = tempfile::tempdir().unwrap();
         let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
         let table = std::sync::Arc::new(crate::driver::background::Table::default());
         core.enable_background(table.clone());
         let service = crate::driver::background::Commands::new(table).start(
             core.lane().root().to_path_buf().into(),
-            pi_tools::background::Invocation::shell("service"),
+            pi_tools::runtime::background::Invocation::shell("service"),
             Default::default(),
         );
         let old_messages = core.lane().messages();
@@ -1662,7 +1699,7 @@ mod tests {
         std::fs::write(skill.join("SKILL.md"), "---\ndescription: d\n---\n").unwrap();
         core.fresh_session();
         core.refresh_prompt_files();
-        assert!(core.commands.iter().any(|c| c.word == "/haiku"));
+        assert!(core.commands().iter().any(|c| c.word == "/haiku"));
     }
 
     // The test lane's resolution with one script, `name`, written into `dir`

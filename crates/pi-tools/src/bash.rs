@@ -1,11 +1,13 @@
-use crate::background::RunHandle;
+use crate::runtime::background::RunHandle;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::process::Command;
 
-use crate::background::{Again, Controls, Environment, Invocation, OutputMode, Rerun, RunSink};
+use crate::runtime::background::{
+    Again, Controls, Environment, Invocation, OutputMode, Rerun, RunSink,
+};
 
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput, output};
 
@@ -258,7 +260,7 @@ async fn schedule(
     let stop = tokio_util::sync::CancellationToken::new();
     let execution = executions.start(ctx.into(), invocation, stop.clone());
     let id = execution.id();
-    execution.watch(crate::background::Peek::text(String::new()));
+    execution.watch(crate::runtime::background::Peek::text(String::new()));
     let launch = rerun(again.clone(), ctx);
     execution.rerun(launch.clone(), again);
     if let Err(error) = launch(execution.clone(), stop) {
@@ -497,7 +499,7 @@ pub fn rerun(again: Again, ctx: &Ctx) -> Rerun {
                 .unwrap_or_default()
                 .as_bytes()
                 .to_vec();
-            crate::channel::process::background(cmd, input, &ctx, execution, stop, again.output)
+            crate::scripts::fd3::background(cmd, input, &ctx, execution, stop, again.output)
         }
         #[cfg(not(unix))]
         {

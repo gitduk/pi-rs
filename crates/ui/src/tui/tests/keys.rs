@@ -258,15 +258,8 @@ async fn only_an_answer_under_the_line_echoes_it() {
     let mut tui = surface(dir.path());
     tui.core.lane_mut().finish();
     let (replies, _inb) = crate::tui::run::Replies::channels();
-    // The real table, or `/keys` is a word the door does not know and the
-    // line is read as a prompt — which is a different test.
-    let table = std::sync::Arc::new(pi_core::input::commands::commands(
-        &[],
-        crate::tui::WORDS,
-        &mut Vec::new(),
-    ));
-    tui.core.commands = table.clone();
-    tui.ui.commands = table;
+    // Use the workspace's actual command table for both dispatch and completion.
+    tui.ui.commands = tui.core.commands().clone();
     let token = tui.core.lane().token();
     let rows = |tui: &mut crate::tui::Tui| view_at(&mut tui.views, token).surface.scrollback.len();
     let enter = || crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));

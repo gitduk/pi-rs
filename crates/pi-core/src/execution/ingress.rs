@@ -5,7 +5,7 @@ use super::messages::{Admission, Messages};
 use super::queue::{Pending, Queue, Queued};
 use crate::driver::Origin;
 use message::WireMessage;
-use pi_tools::channel::Receipt;
+use pi_tools::runtime::channel::Receipt;
 use std::path::PathBuf;
 
 /// Kept by the conversation; connection tables keep only weak references.

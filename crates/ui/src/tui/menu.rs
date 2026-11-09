@@ -90,13 +90,14 @@ impl Ui {
         let sessions = || self.lists.sessions();
         let worktrees = || self.lists.worktrees();
         let editable = || self.lists.editable();
+        let servers = || self.mcp.choices();
         let candidates = input.complete(&Sources {
             models: &self.choices,
             said: &self.said,
             sessions: Some(&sessions),
             worktrees: Some(&worktrees),
             editable: Some(&editable),
-            servers: Some(&core::mcp::choices),
+            servers: Some(&servers),
         });
         // Bottom-up: the best match belongs right above the input.
         Assistance::new(

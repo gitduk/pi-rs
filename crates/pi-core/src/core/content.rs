@@ -73,6 +73,7 @@ mod tests {
             &settings,
             None,
             &[],
+            &crate::core::mcp::Live::default(),
         )
         .unwrap();
         let listing = super::listing(&resolved.brief, &resolved.prompt_blocks);

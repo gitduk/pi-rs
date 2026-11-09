@@ -260,6 +260,7 @@ pub fn resolve(
     settings: &Settings,
     prompt_files: Option<Arc<PromptFiles>>,
     words: &[Command],
+    mcp: &crate::core::mcp::Live,
 ) -> Result<Resolved> {
     let root = workspace.root();
     let mut notes = Vec::new();
@@ -372,7 +373,7 @@ pub fn resolve(
     }
     // Read live like the scripts: a server's tools join once it has listed them.
     if !config.mcp.is_empty() {
-        registry.read(Arc::new(crate::core::mcp::Live));
+        registry.read(Arc::new(mcp.clone()));
     }
 
     let settled = config.settle(config::Flags {
@@ -450,7 +451,7 @@ pub fn resolve(
             summarize: prompt_files.prompt("summarize").into_owned(),
             effort,
             approver: std::sync::Arc::new(agent::Ceiling(tier)),
-            hooks: hooks.arm(std::sync::Arc::new(pi_tools::channel::NoOne)),
+            hooks: hooks.arm(std::sync::Arc::new(pi_tools::runtime::channel::NoOne)),
         }),
         prompt_blocks,
         hooks,
@@ -808,6 +809,7 @@ mod tests {
                 &settings,
                 Some(files.clone()),
                 &[],
+                &crate::core::mcp::Live::default(),
             )
             .unwrap();
             let block = format!("<project_tools path=\"{}\">", dir.display());
@@ -836,6 +838,7 @@ mod tests {
             &settings,
             Some(files),
             &[],
+            &crate::core::mcp::Live::default(),
         )
         .unwrap();
         assert!(!resolved.brief.system.contains("<project_tools"));
@@ -899,6 +902,7 @@ mod tests {
                 &settings,
                 Some(files.clone()),
                 &[],
+                &crate::core::mcp::Live::default(),
             )
             .unwrap();
             assert!(resolved.brief.system.starts_with(&files.system));
@@ -994,6 +998,7 @@ mod tests {
                 &settings,
                 Some(std::sync::Arc::new(super::PromptFiles::default())),
                 &[],
+                &crate::core::mcp::Live::default(),
             )
             .unwrap();
             let loader = resolved.brief.registry.get(skills::Load::NAME);

@@ -499,7 +499,6 @@ impl Core {
         // Built before the comparison: both sides are then canonical, and a
         // path git and the workspace spell differently is still one directory.
         let ws = tool::Workspace::new(&tree.path)
-            .and_then(|ws| crate::core::resolve::fence(ws, &self.config, &self.pinned))
             .map_err(|e| refused("worktree", anyhow::anyhow!("{}: {e}", tree.path.display())))?;
         if ws.root() == from {
             return Ok(Step::Notice(format!("already in {}", tree.name)));

@@ -1,8 +1,8 @@
 //! Duplex fd 3 frames, with semantic observation pulled directly by the writer.
-use crate::background::{OutputMode, RunHandle, Scope};
-use crate::channel::wire::{self, Command as Control, Incoming};
-use crate::channel::{Answer, Ask, Observation, Receiver, Sender, Told};
 use crate::process::{Exited, Group, MAX_RUN, Streams, put_down, reap, spawn};
+use crate::runtime::background::{OutputMode, RunHandle, Scope};
+use crate::runtime::channel::{Answer, Ask, Observation, Receiver, Sender, Told};
+use crate::scripts::wire::{self, Command as Control, Incoming};
 use serde::Serialize;
 #[cfg(test)]
 use serde_json::Value;
@@ -36,7 +36,7 @@ fn start(
     mut cmd: Command,
     input: Vec<u8>,
     ctx: &Ctx,
-    owner: Option<crate::background::Owner>,
+    owner: Option<crate::runtime::background::Owner>,
 ) -> Result<Process, ToolError> {
     let (ours, theirs) = std::os::unix::net::UnixStream::pair()?;
     let fd = theirs.as_raw_fd();
@@ -97,7 +97,7 @@ fn start(
         skipping: false,
         open: true,
     };
-    let (told, hear) = crate::channel::channel();
+    let (told, hear) = crate::runtime::channel::channel();
     let (out, output) = output();
     tokio::spawn(tell(write, hear, output));
 
@@ -269,12 +269,14 @@ struct OutputIn {
     closed: CancellationToken,
 }
 fn output() -> (Output, OutputIn) {
-    let (to, from) = tokio::sync::mpsc::channel(super::events::COUNT);
+    let (to, from) = tokio::sync::mpsc::channel(crate::runtime::channel::EVENT_COUNT);
     let closed = CancellationToken::new();
     (
         Output {
             to,
-            budget: Arc::new(tokio::sync::Semaphore::new(super::events::BYTES)),
+            budget: Arc::new(tokio::sync::Semaphore::new(
+                crate::runtime::channel::EVENT_BYTES,
+            )),
             closed: closed.clone(),
         },
         OutputIn { from, closed },
@@ -282,7 +284,7 @@ fn output() -> (Output, OutputIn) {
 }
 impl Output {
     fn put(&self, frame: Outgoing, bytes: usize) {
-        let permit = if bytes <= super::events::BYTES {
+        let permit = if bytes <= crate::runtime::channel::EVENT_BYTES {
             self.budget
                 .clone()
                 .try_acquire_many_owned(bytes as u32)
@@ -331,13 +333,13 @@ impl Output {
     fn observe(&self, observation: Box<dyn Observation>) {
         self.put(Outgoing::Observe(observation), 1);
     }
-    fn accepted(&self, id: &message::MessageId, receipt: &crate::channel::Receipt) {
+    fn accepted(&self, id: &message::MessageId, receipt: &crate::runtime::channel::Receipt) {
         #[derive(Serialize)]
         struct Accepted<'a> {
             r#type: &'static str,
             id: &'a message::MessageId,
             request: &'a message::RequestId,
-            cursor: &'a crate::channel::Cursor,
+            cursor: &'a crate::runtime::channel::Cursor,
             response: Option<&'a message::Message>,
         }
         self.value(&Accepted {
@@ -378,9 +380,9 @@ async fn tell(mut to: OwnedWriteHalf, mut hear: Receiver, mut output: OutputIn) 
                 match &mut event {
                     Told::Linked {operation,..}=>{model_operations.insert(*operation);},
                     Told::Response {request,event} if model_operations.contains(request)=>match event {
-                        crate::channel::Response::Progress(_)=>continue,
-                        crate::channel::Response::Finished {text,..}=>{text.clear();model_operations.remove(request);model_final=true;},
-                        crate::channel::Response::Queued | crate::channel::Response::Started=>{},
+                        crate::runtime::channel::Response::Progress(_)=>continue,
+                        crate::runtime::channel::Response::Finished {text,..}=>{text.clear();model_operations.remove(request);model_final=true;},
+                        crate::runtime::channel::Response::Queued | crate::runtime::channel::Response::Started=>{},
                     },
                     Told::Response {..} | Told::Started | Told::Progress(_) | Told::Reply(_) | Told::Asked | Told::Answer(_) | Told::Question {..} | Told::Closed(_) | Told::Refused {..}=>{},
                 }
@@ -391,7 +393,7 @@ async fn tell(mut to: OwnedWriteHalf, mut hear: Receiver, mut output: OutputIn) 
             },
             event=async {observation.as_mut().expect("guarded").next().await},if observation.is_some()=>match event {
                 Ok(event)=>{
-                    #[derive(Serialize)] struct MessageFrame<'a>{r#type:&'static str,cursor:&'a crate::channel::Cursor,message:&'a message::Message}
+                    #[derive(Serialize)] struct MessageFrame<'a>{r#type:&'static str,cursor:&'a crate::runtime::channel::Cursor,message:&'a message::Message}
                     if write(&mut to,&MessageFrame {r#type:"message",cursor:&event.cursor,message:&event.message}).await.is_err(){return}
                 }
                 Err(why)=>{observation=None;if write(&mut to,&wire::error(why)).await.is_err(){return}}
@@ -441,7 +443,7 @@ impl Fd3 {
 mod tests {
     use super::*;
     use crate::bash::Bash;
-    use crate::channel::{Asked, NoOne, Outcome, Response};
+    use crate::runtime::channel::{Asked, NoOne, Outcome, Response};
     use crate::testing::{Sink, ctx};
     use std::sync::{Arc, Mutex};
     use tool::Tool;
@@ -671,13 +673,13 @@ printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" "$e" "$f" > heard"#,
     async fn overlapping_operations_keep_their_identity_on_the_wire() {
         let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
         let (_, write) = ours.into_split();
-        let (tx, rx) = crate::channel::channel();
+        let (tx, rx) = crate::runtime::channel::channel();
         let (_out, output) = output();
         let writer = tokio::spawn(tell(write, rx, output));
         for (request, event) in [
             (7, Response::Queued),
-            (7, crate::channel::Response::Started),
-            (8, crate::channel::Response::Started),
+            (7, crate::runtime::channel::Response::Started),
+            (8, crate::runtime::channel::Response::Started),
             (
                 8,
                 Response::Finished {
@@ -685,7 +687,10 @@ printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" "$e" "$f" > heard"#,
                     outcome: Outcome::Done,
                 },
             ),
-            (7, crate::channel::Response::Progress("working".into())),
+            (
+                7,
+                crate::runtime::channel::Response::Progress("working".into()),
+            ),
             (
                 7,
                 Response::Finished {

@@ -2,20 +2,15 @@ use super::*;
 use crate::core::{Core, lanes::Lanes};
 use crate::driver::background::Commands;
 use crate::execution::{Kind, RunError, queue::Pending};
-use pi_tools::background::{Invocation, Owner, RunHandle, RunSink, Scope};
+use pi_tools::runtime::background::{Invocation, Owner, RunHandle, RunSink, Scope};
 
 fn core(lane: Lane, store: pi_store::session::Store, table: Arc<Table>) -> Core {
     Core {
         runtime: Default::default(),
-        commands: lane.resolved().commands.clone(),
         store,
         catalog: Default::default(),
-        config: Arc::new(pi_store::config::Config::default()),
         pinned: Default::default(),
-        prompts_seen: 0,
-        settings: pi_store::settings::Settings::new(toml::Value::Table(Default::default()), None),
         lanes: Lanes::of(lane),
-        refused: Default::default(),
         executions: Some(table),
         surface: &[],
         removals: Default::default(),
@@ -45,16 +40,16 @@ async fn a_hidden_queued_input_gets_drift_without_replacing_front_configuration(
     execution.channel().result("ready".into());
     execution.end();
     core.lanes.push_ahead(lane(b.path(), Arc::default()));
-    let config = core.config.clone();
-    let commands = core.commands.clone();
+    let config = core.config().clone();
+    let commands = core.commands().clone();
     let super::super::runtime::Event::Started(started) = core.next_runtime_event().await else {
         panic!()
     };
     assert_eq!(started.request.lane, core.lanes[0].token());
     assert!(started.entries.iter().any(|e| matches!(e, Entry::Note { note, .. } if note.contains("changed.txt") && note.contains("after"))));
     assert_eq!(core.lanes.front(), 1);
-    assert!(Arc::ptr_eq(&core.config, &config));
-    assert!(Arc::ptr_eq(&core.commands, &commands));
+    assert!(Arc::ptr_eq(core.config(), &config));
+    assert!(Arc::ptr_eq(core.commands(), &commands));
     wire.release.notify_one();
     while !matches!(
         core.next_runtime_event().await,
@@ -740,9 +735,10 @@ async fn startup_restores_the_original_message_ids_before_starting_another_round
     let ctx = first.lane().ctx().clone();
     drop(first);
     let stored = pi_store::session::Store::read(&store.path_of(dir.path(), &id)).unwrap();
+    let environment = crate::core::environment::Environment::fixture(resolved.commands.clone());
     let mut resumed = Lane::opened(Opening {
         id,
-        ..Opening::new(Arc::new(agent), resolved, ctx)
+        ..Opening::new(Arc::new(agent), resolved, ctx, environment)
     });
     resumed.return_session(stored.into_session());
     let mut resumed = core(resumed, store.clone(), Arc::default());

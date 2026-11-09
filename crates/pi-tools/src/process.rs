@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tool::output::{Capture, Captured};
 use tool::{Ctx, ToolError};
 
-use crate::background::{Peek, Printed};
+use crate::runtime::background::{Peek, Printed};
 
 /// The longest a bounded process call may run, whatever its caller asked for.
 pub(crate) const MAX_RUN: Duration = tool::limit::MAX_CALL;

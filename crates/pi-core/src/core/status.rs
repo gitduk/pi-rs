@@ -134,7 +134,7 @@ impl Core {
             }
             pi_tools::rtk::State::Unknown => Row::new(["rtk", "not asked yet"]),
         });
-        let servers = crate::core::mcp::summary();
+        let servers = self.mcp().summary();
         if !servers.is_empty() {
             rows.push(Row::new(["mcp".into(), servers.join(", ")]));
         }

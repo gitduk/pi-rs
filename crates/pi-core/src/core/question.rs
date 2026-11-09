@@ -42,7 +42,7 @@ pub struct Question {
 
 impl Question {
     /// The question a tool asked, checked as `new` checks one.
-    pub fn of(from: Asker, asked: &pi_tools::channel::Asked) -> Result<Self, String> {
+    pub fn of(from: Asker, asked: &pi_tools::runtime::channel::Asked) -> Result<Self, String> {
         let mut question = if asked.back && asked.options.is_empty() {
             let text = pi_store::text::collapsed(&asked.question);
             if text.is_empty() {
@@ -65,8 +65,8 @@ impl Question {
     }
 
     /// The question as an execution that follows is told it.
-    pub fn asked(&self) -> pi_tools::channel::Asked {
-        pi_tools::channel::Asked {
+    pub fn asked(&self) -> pi_tools::runtime::channel::Asked {
+        pi_tools::runtime::channel::Asked {
             question: self.text.clone(),
             options: self.options.clone(),
             back: self.back,

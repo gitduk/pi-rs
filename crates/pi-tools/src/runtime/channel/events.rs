@@ -1,12 +1,9 @@
 //! Bounded runtime observation; slow listeners detach without stopping execution.
 
-use super::Told;
+use super::{EVENT_BYTES as BYTES, EVENT_COUNT as COUNT, Told};
 use std::sync::Arc;
 use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
-
-pub(super) const COUNT: usize = 128;
-pub(super) const BYTES: usize = 64 << 20;
 
 #[derive(Clone)]
 pub struct Sender {

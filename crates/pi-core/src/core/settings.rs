@@ -26,17 +26,22 @@ impl Core {
     /// Before a run: read the prompt's files again if the session is new or
     /// compacted since. `Some` names the files that read differently.
     pub fn refresh_prompt_files(&mut self) -> Option<Vec<String>> {
-        let at = self.lane_mut().prompt_files_due()?;
-        let lane = self.lane();
+        self.refresh_prompt_files_at(self.lanes.front())
+    }
+
+    pub(crate) fn refresh_prompt_files_at(&mut self, index: usize) -> Option<Vec<String>> {
+        let at = self.lanes.at_mut(index).prompt_files_due()?;
+        let lane = self.lanes.at(index);
         let root = lane.root().to_path_buf();
         let was = lane.resolved().prompt_files.clone();
         let mut resolved = match resolve::resolve(
             &self.pinned,
             lane.workspace(),
-            &self.config,
-            &self.settings,
+            &self.lanes[index].environment().config,
+            &self.lanes[index].environment().settings,
             None,
             self.surface,
+            &self.lanes[index].environment().mcp,
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -51,7 +56,7 @@ impl Core {
         resolved.watched = lane.resolved().watched.clone();
         resolved.catalog_generation = lane.resolved().catalog_generation;
         let model = lane.agent().spec().model.clone();
-        self.lane_mut().prompt_files_read(at);
+        self.lanes.at_mut(index).prompt_files_read(at);
         if unchanged {
             return None;
         }
@@ -61,9 +66,9 @@ impl Core {
         let left_out = resolved.prompt_files.left_out(&root);
         let left_out = left_out.filter(|now| was.left_out(&root).as_ref() != Some(now));
         let archive = self.archive(root, model);
-        let retry = crate::core::retry(&self.config);
+        let retry = crate::core::retry(&self.lanes[index].environment().config);
         let executions = self.executions.clone();
-        self.lane_mut().rearm(
+        self.lanes.at_mut(index).rearm(
             std::sync::Arc::new(resolved),
             archive,
             retry,
@@ -72,7 +77,7 @@ impl Core {
         );
         // The shelf was read again with the rest, so a skill found on it is
         // put in force here, as `refresh_skills` would have.
-        self.in_force();
+        self.in_force_at(index);
         let said: Vec<String> = (!moved.is_empty())
             .then(|| format!("re-read — {}", moved.join(", ")))
             .into_iter()
@@ -83,19 +88,19 @@ impl Core {
 
     /// The same, with a refusal as `Err`: why nothing was reloaded.
     pub fn try_reload(&mut self) -> Result<Vec<String>, String> {
-        self.try_reload_with_mcp(true)
+        self.try_reload_at(self.lanes.front())
     }
 
-    pub(super) fn try_reload_with_mcp(&mut self, sync_mcp: bool) -> Result<Vec<String>, String> {
-        let root = self.lane().root().to_path_buf();
+    pub(super) fn try_reload_at(&mut self, at: usize) -> Result<Vec<String>, String> {
+        let root = self.lanes.at(at).root().to_path_buf();
         // Held apart until adopted: a reload refused leaves the files in force.
         let settings = Settings::load(self.pinned.config.as_deref(), &root)
             .map_err(|e| format!("nothing reloaded — {}", refused("reload", e)))?;
-        let before = self.lane().resolved().endpoint.clone();
-        let mut said = self.rebuilt_with_mcp(Some(settings), sync_mcp)?;
+        let before = self.lanes.at(at).resolved().endpoint.clone();
+        let mut said = self.rebuilt_at(at, Some(settings))?;
         // What the run stands on is shown once, so a moved endpoint is said here.
         // An edit needs no such line: it names the value it wrote.
-        let after = &self.lane().resolved().endpoint;
+        let after = &self.lanes.at(at).resolved().endpoint;
         if *after != before {
             said.extend(after.clone());
         }
@@ -111,21 +116,29 @@ impl Core {
         settings: Option<Settings>,
         prompt_files: Option<std::sync::Arc<resolve::PromptFiles>>,
     ) -> Result<Vec<String>, String> {
-        self.adopt_with_mcp(config, workspace, settings, prompt_files, true)
+        self.adopt_at(
+            self.lanes.front(),
+            config,
+            workspace,
+            settings,
+            prompt_files,
+        )
     }
 
-    fn adopt_with_mcp(
+    fn adopt_at(
         &mut self,
+        at: usize,
         config: Config,
         workspace: tool::Workspace,
         settings: Option<Settings>,
         prompt_files: Option<std::sync::Arc<resolve::PromptFiles>>,
-        sync_mcp: bool,
     ) -> Result<Vec<String>, String> {
         let config = self
             .catalog
             .enrich(
-                settings.as_ref().unwrap_or(&self.settings),
+                settings
+                    .as_ref()
+                    .unwrap_or(&self.lanes[at].environment().settings),
                 &self.pinned,
                 config,
             )
@@ -136,9 +149,12 @@ impl Core {
             &self.pinned,
             &workspace,
             &config,
-            settings.as_ref().unwrap_or(&self.settings),
+            settings
+                .as_ref()
+                .unwrap_or(&self.lanes[at].environment().settings),
             prompt_files,
             self.surface,
+            &self.lanes[at].environment().mcp,
         ) {
             Ok(r) => r,
             Err(e) => return failed(e),
@@ -146,28 +162,14 @@ impl Core {
         // Without settings read afresh, the files were not read again: their
         // stamps stay as last read, so an edit since is still a reload's to apply.
         if settings.is_none() {
-            resolved.watched = self.lane().resolved().watched.clone();
+            resolved.watched = self.lanes.at(at).resolved().watched.clone();
         }
         resolved.catalog_generation = self.catalog.generation();
         // The model stays; its entry is re-read via the same `dial` path.
         // A failed dial keeps the old transport rather than refusing the file.
-        let running = self.lane().agent().spec().clone();
-        let mut notes: Vec<String> = Vec::new();
-        let retarget = match crate::core::dial::dial(
-            &self.pinned,
-            &config,
-            &running.model,
-            config::ModelOrigin::Command,
-        ) {
-            Ok(dialled) => {
-                notes.extend(dialled.warning);
-                Some((dialled.transport, dialled.spec))
-            }
-            Err(e) => {
-                notes.push(format!("`{}` not re-dialled — {e}", running.model));
-                None
-            }
-        };
+        let running = self.lanes.at(at).agent().spec().clone();
+        let (replacement, notes) = super::dial::replacement(&self.pinned, &config, &running.model);
+        let retarget = replacement.map(|dialled| (dialled.transport, dialled.spec));
         let model = retarget
             .as_ref()
             .map_or(running.model, |(_, s)| s.model.clone());
@@ -182,8 +184,8 @@ impl Core {
         let archive = self.archive(root.clone(), model);
         let idle = retry.idle;
         let executions = self.executions.clone();
-        self.lane_mut().ctx_mut().workspace = workspace;
-        self.lane_mut().rearm(
+        self.lanes.at_mut(at).ctx_mut().workspace = workspace;
+        self.lanes.at_mut(at).rearm(
             std::sync::Arc::new(resolved),
             archive,
             retry,
@@ -195,22 +197,19 @@ impl Core {
                 }
             },
         );
-        if let Some(settings) = settings {
-            self.settings = settings;
-        }
-        self.in_force();
-        if sync_mcp {
-            crate::core::mcp::sync(&config, &root);
-        }
-        self.config = std::sync::Arc::new(config);
+        self.lanes
+            .at_mut(at)
+            .environment_mut()
+            .install(config, settings, &root);
+        self.in_force_at(at);
         tracing::info!(
             target: "pi::session",
-            models = self.config.names().len(),
-            discovered_models = self.config.discovered.len(),
-            rebound_keys = self.config.keys.len(),
-            commands = self.commands.len(),
-            effort = ?self.lane().agent().brief.effort,
-            system_bytes = self.lane().agent().brief.system.len(),
+            models = self.lanes[at].environment().config.names().len(),
+            discovered_models = self.lanes[at].environment().config.discovered.len(),
+            rebound_keys = self.lanes[at].environment().config.keys.len(),
+            commands = self.lanes[at].environment().commands.len(),
+            effort = ?self.lanes.at(at).agent().brief.effort,
+            system_bytes = self.lanes.at(at).agent().brief.system.len(),
             "reloaded"
         );
         Ok(notes)
@@ -218,23 +217,21 @@ impl Core {
     // Recompute the config from the file trees — `settings`', else those in
     // force — and adopt it, saying why when nothing could be adopted.
     pub(super) fn rebuilt(&mut self, settings: Option<Settings>) -> Result<Vec<String>, String> {
-        self.rebuilt_with_mcp(settings, true)
+        self.rebuilt_at(self.lanes.front(), settings)
     }
 
-    fn rebuilt_with_mcp(
-        &mut self,
-        settings: Option<Settings>,
-        sync_mcp: bool,
-    ) -> Result<Vec<String>, String> {
-        let config = (settings.as_ref().unwrap_or(&self.settings))
-            .config()
-            .map_err(|e| format!("nothing reloaded — {}", refused("settings", e)))?;
+    fn rebuilt_at(&mut self, at: usize, settings: Option<Settings>) -> Result<Vec<String>, String> {
+        let config = (settings
+            .as_ref()
+            .unwrap_or(&self.lanes[at].environment().settings))
+        .config()
+        .map_err(|e| format!("nothing reloaded — {}", refused("settings", e)))?;
         // The tier fences the workspace, so it is built again from the config.
-        let workspace = tool::Workspace::new(self.lane().root())
+        let workspace = tool::Workspace::new(self.lanes.at(at).root())
             .and_then(|ws| resolve::fence(ws, &config, &self.pinned))
             .map_err(|e| format!("nothing reloaded — {}", refused("reload", e.into())))?;
-        let prompt_files = self.lane().resolved().prompt_files.clone();
-        self.adopt_with_mcp(config, workspace, settings, Some(prompt_files), sync_mcp)
+        let prompt_files = self.lanes.at(at).resolved().prompt_files.clone();
+        self.adopt_at(at, config, workspace, settings, Some(prompt_files))
     }
     /// `/edit`: bare, the files it offers; with a name, that file to open.
     pub(super) fn edit(&self, name: &str) -> Step {
@@ -272,7 +269,7 @@ impl Core {
             ("tier", flag(self.pinned.tier.is_some(), "--tier")),
         ]
         .into_iter()
-        .filter(|(path, _)| self.settings.sets(path))
+        .filter(|(path, _)| self.settings().sets(path))
         .filter_map(|(path, by)| {
             Some(format!(
                 "{path}: {} outranks the files, so this run keeps it",
@@ -281,7 +278,7 @@ impl Core {
         })
         .collect();
         if self.pinned.base_url.is_some() {
-            shadowed.extend(self.config.provider.keys().map(|name| {
+            shadowed.extend(self.config().provider.keys().map(|name| {
                 format!(
                     "provider.{name}.base_url: --base-url outranks the files, so this run keeps it"
                 )
@@ -293,11 +290,11 @@ impl Core {
     /// a menu that reads upward from its line: unpriced first, then cheapest.
     pub fn choices(&self) -> Vec<Choice> {
         let rows: Vec<(&str, String, u32, &llm::model::Pricing)> = self
-            .config
+            .config()
             .models
             .iter()
             .map(|(name, entry)| {
-                let format = self.config.find(name).ok().map(|s| s.format);
+                let format = self.config().find(name).ok().map(|s| s.format);
                 (
                     format.map(|f| f.name()).unwrap_or_default(),
                     name.clone(),
@@ -330,7 +327,7 @@ impl Core {
         origin: config::ModelOrigin,
     ) -> Result<Option<crate::core::dial::Dialled>, String> {
         let held = self.lane().model();
-        let dialled = crate::core::dial::dial(&self.pinned, &self.config, name, origin)
+        let dialled = crate::core::dial::dial(&self.pinned, self.config(), name, origin)
             .map_err(|e| format!("still on {held} — {}", refused("switch", e)))?;
         // Bare IDs can resolve to the sole named provider's identity.
         Ok((dialled.spec.model != held).then_some(dialled))
@@ -344,7 +341,7 @@ impl Core {
     ) {
         let archive = self.archive(self.lane().root().to_path_buf(), spec.model.clone());
         let resolved = self.lane().resolved().clone();
-        let retry = crate::core::retry(&self.config);
+        let retry = crate::core::retry(self.config());
         // The child is built from this agent, so the tool is hung again for it
         // to run on the model this session just moved to.
         let executions = self.executions.clone();

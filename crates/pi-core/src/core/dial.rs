@@ -145,6 +145,21 @@ pub fn summary_writer(
     }
 }
 
+/// Resolve a replacement connection while retaining a usable previous connection on failure.
+pub(super) fn replacement(
+    pinned: &Pinned,
+    config: &config::Config,
+    model: &str,
+) -> (Option<Dialled>, Vec<String>) {
+    match dial(pinned, config, model, config::ModelOrigin::Command) {
+        Ok(mut dialled) => {
+            let warning = std::mem::take(&mut dialled.warning);
+            (Some(dialled), warning.into_iter().collect())
+        }
+        Err(error) => (None, vec![format!("`{model}` not re-dialled — {error}")]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

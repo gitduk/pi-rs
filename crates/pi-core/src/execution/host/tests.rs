@@ -63,6 +63,7 @@ fn lane(root: &Path, wire: Arc<Wire>) -> Lane {
     let mut resolved = crate::core::lane::a_resolved("");
     Arc::make_mut(&mut resolved).watched =
         crate::core::resolve::watched(&crate::args::Pinned::default(), root);
+    let environment = crate::core::environment::Environment::fixture(resolved.commands.clone());
     let mut lane = Lane::opened(Opening {
         id: id.clone(),
         ..Opening::new(
@@ -70,6 +71,7 @@ fn lane(root: &Path, wire: Arc<Wire>) -> Lane {
             resolved,
             tool::Ctx::new(tool::Workspace::new(root).unwrap())
                 .with_session(id, root.join("spill")),
+            environment,
         )
     });
     lane.return_session(Session::new());

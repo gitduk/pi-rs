@@ -16,12 +16,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
-pub use pi_tools::background::Invocation;
-use pi_tools::background::{
+pub use pi_tools::runtime::background::Invocation;
+use pi_tools::runtime::background::{
     Again, Controls, Owner, Peek, Printed, Rerun, RunHandle, RunSink, Scope,
 };
-use pi_tools::channel::Sender;
-use pi_tools::channel::{Answer, Ask, Asked, Told};
+use pi_tools::runtime::channel::Sender;
+use pi_tools::runtime::channel::{Answer, Ask, Asked, Told};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tokio::sync::oneshot;
@@ -967,7 +967,7 @@ impl Table {
                 return;
             };
             if let Told::Response { request, event } = &told {
-                use pi_tools::channel::Response;
+                use pi_tools::runtime::channel::Response;
                 match event {
                     Response::Queued => {
                         if let std::collections::hash_map::Entry::Vacant(entry) =
@@ -1000,16 +1000,16 @@ impl Table {
         };
         match &told {
             Told::Response { request, event } => match event {
-                pi_tools::channel::Response::Queued => {
+                pi_tools::runtime::channel::Response::Queued => {
                     tracing::info!(target: "pi::background", execution = id, request, "request queued")
                 }
-                pi_tools::channel::Response::Started => {
+                pi_tools::runtime::channel::Response::Started => {
                     tracing::info!(target: "pi::background", execution = id, request, "request started")
                 }
-                pi_tools::channel::Response::Progress(text) => {
+                pi_tools::runtime::channel::Response::Progress(text) => {
                     tracing::info!(target: "pi::background", execution = id, request, chars = text.chars().count(), "request progress")
                 }
-                pi_tools::channel::Response::Finished { text, outcome } => {
+                pi_tools::runtime::channel::Response::Finished { text, outcome } => {
                     tracing::info!(target: "pi::background", execution = id, request, ?outcome, chars = text.chars().count(), "request finished")
                 }
             },
@@ -1745,7 +1745,7 @@ impl RunHandle for Handle {
             .and_then(|at| inner.items[at].owner.clone())
     }
 
-    fn channel(&self) -> &dyn pi_tools::channel::Channel {
+    fn channel(&self) -> &dyn pi_tools::runtime::channel::Channel {
         self
     }
 
@@ -1778,7 +1778,7 @@ impl RunHandle for Handle {
     }
 }
 
-impl pi_tools::channel::Channel for Handle {
+impl pi_tools::runtime::channel::Channel for Handle {
     fn watch_prompts(&self) {
         let mut inner = self.table.lock();
         let Some(at) = inner.mine(self.id, self.run) else {
@@ -1842,7 +1842,10 @@ impl pi_tools::channel::Channel for Handle {
         self.table.wake();
     }
 
-    fn message(&self, wire: message::WireMessage) -> Result<pi_tools::channel::Receipt, String> {
+    fn message(
+        &self,
+        wire: message::WireMessage,
+    ) -> Result<pi_tools::runtime::channel::Receipt, String> {
         let id = wire.id.clone();
         let session = wire.session.clone();
         let result = self
@@ -1869,8 +1872,8 @@ impl pi_tools::channel::Channel for Handle {
     fn observe(
         &self,
         session: message::SessionId,
-        cursor: Option<pi_tools::channel::Cursor>,
-    ) -> Result<Box<dyn pi_tools::channel::Observation>, String> {
+        cursor: Option<pi_tools::runtime::channel::Cursor>,
+    ) -> Result<Box<dyn pi_tools::runtime::channel::Observation>, String> {
         let result = self
             .table
             .ingress_for(self.id, self.run, &session)
@@ -1883,7 +1886,9 @@ impl pi_tools::channel::Channel for Handle {
                 tracing::warn!(target: "pi::background", execution = self.id, session = session.as_str(), %why, "model observation rejected")
             }
         }
-        result.map(|observation| Box::new(observation) as Box<dyn pi_tools::channel::Observation>)
+        result.map(|observation| {
+            Box::new(observation) as Box<dyn pi_tools::runtime::channel::Observation>
+        })
     }
 
     fn listen(&self, to: Sender) {
@@ -2650,18 +2655,18 @@ mod tests {
         let table = Arc::new(Table::default());
         let root = Path::new("/checkout");
         let sink = Commands::new(table.clone());
-        let (tx, mut rx) = pi_tools::channel::channel();
+        let (tx, mut rx) = pi_tools::runtime::channel::channel();
         let follower = sink.start(
             root.into(),
-            pi_tools::background::Invocation::shell("bridge"),
+            pi_tools::runtime::background::Invocation::shell("bridge"),
             Default::default(),
         );
         follower.channel().listen(tx);
         follower.channel().follow();
-        let (elsewhere, mut quiet) = pi_tools::channel::channel();
+        let (elsewhere, mut quiet) = pi_tools::runtime::channel::channel();
         let other = sink.start(
             "/other".into(),
-            pi_tools::background::Invocation::shell("bridge"),
+            pi_tools::runtime::background::Invocation::shell("bridge"),
             Default::default(),
         );
         other.channel().listen(elsewhere);
@@ -3035,7 +3040,7 @@ print("service exit is not another model input")
             Default::default(),
         );
         let listen = |execution: &dyn RunHandle| {
-            let (to, hear) = pi_tools::channel::channel();
+            let (to, hear) = pi_tools::runtime::channel::channel();
             execution.channel().listen(to);
             execution.channel().follow();
             hear
@@ -3115,7 +3120,7 @@ print("service exit is not another model input")
         RunSink::start(
             &Commands::new(table.clone()),
             root.to_path_buf().into(),
-            pi_tools::background::Invocation::shell(name),
+            pi_tools::runtime::background::Invocation::shell(name),
             CancellationToken::new(),
         )
     }
@@ -3164,7 +3169,7 @@ print("service exit is not another model input")
         let table = Arc::new(Table::default());
         let root = Path::new("/checkout");
         let execution = kept(&table, root, "serve");
-        let (to, mut heard) = pi_tools::channel::channel();
+        let (to, mut heard) = pi_tools::runtime::channel::channel();
         execution.channel().listen(to);
         execution.end();
         assert_eq!(table.background(root).len(), 1);
@@ -3264,11 +3269,11 @@ print("service exit is not another model input")
     async fn an_input_waits_in_line_and_its_command_hears_of_its_turn() {
         let table = Arc::new(Table::default());
         let root = PathBuf::from("/checkout");
-        let (tx, mut rx) = pi_tools::channel::channel();
+        let (tx, mut rx) = pi_tools::runtime::channel::channel();
         let execution = RunSink::start(
             &Commands::new(table.clone()),
             root.clone().into(),
-            pi_tools::background::Invocation::shell("wechat"),
+            pi_tools::runtime::background::Invocation::shell("wechat"),
             CancellationToken::new(),
         );
         execution.channel().listen(tx);
@@ -3488,7 +3493,7 @@ print("service exit is not another model input")
             Invocation::shell("channel"),
             Default::default(),
         );
-        let (to, mut from) = pi_tools::channel::channel();
+        let (to, mut from) = pi_tools::runtime::channel::channel();
         execution.channel().listen(to);
         execution.channel().watch_prompts();
         let Told::Question {
@@ -3542,14 +3547,14 @@ print("service exit is not another model input")
             Invocation::shell("selected"),
             Default::default(),
         );
-        let (to_workspace, mut from_workspace) = pi_tools::channel::channel();
-        let (to_selected, mut from_selected) = pi_tools::channel::channel();
+        let (to_workspace, mut from_workspace) = pi_tools::runtime::channel::channel();
+        let (to_selected, mut from_selected) = pi_tools::runtime::channel::channel();
         workspace.channel().listen(to_workspace);
         selected.channel().listen(to_selected);
         workspace.channel().watch_prompts();
         selected.channel().watch_prompts();
 
-        let next_text = |receiver: &mut pi_tools::channel::Receiver| {
+        let next_text = |receiver: &mut pi_tools::runtime::channel::Receiver| {
             let Told::Question { asked, .. } = receiver.try_recv().unwrap() else {
                 panic!("expected a prompt");
             };
@@ -3585,11 +3590,11 @@ print("service exit is not another model input")
                 asked("which?", &["/compact", "go on"], false),
             )
             .unwrap();
-        let (tx, mut rx) = pi_tools::channel::channel();
+        let (tx, mut rx) = pi_tools::runtime::channel::channel();
         let bridge = RunSink::start(
             &executions,
             root.clone().into(),
-            pi_tools::background::Invocation::shell("telegram"),
+            pi_tools::runtime::background::Invocation::shell("telegram"),
             CancellationToken::new(),
         );
         bridge.channel().listen(tx);
@@ -3682,7 +3687,7 @@ print("service exit is not another model input")
         let execution = RunSink::start(
             &Commands::new(table.clone()),
             root.clone().into(),
-            pi_tools::background::Invocation::shell("long execution"),
+            pi_tools::runtime::background::Invocation::shell("long execution"),
             stop.clone(),
         );
         assert!(table.stop(Path::new("/elsewhere"), execution.id()).is_err());
@@ -3706,7 +3711,7 @@ print("service exit is not another model input")
         let execution = RunSink::start(
             &Commands::new(table.clone()),
             root.clone().into(),
-            pi_tools::background::Invocation::shell("crawl"),
+            pi_tools::runtime::background::Invocation::shell("crawl"),
             CancellationToken::new(),
         );
         execution.channel().status("1/2 pages".into());
@@ -3747,7 +3752,7 @@ print("service exit is not another model input")
         let execution = RunSink::start(
             &Commands::new(table.clone()),
             root.clone().into(),
-            pi_tools::background::Invocation::shell("flood"),
+            pi_tools::runtime::background::Invocation::shell("flood"),
             CancellationToken::new(),
         );
         for n in 0..MAX_WAITING + 3 {
@@ -3782,7 +3787,7 @@ print("service exit is not another model input")
         let execution = RunSink::start(
             &Commands::new(table.clone()),
             root.clone().into(),
-            pi_tools::background::Invocation::shell("quiet"),
+            pi_tools::runtime::background::Invocation::shell("quiet"),
             Default::default(),
         );
         execution.end();
@@ -3795,12 +3800,12 @@ print("service exit is not another model input")
         let table = Arc::new(Table::default());
         let (a, _) = table.add(
             "/repo.worktrees/a".into(),
-            pi_tools::background::Invocation::shell("a"),
+            pi_tools::runtime::background::Invocation::shell("a"),
             Default::default(),
         );
         table.add(
             "/repo".into(),
-            pi_tools::background::Invocation::shell("main"),
+            pi_tools::runtime::background::Invocation::shell("main"),
             Default::default(),
         );
         let stop = match &table.lock().items[0].phase {
@@ -3842,7 +3847,7 @@ print("service exit is not another model input")
         let stop = CancellationToken::new();
         let plain = Commands::new(table.clone()).start(
             root.into(),
-            pi_tools::background::Invocation::shell("plain"),
+            pi_tools::runtime::background::Invocation::shell("plain"),
             stop.clone(),
         );
         let elsewhere = start(&table, Path::new("/elsewhere"), "elsewhere");

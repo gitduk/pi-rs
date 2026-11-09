@@ -215,18 +215,23 @@ impl Tui {
         let answer = tty::background();
         let paint = Paint::with_theme(
             true,
-            Arc::new(following_terminal(&core.config.theme, answer.bg, answer.fg)),
+            Arc::new(following_terminal(
+                &core.config().theme,
+                answer.bg,
+                answer.fg,
+            )),
         )
         .with_background(answer.bg)
         .with_foreground(answer.fg);
         let mut ui = Ui::new(
             screen,
-            core.config.key_table.clone(),
+            core.config().key_table.clone(),
             core.choices(),
-            core.commands.clone(),
+            core.commands().clone(),
             Lists::new(core.store.clone(), core.lane_mut().root().to_path_buf()),
             paint,
         );
+        ui.mcp = core.mcp().clone();
         ui.lists.pinned = core.pinned.clone();
         ui.tty_bg = answer.bg;
         ui.tty_fg = answer.fg;
@@ -234,8 +239,8 @@ impl Tui {
         // reader would never see those bytes again.
         ui.editor.insert_str(&answer.typed);
         ui.at_root = core.lane().root().to_path_buf();
-        ui.status = core.config.status.to_vec();
-        ui.set_vim(&core.config.vim);
+        ui.status = core.config().status.to_vec();
+        ui.set_vim(&core.config().vim);
         drop_shared_history();
         {
             let lines = history_of(&core.store, core.lane().root());
@@ -278,15 +283,16 @@ impl Tui {
     // settle side. No reader thread, no history file to touch.
     #[cfg(test)]
     fn on_test_screen(mut core: Core) -> Self {
-        let paint = Paint::with_theme(false, Arc::new(core.config.theme.clone()));
+        let paint = Paint::with_theme(false, Arc::new(core.config().theme.clone()));
         let mut ui = Ui::new(
             screen::Screen::test(80, 24),
-            core.config.key_table.clone(),
+            core.config().key_table.clone(),
             core.choices(),
-            core.commands.clone(),
+            core.commands().clone(),
             Lists::new(core.store.clone(), core.lane_mut().root().to_path_buf()),
             paint,
         );
+        ui.mcp = core.mcp().clone();
         ui.at_root = core.lane_mut().root().to_path_buf();
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
@@ -335,6 +341,7 @@ impl Tui {
         let parked = std::mem::take(&mut front_view(&mut self.views, self.core.lane()).draft);
         self.ui.editor.set_line(&parked);
         self.follow_root();
+        self.adopt_view();
         // A newly opened lane has no banner yet. Nothing reads the screen
         // here — the events below ask for it again, in their own lane.
         view::opened(&mut self.views, self.core.lane(), &self.ui.paint);
@@ -391,10 +398,10 @@ impl Tui {
             notes.extend(said);
         }
         if self.core.refresh_prompts() {
-            self.ui.commands = self.core.commands.clone();
+            self.ui.commands = self.core.commands().clone();
         }
         if let Some(said) = self.core.refresh_skills() {
-            self.ui.commands = self.core.commands.clone();
+            self.ui.commands = self.core.commands().clone();
             notes.extend(said);
         }
         self.notice(pi_core::input::notice(notes));
@@ -655,7 +662,7 @@ impl Tui {
                 self.complete(
                     request,
                     pi_core::execution::Output::Notice(String::new()),
-                    pi_tools::channel::Outcome::Failed(why.to_string()),
+                    pi_tools::runtime::channel::Outcome::Failed(why.to_string()),
                 );
                 Wake::Nothing
             }
@@ -917,10 +924,10 @@ impl Tui {
             .follow();
         let intent = input::read(
             &next.line,
-            &self.core.commands,
+            self.core.commands(),
             Some(&self.core.lane().agent().brief.registry),
         );
-        let note = if intent.starts_turn(&self.core.commands) {
+        let note = if intent.starts_turn(self.core.commands()) {
             next.note
         } else {
             String::new()

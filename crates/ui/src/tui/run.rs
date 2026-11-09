@@ -16,7 +16,7 @@ use pi_core::driver::Origin;
 pub(super) use pi_core::execution::Done;
 use pi_core::execution::{self, Change, Output, Request, RunResult};
 pub(super) use pi_core::execution::{Fetched, Kind, RemovedWorktrees, Started};
-use pi_tools::channel::Outcome;
+use pi_tools::runtime::channel::Outcome;
 
 // Where off-loop work reports back: one channel per kind of result.
 pub(super) struct Replies {
@@ -142,7 +142,7 @@ impl Tui {
         request: Request,
     ) -> bool {
         self.drivers
-            .respond(request, pi_tools::channel::Response::Started);
+            .respond(request, pi_tools::runtime::channel::Response::Started);
         self.start_model_on(admitted, request)
     }
 

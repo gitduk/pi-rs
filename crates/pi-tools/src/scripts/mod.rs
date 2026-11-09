@@ -12,7 +12,10 @@
 
 pub mod env;
 #[cfg(unix)]
-pub use crate::channel::process::foreground as run_asking;
+pub(crate) mod fd3;
+pub mod wire;
+#[cfg(unix)]
+pub use fd3::foreground as run_asking;
 #[cfg(not(unix))]
 pub async fn run_asking(
     _name: &str,
@@ -20,7 +23,7 @@ pub async fn run_asking(
     input: Vec<u8>,
     timeout: std::time::Duration,
     ctx: &tool::Ctx,
-    _asks: &dyn crate::channel::Ask,
+    _asks: &dyn crate::runtime::channel::Ask,
 ) -> Result<crate::process::Exited, tool::ToolError> {
     crate::process::run(cmd, Some(input), Some(timeout), ctx).await
 }
@@ -33,7 +36,7 @@ use tool::Tool;
 use tool::stamp::{Stamp, Stamped};
 
 use crate::bash::Bash;
-use crate::channel::{Ask, NoOne};
+use crate::runtime::channel::{Ask, NoOne};
 
 use script::{Arg, Runner};
 pub use script::{Script, cargo_script, run_script};

@@ -12,7 +12,7 @@ use crate::core::Core;
 use crate::driver::{Ended, Origin};
 use crate::input::{Intent, Rewound, Step};
 use pi_store::listing::Listing;
-use pi_tools::channel::Outcome;
+use pi_tools::runtime::channel::Outcome;
 
 /// Identity remains attached to an operation while other operations run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -149,7 +149,7 @@ impl Table {
         &self,
         messages: &Messages,
         wire: WireMessage,
-    ) -> Result<pi_tools::channel::Receipt, String> {
+    ) -> Result<pi_tools::runtime::channel::Receipt, String> {
         let WireKind::Response { request: id, .. } = &wire.kind else {
             return Err("expected a user response".into());
         };
@@ -187,7 +187,7 @@ impl Table {
             }
         };
         self.wake();
-        Ok(pi_tools::channel::Receipt {
+        Ok(pi_tools::runtime::channel::Receipt {
             cursor: messages
                 .request_cursor(&request)
                 .map_err(|e| e.to_string())?,

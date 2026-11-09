@@ -310,7 +310,7 @@ impl agent::seams::Input for Input {
 mod tests {
     use super::*;
     use agent::seams::Input as _;
-    use pi_tools::background::RunSink as _;
+    use pi_tools::runtime::background::RunSink as _;
 
     #[tokio::test]
     async fn results_wait_for_the_next_run_without_entering_the_active_run() {
@@ -320,7 +320,7 @@ mod tests {
         let sink = crate::driver::background::Commands::new(executions.clone());
         let phone = sink.start(
             root.clone().into(),
-            pi_tools::background::Invocation::shell("phone"),
+            pi_tools::runtime::background::Invocation::shell("phone"),
             Default::default(),
         );
         phone
@@ -329,17 +329,17 @@ mod tests {
         phone.channel().result("phone result".into());
         let first = sink.start(
             root.clone().into(),
-            pi_tools::background::Invocation::shell("build"),
+            pi_tools::runtime::background::Invocation::shell("build"),
             Default::default(),
         );
         let elsewhere = sink.start(
             other.clone().into(),
-            pi_tools::background::Invocation::shell("other"),
+            pi_tools::runtime::background::Invocation::shell("other"),
             Default::default(),
         );
         let second = sink.start(
             root.clone().into(),
-            pi_tools::background::Invocation::shell("test"),
+            pi_tools::runtime::background::Invocation::shell("test"),
             Default::default(),
         );
         first.channel().result("built".into());

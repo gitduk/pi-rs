@@ -717,10 +717,10 @@ fn a_driven_lane_has_not_finished() {
     let (_run_dir, mut behind) = a_running_lane();
     behind.set_worktree(Some("fix-mem".into()));
     behind.end(true, false);
-    let execution = pi_tools::background::RunSink::start(
+    let execution = pi_tools::runtime::background::RunSink::start(
         &pi_core::driver::background::Commands::new(tui.drivers.background()),
         behind.root().to_path_buf().into(),
-        pi_tools::background::Invocation::shell("driver"),
+        pi_tools::runtime::background::Invocation::shell("driver"),
         Default::default(),
     );
     execution.channel().drive(true);
@@ -1018,7 +1018,7 @@ fn a_key_only_reload_replaces_the_running_connection() {
         &tui.core.lane().agent().model
     ));
     assert_eq!(
-        tui.core.config.key_for("local/m").as_deref(),
+        tui.core.config().key_for("local/m").as_deref(),
         Some("new-test-key")
     );
 }
@@ -1438,10 +1438,10 @@ async fn queued_command_results_open_one_turn_under_their_label() {
         .lane_mut()
         .return_session(agent::session::Session::new());
     tui.core.enable_background(tui.drivers.background());
-    let execution = pi_tools::background::RunSink::start(
+    let execution = pi_tools::runtime::background::RunSink::start(
         &pi_core::driver::background::Commands::new(tui.drivers.background()),
         dir.path().to_path_buf().into(),
-        pi_tools::background::Invocation::shell("build"),
+        pi_tools::runtime::background::Invocation::shell("build"),
         Default::default(),
     );
     for text in ["check the build", "/compact"] {
@@ -1468,10 +1468,10 @@ async fn remote_submissions_use_the_same_parser_as_local_lines() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     tui.core.lane_mut().finish();
-    let execution = pi_tools::background::RunSink::start(
+    let execution = pi_tools::runtime::background::RunSink::start(
         &pi_core::driver::background::Commands::new(tui.drivers.background()),
         dir.path().to_path_buf().into(),
-        pi_tools::background::Invocation::shell("wechat"),
+        pi_tools::runtime::background::Invocation::shell("wechat"),
         Default::default(),
     );
     for line in ["/compact", "!echo hello", " /compact"] {
@@ -1485,7 +1485,7 @@ async fn remote_submissions_use_the_same_parser_as_local_lines() {
             intent,
             pi_core::input::read(
                 line,
-                &tui.core.commands,
+                tui.core.commands(),
                 Some(&tui.core.lane().agent().brief.registry)
             )
         );
@@ -1509,10 +1509,10 @@ async fn a_note_is_filed_only_for_a_line_that_starts_a_turn() {
     tui.core
         .lane_mut()
         .return_session(agent::session::Session::new());
-    let execution = pi_tools::background::RunSink::start(
+    let execution = pi_tools::runtime::background::RunSink::start(
         &pi_core::driver::background::Commands::new(tui.drivers.background()),
         dir.path().to_path_buf().into(),
-        pi_tools::background::Invocation::shell("driver"),
+        pi_tools::runtime::background::Invocation::shell("driver"),
         Default::default(),
     );
 
@@ -1553,10 +1553,10 @@ async fn a_note_is_filed_only_for_a_line_that_starts_a_turn() {
 async fn a_queued_line_keeps_its_note_off_the_running_turn() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    let execution = pi_tools::background::RunSink::start(
+    let execution = pi_tools::runtime::background::RunSink::start(
         &pi_core::driver::background::Commands::new(tui.drivers.background()),
         dir.path().to_path_buf().into(),
-        pi_tools::background::Invocation::shell("driver"),
+        pi_tools::runtime::background::Invocation::shell("driver"),
         Default::default(),
     );
 
@@ -1612,7 +1612,7 @@ async fn leaving_saves_what_an_idle_lane_filed() {
 // when the transcript was lent to a turn as shutdown began.
 #[tokio::test]
 async fn leaving_with_a_command_preserves_its_stop_cause_on_resume() {
-    use pi_tools::background::{Again, RunSink as _};
+    use pi_tools::runtime::background::{Again, RunSink as _};
 
     for running in [false, true] {
         let dir = tempfile::tempdir().expect("a checkout");
@@ -1636,7 +1636,7 @@ async fn leaving_with_a_command_preserves_its_stop_cause_on_resume() {
         let stop = tokio_util::sync::CancellationToken::new();
         let execution = pi_core::driver::background::Commands::new(tui.drivers.background()).start(
             dir.path().into(),
-            pi_tools::background::Invocation::shell("sleep 30; echo done"),
+            pi_tools::runtime::background::Invocation::shell("sleep 30; echo done"),
             stop.clone(),
         );
         execution.rerun(

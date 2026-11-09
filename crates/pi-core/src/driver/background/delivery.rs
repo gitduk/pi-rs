@@ -137,7 +137,7 @@ impl Drop for ResultDelivery {
 mod tests {
     use super::*;
     use crate::driver::background::Commands;
-    use pi_tools::background::{Invocation, Owner, RunHandle, RunSink, Scope};
+    use pi_tools::runtime::background::{Invocation, Owner, RunHandle, RunSink, Scope};
 
     fn source(table: &Arc<Table>) -> Arc<dyn RunHandle> {
         Commands::new(table.clone()).start(

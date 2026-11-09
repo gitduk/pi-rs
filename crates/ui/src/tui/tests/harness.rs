@@ -126,6 +126,7 @@ pub(super) fn running_lane(dir: &std::path::Path) -> Lane {
             std::sync::Arc::new(agent::Agent::new(std::sync::Arc::new(Mute), spec)),
             resolved,
             tool::Ctx::new(ws),
+            pi_core::core::environment::Environment::fixture(commands()),
         )
     });
     // What every `start_*` leaves behind while its execution runs.
@@ -138,13 +139,8 @@ pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
         runtime: Default::default(),
         store: Store::new(dir.join("state")),
         catalog: Default::default(),
-        config: std::sync::Arc::new(pi_store::config::Config::default()),
         pinned: pi_core::args::Pinned::default(),
-        commands: commands(),
-        prompts_seen: 0,
-        settings: pi_store::settings::Settings::new(toml::Value::Table(Default::default()), None),
         lanes: pi_core::core::lanes::Lanes::of(running_lane(dir)),
-        refused: Default::default(),
         executions: None,
         removals: Default::default(),
         surface: crate::tui::WORDS,

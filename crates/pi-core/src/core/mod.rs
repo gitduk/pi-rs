@@ -11,6 +11,7 @@ pub mod bash;
 pub mod catalog;
 pub mod content;
 pub mod dial;
+pub mod environment;
 pub mod hooks;
 pub mod instructions;
 pub mod lane;
@@ -76,28 +77,11 @@ pub struct Core {
     pub runtime: crate::execution::host::Runtime,
     pub store: Store,
     pub catalog: catalog::Catalog,
-    /// The config in force, as opposed to the one on disk. `/model` picks from
-    /// this, so a switch cannot quietly apply an edit a reload has not.
-    pub config: std::sync::Arc<config::Config>,
-    /// The command line's say over the config, re-applied over every reload.
+    /// Command-line overrides shared by workspace configurations.
     pub pinned: crate::args::Pinned,
-    /// What a slash answers to: built-ins, the surface's words and skills. Rebuilt by
-    /// a reload, since a skill can appear between one turn and the next.
-    ///
-    /// Shared rather than copied: a surface may hold the same table and
-    /// re-read it whenever this is replaced.
-    pub commands: std::sync::Arc<Vec<Command>>,
-    /// The servers' list generation `commands` holds the prompts of.
-    pub prompts_seen: u64,
-    /// The config files as last read: what `/settings` writes into and
-    /// a reload reads again.
-    pub settings: Settings,
     /// Every checkout open in this run, in the order they were opened, and
     /// which of them is in front. One value: apart, the two can disagree.
     pub lanes: lanes::Lanes,
-    /// By lane token, the files as they stood when a reload last refused
-    /// them, so a broken file is said once rather than once a second.
-    pub refused: std::collections::HashMap<u64, Vec<tool::stamp::Stamp>>,
     /// Where calls that outlive their turn are kept, when a surface serves
     /// them; a run with nothing to come back to keeps no executions.
     pub executions: Option<std::sync::Arc<crate::driver::background::Table>>,
@@ -110,54 +94,72 @@ pub struct Core {
 }
 
 impl Core {
+    pub fn config(&self) -> &std::sync::Arc<config::Config> {
+        &self.lane().environment().config
+    }
+    #[cfg(any(test, feature = "testing"))]
+    pub fn config_mut(&mut self) -> &mut std::sync::Arc<config::Config> {
+        &mut self.lane_mut().environment_mut().config
+    }
+    pub fn settings(&self) -> &Settings {
+        &self.lane().environment().settings
+    }
+    pub fn commands(&self) -> &std::sync::Arc<Vec<Command>> {
+        &self.lane().environment().commands
+    }
+    pub fn mcp(&self) -> &mcp::Live {
+        &self.lane().environment().mcp
+    }
+
     // Put the lane in front's command table in force: a skill belongs to one
     // tree, not another.
     fn in_force(&mut self) {
-        let table = self.lane().resolved().commands.clone();
-        self.prompts_seen = ::mcp::generation();
-        self.commands = with_prompts(table, crate::core::mcp::prompts());
+        self.in_force_at(self.lanes.front());
     }
 
-    /// Put the servers' prompts in the table again when their lists moved.
-    /// True when the table changed.
+    fn in_force_at(&mut self, at: usize) {
+        let lane = self.lanes.at_mut(at);
+        let table = lane.resolved().commands.clone();
+        let environment = lane.environment_mut();
+        environment.prompts_seen = environment.mcp.generation();
+        environment.commands = with_prompts(table, environment.mcp.prompts());
+    }
+
     pub fn refresh_prompts(&mut self) -> bool {
-        if ::mcp::generation() == self.prompts_seen {
+        if self.mcp().generation() == self.lane().environment().prompts_seen {
             return false;
         }
         self.in_force();
         true
     }
 
-    fn model_config_changed(&self) -> bool {
-        self.lane().resolved().catalog_generation != self.catalog.generation()
-            || self.settings.project() != config::project_file(self.lane().root()).as_deref()
+    fn model_config_changed_at(&self, at: usize) -> bool {
+        let lane = &self.lanes[at];
+        lane.resolved().catalog_generation != self.catalog.generation()
+            || lane.environment().settings.project() != config::project_file(lane.root()).as_deref()
     }
 
-    /// Apply model facts or the current lane's configuration source before a run.
     pub fn refresh_model_config(&mut self) -> Option<Vec<String>> {
-        if self.model_config_changed() {
-            self.refresh_config()
-        } else {
-            None
-        }
+        let at = self.lanes.front();
+        self.model_config_changed_at(at)
+            .then(|| self.refresh_config_at(at))
+            .flatten()
     }
 
-    /// Resolve the lane in front again when a file it was built from changed
-    /// on disk. `Some` when it was resolved again, with what to say — empty
-    /// when only model facts moved, which no line of its own announces;
-    /// `None` when there was nothing to do.
     pub fn refresh_config(&mut self) -> Option<Vec<String>> {
-        self.refresh_config_with_mcp(true)
+        self.refresh_config_at(self.lanes.front())
     }
 
-    pub(crate) fn refresh_config_with_mcp(&mut self, sync_mcp: bool) -> Option<Vec<String>> {
-        let lane = self.lane();
+    pub(crate) fn refresh_config_at(&mut self, at: usize) -> Option<Vec<String>> {
+        let lane = &self.lanes[at];
         let now = resolve::watched(&self.pinned, lane.root());
         let was = &lane.resolved().watched;
         let token = lane.token();
         let files_changed = &now != was;
-        let model_config_changed = self.model_config_changed();
-        if (!files_changed && !model_config_changed) || self.refused.get(&token) == Some(&now) {
+        let model_config_changed = self.model_config_changed_at(at);
+        if (!files_changed && !model_config_changed)
+            || lane.environment().refused.as_ref() == Some(&now)
+        {
             return None;
         }
         let root = lane.root().to_path_buf();
@@ -167,31 +169,18 @@ impl Core {
             .chain(was.iter().filter(|s| !now.iter().any(|n| n.0 == s.0)))
             .map(|(path, ..)| crate::core::instructions::short(path, &root))
             .collect();
-        let reloaded = self.try_reload_with_mcp(sync_mcp);
-        if files_changed {
-            tracing::info!(
-                target: "pi::session", moved = %moved.join(", "),
-                refused = reloaded.as_ref().err().map(String::as_str),
-                "config changed on disk"
-            );
-        } else {
-            tracing::info!(
-                target: "pi::session", model_config_changed,
-                refused = reloaded.as_ref().err().map(String::as_str),
-                "configuration inputs changed"
-            );
-        }
+        let reloaded = self.try_reload_at(at);
+        tracing::info!(target: "pi::session", lane=token, moved=%moved.join(", "), model_config_changed, refused=reloaded.as_ref().err().map(String::as_str), "workspace config checked");
         match reloaded {
             Ok(mut said) => {
-                self.refused.remove(&token);
-                // Facts applied with nothing named are not worth a line.
-                if !moved.is_empty() {
+                self.lanes.at_mut(at).environment_mut().refused = None;
+                if files_changed {
                     said.insert(0, format!("reloaded — {}", moved.join(", ")));
                 }
                 Some(said)
             }
             Err(why) => {
-                self.refused.insert(token, now);
+                self.lanes.at_mut(at).environment_mut().refused = Some(now);
                 Some(vec![why])
             }
         }
@@ -249,9 +238,9 @@ impl Core {
     /// `table`, which the surface serves; re-arm lanes already open.
     pub fn enable_background(&mut self, table: std::sync::Arc<crate::driver::background::Table>) {
         self.executions = Some(table);
-        let retry = retry(&self.config);
         for at in 0..self.lanes.len() {
             let lane = &self.lanes[at];
+            let retry = lane.resolved().retry;
             let archive =
                 self.archive(lane.root().to_path_buf(), lane.agent().spec().model.clone());
             let resolved = lane.resolved().clone();
@@ -395,7 +384,7 @@ impl Core {
                 }
             }
             Intent::Builtin(builtin) => self.builtin(builtin),
-            Intent::Other { word, args } => step_for(&self.commands, &word, &args),
+            Intent::Other { word, args } => step_for(self.commands(), &word, &args),
         }
     }
 
@@ -404,7 +393,7 @@ impl Core {
         match builtin {
             Builtin::Quit => Step::Quit,
             Builtin::Help => {
-                Step::Handled(help(&self.commands, &self.lane().agent().brief.registry))
+                Step::Handled(help(self.commands(), &self.lane().agent().brief.registry))
             }
             Builtin::Status => Step::Handled(self.status()),
             // Bare, it is asked; with a level, a change the surface shows.
@@ -412,7 +401,7 @@ impl Core {
                 Step::Handled(Listing::say(self.effort("")))
             }
             Builtin::Effort(arg) => Step::Notice(notice(self.effort(&arg))),
-            Builtin::Mcp(arg) => crate::core::mcp::command(&arg),
+            Builtin::Mcp(arg) => self.mcp().command(&arg),
             Builtin::Content => Step::Handled(self.content()),
             Builtin::New => match self.new_session() {
                 Ok(()) => Step::Swap(String::new()),
@@ -666,7 +655,7 @@ mod tests {
         std::fs::create_dir_all(shelf.join("haiku")).unwrap();
         std::fs::write(shelf.join("haiku/SKILL.md"), "---\ndescription: d\n---\n").unwrap();
         assert!(core.refresh_skills().is_some());
-        assert!(core.commands.iter().any(|c| c.word == "/haiku"));
+        assert!(core.commands().iter().any(|c| c.word == "/haiku"));
     }
 
     #[test]
@@ -819,14 +808,12 @@ mod tests {
             std::sync::Arc::new(Recording::default()),
             test_spec("m"),
         ));
+        let resolved = crate::core::lane::a_resolved("");
+        let environment = super::environment::Environment::fixture(resolved.commands.clone());
         crate::core::lane::Lane::opened(crate::core::lane::Opening {
             id: name.into(),
             name: Some(name.to_string()),
-            ..crate::core::lane::Opening::new(
-                agent,
-                crate::core::lane::a_resolved(""),
-                tool::Ctx::new(ws),
-            )
+            ..crate::core::lane::Opening::new(agent, resolved, tool::Ctx::new(ws), environment)
         })
     }
 
@@ -907,27 +894,24 @@ mod tests {
             None,
         );
 
-        let commands = resolved.commands.clone();
+        let environment = super::environment::Environment::fixture(resolved.commands.clone());
         let ctx = tool::Ctx::new(ws).with_session("s1", root.join("spill"));
         let mut lane = crate::core::lane::Lane::opened(crate::core::lane::Opening {
             id: "s1".into(),
-            ..crate::core::lane::Opening::new(std::sync::Arc::new(agent), resolved, ctx)
+            ..crate::core::lane::Opening::new(
+                std::sync::Arc::new(agent),
+                resolved,
+                ctx,
+                environment,
+            )
         });
         lane.return_session(agent::session::Session::default());
         crate::core::Core {
             runtime: Default::default(),
             store,
             catalog: Default::default(),
-            config: std::sync::Arc::new(pi_store::config::Config::default()),
             pinned,
-            commands,
-            prompts_seen: 0,
-            settings: pi_store::settings::Settings::new(
-                toml::Value::Table(Default::default()),
-                None,
-            ),
             lanes: crate::core::lanes::Lanes::of(lane),
-            refused: Default::default(),
             executions: None,
             removals: Default::default(),
             surface: &[],
@@ -1018,7 +1002,7 @@ output_per_mtok = 5.0
 "#,
         )
         .unwrap();
-        core.config = std::sync::Arc::new(pi_store::config::Config::in_force(tree).unwrap());
+        *core.config_mut() = std::sync::Arc::new(pi_store::config::Config::in_force(tree).unwrap());
 
         let choices = core.choices();
         let names: Vec<&str> = choices.iter().map(|c| c.name.as_str()).collect();

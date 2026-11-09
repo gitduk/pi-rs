@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use tool::{Concurrency, Ctx, Tier, Tool, ToolError, ToolOutput};
 
-use crate::background::{Environment, Invocation, OutputMode};
 use crate::bash::Bash;
-use crate::channel::Ask;
+use crate::runtime::background::{Environment, Invocation, OutputMode};
+use crate::runtime::channel::Ask;
 
 const TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -275,7 +275,7 @@ mod tests {
             runner: Runner::Cargo,
             background: false,
             shell: None,
-            asks: Arc::new(crate::channel::NoOne),
+            asks: Arc::new(crate::runtime::channel::NoOne),
         };
         let args = json!({
             "PATH": "/hijacked",

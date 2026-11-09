@@ -13,7 +13,7 @@ use std::time::Duration;
 use agent::Event;
 use async_trait::async_trait;
 use pi_store::config::{Hook, HookOn};
-use pi_tools::channel::Ask;
+use pi_tools::runtime::channel::Ask;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tool::{Ctx, ToolOutput};
@@ -408,7 +408,11 @@ mod tests {
     use agent::Hooks;
 
     fn shell(ctx: &Ctx, hooks: Vec<Hook>) -> Arc<dyn Hooks> {
-        of(&hooks, &ctx.workspace, Arc::new(pi_tools::channel::NoOne))
+        of(
+            &hooks,
+            &ctx.workspace,
+            Arc::new(pi_tools::runtime::channel::NoOne),
+        )
     }
 
     fn hook(on: HookOn, command: &str) -> Hook {
@@ -422,13 +426,13 @@ mod tests {
     // Answers every question with `picked` at once, as a person might.
     struct Says(&'static str);
 
-    impl pi_tools::channel::Ask for Says {
+    impl pi_tools::runtime::channel::Ask for Says {
         fn ask(
             &self,
-            _scope: pi_tools::background::Scope,
+            _scope: pi_tools::runtime::background::Scope,
             asker: &str,
-            asked: pi_tools::channel::Asked,
-        ) -> Result<Option<pi_tools::channel::Answer>, String> {
+            asked: pi_tools::runtime::channel::Asked,
+        ) -> Result<Option<pi_tools::runtime::channel::Answer>, String> {
             assert_eq!(asker, "hook");
             assert!(asked.back, "a gate waits on its answer");
             let (to, answer) = tokio::sync::oneshot::channel();

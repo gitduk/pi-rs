@@ -6,7 +6,7 @@ use pi_store::session::messages::Lookup;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub use pi_tools::channel::{Cursor, Observed};
+pub use pi_tools::runtime::channel::{Cursor, Observed};
 
 /// Pulls from the retained log. A slow observer retains no queue of messages.
 pub struct Observation {
@@ -170,7 +170,7 @@ fn read_committed(
 }
 
 #[async_trait::async_trait]
-impl pi_tools::channel::Observation for Observation {
+impl pi_tools::runtime::channel::Observation for Observation {
     fn cursor(&self) -> &Cursor {
         self.cursor()
     }

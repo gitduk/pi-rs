@@ -182,7 +182,7 @@ pub trait RunHandle: Send + Sync {
     fn owner(&self) -> Option<Owner> {
         None
     }
-    fn channel(&self) -> &dyn crate::channel::Channel;
+    fn channel(&self) -> &dyn crate::runtime::channel::Channel;
     fn watch(&self, output: Peek);
     fn rerun(&self, _how: Rerun, _again: Again) {}
     fn end(&self);

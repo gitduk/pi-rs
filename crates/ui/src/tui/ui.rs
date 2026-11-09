@@ -69,6 +69,7 @@ pub(super) struct Ui {
     pub(super) lists: Lists,
     // The same copy, of the same list `/help` prints.
     pub(super) commands: Arc<Vec<Command>>,
+    pub(super) mcp: pi_core::core::mcp::Live,
     // The page up over the transcript, if any. The line keeps the keys
     // under it; the page only decides what the history region shows.
     pub(super) read: Option<Read>,
@@ -243,6 +244,7 @@ impl Ui {
             answered: Vec::new(),
             choices,
             commands,
+            mcp: Default::default(),
             lists,
             editor,
             tab_sep: Self::paint_sep(&paint),
@@ -402,24 +404,26 @@ impl Ui {
     pub(super) fn adopt_config(&mut self, core: &Core, view: &mut View) {
         // The key map lives in two places; a reload has to reach both or the
         // screen keeps answering to the old bindings.
-        if !Arc::ptr_eq(&self.keys, &core.config.key_table) {
-            self.keys = core.config.key_table.clone();
+        if !Arc::ptr_eq(&self.keys, &core.config().key_table) {
+            self.keys = core.config().key_table.clone();
         }
         // Likewise the completion list: a reload is allowed to define models —
         // and skills — the last one did not.
         self.choices = core.choices();
+        self.mcp = core.mcp().clone();
         // The theme takes the view it was painted into — the opening block is
         // painted in it — and every copy takes the terminal's band.
-        let theme = crate::theme::following_terminal(&core.config.theme, self.tty_bg, self.tty_fg);
+        let theme =
+            crate::theme::following_terminal(&core.config().theme, self.tty_bg, self.tty_fg);
         if self.paint.theme.as_ref() != &theme {
             self.set_theme(view, core.lane().resolved(), Arc::new(theme));
         }
-        if !Arc::ptr_eq(&self.commands, &core.commands) {
-            self.commands = core.commands.clone();
+        if !Arc::ptr_eq(&self.commands, core.commands()) {
+            self.commands = core.commands().clone();
         }
-        self.set_vim(&core.config.vim);
+        self.set_vim(&core.config().vim);
         // And the segment lists, copied in at startup.
-        self.status = core.config.status.to_vec();
+        self.status = core.config().status.to_vec();
     }
 }
 
