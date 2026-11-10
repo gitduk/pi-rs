@@ -422,7 +422,7 @@ impl Turn {
             input,
         } = self;
         let messages = responder.messages();
-        let input = input.with_messages(
+        let input = input.with_context(ctx.clone()).with_messages(
             messages,
             responder
                 .request()
@@ -478,6 +478,13 @@ impl Turn {
                 _ => None,
             })
             .unwrap_or_default();
+        if let Err(error) = input.close_results(status.clone(), &body) {
+            return Done {
+                request,
+                kind: Kind::Turn,
+                ran: Some((session, Err(RunError::Failed(error)))),
+            };
+        }
         if let Err(error) = responder.complete(status, body) {
             return Done {
                 request,

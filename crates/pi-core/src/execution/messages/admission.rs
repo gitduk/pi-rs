@@ -198,6 +198,38 @@ pub struct AdmittedInput {
 }
 
 impl AdmittedInput {
+    /// Join an automatic input to a running conversation without starting another run.
+    pub(crate) fn join(
+        self,
+        active: &RequestId,
+    ) -> Result<(agent::session::Prompt, Responder), Error> {
+        let Self { prompt, mut ticket } = self;
+        let mut table = ticket.messages.lock();
+        if table.active.as_ref() != Some(active.message())
+            || !matches!(
+                ticket.original.kind(),
+                Kind::Request(Request::ToModel(message::InputKind::Automatic))
+            )
+        {
+            return Err(Error::Parent);
+        }
+        let index = table
+            .waiting
+            .iter()
+            .position(|id| id == ticket.original.id())
+            .ok_or(Error::Busy)?;
+        table.waiting.remove(index);
+        table.queued_bytes -= ticket.original.encoded_bytes();
+        ticket.started = true;
+        let responder = Responder {
+            messages: ticket.messages.clone(),
+            original: ticket.original.clone(),
+            finished: false,
+        };
+        drop(table);
+        Ok((prompt, responder))
+    }
+
     pub fn message(&self) -> &Message {
         &self.ticket.original
     }

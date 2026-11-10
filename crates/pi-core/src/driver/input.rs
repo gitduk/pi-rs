@@ -9,12 +9,14 @@ use agent::session::Prompt;
 use super::background::Table;
 use crate::core::lane::Notes;
 
-/// Notes for an active run. New inputs remain queued until that run ends.
+/// Notes and automatic results for an active run. User inputs wait until it ends.
 pub struct Input {
     root: PathBuf,
     executions: Arc<Table>,
     notes: Option<Notes>,
     messages: Option<Calls>,
+    ctx: Option<tool::Ctx>,
+    results: std::sync::Mutex<Vec<crate::execution::messages::Responder>>,
 }
 
 struct Calls {
@@ -55,8 +57,35 @@ impl Input {
             executions,
             notes,
             messages: None,
+            ctx: None,
+            results: Default::default(),
         }
     }
+
+    /// Include changes made by this run when annotating a background result.
+    pub(crate) fn with_context(mut self, ctx: tool::Ctx) -> Self {
+        self.ctx = Some(ctx);
+        self
+    }
+
+    /// Answer every automatic input consumed by this run with its terminal outcome.
+    pub(crate) fn close_results(
+        &self,
+        status: message::Status,
+        body: &[message::Block],
+    ) -> Result<(), String> {
+        let mut results = self
+            .results
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for mut result in results.drain(..) {
+            result
+                .complete(status.clone(), body.to_vec())
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
     pub fn with_messages(
         mut self,
         messages: crate::execution::messages::Messages,
@@ -177,7 +206,45 @@ impl Drop for Input {
 
 impl agent::seams::Input for Input {
     fn take(&self) -> Option<Prompt> {
-        None
+        let calls = self.messages.as_ref()?;
+        let ctx = self.ctx.as_ref()?;
+        // Keep refused producers reserved until this pass ends so other results can advance.
+        let mut deferred = Vec::new();
+        loop {
+            let session = calls.messages.session();
+            let delivery = self.executions.claim_result(&self.root, session.as_str())?;
+            let admitted = match calls.messages.admit_wire(delivery.message(session)) {
+                Ok(crate::execution::messages::Admission::Accepted(input)) => input,
+                Ok(crate::execution::messages::Admission::Existing { .. }) => {
+                    delivery.commit();
+                    continue;
+                }
+                Err(error) => {
+                    delivery.refused(&error.to_string());
+                    deferred.push(delivery);
+                    continue;
+                }
+            };
+            let admitted =
+                admitted.presentation(delivery.due.label.clone(), delivery.due.note_for(ctx));
+            let (prompt, mut responder) = match admitted.join(&calls.parent) {
+                Ok(joined) => joined,
+                Err(error) => {
+                    delivery.refused(&error.to_string());
+                    deferred.push(delivery);
+                    continue;
+                }
+            };
+            if !delivery.commit() {
+                let _ = responder.complete(message::Status::Stopped, vec![]);
+                continue;
+            }
+            self.results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(responder);
+            return Some(prompt);
+        }
     }
 
     fn tool_request(
