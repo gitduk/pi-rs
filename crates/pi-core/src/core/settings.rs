@@ -423,8 +423,8 @@ impl Core {
         }
         said
     }
-    // What `/model` on its own shows.
-    pub(super) fn listing(&self) -> Listing {
+    /// Current model choices with the selected model marked.
+    pub fn model_listing(&self) -> Listing {
         let here = &self.lane().agent().spec().model;
         let choices = self.choices();
         if choices.is_empty() {

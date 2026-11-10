@@ -16,6 +16,7 @@ use crate::args::Pinned;
 
 // Discovery is optional: a slow catalog must not hold startup indefinitely.
 pub(super) const TIMEOUT: Duration = Duration::from_secs(5);
+const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
 /// A snapshot of the discovered model facts applied to a resolved configuration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -187,9 +188,8 @@ pub struct Catalog {
     generation: Generation,
     sources: Vec<Source>,
     known: BTreeMap<String, Cached>,
-    /// Whether a list was read since it was last asked for: a start, a
-    /// provider's configuration change or `/model` asks again.
-    fetched: bool,
+    /// Last completed attempt; cleared when fresh discovery is requested.
+    checked: Option<std::time::Instant>,
     pending: Option<Pending>,
     errors: Vec<String>,
 }
@@ -208,7 +208,7 @@ impl Catalog {
         use super::models::Discovery;
         if self.sources.is_empty() {
             Discovery::NotConfigured
-        } else if self.pending.is_some() || !self.fetched {
+        } else if self.pending.is_some() || self.checked.is_none() {
             Discovery::Pending
         } else if !self.errors.is_empty() {
             Discovery::Failed
@@ -250,11 +250,11 @@ impl Catalog {
     /// Ask for another list at the next opportunity, retaining the current
     /// one. What comes back is applied whole: someone is choosing from it.
     pub fn refresh(&mut self) {
-        self.fetched = false;
+        self.checked = None;
     }
 
     fn accept(&mut self, results: Results) -> Refresh {
-        self.fetched = true;
+        self.checked = Some(std::time::Instant::now());
         let mut changed = false;
         let mut errors = Vec::new();
         for (source, result) in results {
@@ -292,7 +292,7 @@ impl Catalog {
             self.known
                 .retain(|name, _| sources.iter().any(|s| &s.name == name));
             self.sources = sources;
-            self.fetched = false;
+            self.checked = None;
             self.errors.clear();
         }
     }
@@ -306,7 +306,7 @@ impl Catalog {
             Err(oneshot::error::TryRecvError::Empty) => None,
             Err(oneshot::error::TryRecvError::Closed) => {
                 self.pending = None;
-                self.fetched = true;
+                self.checked = Some(std::time::Instant::now());
                 Some(Refresh {
                     changed: false,
                     notes: vec!["model discovery ended without a result".into()],
@@ -337,10 +337,14 @@ impl Catalog {
         None
     }
 
-    /// Begin reading the lists, unless one is on its way or has come since it
-    /// was last asked for.
+    /// Begin discovery when requested or expired, keeping one attempt in flight.
     fn start(&mut self) {
-        if self.pending.is_some() || self.sources.is_empty() || self.fetched {
+        if self.pending.is_some()
+            || self.sources.is_empty()
+            || self
+                .checked
+                .is_some_and(|at| at.elapsed() < REFRESH_INTERVAL)
+        {
             return;
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {

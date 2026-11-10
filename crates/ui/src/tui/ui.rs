@@ -424,6 +424,7 @@ impl Ui {
         self.set_vim(&core.config().vim);
         // And the segment lists, copied in at startup.
         self.status = core.config().status.to_vec();
+        self.refresh_model_page(core, view);
     }
 }
 

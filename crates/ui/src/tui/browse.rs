@@ -10,6 +10,7 @@ use ratatui::text::Line;
 
 use super::Ui;
 use super::view::{Scroll, View};
+use pi_core::core::Core;
 use pi_store::keys::Mode;
 use pi_store::listing::Listing;
 
@@ -82,6 +83,7 @@ impl PageLine {
 
 pub(super) struct Read {
     pub(super) page: Vec<PageLine>,
+    pub(super) models: Option<Listing>,
     // Where the page is scrolled to, as the transcript has its own.
     pub(super) scroll: Scroll,
     // The mode the line goes back to when the page closes, if opening it
@@ -90,6 +92,23 @@ pub(super) struct Read {
 }
 
 impl Ui {
+    pub(super) fn refresh_model_page(&mut self, core: &Core, view: &mut View) {
+        let Some(previous) = self.read.as_ref().and_then(|read| read.models.as_ref()) else {
+            return;
+        };
+        let models = core.model_listing();
+        if previous == &models {
+            return;
+        }
+        self.search_close(view);
+        let lines = super::slash::lines(&models, self.screen.width(), &self.paint);
+        if let Some(read) = &mut self.read {
+            read.page = lines.into_iter().map(PageLine::from).collect();
+            read.models = Some(models);
+            read.scroll.top = None;
+        }
+    }
+
     pub(super) fn page(&self) -> Option<&[PageLine]> {
         self.read.as_ref().map(|read| read.page.as_slice())
     }
@@ -128,6 +147,7 @@ impl Ui {
         self.search = None;
         self.read = Some(Read {
             page,
+            models: None,
             // The draw stops `TOP` at the page's head.
             scroll: Scroll {
                 by: super::screen::TOP,

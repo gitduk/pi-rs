@@ -6,7 +6,7 @@ use super::{Tui, clipboard, front_view, keys};
 use ::execution::channel::{Outcome, Response};
 use pi_core::driver::Origin;
 use pi_core::execution::{self, Action, Change, Completion, Output, Request};
-use pi_core::input::{Intent, Rewound};
+use pi_core::input::{Builtin, Intent, Rewound};
 
 impl Tui {
     /// Every admitted operation uses this executor, independently of where its
@@ -33,6 +33,7 @@ impl Tui {
         tracing::info!(target: "pi::session", request = request.id, ?origin,
             lane = request.lane, ?intent, "dispatch");
         let was = self.core.lanes.front();
+        let models = matches!(&intent, Intent::Builtin(Builtin::Model(name)) if name.is_empty());
         let action = execution::dispatch(&mut self.core, intent);
         self.reconcile(was);
 
@@ -50,6 +51,9 @@ impl Tui {
                     output,
                     Outcome::Done,
                 );
+                if models && let Some(read) = &mut self.ui.read {
+                    read.models = Some(self.core.model_listing());
+                }
             }
             Action::Bash(command) => {
                 if let Some(line) = line {

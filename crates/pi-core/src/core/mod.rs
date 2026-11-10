@@ -420,7 +420,7 @@ impl Core {
             Builtin::Compact(focus) => Step::Compact(Some(focus).filter(|f| !f.is_empty())),
             Builtin::Model(name) if name.is_empty() => {
                 self.catalog.refresh();
-                Step::Handled(self.listing())
+                Step::Handled(self.model_listing())
             }
             Builtin::Model(name) => Step::Notice(notice(self.switch(&name))),
             Builtin::Mv(dir) => match dir.trim() {

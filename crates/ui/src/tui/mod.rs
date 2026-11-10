@@ -818,6 +818,9 @@ impl Tui {
                         self.land_removal(removed);
                         Wake::Nothing
                     }
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(
+                        looked + std::time::Duration::from_secs(1)
+                    )) => Wake::Nothing,
                     // Only while something runs, a flash is up or a model list
                     // is on its way: an idle loop waking ten times a second
                     // has nothing to spin.
