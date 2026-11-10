@@ -312,7 +312,7 @@ fn a_modifying_call_keeps_its_line() {
     ui.flush(&lane, &mut view);
 
     assert_eq!(live_pending_rows(&ui), 1, "the edit holds a row of its own");
-    let (live, _) = ui.live(&lane, &view, true, std::time::Instant::now());
+    let (live, _, _) = ui.live(&lane, &view, true, std::time::Instant::now());
     assert!(
         plain(&live[0]).contains("edit b.rs"),
         "and that row is the edit's: {:?}",
@@ -322,6 +322,133 @@ fn a_modifying_call_keeps_its_line() {
         drawn_rows(&view),
         vec![format!("{} read a.rs", icons::DONE_MARK)]
     );
+}
+
+// A click on a running call's line opens what it has printed: the last
+// lines, with a count for the rest. Its end closes the view.
+#[test]
+fn a_click_opens_what_a_running_call_printed() {
+    let mut ui = test_ui(80, 24);
+    let (_dir, mut lane) = a_running_lane();
+    let mut view = View::default();
+    ui.on_event(
+        &mut lane,
+        &mut view,
+        agent::Event::ToolQueued {
+            id: "c".into(),
+            name: "bash".into(),
+            args: serde_json::json!({"command": "seq 1 40"}),
+        },
+    );
+    ui.on_event(
+        &mut lane,
+        &mut view,
+        agent::Event::ToolStart {
+            id: "c".into(),
+            at: std::time::Instant::now(),
+        },
+    );
+    let printed: String = (1..=40).map(|n| format!("{n}\n")).collect();
+    ui.on_event(
+        &mut lane,
+        &mut view,
+        agent::Event::ToolPrinted {
+            id: "c".into(),
+            text: printed,
+        },
+    );
+    ui.flush(&lane, &mut view);
+    let (closed, _, _) = ui.live(&lane, &view, false, std::time::Instant::now());
+    assert_eq!(closed.len(), 1, "one line while closed");
+
+    ui.key(
+        &lane,
+        &mut view,
+        mouse_event(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            0,
+        ),
+        false,
+    );
+    ui.flush(&lane, &mut view);
+    let (open, _, _) = ui.live(&lane, &view, false, std::time::Instant::now());
+    assert!(open.len() > 1, "the printed lines open under it");
+    assert!(
+        open.iter().any(|l| plain(l).contains("more")),
+        "a count for what is left out: {open:?}"
+    );
+    assert!(
+        open.iter().any(|l| plain(l).contains("40")),
+        "its newest line: {open:?}"
+    );
+
+    ui.on_event(
+        &mut lane,
+        &mut view,
+        agent::Event::ToolEnd {
+            id: "c".into(),
+            name: "bash".into(),
+            outcome: agent::Outcome::Done,
+            preview: String::new(),
+            took: std::time::Duration::ZERO,
+        },
+    );
+    ui.flush(&lane, &mut view);
+    assert!(
+        !view.state.tools.iter().any(|t| t.open),
+        "its end closes the view"
+    );
+}
+
+// A prompt above the live block leaves a gap row; the first clickable row
+// must still name the first call, and a second click closes what the first
+// opened.
+#[test]
+fn a_click_after_a_prompt_opens_and_closes_its_own_call() {
+    let mut ui = test_ui(80, 24);
+    let (_dir, mut lane) = a_running_lane();
+    let mut view = View::default();
+    for row in Row::prompt("go", 1, &Paint::new(false)) {
+        view.surface.scrollback.push(row);
+    }
+    for (id, command) in [("c1", "seq 1 3"), ("c2", "seq 4 6")] {
+        ui.on_event(
+            &mut lane,
+            &mut view,
+            agent::Event::ToolQueued {
+                id: id.into(),
+                name: "bash".into(),
+                args: serde_json::json!({"command": command}),
+            },
+        );
+        ui.on_event(
+            &mut lane,
+            &mut view,
+            agent::Event::ToolStart {
+                id: id.into(),
+                at: std::time::Instant::now(),
+            },
+        );
+        ui.on_event(
+            &mut lane,
+            &mut view,
+            agent::Event::ToolPrinted {
+                id: id.into(),
+                text: command.into(),
+            },
+        );
+    }
+    ui.flush(&lane, &mut view);
+    let at = ui
+        .row_targets
+        .iter()
+        .position(|t| matches!(t, Target::PendingTool(_)))
+        .expect("a call line");
+    let row = ui.regions.history.y + at as u16;
+    ui.on_mouse_click(&mut view, 0, row);
+    assert!(view.state.tools.iter().find(|t| t.id == "c2").unwrap().open);
+    ui.on_mouse_click(&mut view, 0, row);
+    assert!(!view.state.tools.iter().find(|t| t.id == "c2").unwrap().open);
 }
 
 // A failing call is never the row's: the row would name it, count it and
@@ -354,7 +481,7 @@ fn a_failing_call_never_joins_the_row() {
     // The row is back to what it keeps, and the ✗ holds the line its own
     // row will take.
     assert_eq!(live_pending_rows(&ui), 1, "the ✗ keeps a line here");
-    let (live, _) = ui.live(&lane, &view, true, std::time::Instant::now());
+    let (live, _, _) = ui.live(&lane, &view, true, std::time::Instant::now());
     assert_eq!(
         plain(&live[0]),
         format!("{} read b.rs", icons::FAIL_MARK),
@@ -530,7 +657,7 @@ fn the_live_region_ends_with_the_turn_and_not_with_the_clock() {
 fn live_pending_rows(ui: &crate::tui::Ui) -> usize {
     ui.row_targets
         .iter()
-        .filter(|t| matches!(t, Target::PendingTools(_)))
+        .filter(|t| matches!(t, Target::PendingTool(_)))
         .count()
 }
 

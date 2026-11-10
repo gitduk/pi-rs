@@ -275,6 +275,9 @@ pub struct Ctx {
     request: Option<std::sync::Arc<message::Message>>,
     // Where a running call says how far it has got; set per call by the loop.
     progress: Option<Progress>,
+    // Where a running call hands out what it has printed so far, replacing
+    // the last view; set per call by the loop.
+    output: Option<Output>,
     // Only calls already listening receive a request; an idle request must
     // never change how the next call runs.
     background: tokio::sync::broadcast::Sender<()>,
@@ -282,6 +285,9 @@ pub struct Ctx {
 
 /// Takes a running call's latest word on its progress, replacing the last.
 pub type Progress = std::sync::Arc<dyn Fn(String) + Send + Sync>;
+
+/// Takes what a running call has printed so far, replacing the last view.
+pub type Output = std::sync::Arc<dyn Fn(String) + Send + Sync>;
 
 pub type FileLocks =
     std::sync::Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, FileLock>>>;
@@ -311,6 +317,7 @@ impl Ctx {
             spill_root: spill::temp(),
             request: None,
             progress: None,
+            output: None,
             background: tokio::sync::broadcast::channel(1).0,
         }
     }
@@ -462,6 +469,25 @@ impl Ctx {
         if let Some(to) = &self.progress {
             to(text.into());
         }
+    }
+
+    /// Route what this call prints to `to`.
+    pub fn with_output(mut self, to: Output) -> Self {
+        self.output = Some(to);
+        self
+    }
+
+    /// Hand out what the call has printed so far, replacing the last view.
+    /// A no-op when nothing is listening.
+    pub fn say_output(&self, text: impl Into<String>) {
+        if let Some(to) = &self.output {
+            to(text.into());
+        }
+    }
+
+    /// Whether anything is listening for what this call prints.
+    pub fn hears_output(&self) -> bool {
+        self.output.is_some()
     }
 
     /// Hold this while mutating `path`. Keyed on the resolved path, not the

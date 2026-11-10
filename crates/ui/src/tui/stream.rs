@@ -185,6 +185,8 @@ impl Ui {
                     summary: crate::render::summarize(args),
                     place,
                     run: Run::Queued,
+                    output: None,
+                    open: false,
                 });
             }
             Event::ToolStart { id, at } => {
@@ -202,6 +204,11 @@ impl Ui {
                     *progress = Some(text.clone());
                 }
             }
+            Event::ToolPrinted { id, text } => {
+                if let Some(t) = view.state.tools.iter_mut().find(|t| t.id == *id) {
+                    t.output = Some(text.clone());
+                }
+            }
             Event::ToolEnd {
                 id,
                 name,
@@ -216,6 +223,8 @@ impl Ui {
                     let row =
                         Row::result(*outcome, name.clone(), preview.clone()).timed(Some(*took));
                     t.run = Run::Landed(row.at(t.place.clone()));
+                    t.output = None;
+                    t.open = false;
                 }
             }
             // New entries: derive rows via `f_entry`, check them against

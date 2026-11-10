@@ -493,15 +493,15 @@ pub(super) fn body(
     if folds.holds(reasoning, scrollback) || partial.is_empty() {
         return Vec::new();
     }
-    // All of it, not just the visible rows: this is the only copy until
-    // `close` lands it, and scrolling up must reach its head.
     if reasoning {
-        // Indented like the lines it will join.
+        // Indented like the lines it will join, and one row: an unfinished line
+        // that wraps and unwraps as it grows moves everything under it.
         let indent = folds.stream_indent(scrollback).unwrap_or_default();
-        let muted = Row::reasoning_line(partial, paint);
-        let border = (!indent.is_empty()).then(|| Line::from(indent));
-        screen::wrap(border.as_ref(), &muted, width)
+        let line = Row::reasoning_line(&format!("{indent}{partial}"), paint);
+        vec![screen::clip_tail(&line, width)]
     } else {
+        // The code lines, all of them: this is the only copy until `close`
+        // lands it, and scrolling up must reach its head.
         // Code lines indented, as they will land.
         let indent = Line::from(super::row::CODE_INDENT);
         render::render_coded_at(partial, paint, Some(width))

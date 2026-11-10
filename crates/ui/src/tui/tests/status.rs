@@ -71,14 +71,14 @@ fn a_retry_waits_on_the_status_line_and_leaves_its_reason_in_a_row() {
         (0, None),
     ] {
         let now = until - std::time::Duration::from_millis(remaining_ms);
-        let (live, _) = ui.live(&lane, &view, false, now);
+        let (live, _, _) = ui.live(&lane, &view, false, now);
         let status = plain(live.last().expect("a status line"));
         match expected {
             Some(text) => assert!(status.contains(text), "{status:?}"),
             None => assert!(!status.contains("retry"), "{status:?}"),
         }
     }
-    let (live, _) = ui.live(
+    let (live, _, _) = ui.live(
         &lane,
         &view,
         false,
@@ -91,7 +91,7 @@ fn a_retry_waits_on_the_status_line_and_leaves_its_reason_in_a_row() {
 
     ui.on_event(&mut lane, &mut view, agent::Event::TextDelta("ok".into()));
     assert!(view.state.work.as_ref().unwrap().retry.is_none());
-    let (live, _) = ui.live(
+    let (live, _, _) = ui.live(
         &lane,
         &view,
         false,
@@ -109,10 +109,10 @@ fn a_status_line_with_nothing_to_say_draws_no_row() {
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     view.state.work = a_turn(false);
-    let (shown, _) = ui.live(&lane, &view, false, std::time::Instant::now());
+    let (shown, _, _) = ui.live(&lane, &view, false, std::time::Instant::now());
     assert_eq!(shown.len(), 1, "the clock has something to say");
     ui.status = Vec::new();
-    let (gone, _) = ui.live(&lane, &view, false, std::time::Instant::now());
+    let (gone, _, _) = ui.live(&lane, &view, false, std::time::Instant::now());
     assert!(gone.is_empty(), "{gone:?}");
 }
 

@@ -125,7 +125,7 @@ impl Agent {
                                 id: call.id.clone(),
                                 at: began,
                             });
-                            let ctx = &with_progress(ctx, call, voice);
+                            let ctx = &with_call_voice(ctx, call, voice);
                             let mut output =
                                 tool::output::gated(t.as_ref(), call.args.clone(), ctx).await;
                             if let Ok(out) = &mut output
@@ -189,15 +189,24 @@ enum Landed {
     Ran(ToolResult, Drawn, Usage),
 }
 
-// The call's own context, its progress said as events under its id.
-fn with_progress(ctx: &Ctx, call: &ToolCall, voice: &Voice) -> Ctx {
-    let (id, voice) = (call.id.clone(), voice.clone());
-    ctx.clone().with_progress(Arc::new(move |text| {
-        voice.say(Event::ToolProgress {
-            id: id.clone(),
-            text,
-        })
-    }))
+// The call's own context: its progress and what it prints said as events
+// under its id.
+fn with_call_voice(ctx: &Ctx, call: &ToolCall, voice: &Voice) -> Ctx {
+    let (progress_id, output_id) = (call.id.clone(), call.id.clone());
+    let (progress_voice, output_voice) = (voice.clone(), voice.clone());
+    ctx.clone()
+        .with_progress(Arc::new(move |text| {
+            progress_voice.say(Event::ToolProgress {
+                id: progress_id.clone(),
+                text,
+            })
+        }))
+        .with_output(Arc::new(move |text| {
+            output_voice.say(Event::ToolPrinted {
+                id: output_id.clone(),
+                text,
+            })
+        }))
 }
 
 // A call's output as its result, its end said as it lands.

@@ -218,6 +218,7 @@ fn watched(event: &Event) -> Option<(HookOn, Option<&str>, Value)> {
         Event::TextDelta(_)
         | Event::ReasoningDelta(_)
         | Event::ToolProgress { .. }
+        | Event::ToolPrinted { .. }
         | Event::Usage(_)
         | Event::Context { .. } => return None,
     };

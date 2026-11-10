@@ -29,6 +29,11 @@ pub enum Event {
         id: String,
         text: String,
     },
+    // What a running call has printed so far, replacing the last view.
+    ToolPrinted {
+        id: String,
+        text: String,
+    },
     ToolEnd {
         id: String,
         name: String,
@@ -139,6 +144,7 @@ pub(crate) fn journal(event: &Event) {
         Event::Context { .. } => {}
         // What it sums up is journaled where it happened.
         Event::ToolProgress { .. } => {}
+        Event::ToolPrinted { .. } => {}
         Event::TurnStart { turn } => tracing::info!(target: "pi::loop", turn, "turn start"),
         Event::ToolQueued { id, name, args } => {
             tracing::info!(target: "pi::tool", call = %id, tool = %name, args = %clipped(args), "call");

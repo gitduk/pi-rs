@@ -231,7 +231,22 @@ impl Ui {
         }
         match self.target_at(row) {
             // Live rows rebuild every frame, so a flag flip is enough.
-            Some(Target::PendingTools(_)) => self.live_tools_shown = !self.live_tools_shown,
+            Some(Target::PendingTool(row)) => {
+                let id = self
+                    .tool_rows
+                    .get(row)
+                    .and_then(Option::as_ref)
+                    .map(String::as_str);
+                match id.and_then(|id| {
+                    view.state
+                        .tools
+                        .iter_mut()
+                        .find(|t| t.id == id && t.printable())
+                }) {
+                    Some(t) => t.open = !t.open,
+                    None => self.live_tools_shown = !self.live_tools_shown,
+                }
+            }
             Some(Target::Text(n)) => {
                 if let Some(code) = self.page_copies(n) {
                     let said = copy_out(&code);
@@ -604,9 +619,9 @@ pub(super) enum Target {
     Scrollback(usize, usize),
     // Trailing whitespace has an ordered history position but no click action.
     Separator(usize, usize),
-    // Row `i` of the live block: a pending call, a click on it opening or
-    // closing the batch, or the rest.
-    PendingTools(usize),
+    // A running call's own line in the live block: a click opens or closes
+    // what it printed, or folds the batch when there is nothing to show.
+    PendingTool(usize),
     // Completed executions waiting to be delivered in the live block.
     BackgroundResults(usize),
     BackgroundResult(usize, u64),

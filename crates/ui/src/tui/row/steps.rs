@@ -176,6 +176,19 @@ fn desc_of(name: &str, preview: &str) -> String {
 /// The indent aligning detail lines and list controls with step text.
 pub const STEP_INDENT: &str = "  ";
 
+// An opened block of reasoning still streaming shows this many of its first
+// and newest lines, with a count of the rest between.
+const FOLD_HEAD: usize = 2;
+const FOLD_TAIL: usize = 3;
+// The rows that takes: the head, the count, the tail.
+const FOLD_ROWS: usize = FOLD_HEAD + 1 + FOLD_TAIL;
+
+// Whether a block of `n` lines has a middle to fold, the count's row standing
+// in for it.
+fn folds_middle(n: usize) -> bool {
+    n > FOLD_ROWS
+}
+
 /// One step of a group, in the order the run took it: a read-only call that
 /// landed well, or a block of reasoning; each opens on its own.
 pub enum Step {
@@ -358,10 +371,14 @@ impl Step {
         }
     }
 
-    // The lines it shows opened: its own, then what it holds.
+    // The lines it shows opened: its own, then what it holds. A live block
+    // keeps its head and newest lines around a count, not every line.
     fn opened_len(&self) -> usize {
         match self {
             Step::Tool(t) => 1 + t.body.len(),
+            Step::Thinking {
+                lines, live: true, ..
+            } if folds_middle(lines.len()) => FOLD_ROWS,
             Step::Thinking {
                 lines, live: true, ..
             } => lines.len().max(1),
@@ -379,17 +396,35 @@ impl Step {
                     lines, live: true, ..
                 },
                 _,
-            ) if j < lines.len() => lines[j].clone().into(),
+            ) if folds_middle(lines.len()) => {
+                debug_assert!(j < FOLD_ROWS, "a folded row asks for its own line");
+                let n = lines.len();
+                match j {
+                    j if j < FOLD_HEAD => lines[j].clone().into(),
+                    j if j == FOLD_HEAD => Line::from(paint.span(
+                        &paint.theme.muted,
+                        format!("{} {} more", icons::ELLIPSIS, n - FOLD_HEAD - FOLD_TAIL),
+                    ))
+                    .into(),
+                    j => lines[n - (FOLD_ROWS - j)].clone().into(),
+                }
+            }
+            (
+                Step::Thinking {
+                    lines, live: true, ..
+                },
+                _,
+            ) => lines
+                .get(j)
+                .cloned()
+                .map_or_else(|| self.head_line(tick, paint), PageLine::from),
             (
                 Step::Thinking {
                     shown, live: false, ..
                 },
                 _,
             ) if j < shown.len() => shown[j].clone().into(),
-            _ => self
-                .head(tick)
-                .content(true, false, paint, usize::MAX)
-                .into(),
+            _ => self.head_line(tick, paint),
         };
         // Bold as `span_hovered` bolds: only where there is colour.
         if hovered && paint.color {
@@ -433,6 +468,13 @@ impl Step {
     // The lines it currently takes in the list.
     fn len(&self) -> usize {
         if self.is_open() { self.opened_len() } else { 1 }
+    }
+
+    // Its own line, opened and whole, as the head of what it shows.
+    fn head_line(&self, tick: usize, paint: &Paint) -> PageLine {
+        self.head(tick)
+            .content(true, false, paint, usize::MAX)
+            .into()
     }
 
     // `tick` turns the mark of reasoning still streaming.
@@ -907,15 +949,45 @@ mod tests {
 
         // The step that leaves the group takes its openness with it: what is
         // left has nothing open, so nothing is unfolded.
-        let mut row = Row::steps(think(7, 0), false);
+        let mut row = Row::steps(think(7, 0, false), false);
         assert_eq!(row.folded(), Some(false), "opened whole");
         assert!(row.end_block(7, &paint), "an empty block leaves no step");
         assert_eq!(row.folded(), Some(true), "nothing is open");
     }
 
-    fn think(block: u64, n: usize) -> Step {
+    fn think(block: u64, n: usize, live: bool) -> Step {
         let lines = (1..=n).map(|i| Line::from(format!("line {i}"))).collect();
-        Step::thinking(block, lines, false, &Paint::new(false))
+        Step::thinking(block, lines, live, &Paint::new(false))
+    }
+
+    // Opened, a live block keeps its head and newest lines around a count:
+    // the latest thinking is what the person waits to read.
+    #[test]
+    fn an_opened_live_block_keeps_its_head_and_newest_lines() {
+        let row = Row::steps(think(7, 10, true), false);
+        assert_eq!(row.len(), FOLD_ROWS);
+        let lines = shown(&row, 80);
+        assert!(lines[0].contains("line 1"), "{lines:?}");
+        assert!(lines[1].contains("line 2"), "{lines:?}");
+        assert!(
+            lines[2].contains(&format!("{} {} more", icons::ELLIPSIS, 5)),
+            "{lines:?}"
+        );
+        assert!(lines[3].contains("line 8"), "{lines:?}");
+        assert!(lines[4].contains("line 9"), "{lines:?}");
+        assert!(lines[5].contains("line 10"), "{lines:?}");
+
+        // As many lines as the opened rows hold, none of them is folded away.
+        let all = shown(&Row::steps(think(7, FOLD_ROWS, true), false), 80);
+        assert!(all[FOLD_ROWS - 1].contains("line 6"), "{all:?}");
+    }
+
+    // Closed, a block is one line whatever it holds.
+    #[test]
+    fn a_closed_live_block_keeps_its_head() {
+        let row = Row::steps(think(7, 10, true), true);
+        assert_eq!(row.len(), 1);
+        assert!(shown(&row, 80)[0].contains("line 1"));
     }
 
     // Each line as the screen draws it, border included.
@@ -952,7 +1024,7 @@ mod tests {
         );
         let ran = FoldedTool::new("bash", &long, &long, "one\ntwo\n");
         let mut listed = bundle(vec![tool("read", "a.rs")]);
-        assert!(listed.join(think(1, 3)).is_ok());
+        assert!(listed.join(think(1, 3, false)).is_ok());
         assert!(listed.join(Step::Tool(ran)).is_ok());
         opens_as_in_place(listed, 2);
         opens_as_in_place(
@@ -972,7 +1044,7 @@ mod tests {
         let ran = FoldedTool::new("bash", "cat <<EOF", "cat <<EOF\nhi\nEOF", "hi\n")
             .timed(Some(std::time::Duration::from_secs(5)));
         let mut row = bundle(vec![tool("read", "a.rs")]);
-        assert!(row.join(think(1, 3)).is_ok());
+        assert!(row.join(think(1, 3, false)).is_ok());
         assert!(row.join(Step::Tool(ran)).is_ok());
         assert_eq!(row.len(), 3);
         let unfolded = shown(&row, 80);
@@ -996,7 +1068,7 @@ mod tests {
     // its lines and no header above them.
     #[test]
     fn a_group_of_one_opens_its_step() {
-        let mut row = Row::steps(think(1, 2), true);
+        let mut row = Row::steps(think(1, 2, false), true);
         assert!(row.toggle_expand());
         assert_eq!(row.len(), 2);
 
@@ -1010,7 +1082,7 @@ mod tests {
         assert_eq!(one.len(), 2);
 
         // Before its first line lands there is nothing to unfold.
-        let empty = Row::steps(think(2, 0), false);
+        let empty = Row::steps(think(2, 0, false), false);
         assert!(!empty.is_expandable());
     }
 
@@ -1018,7 +1090,7 @@ mod tests {
     #[test]
     fn a_long_call_fills_the_row_before_what_follows_it() {
         let long = "x".repeat(200);
-        let mut row = Row::steps(think(1, 1), true);
+        let mut row = Row::steps(think(1, 1, false), true);
         assert!(row.join(Step::Tool(tool("bash", &long))).is_ok());
         assert!(row.join(Step::Tool(tool("bash", &long))).is_ok());
         let line = &shown(&row, 80)[1];

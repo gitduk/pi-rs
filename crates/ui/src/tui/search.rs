@@ -33,7 +33,7 @@ impl Spot {
                 Some(Spot::Row(idx, line))
             }
             Target::Text(n) => Some(Spot::Text(n)),
-            Target::PendingTools(i)
+            Target::PendingTool(i)
             | Target::BackgroundResults(i)
             | Target::BackgroundResult(i, _)
             | Target::Live(i) => Some(Spot::Live(i)),

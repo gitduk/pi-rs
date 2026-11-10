@@ -39,6 +39,25 @@ pub fn clip_line(line: &Line<'_>, width: usize) -> Line<'static> {
     line_of(&kept)
 }
 
+/// The end of `line` that fits `width` columns: for a line still being
+/// written, whose newest columns are what is waited for. Only the last run
+/// answers; earlier lines are not part of it.
+pub fn clip_tail(line: &Line<'_>, width: usize) -> Line<'static> {
+    let (run, ends) = cells(line);
+    let run = &run[ends.last().copied().unwrap_or(0)..];
+    let mut used = 0;
+    let mut kept = Vec::new();
+    for cell in run.iter().rev() {
+        if used + cell.w > width {
+            break;
+        }
+        used += cell.w;
+        kept.push(cell.clone());
+    }
+    kept.reverse();
+    line_of(&kept).style(line.style)
+}
+
 #[derive(Clone)]
 struct Cell {
     text: String,
@@ -164,11 +183,17 @@ fn line_of(cells: &[Cell]) -> Line<'static> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit, rows};
+    use super::{clip_tail, fit, rows};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::text::Line;
     use ratatui::widgets::{Paragraph, Widget, Wrap};
+
+    #[test]
+    fn a_clipped_tail_keeps_the_newest_columns() {
+        let line = Line::from("abcdef");
+        assert_eq!(clip_tail(&line, 3).to_string(), "def");
+    }
 
     // The rows a paragraph draws a line onto, trailing blanks cut. A wide glyph
     // holds two cells, so the text is only read back for the ASCII samples;

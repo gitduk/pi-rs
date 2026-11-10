@@ -146,6 +146,27 @@ pub async fn foreground_result(
         .await
 }
 
+// What a live view needs of a window: the newest lines, never half a
+// character.
+const LIVE_TAIL: usize = 4096;
+
+fn tail(text: &str, bytes: usize) -> &str {
+    let mut at = text.len().saturating_sub(bytes);
+    while !text.is_char_boundary(at) {
+        at += 1;
+    }
+    &text[at..]
+}
+
+// Stops the live view task when `finish` leaves, by whatever path.
+struct LiveTask(tokio::task::JoinHandle<()>);
+
+impl Drop for LiveTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 // One line: whoever reads the preview, and the log, treat further newlines
 // as structure, not text.
 fn first_line(command: &str) -> &str {
@@ -473,6 +494,31 @@ impl Bash {
     ) -> Result<Foreground, ToolError> {
         let before = crate::drift::before(ctx);
         let launched = launch(&prepared, ctx)?;
+        // What the call prints while it runs, shown where the caller can
+        // read it; the window is the same one a background execution keeps.
+        // Nobody listening means nobody pays for reading it every 200ms.
+        // The guard aborts on every way out of `finish`, `?` included.
+        let live = launched.streams.peek();
+        let _live = ctx.hears_output().then(|| {
+            let stop = tokio_util::sync::CancellationToken::new();
+            let ticking = stop.clone();
+            let ctx = ctx.clone();
+            LiveTask(tokio::spawn(async move {
+                let mut seen = 0;
+                loop {
+                    tokio::select! {
+                        _ = ticking.cancelled() => break,
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
+                            let printed = live.since(0);
+                            if printed.total != seen {
+                                seen = printed.total;
+                                ctx.say_output(tail(&printed.text, LIVE_TAIL));
+                            }
+                        }
+                    }
+                }
+            }))
+        });
         let (completion, body, output) = if let Some(executions) = &self.executions {
             let mut requests = ctx.background_requests();
             let peek = launched.streams.peek();

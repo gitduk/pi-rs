@@ -28,6 +28,12 @@ pub(super) struct RunTool {
     // Where it runs, when not the workspace root.
     pub(super) place: Option<String>,
     pub(super) run: Run,
+    // What it printed so far, while it still runs: the latest view, replaced
+    // whole each time it reports.
+    pub(super) output: Option<String>,
+    // Whether a click opened what it printed. Lives on the call, so a run
+    // that is abandoned or rebuilt takes its open state with it.
+    pub(super) open: bool,
 }
 
 // Where a call stands, each stage holding what only it has.
@@ -45,6 +51,13 @@ pub(super) enum Run {
 }
 
 impl RunTool {
+    // Whether a click has something to open: output arrived and is not blank.
+    pub(super) fn printable(&self) -> bool {
+        self.output
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
+    }
+
     // Running, how long so far; landed, how long it ran; queued, nothing.
     fn out_secs(&self, now: Instant) -> Option<u64> {
         let secs = match &self.run {

@@ -152,6 +152,8 @@ pub(super) struct Ui {
     pub(super) tools: Option<Arc<agent::Briefing>>,
     // The execution a click opened under its row.
     pub(super) background_open: Option<OpenCommand>,
+    // Whose own line each live tool row the last frame drew is, from the top.
+    pub(super) tool_rows: Vec<Option<String>>,
     // Whose own row each bar row the last frame drew is, from the top.
     pub(super) command_rows: Vec<super::call::CommandRow>,
     // Every execution listed, not the first few: the fold row flips it.
@@ -281,6 +283,7 @@ impl Ui {
             background_results_shown: false,
             tools: None,
             background_open: None,
+            tool_rows: Vec::new(),
             command_rows: Vec::new(),
             background_all: false,
             below: 0,

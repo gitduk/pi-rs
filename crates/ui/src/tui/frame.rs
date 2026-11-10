@@ -17,6 +17,7 @@ use super::scrollback::{Piece, ScrollbackRows, body};
 use super::search::{self, Anchor, Laid, Spot};
 use super::view::{Doing, Scroll, StreamKind, View, snapshot};
 use crate::render;
+use crate::render::Paint;
 use crate::status;
 use pi_core::core::question::{Asker, Question};
 use pi_store::icons;
@@ -64,7 +65,8 @@ impl Ui {
             let hovered = self.hovered_scrollback.filter(|h| h.0 == idx).map(|h| h.1);
             row.update_live(hovered, self.spinner, flight);
         }
-        let (live, live_targets) = self.live(lane, view, row_holds, now);
+        let (live, live_targets, tool_ids) = self.live(lane, view, row_holds, now);
+        self.tool_rows = tool_ids;
 
         let hovered_command = self.pointer.and_then(|(_, row)| {
             (self
@@ -715,9 +717,9 @@ impl Ui {
         view: &View,
         row_holds: bool,
         now: std::time::Instant,
-    ) -> (Vec<Line<'static>>, Vec<Target>) {
+    ) -> (Vec<Line<'static>>, Vec<Target>, Vec<Option<String>>) {
         let width = self.screen.width();
-        let mut rows: Vec<Line<'static>> = Vec::new();
+        let mut out = LiveRows::default();
         let thinking = view.surface.stream.kind == StreamKind::Reasoning;
 
         // Calls kept here: a foldable one doesn't show while the group
@@ -729,7 +731,7 @@ impl Ui {
                 shown
                     .iter()
                     .copied()
-                    .map(|t| pending_line(now, self.spinner, t, &self.paint)),
+                    .map(|t| (t, pending_line(now, self.spinner, t, &self.paint))),
             );
         } else if let Some(t) = shown.last() {
             let extra = if shown.len() > 1 {
@@ -740,18 +742,27 @@ impl Ui {
             let (mut line, border) = pending_line(now, self.spinner, t, &self.paint);
             line.spans
                 .push(self.paint.span(&self.paint.theme.muted, extra));
-            pending.push((line, border));
+            pending.push((*t, (line, border)));
         }
         let mut spacing = super::spacing::Spacing::after(&view.surface.scrollback);
         if !pending.is_empty() && spacing.push(super::spacing::Block::Tools) {
-            rows.push(Line::default());
+            out.push(Line::default(), None);
         }
-        rows.extend(pending.into_iter().flat_map(|(line, border)| {
+        for (t, (line, border)) in pending {
             let prefix = render::Prefix::hanging(border);
-            screen::wrap_continued(Some(&prefix.first), Some(&prefix.rest), &line, width)
-        }));
-        // Target indices include wrapped tool rows and their leading gap.
-        let pending_rows = rows.len();
+            for row in screen::wrap_continued(Some(&prefix.first), Some(&prefix.rest), &line, width)
+            {
+                out.push(row, Some(t.id.clone()));
+            }
+            if t.open
+                && t.printable()
+                && let Some(output) = &t.output
+            {
+                for row in printed_rows(output, width, &self.paint) {
+                    out.push(row, None);
+                }
+            }
+        }
         let body = |text: &str| {
             body(
                 &view.surface.folds,
@@ -773,9 +784,11 @@ impl Ui {
             && content.first().is_some_and(|line| !line.spans.is_empty())
             && spacing.push(super::spacing::Block::Prose)
         {
-            rows.push(Line::default());
+            out.push(Line::default(), None);
         }
-        rows.extend(content);
+        for row in content {
+            out.push(row, None);
+        }
 
         if lane.is_running() {
             let mut parts = status::parts(&self.status, &snapshot(lane, view), true);
@@ -806,7 +819,7 @@ impl Ui {
                     && self.status.contains(&pi_store::status::Segment::Elapsed))
             {
                 if spacing.push(super::spacing::Block::Status) {
-                    rows.push(Line::default());
+                    out.push(Line::default(), None);
                 }
                 let line = parts.join(icons::PART_SEP);
                 let painted = status::painted(&line, &self.paint);
@@ -814,12 +827,11 @@ impl Ui {
                 let prefix = render::Prefix::hanging(Line::from(
                     self.paint.span(&marker, format!("{} ", icons::PI_MARK)),
                 ));
-                rows.extend(screen::wrap_continued(
-                    Some(&prefix.first),
-                    Some(&prefix.rest),
-                    &painted,
-                    width,
-                ));
+                for row in
+                    screen::wrap_continued(Some(&prefix.first), Some(&prefix.rest), &painted, width)
+                {
+                    out.push(row, None);
+                }
             }
         }
         // Typed lines precede execution results to match delivery priority.
@@ -839,19 +851,22 @@ impl Ui {
             );
             screen::wrap_continued(Some(&prefix.first), Some(&prefix.rest), &muted, width)
         };
-        rows.extend(
-            view.queued
-                .lock()
-                .iter()
-                .filter_map(|q| q.line.as_deref())
-                .flat_map(|line| waiting(icons::SAID_RULE, line)),
-        );
-        let mut targets: Vec<_> = rows
+        for row in view
+            .queued
+            .lock()
+            .iter()
+            .filter_map(|q| q.line.as_deref())
+            .flat_map(|line| waiting(icons::SAID_RULE, line))
+        {
+            out.push(row, None);
+        }
+        let mut targets: Vec<_> = out
+            .rows
             .iter()
             .enumerate()
             .map(|(i, row)| {
-                if i < pending_rows && !row.spans.is_empty() {
-                    Target::PendingTools(i)
+                if out.ids[i].is_some() && !row.spans.is_empty() {
+                    Target::PendingTool(i)
                 } else {
                     Target::Live(i)
                 }
@@ -864,11 +879,13 @@ impl Ui {
             hovered,
             &self.paint,
             width,
-            rows.len(),
+            out.rows.len(),
         );
-        rows.extend(results);
+        for row in results {
+            out.push(row, None);
+        }
         targets.extend(result_targets);
-        (rows, targets)
+        (out.rows, targets, out.ids)
     }
 
     // `judge #3 · tests failed, now what? · space mark · tab take …`: who
@@ -917,4 +934,46 @@ impl Ui {
             self.paint.span(&theme.muted, hint),
         ])
     }
+}
+
+// The live block's rows, each with the call it belongs to, built in one pass
+// so a row and its id can never slip apart.
+#[derive(Default)]
+struct LiveRows {
+    rows: Vec<Line<'static>>,
+    ids: Vec<Option<String>>,
+}
+
+impl LiveRows {
+    fn push(&mut self, line: Line<'static>, id: Option<String>) {
+        self.rows.push(line);
+        self.ids.push(id);
+    }
+}
+
+// What a call printed, as the live block shows it opened: its last lines,
+// with a count for the rest.
+fn printed_rows(text: &str, width: usize, paint: &Paint) -> Vec<Line<'static>> {
+    const TAIL: usize = 12;
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(TAIL);
+    let prefix = render::Prefix::hanging(Line::from(paint.span(&paint.theme.muted, "  ")));
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    if start > 0 {
+        let line = Line::from(paint.span(
+            &paint.theme.muted,
+            format!("  {} {} more", icons::ELLIPSIS, start),
+        ));
+        rows.push(screen::clip_line(&line, width));
+    }
+    for line in &lines[start..] {
+        let line = Line::from(paint.span(&paint.theme.muted, (*line).to_string()));
+        rows.extend(screen::wrap_continued(
+            Some(&prefix.first),
+            Some(&prefix.rest),
+            &line,
+            width,
+        ));
+    }
+    rows
 }

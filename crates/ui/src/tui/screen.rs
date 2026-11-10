@@ -18,7 +18,7 @@ use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
-pub use crate::wrap::{clip_line, fit, rows};
+pub use crate::wrap::{clip_line, clip_tail, fit, rows};
 
 /// How many rows `wrap` makes of `line`, without making them.
 pub fn wrap_rows(border: Option<&Line<'_>>, line: &Line<'_>, width: usize) -> usize {

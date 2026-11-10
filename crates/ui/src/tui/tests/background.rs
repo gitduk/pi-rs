@@ -599,7 +599,7 @@ fn waiting_results_fold_without_wrapping_long_commands() {
     for width in [20, 40, 80] {
         let mut ui = test_ui(width, 24);
         ui.sync_background(pending.clone());
-        let (live, targets) = ui.live(&lane, &view, false, std::time::Instant::now());
+        let (live, targets, _) = ui.live(&lane, &view, false, std::time::Instant::now());
         assert_eq!(live.len(), targets.len());
         let at = targets
             .iter()
@@ -612,7 +612,7 @@ fn waiting_results_fold_without_wrapping_long_commands() {
         }
 
         ui.background_results_shown = true;
-        let (live, targets) = ui.live(&lane, &view, false, std::time::Instant::now());
+        let (live, targets, _) = ui.live(&lane, &view, false, std::time::Instant::now());
         let ids: Vec<_> = targets
             .iter()
             .filter_map(|t| match t {
