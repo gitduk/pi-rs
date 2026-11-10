@@ -49,7 +49,7 @@ api_key  = "$ANTHROPIC_API_KEY" # `$` reads the environment; anything else is th
 # tier   = "exec"                 # read | write | exec | net
 
 # Seconds a subagent may run silent before it is read as wedged. Unset is 1800.
-# The only thing that stops a subagent on its own: it is not capped by turns.
+# Independent of the child call's total runtime and model-turn budgets.
 # subagent_deadline = 1800
 
 # How many times to retry a request the provider could not serve, and how many

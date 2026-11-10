@@ -15,7 +15,7 @@ use super::Core;
 use crate::args::Pinned;
 
 // Discovery is optional: a slow catalog must not hold startup indefinitely.
-const TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A snapshot of the discovered model facts applied to a resolved configuration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -190,9 +190,6 @@ pub struct Catalog {
     /// Whether a list was read since it was last asked for: a start, a
     /// provider's configuration change or `/model` asks again.
     fetched: bool,
-    /// A list someone asked for is applied whole: the menu it fills shows
-    /// every model's facts, not just the ones a lane runs.
-    apply_all: bool,
     pending: Option<Pending>,
     errors: Vec<String>,
 }
@@ -202,25 +199,23 @@ struct Refresh {
     notes: Vec<String>,
 }
 
-/// Whether a lane would find something different: a new name, or a fact of a
-/// model it runs. A price on a model nothing runs can wait.
-fn reaches_a_lane(
-    provider: &str,
-    cached: &Cached,
-    models: &toml::Table,
-    in_use: &BTreeSet<String>,
-) -> bool {
-    if !cached.models.keys().eq(models.keys()) {
-        return true;
-    }
-    in_use.iter().any(|name| {
-        // A bare name is the one provider's, whichever holds it.
-        let (prefix, id) = name.split_once('/').unwrap_or((provider, name.as_str()));
-        prefix == provider && cached.models.get(id) != models.get(id)
-    })
-}
-
 impl Catalog {
+    /// Publish discovery readiness to the tools of a newly resolved run.
+    pub fn publish_status(&self, resolved: &super::resolve::Resolved) {
+        resolved.models.discovery(self.discovery());
+    }
+    fn discovery(&self) -> super::models::Discovery {
+        use super::models::Discovery;
+        if self.sources.is_empty() {
+            Discovery::NotConfigured
+        } else if self.pending.is_some() || !self.fetched {
+            Discovery::Pending
+        } else if !self.errors.is_empty() {
+            Discovery::Failed
+        } else {
+            Discovery::Ready
+        }
+    }
     /// The version of the last successfully changed catalog.
     pub fn generation(&self) -> Generation {
         self.generation
@@ -229,8 +224,7 @@ impl Catalog {
     pub async fn load(&mut self, pinned: &Pinned, config: &Config) -> Vec<String> {
         self.sources = Source::configured(pinned, config);
         let sources = self.sources.clone();
-        // No lane runs yet: nothing counts as in use.
-        self.accept(read(sources).await, &BTreeSet::new()).notes
+        self.accept(read(sources).await).notes
     }
 
     /// Apply only facts belonging to the connections that are still configured.
@@ -257,12 +251,10 @@ impl Catalog {
     /// one. What comes back is applied whole: someone is choosing from it.
     pub fn refresh(&mut self) {
         self.fetched = false;
-        self.apply_all = true;
     }
 
-    fn accept(&mut self, results: Results, in_use: &BTreeSet<String>) -> Refresh {
+    fn accept(&mut self, results: Results) -> Refresh {
         self.fetched = true;
-        let apply_all = std::mem::take(&mut self.apply_all);
         let mut changed = false;
         let mut errors = Vec::new();
         for (source, result) in results {
@@ -270,10 +262,7 @@ impl Catalog {
                 Ok(models) => {
                     let moved = self.known.get(&source.name).is_none_or(|cached| {
                         // A new credential re-dials as much as a new fact does.
-                        cached.source != source
-                            || (cached.models != models
-                                && (apply_all
-                                    || reaches_a_lane(&source.name, cached, &models, in_use)))
+                        cached.source != source || cached.models != models
                     });
                     if moved {
                         changed = true;
@@ -308,11 +297,11 @@ impl Catalog {
         }
     }
 
-    fn finish_pending(&mut self, in_use: &BTreeSet<String>) -> Option<Refresh> {
+    fn finish_pending(&mut self) -> Option<Refresh> {
         match self.pending.as_mut()?.result.try_recv() {
             Ok(results) => {
                 self.pending = None;
-                Some(self.accept(results, in_use))
+                Some(self.accept(results))
             }
             Err(oneshot::error::TryRecvError::Empty) => None,
             Err(oneshot::error::TryRecvError::Closed) => {
@@ -339,15 +328,10 @@ impl Catalog {
         self.pending.is_some()
     }
 
-    fn poll(
-        &mut self,
-        pinned: &Pinned,
-        config: &Config,
-        in_use: &BTreeSet<String>,
-    ) -> Option<Refresh> {
+    fn poll(&mut self, pinned: &Pinned, config: &Config) -> Option<Refresh> {
         self.configure(pinned, config);
         if self.pending.is_some() {
-            return self.finish_pending(in_use);
+            return self.finish_pending();
         }
         self.start();
         None
@@ -372,21 +356,6 @@ impl Catalog {
 }
 
 impl Core {
-    /// The models this run stands on: every lane's, and the ones the files
-    /// would dial without being asked.
-    fn models_in_use(&self) -> BTreeSet<String> {
-        let mut names: BTreeSet<String> = self
-            .lanes
-            .iter()
-            .map(|lane| lane.agent().spec().model.clone())
-            .collect();
-        for lane in self.lanes.all() {
-            names.extend(lane.environment().config.model.clone());
-            names.extend(lane.environment().config.summarize_model.clone());
-        }
-        names
-    }
-
     /// Whether a model list is still on its way.
     pub fn awaiting_models(&self) -> bool {
         self.catalog.awaiting_models()
@@ -394,9 +363,15 @@ impl Core {
 
     /// Poll discovery without blocking a caller; new facts rebuild the active agent.
     pub fn refresh_models(&mut self) -> Option<Vec<String>> {
-        let in_use = self.models_in_use();
         let config = self.config().clone();
-        let refresh = self.catalog.poll(&self.pinned, &config, &in_use)?;
+        let refresh = self.catalog.poll(&self.pinned, &config);
+        if refresh.as_ref().is_none_or(|refresh| !refresh.changed) {
+            self.lane()
+                .resolved()
+                .models
+                .discovery(self.catalog.discovery());
+        }
+        let refresh = refresh?;
         let mut notes = refresh.notes;
         for note in &notes {
             tracing::warn!(target: "pi::session", reason = %note, "model discovery failed");
@@ -422,6 +397,10 @@ impl Core {
                 spec,
             ));
         }
+        self.lane()
+            .resolved()
+            .models
+            .discovery(self.catalog.discovery());
         (!notes.is_empty()).then_some(notes)
     }
 }
@@ -492,15 +471,10 @@ max_output_tokens = 2048
         )
     }
 
-    async fn refreshed(
-        catalog: &mut Catalog,
-        pinned: &Pinned,
-        config: &Config,
-        in_use: &BTreeSet<String>,
-    ) -> Refresh {
+    async fn refreshed(catalog: &mut Catalog, pinned: &Pinned, config: &Config) -> Refresh {
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                if let Some(result) = catalog.poll(pinned, config, in_use) {
+                if let Some(result) = catalog.poll(pinned, config) {
                     break result;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -755,12 +729,12 @@ format = "chat"
         let mut catalog = Catalog::default();
         catalog.load(&pinned, &config).await;
         assert!(
-            catalog.poll(&pinned, &config, &BTreeSet::new()).is_none(),
+            catalog.poll(&pinned, &config).is_none(),
             "a list is read again only when asked"
         );
         catalog.refresh();
-        assert!(catalog.poll(&pinned, &config, &BTreeSet::new()).is_none());
-        let refreshed = refreshed(&mut catalog, &pinned, &config, &BTreeSet::new()).await;
+        assert!(catalog.poll(&pinned, &config).is_none());
+        let refreshed = refreshed(&mut catalog, &pinned, &config).await;
         assert!(refreshed.changed);
         let config = catalog.enrich(&settings, &pinned, config).unwrap();
         assert_eq!(
@@ -776,38 +750,33 @@ format = "chat"
         assert_eq!(config.find("test/b").unwrap().context_window, 300000);
     }
 
-    // A fact nobody runs waits for a list someone asked for; one a lane runs
-    // is applied whenever it moves.
     #[test]
-    fn a_fact_nobody_runs_waits_for_a_list_someone_asked_for() {
+    fn a_fact_on_an_alternative_model_updates_the_catalog() {
         let mut catalog = Catalog::default();
-        let idle: BTreeSet<String> = ["test/a".to_string()].into();
         assert!(
             catalog
-                .accept(
-                    vec![answer("test", &[("a", 100000), ("b", 9000)])],
-                    &BTreeSet::new()
-                )
+                .accept(vec![answer("test", &[("a", 100000), ("b", 9000)])])
                 .changed
         );
         let first = catalog.generation();
 
         assert!(
-            !catalog
-                .accept(vec![answer("test", &[("a", 100000), ("b", 8000)])], &idle)
+            catalog
+                .accept(vec![answer("test", &[("a", 100000), ("b", 8000)])])
                 .changed,
-            "nothing a lane runs moved"
+            "alternative model facts must reach selection queries"
         );
-        assert_eq!(catalog.generation(), first);
+        assert_ne!(catalog.generation(), first);
+        let current = catalog.generation();
 
         catalog.refresh();
         assert!(
-            catalog
-                .accept(vec![answer("test", &[("a", 100000), ("b", 8000)])], &idle)
+            !catalog
+                .accept(vec![answer("test", &[("a", 100000), ("b", 8000)])])
                 .changed,
-            "an asked-for list is applied whole"
+            "identical facts do not rebuild the catalog"
         );
-        assert_ne!(catalog.generation(), first);
+        assert_eq!(catalog.generation(), current);
     }
 
     fn answer(name: &str, rows: &[(&str, i64)]) -> (Source, Result<toml::Table, String>) {

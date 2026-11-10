@@ -93,6 +93,11 @@ pub trait Archive: Send + Sync {
     // No screen, so the transcript is the only record. Called once with the
     // whole transcript, finished or cut short; `parent` is the calling session.
     fn keep(&self, parent: &str, id: &str, session: Session);
+
+    /// File a child transcript with the model that actually ran it.
+    fn keep_model(&self, parent: &str, id: &str, _model: &str, session: Session) {
+        self.keep(parent, id, session);
+    }
 }
 
 /// What a pass of the compactor left: what to send next, whether the transcript

@@ -218,6 +218,53 @@ impl Shelf {
         self.fresh(|seen| (seen.found.clone(), seen.generation))
     }
 
+    /// Load named instructions in order from the current catalog, including their sources.
+    ///
+    /// # Errors
+    /// Returns an error if any name is missing, unreadable, or exceeds the read limit.
+    pub async fn preload(&self, names: &[String]) -> Result<Vec<String>, tool::ToolError> {
+        let (found, _) = self.now();
+        let selected = names
+            .iter()
+            .map(|name| {
+                found
+                    .skills
+                    .iter()
+                    .find(|skill| skill.name == *name)
+                    .ok_or_else(|| {
+                        tool::ToolError::Invalid(format!("no skill named `{name}` to preload"))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut loaded = Vec::new();
+        for skill in selected {
+            let text = match skill.builtin {
+                Some(text) => text.to_string(),
+                None => {
+                    let path = skill.dir.join("SKILL.md");
+                    let failed =
+                        |error| tool::ToolError::Invalid(format!("{}: {error}", path.display()));
+                    let meta = tokio::fs::metadata(&path).await.map_err(failed)?;
+                    if meta.len() > MAX_BYTES {
+                        return Err(tool::ToolError::Invalid(over_limit(
+                            &skill.name,
+                            meta.len(),
+                        )));
+                    }
+                    tokio::fs::read_to_string(&path).await.map_err(failed)?
+                }
+            };
+            if text.len() as u64 > MAX_BYTES {
+                return Err(tool::ToolError::Invalid(over_limit(
+                    &skill.name,
+                    text.len() as u64,
+                )));
+            }
+            loaded.push(instructions(skill, &text));
+        }
+        Ok(loaded)
+    }
+
     fn fresh<T>(&self, read: impl FnOnce(&Seen) -> T) -> T {
         let mut stamps = Vec::new();
         for dir in &self.dirs {

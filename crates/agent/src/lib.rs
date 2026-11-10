@@ -57,6 +57,8 @@ pub const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
+    #[error("reached the limit of {turns} model turns")]
+    TurnLimit { turns: usize },
     #[error(transparent)]
     Llm(#[from] llm::LlmError),
 
@@ -191,6 +193,31 @@ impl Agent {
         retry: &Retry,
         input: &dyn seams::Input,
     ) -> Result<Usage, AgentError> {
+        self.run_inner(session, ctx, tx, retry, input, None).await
+    }
+
+    /// Run with a finite number of model turns, preserving work when the limit is reached.
+    pub async fn run_bounded(
+        &self,
+        session: &mut Session,
+        ctx: &Ctx,
+        tx: &UnboundedSender<Event>,
+        retry: &Retry,
+        max_turns: std::num::NonZeroUsize,
+    ) -> Result<Usage, AgentError> {
+        self.run_inner(session, ctx, tx, retry, &|| None, Some(max_turns.get()))
+            .await
+    }
+
+    async fn run_inner(
+        &self,
+        session: &mut Session,
+        ctx: &Ctx,
+        tx: &UnboundedSender<Event>,
+        retry: &Retry,
+        input: &dyn seams::Input,
+        max_turns: Option<usize>,
+    ) -> Result<Usage, AgentError> {
         let voice = Voice::new(tx.clone(), self.brief.hooks.clone());
         // Tool sources are live: what they list now, not when the brief was applied.
         tracing::info!(
@@ -205,7 +232,9 @@ impl Agent {
         if let Some(note) = self.brief.hooks.ahead(&prompt, ctx).await {
             say_note(session, &voice, note);
         }
-        let mut out = self.turns(session, ctx, &voice, retry, input).await;
+        let mut out = self
+            .turns(session, ctx, &voice, retry, input, max_turns)
+            .await;
         let closing = match &out {
             Ok(_) => message::Status::Failed(message::Failure {
                 code: "MISSING_TOOL_RESULT".into(),
@@ -240,6 +269,7 @@ impl Agent {
         voice: &Voice,
         retry: &Retry,
         input: &dyn seams::Input,
+        max_turns: Option<usize>,
     ) -> Result<Usage, AgentError> {
         let mut totals = Usage::default();
 
@@ -257,6 +287,9 @@ impl Agent {
         let mut holds = 0usize;
 
         for turn in 1.. {
+            if max_turns.is_some_and(|limit| turn > limit) {
+                return Err(AgentError::TurnLimit { turns: turn - 1 });
+            }
             receive(session, ctx, voice, input);
             heed(session, voice, input);
             voice.say(Event::TurnStart { turn });

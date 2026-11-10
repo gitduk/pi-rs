@@ -356,6 +356,12 @@ pub fn arm(
     if let Some(deadline) = resolved.subagent_deadline {
         subagent = subagent.with_deadline(deadline);
     }
+    if let Some(models) = &resolved.subagent_models {
+        subagent = subagent.with_models(models.clone());
+    }
+    if let Some(shelf) = &resolved.shelf {
+        subagent = subagent.with_skills(shelf.clone());
+    }
     // Changed from here on a fresh `Arc`, since the child holds this one: it
     // runs on the registry it came from, and only the lane's copy carries the tool.
     offer_builtin(Arc::make_mut(&mut brief), Arc::new(subagent), &mut said);
@@ -435,6 +441,8 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
         prompt_blocks: Vec::new(),
         hooks: Default::default(),
         subagent_deadline: None,
+        subagent_models: None,
+        models: Arc::new(super::models::Models::new(&Default::default())),
         standing: standing.into(),
         ceiling: tool::Tier::Exec,
         commands: Arc::new(Vec::new()),
@@ -635,7 +643,7 @@ impl Lane {
     /// call: a brief armed on an agent other than the one in force is stale.
     pub fn rearm(
         &mut self,
-        resolved: Arc<Resolved>,
+        mut resolved: Arc<Resolved>,
         archive: Arc<dyn Archive>,
         retry: agent::Retry,
         executions: Option<Arc<crate::driver::background::Table>>,
@@ -643,6 +651,19 @@ impl Lane {
     ) {
         if let Some(table) = &executions {
             self.bind_inputs(table);
+        }
+        let previous = self.checkout.resolved.models.clone();
+        if !Arc::ptr_eq(&previous, &resolved.models) {
+            previous.replace(&resolved.models);
+            let source: Arc<dyn tool::Source> = resolved.models.clone();
+            let patch = Arc::make_mut(&mut resolved);
+            Arc::make_mut(&mut patch.brief)
+                .registry
+                .swap_source(&source, previous.clone());
+            patch.models = previous;
+            if self.checkout.resolved.subagent_models.is_some() {
+                patch.subagent_models = self.checkout.resolved.subagent_models.clone();
+            }
         }
         let agent = Arc::make_mut(&mut self.checkout.agent);
         change(agent);

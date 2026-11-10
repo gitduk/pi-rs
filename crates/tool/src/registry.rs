@@ -21,6 +21,7 @@ pub struct Registry {
     sources: Vec<Arc<dyn Source>>,
     ceilings: Vec<Tier>,
     hidden: BTreeSet<String>,
+    allowed: Option<BTreeSet<String>>,
 }
 
 impl std::fmt::Debug for Registry {
@@ -50,7 +51,7 @@ impl Registry {
     /// tool added after the sources still holds its name against them.
     pub fn offer(&mut self, tool: Arc<dyn Tool>) -> bool {
         let name = tool.name();
-        if self.hidden.contains(name) || !self.ceilings.iter().all(|&c| tool.tier().under(c)) {
+        if !self.allows(name) || !self.ceilings.iter().all(|&c| tool.tier().under(c)) {
             return false;
         }
         match self.tools.entry(name.to_string()) {
@@ -88,6 +89,9 @@ impl Registry {
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        if !self.allows(name) {
+            return None;
+        }
         match self.tools.get(name) {
             Some(tool) => Some(tool.clone()),
             None => self.sourced().remove(name),
@@ -125,6 +129,25 @@ impl Registry {
         self
     }
 
+    /// Restrict current and future tools to these names, preserving earlier cuts.
+    pub fn only(mut self, names: &[String]) -> Self {
+        let mut allowed: BTreeSet<String> = names.iter().cloned().collect();
+        if let Some(prior) = &self.allowed {
+            allowed.retain(|name| prior.contains(name));
+        }
+        self.tools.retain(|name, _| allowed.contains(name));
+        self.allowed = Some(allowed);
+        self
+    }
+
+    fn allows(&self, name: &str) -> bool {
+        !self.hidden.contains(name)
+            && self
+                .allowed
+                .as_ref()
+                .is_none_or(|names| names.contains(name))
+    }
+
     pub fn defs(&self) -> Vec<ToolDef> {
         self.all()
             .values()
@@ -142,7 +165,7 @@ impl Registry {
         for tool in self.sources.iter().flat_map(|s| s.tools()) {
             let name = tool.name();
             if self.tools.contains_key(name)
-                || self.hidden.contains(name)
+                || !self.allows(name)
                 || !self.ceilings.iter().all(|&c| tool.tier().under(c))
             {
                 continue;

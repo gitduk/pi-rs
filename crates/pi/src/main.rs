@@ -264,6 +264,7 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
     mcp.sync(&config, workspace.root());
     let mut resolved = resolve(&pinned, &workspace, &config, &settings, None, words, &mcp)?;
     resolved.catalog_generation = catalog.generation();
+    catalog.publish_status(&resolved);
     resolved.notes.extend(discovery_notes.iter().cloned());
     resolved.notes.extend(replaced.clone());
     if named_by == pi_store::config::ModelOrigin::Discovered {

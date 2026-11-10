@@ -2988,6 +2988,7 @@ dependencies = [
  "pi-tools",
  "serde",
  "serde_json",
+ "skills",
  "tempfile",
  "tokio",
  "tokio-util",

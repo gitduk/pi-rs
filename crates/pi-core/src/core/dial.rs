@@ -45,6 +45,7 @@ fn said_by(origin: config::ModelOrigin) -> &'static str {
     match origin {
         O::Flag => "-m",
         O::Command => "/model",
+        O::Subagent => "the subagent's model argument",
         O::Resumed => "the resumed session",
         O::Project => "`model` in the project's .pi/settings.toml",
         O::Global => "`model` in ~/.pi/settings.toml",
@@ -143,6 +144,24 @@ pub fn summary_writer(
         }
         _ => Ok(None),
     }
+}
+
+/// Resolve child connections against the same configuration snapshot as their caller.
+pub(super) fn subagent_models(
+    pinned: &Pinned,
+    models: Arc<super::models::Models>,
+) -> subagent::ModelResolver {
+    let pinned = pinned.clone();
+    Arc::new(move |name| {
+        let config = models.config();
+        let dialled = dial(&pinned, &config, name, config::ModelOrigin::Subagent)
+            .map_err(|error| tool::ToolError::Invalid(format!("{error:#}")))?;
+        Ok(subagent::ModelConnection {
+            transport: dialled.transport,
+            spec: dialled.spec,
+            notes: dialled.assumed.into_iter().chain(dialled.warning).collect(),
+        })
+    })
 }
 
 /// Resolve a replacement connection while retaining a usable previous connection on failure.

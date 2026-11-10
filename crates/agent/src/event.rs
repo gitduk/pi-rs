@@ -109,6 +109,11 @@ impl Voice {
         Self { tx, hooks }
     }
 
+    /// Report a warning through the same journal and hooks as loop events.
+    pub fn warn(&self, warning: String) {
+        self.say(Event::Warning(warning));
+    }
+
     /// Journals it, hands it to the hooks, says it to the user, in that order,
     /// in one call — call this where the fact occurs, not where the event is
     /// consumed, or order drifts.

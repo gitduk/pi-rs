@@ -1,5 +1,6 @@
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -31,6 +32,16 @@ struct Args {
     // the log, which otherwise show a delegated task as a bare `subagent`.
     description: String,
     prompt: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    tools: Option<Vec<String>>,
+    #[serde(default)]
+    skills: Vec<String>,
+    #[serde(default)]
+    max_turns: Option<NonZeroUsize>,
+    #[serde(default)]
+    timeout_ms: Option<NonZeroU64>,
     // Run after the child stops, in the same checkout. Never seen by the
     // child: a check it knows about is a check it can write itself around.
     #[serde(default)]
@@ -70,20 +81,32 @@ pub struct Subagent {
     // `subagent` of its own, so this does not nest.
     agent: Arc<Agent>,
     archive: Arc<dyn Archive>,
-    // How long the child may run silent before it is read as wedged: the one
-    // brake here, and the only way a child ends that is not a stop.
+    // Independent of each call's total time and turn budgets.
     deadline: Duration,
     // The retry schedule the child runs on, handed in when the tool is hung:
     // a tool has no way to reach the config where it is called.
     retry: Retry,
     tools: Option<ToolFactory>,
+    models: Option<ModelResolver>,
+    skills: Option<Arc<skills::Shelf>>,
 }
 
 // How long a child may run silent unless `with_deadline` says otherwise.
 const DEADLINE: Duration = Duration::from_secs(1800);
+const MAX_TURNS: NonZeroUsize = NonZeroUsize::new(64).expect("default turn limit is nonzero");
 
 /// Build tools owned by one child run, released when its context is cancelled.
 pub type ToolFactory = Arc<dyn Fn(&Ctx, tool::Registry) -> tool::Registry + Send + Sync>;
+
+/// Resolve a model name using the caller's connection configuration.
+pub type ModelResolver = Arc<dyn Fn(&str) -> Result<ModelConnection, ToolError> + Send + Sync>;
+
+/// A child model's connection and diagnostics to preserve with its result.
+pub struct ModelConnection {
+    pub transport: Arc<dyn llm::Transport>,
+    pub spec: llm::ModelSpec,
+    pub notes: Vec<String>,
+}
 
 impl Subagent {
     pub const NAME: &'static str = "subagent";
@@ -130,6 +153,8 @@ impl Subagent {
             deadline: DEADLINE,
             retry,
             tools: None,
+            models: None,
+            skills: None,
         }
     }
 
@@ -143,11 +168,24 @@ impl Subagent {
         self.tools = Some(tools);
         self
     }
+
+    /// Allow each call to select a model through the caller's resolver.
+    pub fn with_models(mut self, models: ModelResolver) -> Self {
+        self.models = Some(models);
+        self
+    }
+
+    /// Preload explicitly selected instructions from the caller's skill catalog.
+    pub fn with_skills(mut self, skills: Arc<skills::Shelf>) -> Self {
+        self.skills = Some(skills);
+        self
+    }
 }
 
 // What the child's event stream said, once it has closed.
 #[derive(Default)]
 struct Heard {
+    warnings: Vec<String>,
     // The last turn's prose only. Every earlier turn was followed by tool
     // calls, which is what makes it not the answer.
     text: String,
@@ -239,16 +277,20 @@ impl Tool for Subagent {
     fn description(&self) -> &str {
         "Assign a self-contained task to a subagent. \
          The tool returns the subagent's conclusion. \
-         The subagent uses the same checkout and tools, with a separate context. \
+         The subagent uses the same checkout, with a separate context. \
+         It inherits your model and tools unless you supply `model` or `tools`. \
+         Supply `skills` to preload applicable instructions by name before the task starts. \
+         Skills already loaded in your conversation are not inherited. \
+         `tools` restricts callable tools to the listed names. \
+         It cannot add tools you lack. \
+         Select only the tools the task needs. \
+         For read-only exploration, include only read tools and exclude shells and other tools that can change state. \
          You receive only its final message, not the files it reads or commands it runs.\n\n\
-         Use it for searches across many files, test suites, or summaries of large unfamiliar areas. \
-         Several calls can run in parallel. \
-         Do not delegate work you can finish in one or two calls. \
-         The extra call costs more than it saves.\n\n\
+         Several calls can run in parallel.\n\n\
          Do not assign work that requires answers from you while it runs. \
          The subagent cannot ask you questions. \
          It will guess missing details. \
-         Specify the required result and its format. \
+         Provide the complete task, necessary context, and required result format. \
          The subagent cannot call this tool or delegate further. \
          Assign work it can finish itself.\n\n\
          The result ends with paths changed through `write` or `edit`. \
@@ -275,6 +317,36 @@ impl Tool for Subagent {
                 "verify": {
                     "type": "string",
                     "description": "Supply a shell command to check the task, such as tests, a build, or a linter. The command runs in the workspace root after the subagent stops. Its exit status accompanies the result. Omit `verify` when the task has no check.",
+                },
+                "model": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Model to use for this task, optionally qualified by provider. Omit to inherit the caller's model. The connection must already be configured.",
+                },
+                "tools": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "uniqueItems": true,
+                    "description": "Exact names of tools the child may call. Omit to inherit tools; an empty list disables all tools. Preloaded skills do not grant tools. This restricts tool access, not the side effects of an allowed tool. verify runs separately with the caller's permissions.",
+                },
+                "skills": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "uniqueItems": true,
+                    "description": "Skill names whose full instructions and sources are loaded before the task starts. Missing or unreadable skills fail the call. Omit or pass [] to preload none. Preloading does not require the skill tool; allow that tool if the child needs supporting files or additional skills.",
+                },
+                "max_turns": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": MAX_TURNS.get(),
+                    "description": "Maximum model turns for this child. A turn can contain multiple tool calls. Reaching the limit returns an unfinished result. Choose a small budget for a bounded check.",
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": tool::limit::MAX_CALL.as_millis(),
+                    "default": tool::limit::MAX_CALL.as_millis(),
+                    "description": "Total child runtime budget in milliseconds, including periods with progress. Reaching the budget cancels the child and returns an unfinished result after cleanup. Verification runs separately.",
                 },
             },
             "required": ["description", "prompt"],
@@ -303,6 +375,13 @@ impl Tool for Subagent {
 
 impl Subagent {
     async fn run(&self, args: Args, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
+        let max_turns = args.max_turns.unwrap_or(MAX_TURNS);
+        let timeout = args
+            .timeout_ms
+            .map(|ms| Duration::from_millis(ms.get()))
+            .unwrap_or(tool::limit::MAX_CALL)
+            .min(tool::limit::MAX_CALL);
+        let expires = tokio::time::Instant::now() + timeout;
         let id = format!(
             "{}-subagent-{}",
             ctx.spill_namespace(),
@@ -320,10 +399,43 @@ impl Subagent {
             .with_own_writes();
 
         let mut agent = self.agent.as_ref().clone();
+        let mut model_notes = Vec::new();
         if let Some(tools) = &self.tools {
             let patch = Arc::make_mut(&mut agent.brief);
             patch.registry = tools(&child, std::mem::take(&mut patch.registry));
         }
+        if let Some(name) = &args.model {
+            if name.trim().is_empty() {
+                return Err(ToolError::Invalid(
+                    "subagent model must not be empty".into(),
+                ));
+            }
+            let resolve = self.models.as_ref().ok_or_else(|| {
+                ToolError::Invalid("model selection is not available for this subagent".into())
+            })?;
+            let connection = resolve(name)?;
+            model_notes = connection.notes;
+            agent.retarget(connection.transport, connection.spec);
+        }
+        if let Some(names) = &args.tools {
+            let patch = Arc::make_mut(&mut agent.brief);
+            for name in names {
+                if patch.registry.get(name).is_none() {
+                    return Err(ToolError::Invalid(format!(
+                        "subagent tool `{name}` is unavailable"
+                    )));
+                }
+            }
+            patch.registry = std::mem::take(&mut patch.registry).only(names);
+        }
+        let instructions = if args.skills.is_empty() {
+            Vec::new()
+        } else {
+            let shelf = self.skills.as_ref().ok_or_else(|| {
+                ToolError::Invalid("skill preloading is not available for this subagent".into())
+            })?;
+            shelf.preload(&args.skills).await?
+        };
 
         let (tx, mut rx) = unbounded_channel();
         // Every event resets the silence clock, whatever kind it is: an
@@ -362,6 +474,7 @@ impl Subagent {
                         continue;
                     }
                     Event::Usage(usage) => heard.turn = usage,
+                    Event::Warning(warning) => heard.warnings.push(warning),
                     Event::TurnEnd { usage, .. } => {
                         heard.spent.add(&usage);
                         heard.turn = Default::default();
@@ -380,11 +493,18 @@ impl Subagent {
         // hung tool speaks no events. It trips the same token a stop does.
         let watchdog_stop = stop.clone();
         let deadline = self.deadline;
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let expired = timed_out.clone();
         let watchdog = tokio::spawn(async move {
             let mut ticking = ticking;
             loop {
                 let outlived = tokio::time::Instant::from(*ticking.borrow() + deadline);
                 tokio::select! {
+                    _ = tokio::time::sleep_until(expires) => {
+                        expired.store(true, Ordering::Relaxed);
+                        watchdog_stop.cancel();
+                        return;
+                    }
                     _ = tokio::time::sleep_until(outlived) => {
                         // A reset may have raced the trip; trust only the
                         // value read after the sleep came back.
@@ -405,7 +525,18 @@ impl Subagent {
                 }
             }
         });
-        let mut session = Session::with_prompt(args.prompt);
+        // Keep selected instructions with the task: transient notes may be
+        // omitted by compaction before the child has finished using them.
+        let prompt = if instructions.is_empty() {
+            args.prompt
+        } else {
+            format!(
+                "Follow these preloaded skill instructions for the task below.\n\n{}\n\n---\nTask:\n{}",
+                instructions.join("\n\n---\n\n"),
+                args.prompt,
+            )
+        };
+        let mut session = Session::with_prompt(prompt);
         // One span for the whole child, so the log can file its records
         // under it rather than lose them among its siblings'.
         let child_span = tracing::info_span!(
@@ -414,12 +545,20 @@ impl Subagent {
             session = %child.spill_namespace(),
             description = %args.description,
         );
+        // Use the loop's event entrance so a failed or cancelled request still
+        // leaves the connection diagnostics in the journal.
+        child_span.in_scope(|| {
+            let voice = agent::event::Voice::new(tx.clone(), agent.brief.hooks.clone());
+            for note in &model_notes {
+                voice.warn(note.clone());
+            }
+        });
         // The token ends the run — the watchdog or a stop — unwinding like a
         // stop; one ignoring it is dropped after STOP_GRACE.
         let ran = {
             let mut run = std::pin::pin!(
                 agent
-                    .run(&mut session, &child, &tx, &self.retry)
+                    .run_bounded(&mut session, &child, &tx, &self.retry, max_turns)
                     .instrument(child_span)
             );
             let grace_stop = stop.clone();
@@ -451,13 +590,22 @@ impl Subagent {
                 Heard::default()
             }
         };
+        for warning in &heard.warnings {
+            if !model_notes.contains(warning) {
+                model_notes.push(warning.clone());
+            }
+        }
 
         // A child dropped past its grace never reached its own close.
         session.close_dangling();
-        self.archive.keep(ctx.spill_namespace(), &id, session);
+        self.archive
+            .keep_model(ctx.spill_namespace(), &id, &agent.model.spec.model, session);
 
         let cut = match ran {
             Ok(_) => None,
+            Err(AgentError::TurnLimit { turns }) => {
+                Some(format!("reached the limit of {turns} model turns"))
+            }
             // A stop only: our own token tripping leaves the parent's alone —
             // conflating them would end the caller's whole turn over a wedged child.
             // A child that outlived its grace was stopped all the same.
@@ -466,6 +614,14 @@ impl Subagent {
             }
             // Our token trips only for the parent's stop, caught just above,
             // or for the watchdog.
+            Err(AgentError::Cancelled | AgentError::Unstopped)
+                if timed_out.load(Ordering::Relaxed) =>
+            {
+                Some(format!(
+                    "reached the total runtime budget of {}",
+                    llm::figures::elapsed(timeout)
+                ))
+            }
             Err(AgentError::Cancelled | AgentError::Unstopped) => Some(format!(
                 "a call ran {} with no progress",
                 llm::figures::elapsed(self.deadline)
@@ -482,7 +638,10 @@ impl Subagent {
                 } else {
                     String::new()
                 };
-                return Err(ToolError::Invalid(format!("subagent: {why}{uncounted}")));
+                return Err(ToolError::Invalid(with_model_notes(
+                    format!("subagent: {why}{uncounted}"),
+                    &model_notes,
+                )));
             }
         };
 
@@ -531,11 +690,22 @@ impl Subagent {
         };
         // The child's whole spend rides home on the result, where the parent's
         // run counts it — the surface never had a handle to drain.
-        Ok(
-            ToolOutput::text(answer(&heard, cut.as_deref(), lost, &wrote, check.as_ref()))
-                .with_preview(sketch(&args.description, &heard))
-                .with_spent(heard.spent),
-        )
+        let unfinished = cut.is_some();
+        let output = ToolOutput::text(with_model_notes(
+            answer(&heard, cut.as_deref(), lost, &wrote, check.as_ref()),
+            &model_notes,
+        ))
+        .with_preview(sketch(&args.description, &heard))
+        .with_spent(heard.spent);
+        Ok(if unfinished { output.warned() } else { output })
+    }
+}
+
+fn with_model_notes(body: String, notes: &[String]) -> String {
+    if notes.is_empty() {
+        body
+    } else {
+        format!("{}\n\n{body}", notes.join("\n"))
     }
 }
 

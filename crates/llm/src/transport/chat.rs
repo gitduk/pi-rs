@@ -10,6 +10,8 @@
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
+use std::sync::Mutex;
 
 use super::{Call, FAILED, Forced, Shared, Transport, forced, max_output_tokens};
 use crate::error::{LlmError, Result};
@@ -24,6 +26,7 @@ pub struct ChatCompletions {
     http: reqwest::Client,
     api_key: Option<String>,
     gaps: Shared,
+    without_thinking: Mutex<BTreeSet<(String, String)>>,
 }
 
 impl ChatCompletions {
@@ -32,8 +35,35 @@ impl ChatCompletions {
             http: reqwest::Client::new(),
             api_key,
             gaps: Shared::new("chat"),
+            without_thinking: Mutex::default(),
         }
     }
+}
+
+fn rejects_thinking(error: &LlmError) -> bool {
+    let LlmError::Api {
+        status: 400 | 422,
+        body,
+        ..
+    } = error
+    else {
+        return false;
+    };
+    let message = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| value["error"]["message"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| body.clone())
+        .to_ascii_lowercase();
+    message.contains("thinking")
+        && [
+            "cannot be represented",
+            "unsupported",
+            "not supported",
+            "unknown parameter",
+            "unrecognized",
+        ]
+        .iter()
+        .any(|term| message.contains(term))
 }
 
 fn check_format(spec: &ModelSpec) -> Result<()> {
@@ -401,12 +431,43 @@ impl Transport for ChatCompletions {
         req: &Request,
     ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
         check_format(spec)?;
-        let body = build_body(spec, req);
+        let mut body = build_body(spec, req);
+        let key = (spec.base_url.clone(), spec.model.clone());
+        if self
+            .without_thinking
+            .lock()
+            .expect("thinking capability lock poisoned")
+            .contains(&key)
+        {
+            body.as_object_mut()
+                .expect("chat body is an object")
+                .remove("thinking");
+        }
         let url = format!("{}/chat/completions", spec.base_url.trim_end_matches('/'));
-        let resp = Call::to(&self.http, "chat", url, spec, req)
+        let response = Call::to(&self.http, "chat", url.clone(), spec, req)
             .bearer(&self.api_key)
             .send(&body)
-            .await?;
+            .await;
+        let resp = match response {
+            Err(error) if body.get("thinking").is_some() && rejects_thinking(&error) => {
+                body.as_object_mut()
+                    .expect("chat body is an object")
+                    .remove("thinking");
+                let response = Call::to(&self.http, "chat", url, spec, req)
+                    .bearer(&self.api_key)
+                    .send(&body)
+                    .await?;
+                self.without_thinking
+                    .lock()
+                    .expect("thinking capability lock poisoned")
+                    .insert(key);
+                self.gaps
+                    .frame()
+                    .unsupported_option(&spec.model, "thinking");
+                response
+            }
+            other => other?,
+        };
 
         let mut dec = Decoder::new(self.gaps.clone());
         let events = super::sse(resp, "chat", move |data| {

@@ -11,6 +11,7 @@ agent.workspace = true
 llm.workspace = true
 tool.workspace = true
 pi-tools.workspace = true
+skills.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

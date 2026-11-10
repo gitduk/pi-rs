@@ -40,6 +40,9 @@ pub struct Resolved {
     /// How long a subagent may run silent before it is read as wedged; `None`
     /// leaves the subagent's own default.
     pub subagent_deadline: Option<std::time::Duration>,
+    /// Model connections available to child calls, from this configuration snapshot.
+    pub subagent_models: Option<subagent::ModelResolver>,
+    pub(crate) models: Arc<super::models::Models>,
     /// How far this run may reach. The lane needs it to decide whether the
     /// subagent, offered after this set is cut, belongs in it.
     pub ceiling: tool::Tier,
@@ -268,7 +271,9 @@ pub fn resolve(
     let read_from = watched(pinned, root);
 
     // Sources offer their tools in order, built-ins first.
+    let models = Arc::new(super::models::Models::new(config));
     let mut registry = pi_tools::builtin();
+    registry.read(models.clone());
     // Whether two directories are the one directory, seen from different
     // routes: a home that is the checkout's own `.pi` would otherwise be read
     // twice and every skill and script in it reported as colliding with itself.
@@ -458,6 +463,8 @@ pub fn resolve(
         subagent_deadline: config
             .subagent_deadline
             .map(|s| std::time::Duration::from_secs(s.max(1))),
+        subagent_models: Some(super::dial::subagent_models(pinned, models.clone())),
+        models,
         standing: for_child.into(),
         ceiling: tier,
         commands: std::sync::Arc::new(commands),

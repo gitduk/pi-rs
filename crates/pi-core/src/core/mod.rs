@@ -19,6 +19,7 @@ pub mod lanes;
 pub mod mcp;
 pub mod memory;
 pub mod meter;
+mod models;
 pub mod prompt;
 pub mod question;
 pub mod resolve;

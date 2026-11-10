@@ -78,8 +78,8 @@ pub struct Config {
     pub hooks: Vec<Hook>,
 
     /// How long a subagent may run silent, in seconds, before it is
-    /// read as wedged and stopped — the one brake a subagent has of its own,
-    /// since nothing bounds one by turns. Clamped up to 1 s: a zero would stop
+    /// read as wedged and stopped, independently of its total runtime and turn
+    /// budgets. Clamped up to 1 s: a zero would stop
     /// every subagent the moment it started. Unset reads as 1800.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent_deadline: Option<u64>,
@@ -425,6 +425,7 @@ impl Config {
 pub enum ModelOrigin {
     Flag,
     Command,
+    Subagent,
     Resumed,
     Project,
     Global,

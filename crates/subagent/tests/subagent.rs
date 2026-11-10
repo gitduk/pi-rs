@@ -442,7 +442,7 @@ async fn a_child_that_keeps_talking_outlives_the_deadline() {
 }
 
 #[test]
-fn the_subagent_takes_the_command_and_nothing_else() {
+fn the_subagent_takes_the_task_and_optional_overrides() {
     let parent = Agent::new(
         Arc::new(Scripted {
             turns: vec![],
@@ -459,8 +459,7 @@ fn the_subagent_takes_the_command_and_nothing_else() {
         Retry::default(),
     )
     .schema();
-    // No cap of the caller's to set: the child ends when it answers, when it
-    // stops saying anything, or when the caller's esc reaches it.
+    // Required task fields stay separate from optional execution controls.
     let mut args: Vec<&str> = schema["properties"]
         .as_object()
         .unwrap()
@@ -468,7 +467,19 @@ fn the_subagent_takes_the_command_and_nothing_else() {
         .map(String::as_str)
         .collect();
     args.sort_unstable();
-    assert_eq!(args, ["description", "prompt", "verify"]);
+    assert_eq!(
+        args,
+        [
+            "description",
+            "max_turns",
+            "model",
+            "prompt",
+            "skills",
+            "timeout_ms",
+            "tools",
+            "verify"
+        ]
+    );
 }
 
 #[tokio::test]

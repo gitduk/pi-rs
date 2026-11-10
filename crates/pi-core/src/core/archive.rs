@@ -44,10 +44,14 @@ impl Archive for Filed {
     // On the saver thread: several subagents saving must not each serialize
     // megabytes on the tool path, and `flush` joins whatever is queued.
     fn keep(&self, parent: &str, id: &str, session: Session) {
+        self.keep_model(parent, id, &self.model, session);
+    }
+
+    fn keep_model(&self, parent: &str, id: &str, model: &str, session: Session) {
         let (store, root, model, parent, id) = (
             self.store.clone(),
             self.root.clone(),
-            self.model.clone(),
+            model.to_string(),
             parent.to_string(),
             id.to_string(),
         );

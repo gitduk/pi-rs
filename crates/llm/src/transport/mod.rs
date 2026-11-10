@@ -365,6 +365,15 @@ impl Gaps {
         std::mem::take(&mut self.pending)
     }
 
+    pub(crate) fn unsupported_option(&mut self, model: &str, option: &str) {
+        if self.first_time(&format!("options:{model}"), option) {
+            tracing::warn!(target: "pi::wire", format = self.format, model, option, "retry accepted after removing an unsupported option");
+            self.pending.push(format!(
+                "the endpoint rejected `{option}` for `{model}`; the request succeeded without it, and future requests omit it. The endpoint's default behavior applies instead"
+            ));
+        }
+    }
+
     fn first_time(&mut self, event: &str, thing: &str) -> bool {
         self.said.insert((event.to_string(), thing.to_string()))
     }

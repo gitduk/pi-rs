@@ -1,8 +1,67 @@
 # Tools
 
 The built-in tools are `read`, `write`, `edit`, `glob`, `grep`, `bash`, `fetch`,
-`skill`, `subagent`, and `memory`.
+`skill`, `subagent`, `models`, and `memory`.
 MCP servers and scripts can add tools.
+
+## Model catalog
+
+`models({})` lists locally known model IDs, reported context and output limits,
+capabilities, and prices per million tokens. It uses the same configuration and
+discovered facts as model selection. It sends no network requests and returns no
+connection secrets. Configuration and catalog updates refresh its data.
+Running agents also see these updates. `discovery` reports `pending`, `ready`,
+`failed`, or `not_configured`. A query briefly waits for discovery already in
+progress without starting another network request. If still pending, query again
+rather than reading connection files. A failed refresh can retain earlier data.
+
+`null` means unknown or unconfirmed. Zero prices are unconfirmed because missing
+rates also default to zero. Default capability values are not proof of remote
+support. The list does not verify live availability or establish model speed.
+
+Query when selecting an alternative model for a subagent. Use a returned ID as
+`subagent.model`. Reuse earlier results unless they are outdated or a choice
+fails. Otherwise omit `model` to inherit the caller's model.
+
+## Subagents
+
+`subagent` takes `description` and a self-contained `prompt`. It uses a separate
+context and returns its final message. It does not receive the caller's conversation
+or skill bodies already loaded there. Pass applicable skill names in `skills`.
+
+Optional `skills` preloads the full instructions and sources before the task
+starts, in the supplied order. Missing, unreadable, or oversized skills fail the
+call before the child runs. Omit it or pass `[]` to preload none. Preloading
+works without the `skill` tool and does not grant tools. Allow `skill` if the
+child needs a skill's supporting files or additional instructions. `--no-skills`
+also disables preloading.
+
+Optional `model` selects a model through an existing provider connection, using the
+same model names as the main session. Omit it to inherit the main session's model.
+Optional `tools` is an allowlist of exact tool names. Omit it to inherit tools;
+`[]` disables all tools. It cannot grant tools unavailable to the caller or enable
+nested delegation. The allowlist also applies to tools discovered during the task.
+
+For exploration, pass the exploration skill's name in `skills`, supply
+`tools: ["read", "glob", "grep", "skill"]`, and ask the child to investigate at
+the required depth and report findings with paths and line numbers.
+Check the available tools before selecting
+them. Allowing a shell, script, or MCP tool also allows that tool's side effects.
+
+Optional `verify` runs a shell command after the child stops, with the caller's
+permissions, independently of the child's tool allowlist. Omit it for exploration
+that needs no separate check.
+
+Optional `max_turns` limits model turns, not individual tool calls. The default
+is 64. Optional `timeout_ms` limits total runtime, including progress. Its default
+and maximum are the shared tool runtime limit. Both accept positive integers.
+Reaching either budget returns an unfinished result and preserves the child
+transcript. Cancellation cleanup can extend past the runtime budget. Verification
+runs separately. The silence watchdog remains independent of these budgets.
+
+Calls in a parallel batch finish before the caller resumes. Use short probes
+before assigning long tasks to unfamiliar connections. For a basic check, choose
+an explicit expected answer and small budgets instead of a full codebase survey.
 
 ## MCP tools and prompts
 
