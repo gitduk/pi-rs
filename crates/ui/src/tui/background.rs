@@ -2,12 +2,10 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pi_core::driver::background::{BackgroundCommand, State};
-use pi_store::keys::Mode;
 
 use super::{Asked, Deed, Ui};
 
-pub(super) const HINT: &str =
-    "ctrl+k/j move · x stop · r restart · X stop all · enter output · q/esc back";
+pub(super) const HINT: &str = "j/k move · ctrl+k/j move across input · x stop · r restart · X stop all · enter output · q/esc back";
 
 impl Ui {
     // Keep stopped rows available for restart while other commands still run.
@@ -54,35 +52,35 @@ impl Ui {
         if self.background_focus.is_none() && !(ctrl && key.code == KeyCode::Char('k')) {
             return None;
         }
-        if self.vim != Some(Mode::Normal) || self.reading() || !self.menu().is_empty() {
+        if self.vim.is_none() || self.reading() || !self.menu().is_empty() {
             self.leave_background();
             return None;
         }
         let Some(id) = self.background_focus else {
+            if self.executions.is_empty() {
+                return None;
+            }
             self.background_focus = self.executions.last().map(|j| j.id);
             self.disarm();
             return Some(Asked::Own(Deed::Nothing));
         };
         self.disarm();
-        let deed = if ctrl {
-            match key.code {
-                KeyCode::Char('k') | KeyCode::Char('j') => {
-                    let at = self.executions.iter().position(|j| j.id == id).unwrap_or(0);
-                    let next = if key.code == KeyCode::Char('k') {
-                        Some(at.saturating_sub(1))
-                    } else {
-                        at.checked_add(1)
-                            .filter(|&next| next < self.executions.len())
-                    };
-                    match next.and_then(|at| self.executions.get(at)) {
-                        Some(execution) => self.background_focus = Some(execution.id),
-                        None => self.leave_background(),
-                    }
-                    None
-                }
-                _ => None,
+        if (ctrl || key.modifiers.is_empty()) && matches!(key.code, KeyCode::Char('k' | 'j')) {
+            let at = self.executions.iter().position(|j| j.id == id).unwrap_or(0);
+            let next = if key.code == KeyCode::Char('k') {
+                Some(at.saturating_sub(1))
+            } else {
+                at.checked_add(1)
+                    .filter(|&next| next < self.executions.len())
+            };
+            match next.and_then(|at| self.executions.get(at)) {
+                Some(execution) => self.background_focus = Some(execution.id),
+                None if ctrl => self.leave_background(),
+                None => {}
             }
-        } else if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+            return Some(Asked::Own(Deed::Nothing));
+        }
+        let deed = if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
                     self.leave_background();

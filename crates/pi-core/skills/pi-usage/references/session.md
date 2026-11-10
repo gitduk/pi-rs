@@ -29,7 +29,8 @@ their `key=value` arguments. Descriptions mark tools with `[tool]` and skills
 with `[skill]`. Existing commands keep their names when a tool has the same
 name. There is no `/tool` entry point.
 
-In Vim Normal mode, `ctrl+k` focuses the last background command above the input.
+`ctrl+k` focuses the last background command above the input, in Vim Normal
+mode and on the insert-mode line alike.
 `ctrl+k` and `ctrl+j` move between commands.
 `ctrl+j` below the last command or `esc` returns to the draft at its original
 cursor position. pi highlights the selected command.
@@ -41,7 +42,7 @@ cursor position. pi highlights the selected command.
 
 Stopped rows stay available while focused so you can restart them.
 Completion lists and reading pages keep their own keys.
-Insert mode keeps its editing keys.
+Insert mode keeps its editing keys apart from `ctrl+k`.
 `/keys` includes this help.
 
 While a model reply is generating, completed background results and additional

@@ -430,13 +430,6 @@ fn insert_mode_menus_and_pages_keep_their_keys() {
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     ui.sync_background(background(&[6]));
-    ui.editor.set_line("abcdef");
-    ui.editor.left();
-    ui.editor.left();
-    ui.key(&lane, &mut view, ctrl('k'), false);
-    assert_eq!(ui.editor.text(), "abcd");
-    assert_eq!(ui.background_focus, None);
-    ui.editor.clear();
     ui.vim = Some(Mode::Normal);
     let mut q = Question::of(
         pi_core::core::question::Asker::Tool {

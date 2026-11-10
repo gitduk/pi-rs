@@ -81,7 +81,7 @@ impl Tui {
                 let output = if word == keys::KEYS {
                     let mut listing = self.ui.keys.listing();
                     listing.rows.push(pi_store::listing::Row::new([format!(
-                        "Normal, with no menu: ctrl+k focuses the last execution. In executions: {}",
+                        "Insert or Normal, with no menu: ctrl+k focuses the last execution. In executions: {}",
                         super::background::HINT
                     )]));
                     Output::Listing(listing)
