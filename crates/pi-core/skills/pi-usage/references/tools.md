@@ -59,14 +59,14 @@ Reaching either budget returns an unfinished result and preserves the child
 transcript. Cancellation cleanup can extend past the runtime budget. Verification
 runs separately. The silence watchdog remains independent of these budgets.
 
-Optional `background: true` submits a task and returns its `task_id` immediately.
-Model, tool, and skill validation happens before submission. The task continues
-after the calling turn ends. Its terminal result arrives automatically in the
-originating session, including when that session is idle. Manage it through the
+`background` defaults to `true`: a call submits a task and returns its `task_id`
+immediately. Model, tool, and skill validation happens before submission. The task
+continues after the calling turn ends. Its terminal result arrives automatically in
+the originating session, including when that session is idle. Manage it through the
 existing background task controls. Stopping a task cancels it; exiting the process
-stops all tasks. Background subagents cannot be restarted. Omit `background` or
-use `false` to wait synchronously. Hosts without background execution do not offer
-this parameter.
+stops all tasks. Background subagents cannot be restarted. Set `background: false`
+to wait synchronously. Hosts without background execution do not offer this
+parameter.
 
 Synchronous calls in a parallel batch finish before the caller resumes. Use short probes
 before assigning long tasks to unfamiliar connections. For a basic check, choose
@@ -116,7 +116,8 @@ pi stops a foreground command after ten minutes.
 It never automatically moves that command to the background.
 Interrupting the run stops the command's process group.
 One-shot runs and subagents offer only foreground commands.
-A subagent call waits unless `background: true` is offered and selected.
+A subagent call returns a task when the host offers background execution; otherwise
+it waits.
 Background commands stop when pi exits.
 
 Use cron for work that must continue after pi exits.

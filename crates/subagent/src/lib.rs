@@ -287,7 +287,10 @@ impl Tool for Subagent {
 
     fn description(&self) -> &str {
         "Assign a self-contained task to a subagent. \
-         The tool returns the subagent's conclusion. If background is offered and selected, it returns a task ID instead. \
+         When background execution is available, tasks run in the background by default: the tool returns a task ID immediately and delivers the conclusion automatically. \
+         Dispatch independent tasks, then continue other work or end your turn; do not wait or poll for them. \
+         Set `background: false` only when the next action requires the conclusion immediately or the user explicitly requests synchronous execution. \
+         Without background support, the tool waits and returns the conclusion. \
          The subagent uses the same checkout, with a separate context. \
          It inherits your model and tools unless you supply `model` or `tools`. \
          Supply `skills` to preload applicable instructions by name before the task starts. \
@@ -319,7 +322,8 @@ impl Tool for Subagent {
             "properties": {
                 "background": {
                     "type": "boolean",
-                    "description": "Run independently of this turn. Return a task ID immediately and deliver the terminal result to the originating session automatically. Use when you can continue independent work. The task stops when this process exits. Omit or use false to wait for the conclusion."
+                    "default": true,
+                    "description": "Defaults to true. Return a task ID immediately and deliver the conclusion to the originating session automatically. Use background execution for independent tasks even when you have no other work: dispatch them and end your turn. Set false only when the next action immediately requires the conclusion or the user explicitly requests synchronous execution. The task stops when this process exits."
                 },
                 "description": {
                     "type": "string",
@@ -381,7 +385,12 @@ impl Tool for Subagent {
         Tier::Exec
     }
 
-    async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
+    async fn execute(&self, mut args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
+        if self.executions.is_some()
+            && let Some(args) = args.as_object_mut()
+        {
+            args.entry("background").or_insert(Value::Bool(true));
+        }
         let args: Args =
             tool::parse_args_hinted(args, "subagent takes `description` and `prompt`")?;
         // An ask with no text in it is a message every provider refuses; say so
@@ -411,12 +420,16 @@ impl Tool for Subagent {
         if ctx.cancel.is_cancelled() {
             return Err(ToolError::Cancelled);
         }
-        let description = prepared.args.description.clone();
+        let label = format!(
+            "{} · {}",
+            prepared.agent.spec().model,
+            prepared.args.description
+        );
         let execution = executions.start(
             ctx.into(),
             Invocation::Task {
                 name: Self::NAME.into(),
-                description: description.clone(),
+                description: label.clone(),
             },
             stop,
         );
@@ -446,7 +459,7 @@ impl Tool for Subagent {
         });
         Ok(
             ToolOutput::text(json!({"task_id": id, "status": "running"}).to_string())
-                .with_preview(format!("{description} [background #{id}]")),
+                .with_preview(format!("{label} [background #{id}]")),
         )
     }
 }
@@ -562,6 +575,7 @@ impl Prepared {
         let heard = tokio::spawn(async move {
             let mut heard = Heard::default();
             let mut said = String::new();
+            tell(&caller, &heard, &mut said);
             loop {
                 // A held call is shown when its hold ends, even if the child
                 // falls silent then, as it does under a long command.
