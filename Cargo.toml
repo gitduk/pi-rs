@@ -9,6 +9,7 @@ rust-version = "1.92"
 license = "MIT"
 
 [workspace.dependencies]
+execution = { path = "crates/execution" }
 message = { path = "crates/message" }
 llm = { path = "crates/llm" }
 tool = { path = "crates/tool" }

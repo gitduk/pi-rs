@@ -2,7 +2,7 @@ use super::*;
 use crate::core::{Core, lanes::Lanes};
 use crate::driver::background::Commands;
 use crate::execution::{Kind, RunError, queue::Pending};
-use pi_tools::runtime::background::{Invocation, Owner, RunHandle, RunSink, Scope};
+use ::execution::background::{Invocation, Owner, RunHandle, RunSink, Scope};
 
 fn core(lane: Lane, store: pi_store::session::Store, table: Arc<Table>) -> Core {
     Core {
@@ -820,4 +820,310 @@ async fn a_stream_drain_does_not_overtake_queued_execution_starts() {
         core.next_runtime_event().await;
     }
     crate::core::saves::flush().await;
+}
+
+#[derive(Default)]
+struct ChildArchive(std::sync::Mutex<Vec<String>>);
+
+impl agent::Archive for ChildArchive {
+    fn keep(&self, _: &str, id: &str, _: Session) {
+        self.0.lock().unwrap().push(id.to_owned());
+    }
+}
+
+fn background_subagent(
+    parent: &Lane,
+    table: &Arc<Table>,
+) -> (subagent::Subagent, Arc<ChildArchive>) {
+    let archive = Arc::new(ChildArchive::default());
+    let tool = subagent::Subagent::new(
+        parent.agent(),
+        parent.agent().brief.clone(),
+        archive.clone(),
+        "",
+        Default::default(),
+    )
+    .with_background(Arc::new(Commands::new(table.clone())));
+    (tool, archive)
+}
+
+#[tokio::test]
+async fn a_background_subagent_survives_its_turn_and_wakes_its_own_session() {
+    use tool::Tool as _;
+    let dir = tempfile::tempdir().unwrap();
+    let wire = Arc::new(Wire {
+        billed_input: 1000,
+        ..Default::default()
+    });
+    let parent_wire = Arc::new(Wire::default());
+    let table = Arc::new(Table::default());
+    let parent = lane(dir.path(), parent_wire.clone());
+    let (tool, archive) = background_subagent(&parent, &table);
+    let tool = tool.with_models(Arc::new({
+        let wire = wire.clone();
+        let spec = parent.agent().spec().clone();
+        move |_| {
+            Ok(subagent::ModelConnection {
+                transport: wire.clone(),
+                spec: spec.clone(),
+                notes: vec![],
+            })
+        }
+    }));
+    let ctx = parent.ctx().clone();
+    let started = tokio::time::timeout(std::time::Duration::from_secs(1), tool.execute(
+        serde_json::json!({"description":"independent question", "prompt":"answer", "background":true, "model":"child"}), &ctx,
+    )).await.expect("submission must return while the provider is blocked").unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&started.flatten()).unwrap()["task_id"],
+        1
+    );
+    wire.entered.notified().await;
+    assert!(
+        archive.0.lock().unwrap().is_empty(),
+        "the child is still running"
+    );
+    assert!(
+        table
+            .take_back_for(dir.path(), Some("other-session"))
+            .is_none()
+    );
+    // The parent can make a model request while the child provider is blocked.
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut main = Session::with_prompt("continue independent work");
+    parent_wire.release.notify_one();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        parent
+            .agent()
+            .run(&mut main, &ctx, &tx, &Default::default()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(archive.0.lock().unwrap().is_empty());
+    ctx.cancel.cancel();
+    wire.release.notify_one();
+    let mut core = core(
+        parent,
+        pi_store::session::Store::new(dir.path().join("state")),
+        table.clone(),
+    );
+    let started = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match core.next_runtime_event().await {
+                super::super::runtime::Event::Activity => continue,
+                super::super::runtime::Event::Started(started) => break started,
+                _ => panic!("the result must wake the original session"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(started.message.body().iter().any(|block| matches!(block, message::Block::Data(data) if data["completion"]["usage"]["input"] == 1000)));
+    assert_eq!(core.lanes[0].spent().usage.input, 1000);
+    assert_eq!(started.request.lane, core.lanes[0].token());
+    assert_eq!(
+        archive.0.lock().unwrap().len(),
+        1,
+        "archived before delivering"
+    );
+    assert!(
+        table.take_back_for(dir.path(), ctx.session()).is_none(),
+        "delivered once"
+    );
+    parent_wire.release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !matches!(
+            core.next_runtime_event().await,
+            super::super::runtime::Event::Settled(_)
+        ) {}
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        core.lanes[0].spent().usage.input,
+        1000,
+        "delivery must not charge again"
+    );
+}
+
+#[tokio::test]
+async fn invalid_background_subagent_settings_do_not_register_a_task() {
+    use tool::Tool as _;
+    let dir = tempfile::tempdir().unwrap();
+    let parent = lane(dir.path(), Arc::default());
+    let table = Arc::new(Table::default());
+    let (tool, _archive) = background_subagent(&parent, &table);
+    for extra in [
+        serde_json::json!({"model":"missing"}),
+        serde_json::json!({"tools":["missing"]}),
+        serde_json::json!({"skills":["missing"]}),
+    ] {
+        let mut args =
+            serde_json::json!({"description":"invalid task", "prompt":"answer", "background":true});
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert!(tool.execute(args, parent.ctx()).await.is_err());
+        assert!(table.background(dir.path()).is_empty());
+    }
+}
+
+#[tokio::test]
+async fn stopping_a_background_subagent_archives_without_delivering_a_late_result() {
+    use tool::Tool as _;
+    let dir = tempfile::tempdir().unwrap();
+    let wire = Arc::new(Wire::default());
+    let parent = lane(dir.path(), wire.clone());
+    let table = Arc::new(Table::default());
+    let (tool, archive) = background_subagent(&parent, &table);
+    tool.execute(
+        serde_json::json!({"description":"cancel task", "prompt":"answer", "background":true}),
+        parent.ctx(),
+    )
+    .await
+    .unwrap();
+    wire.entered.notified().await;
+    table.stop(dir.path(), 1).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while archive.0.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled work must be archived");
+    assert!(
+        table
+            .take_back_for(dir.path(), parent.ctx().session())
+            .is_none()
+    );
+    assert!(table.background(dir.path()).is_empty());
+}
+
+#[tokio::test]
+async fn background_subagent_timeout_delivers_an_incomplete_terminal_report() {
+    use tool::Tool as _;
+    let dir = tempfile::tempdir().unwrap();
+    let parent = lane(dir.path(), Arc::default());
+    let table = Arc::new(Table::default());
+    let (tool, archive) = background_subagent(&parent, &table);
+    tool.execute(serde_json::json!({"description":"bounded task", "prompt":"answer", "background":true, "timeout_ms":1}), parent.ctx()).await.unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let changed = table.changed().notified();
+            if let Some(result) = table.claim_result(dir.path(), parent.id()) {
+                break result;
+            }
+            changed.await;
+        }
+    })
+    .await
+    .unwrap();
+    let completion = result.due.completion.as_ref().unwrap();
+    assert_eq!(completion["outcome"], "incomplete");
+    assert_eq!(completion["warned"], true);
+    assert!(result.due.text.contains("runtime budget"));
+    assert_eq!(archive.0.lock().unwrap().len(), 1);
+    assert!(result.commit());
+    assert!(table.claim_result(dir.path(), parent.id()).is_none());
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_detached_subagent_archival() {
+    use tool::Tool as _;
+    let dir = tempfile::tempdir().unwrap();
+    let wire = Arc::new(Wire::default());
+    let table = Arc::new(Table::default());
+    let parent = lane(dir.path(), wire.clone());
+    let (tool, archive) = background_subagent(&parent, &table);
+    tool.execute(
+        serde_json::json!({"description":"pending task", "prompt":"answer", "background":true}),
+        parent.ctx(),
+    )
+    .await
+    .unwrap();
+    wire.entered.notified().await;
+    let mut core = core(
+        parent,
+        pi_store::session::Store::new(dir.path().join("state")),
+        table,
+    );
+    assert!(!core.runtime_busy(), "the parent turn has already ended");
+    core.stop_runtime();
+    core.finish_runtime_shutdown("test shutdown");
+    assert!(archive.0.lock().unwrap().is_empty());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        core.wait_background_shutdown(),
+    )
+    .await
+    .unwrap();
+    crate::core::saves::flush().await;
+    assert_eq!(
+        archive.0.lock().unwrap().len(),
+        1,
+        "cleanup archived before the final flush"
+    );
+}
+
+#[tokio::test]
+async fn background_spend_stays_with_its_session_after_new() {
+    use tool::Tool as _;
+    let dir = tempfile::tempdir().unwrap();
+    let wire = Arc::new(Wire {
+        billed_input: 1000,
+        ..Default::default()
+    });
+    let table = Arc::new(Table::default());
+    let parent = lane(dir.path(), wire.clone());
+    let meter = parent.agent().meter.clone();
+    let (tool, archive) = background_subagent(&parent, &table);
+    tool.execute(
+        serde_json::json!({"description":"old task", "prompt":"answer", "background":true}),
+        parent.ctx(),
+    )
+    .await
+    .unwrap();
+    wire.entered.notified().await;
+    let mut core = core(
+        parent,
+        pi_store::session::Store::new(dir.path().join("state")),
+        table.clone(),
+    );
+    let old_id = core.lane().id().to_owned();
+    core.dispatch(crate::input::Intent::Builtin(crate::input::Builtin::New));
+    assert_ne!(core.lane().id(), old_id);
+    assert!(!Arc::ptr_eq(&meter, &core.lane().agent().meter));
+    wire.release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while archive.0.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(meter.read().usage.input, 1000);
+    assert_eq!(core.lane().spent().usage.input, 0);
+    // The tool rearmed for the new session must use that session's fresh meter too.
+    let next = core
+        .lane()
+        .agent()
+        .brief
+        .registry
+        .get(subagent::Subagent::NAME)
+        .unwrap();
+    next.execute(
+        serde_json::json!({"description":"new task", "prompt":"answer", "background":true}),
+        core.lane().ctx(),
+    )
+    .await
+    .unwrap();
+    wire.entered.notified().await;
+    wire.release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(2), table.wait_tasks())
+        .await
+        .unwrap();
+    assert_eq!(core.lane().spent().usage.input, 1000);
+    assert_eq!(meter.read().usage.input, 1000);
 }

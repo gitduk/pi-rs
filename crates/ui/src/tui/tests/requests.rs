@@ -1,20 +1,20 @@
 use std::sync::Arc;
 
+use ::execution::background::{RunHandle, RunSink};
+use ::execution::channel::{Outcome, Response, Told};
 use pi_core::driver::{Ended, Origin};
 use pi_core::execution::{Done, Kind, Request, RunError};
-use pi_tools::runtime::background::{RunHandle, RunSink};
-use pi_tools::runtime::channel::{Outcome, Response, Told};
 
 use super::harness::*;
 use crate::tui::{Asked, Tui, Wake};
 
-fn bridge(tui: &Tui) -> (Arc<dyn RunHandle>, pi_tools::runtime::channel::Receiver) {
+fn bridge(tui: &Tui) -> (Arc<dyn RunHandle>, ::execution::channel::Receiver) {
     let execution = pi_core::driver::background::Commands::new(tui.drivers.background()).start(
         tui.core.lane().root().to_path_buf().into(),
-        pi_tools::runtime::background::Invocation::shell("bridge"),
+        ::execution::background::Invocation::shell("bridge"),
         Default::default(),
     );
-    let (tx, rx) = pi_tools::runtime::channel::channel();
+    let (tx, rx) = ::execution::channel::channel();
     execution.channel().listen(tx);
     (execution, rx)
 }
@@ -32,7 +32,7 @@ async fn submit(tui: &mut Tui, execution: &dyn RunHandle, text: &str) {
     }
 }
 
-fn response(rx: &mut pi_tools::runtime::channel::Receiver) -> (u64, Response) {
+fn response(rx: &mut ::execution::channel::Receiver) -> (u64, Response) {
     loop {
         match rx.try_recv().expect("an operation response") {
             Told::Response { request, event } => return (request, event),

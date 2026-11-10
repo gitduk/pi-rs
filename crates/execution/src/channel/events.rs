@@ -77,7 +77,8 @@ impl Receiver {
         self.from.try_recv().map(|queued| queued.event)
     }
 
-    pub(crate) fn disconnection(&self) -> CancellationToken {
+    /// Cancelled when the receiver no longer accepts events.
+    pub fn disconnection(&self) -> CancellationToken {
         self.closed.clone()
     }
 }

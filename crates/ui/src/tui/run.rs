@@ -11,12 +11,12 @@ use tokio_util::sync::CancellationToken;
 use super::Tui;
 use super::term::{Deafened, EXIT_GRACE, external_editor, scratch_file};
 use super::view::{Doing, Work, front_view, tail_of, view_at};
+use ::execution::channel::Outcome;
 use pi_core::driver::Origin;
 #[cfg(test)]
 pub(super) use pi_core::execution::Done;
 use pi_core::execution::{self, Change, Output, Request, RunResult};
 pub(super) use pi_core::execution::{Fetched, Kind, RemovedWorktrees, Started};
-use pi_tools::runtime::channel::Outcome;
 
 // Where off-loop work reports back: one channel per kind of result.
 pub(super) struct Replies {
@@ -142,7 +142,7 @@ impl Tui {
         request: Request,
     ) -> bool {
         self.drivers
-            .respond(request, pi_tools::runtime::channel::Response::Started);
+            .respond(request, ::execution::channel::Response::Started);
         self.start_model_on(admitted, request)
     }
 
@@ -765,5 +765,17 @@ impl Tui {
             }
         }
         self.core.finish_runtime_shutdown(why);
+        if tokio::time::timeout(
+            agent::STOP_GRACE + EXIT_GRACE,
+            self.core.wait_background_shutdown(),
+        )
+        .await
+        .is_err()
+        {
+            self.ui.screen.leave();
+            eprintln!(
+                "some background executions did not stop in time; their last save is what is on disk"
+            );
+        }
     }
 }

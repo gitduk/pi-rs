@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use ::execution::background::{Invocation, Outcome as ExecutionOutcome, Report, RunSink};
 use async_trait::async_trait;
 use pi_tools::bash;
 use serde_json::{Value, json};
@@ -32,6 +33,8 @@ struct Args {
     // the log, which otherwise show a delegated task as a bare `subagent`.
     description: String,
     prompt: String,
+    #[serde(default)]
+    background: bool,
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
@@ -89,6 +92,7 @@ pub struct Subagent {
     tools: Option<ToolFactory>,
     models: Option<ModelResolver>,
     skills: Option<Arc<skills::Shelf>>,
+    executions: Option<Arc<dyn RunSink>>,
 }
 
 // How long a child may run silent unless `with_deadline` says otherwise.
@@ -155,7 +159,14 @@ impl Subagent {
             tools: None,
             models: None,
             skills: None,
+            executions: None,
         }
+    }
+
+    /// Register calls that must continue independently of their calling turn.
+    pub fn with_background(mut self, executions: Arc<dyn RunSink>) -> Self {
+        self.executions = Some(executions);
+        self
     }
 
     pub fn with_deadline(mut self, deadline: Duration) -> Self {
@@ -276,7 +287,7 @@ impl Tool for Subagent {
 
     fn description(&self) -> &str {
         "Assign a self-contained task to a subagent. \
-         The tool returns the subagent's conclusion. \
+         The tool returns the subagent's conclusion. If background is offered and selected, it returns a task ID instead. \
          The subagent uses the same checkout, with a separate context. \
          It inherits your model and tools unless you supply `model` or `tools`. \
          Supply `skills` to preload applicable instructions by name before the task starts. \
@@ -303,9 +314,13 @@ impl Tool for Subagent {
     }
 
     fn schema(&self) -> Value {
-        json!({
+        let mut schema = json!({
             "type": "object",
             "properties": {
+                "background": {
+                    "type": "boolean",
+                    "description": "Run independently of this turn. Return a task ID immediately and deliver the terminal result to the originating session automatically. Use when you can continue independent work. The task stops when this process exits. Omit or use false to wait for the conclusion."
+                },
                 "description": {
                     "type": "string",
                     "description": "Name the task in three to six words. Examples: \"find every caller of spans\" or \"run the test suite\". The user sees this label while the task runs. The subagent does not receive it.",
@@ -351,7 +366,14 @@ impl Tool for Subagent {
             },
             "required": ["description", "prompt"],
             "additionalProperties": false,
-        })
+        });
+        if self.executions.is_none() {
+            schema["properties"]
+                .as_object_mut()
+                .expect("object schema")
+                .remove("background");
+        }
+        schema
     }
 
     // What the child may do, because that is what the caller is authorising.
@@ -369,19 +391,77 @@ impl Tool for Subagent {
                 "the subagent's `prompt` is empty — say what it should do".into(),
             ));
         }
-        self.run(args, ctx).await
+        if !args.background {
+            let prepared = self.prepare(args, ctx).await?;
+            return prepared
+                .run(self.archive.as_ref(), &self.retry, self.deadline, ctx)
+                .await
+                .map(|report| report.output);
+        }
+        let executions = self.executions.as_ref().ok_or_else(|| {
+            ToolError::Invalid("background execution is not available for this subagent".into())
+        })?;
+        // Validation remains cancellable; accepted work gets its own lifetime.
+        let stop = tokio_util::sync::CancellationToken::new();
+        let detached = ctx.clone().with_cancel(stop.clone());
+        let mut prepared = tokio::select! {
+            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+            prepared = self.prepare(args, &detached) => prepared?,
+        };
+        if ctx.cancel.is_cancelled() {
+            return Err(ToolError::Cancelled);
+        }
+        let description = prepared.args.description.clone();
+        let execution = executions.start(
+            ctx.into(),
+            Invocation::Task {
+                name: Self::NAME.into(),
+                description: description.clone(),
+            },
+            stop,
+        );
+        let id = execution.id();
+        let progress = execution.clone();
+        let progress: tool::Progress = Arc::new(move |text| progress.channel().status(text));
+        let detached = detached.with_progress(progress.clone());
+        prepared.child = prepared.child.with_progress(progress);
+        let archive = self.archive.clone();
+        let retry = self.retry;
+        let deadline = self.deadline;
+        ::execution::background::spawn(execution, async move {
+            let report = match prepared
+                .run(archive.as_ref(), &retry, deadline, &detached)
+                .await
+            {
+                Ok(report) => report,
+                Err(error) => Report {
+                    outcome: ExecutionOutcome::Failed,
+                    output: ToolOutput::text(error.to_string()).warned(),
+                },
+            };
+            Report {
+                output: tool::output::bound(report.output, &detached),
+                ..report
+            }
+        });
+        Ok(
+            ToolOutput::text(json!({"task_id": id, "status": "running"}).to_string())
+                .with_preview(format!("{description} [background #{id}]")),
+        )
     }
 }
 
+struct Prepared {
+    args: Args,
+    id: String,
+    child: Ctx,
+    agent: Agent,
+    model_notes: Vec<String>,
+    instructions: Vec<String>,
+}
+
 impl Subagent {
-    async fn run(&self, args: Args, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let max_turns = args.max_turns.unwrap_or(MAX_TURNS);
-        let timeout = args
-            .timeout_ms
-            .map(|ms| Duration::from_millis(ms.get()))
-            .unwrap_or(tool::limit::MAX_CALL)
-            .min(tool::limit::MAX_CALL);
-        let expires = tokio::time::Instant::now() + timeout;
+    async fn prepare(&self, args: Args, ctx: &Ctx) -> Result<Prepared, ToolError> {
         let id = format!(
             "{}-subagent-{}",
             ctx.spill_namespace(),
@@ -389,14 +469,15 @@ impl Subagent {
         );
         // Tree, locks and renumbering are shared with the parent (same files);
         // transcript, spill name and token are the child's own.
-        let stop = ctx.cancel.child_token();
-        let _stop = stop.clone().drop_guard();
-        let root = ctx.spill_root().to_path_buf();
-        let child = ctx
+        let mut child = ctx
             .clone()
-            .with_cancel(stop.clone())
-            .with_session(&id, root)
+            .with_cancel(ctx.cancel.child_token())
+            .with_session(&id, ctx.spill_root())
             .with_own_writes();
+        if args.background {
+            // Reads in another context must not acknowledge changes for the caller.
+            child.viewed = Default::default();
+        }
 
         let mut agent = self.agent.as_ref().clone();
         let mut model_notes = Vec::new();
@@ -437,6 +518,42 @@ impl Subagent {
             shelf.preload(&args.skills).await?
         };
 
+        Ok(Prepared {
+            args,
+            id,
+            child,
+            agent,
+            model_notes,
+            instructions,
+        })
+    }
+}
+
+impl Prepared {
+    async fn run(
+        self,
+        archive: &dyn Archive,
+        retry: &Retry,
+        deadline: Duration,
+        ctx: &Ctx,
+    ) -> Result<Report, ToolError> {
+        let Self {
+            args,
+            id,
+            child,
+            agent,
+            mut model_notes,
+            instructions,
+        } = self;
+        let max_turns = args.max_turns.unwrap_or(MAX_TURNS);
+        let timeout = args
+            .timeout_ms
+            .map(|ms| Duration::from_millis(ms.get()))
+            .unwrap_or(tool::limit::MAX_CALL)
+            .min(tool::limit::MAX_CALL);
+        let stop = child.cancel.clone();
+        let _stop = stop.clone().drop_guard();
+        let expires = tokio::time::Instant::now() + timeout;
         let (tx, mut rx) = unbounded_channel();
         // Every event resets the silence clock, whatever kind it is: an
         // event is the child moving, and moving is all the watchdog asks.
@@ -492,7 +609,6 @@ impl Subagent {
         // The watchdog: silence for a whole deadline is a wedged call — a
         // hung tool speaks no events. It trips the same token a stop does.
         let watchdog_stop = stop.clone();
-        let deadline = self.deadline;
         let timed_out = Arc::new(AtomicBool::new(false));
         let expired = timed_out.clone();
         let watchdog = tokio::spawn(async move {
@@ -558,7 +674,7 @@ impl Subagent {
         let ran = {
             let mut run = std::pin::pin!(
                 agent
-                    .run_bounded(&mut session, &child, &tx, &self.retry, max_turns)
+                    .run_bounded(&mut session, &child, &tx, retry, max_turns)
                     .instrument(child_span)
             );
             let grace_stop = stop.clone();
@@ -579,7 +695,7 @@ impl Subagent {
         // The collector ends when the last sender goes, and `run` held one.
         drop(tx);
         let mut lost = false;
-        let heard = match heard.await {
+        let mut heard = match heard.await {
             Ok(heard) => heard,
             // Torn down with the task itself: nothing more was seen because
             // nothing more was sent.
@@ -590,6 +706,7 @@ impl Subagent {
                 Heard::default()
             }
         };
+        heard.spent.add(&heard.turn);
         for warning in &heard.warnings {
             if !model_notes.contains(warning) {
                 model_notes.push(warning.clone());
@@ -598,9 +715,9 @@ impl Subagent {
 
         // A child dropped past its grace never reached its own close.
         session.close_dangling();
-        self.archive
-            .keep_model(ctx.spill_namespace(), &id, &agent.model.spec.model, session);
+        archive.keep_model(ctx.spill_namespace(), &id, &agent.model.spec.model, session);
 
+        let mut outcome = ExecutionOutcome::Succeeded;
         let cut = match ran {
             Ok(_) => None,
             Err(AgentError::TurnLimit { turns }) => {
@@ -610,7 +727,11 @@ impl Subagent {
             // conflating them would end the caller's whole turn over a wedged child.
             // A child that outlived its grace was stopped all the same.
             Err(AgentError::Cancelled | AgentError::Unstopped) if ctx.cancel.is_cancelled() => {
-                return Err(ToolError::Cancelled);
+                if !args.background {
+                    return Err(ToolError::Cancelled);
+                }
+                outcome = ExecutionOutcome::Cancelled;
+                Some("execution cancelled".into())
             }
             // Our token trips only for the parent's stop, caught just above,
             // or for the watchdog.
@@ -624,24 +745,27 @@ impl Subagent {
             }
             Err(AgentError::Cancelled | AgentError::Unstopped) => Some(format!(
                 "a call ran {} with no progress",
-                llm::figures::elapsed(self.deadline)
+                llm::figures::elapsed(deadline)
             )),
             Err(why) => {
-                // The child's spend rode home on the collector, but an error
-                // result carries no `.with_spent`: name what went uncounted.
-                let uncounted = if heard.spent.input + heard.spent.output > 0 {
-                    format!(
-                        " ({} turn(s), {}, ran uncounted)",
-                        heard.turns,
-                        llm::figures::slash(heard.spent.input, heard.spent.output)
-                    )
-                } else {
-                    String::new()
-                };
-                return Err(ToolError::Invalid(with_model_notes(
-                    format!("subagent: {why}{uncounted}"),
-                    &model_notes,
-                )));
+                if !args.background {
+                    // Error results cannot carry `.with_spent` into the caller's run.
+                    let uncounted = if heard.spent.input + heard.spent.output > 0 {
+                        format!(
+                            " ({} turn(s), {}, ran uncounted)",
+                            heard.turns,
+                            llm::figures::slash(heard.spent.input, heard.spent.output)
+                        )
+                    } else {
+                        String::new()
+                    };
+                    return Err(ToolError::Invalid(with_model_notes(
+                        format!("subagent: {why}{uncounted}"),
+                        &model_notes,
+                    )));
+                }
+                outcome = ExecutionOutcome::Failed;
+                Some(format!("subagent: {why}"))
             }
         };
 
@@ -663,6 +787,7 @@ impl Subagent {
             .filter(|v| !v.is_empty())
         {
             None => None,
+            Some(_) if ctx.cancel.is_cancelled() => None,
             Some(command) => {
                 // The workspace's own cap, not a shorter one: a subagent's
                 // leash isn't a request for a shorter suite.
@@ -677,6 +802,10 @@ impl Subagent {
                     },
                     // A stop ends the caller's turn as elsewhere; anything else is an
                     // outcome, not a reason to drop the work the child already did.
+                    Err(ToolError::Cancelled) if args.background => {
+                        outcome = ExecutionOutcome::Cancelled;
+                        Outcome::NoVerdict("execution cancelled".into())
+                    }
                     Err(ToolError::Cancelled) => return Err(ToolError::Cancelled),
                     Err(ToolError::Timeout { ms, .. }) => Outcome::CutOff { ms },
                     Err(why) => Outcome::NoVerdict(why.to_string()),
@@ -688,8 +817,17 @@ impl Subagent {
                 })
             }
         };
-        // The child's whole spend rides home on the result, where the parent's
-        // run counts it — the surface never had a handle to drain.
+        // Synchronous calls fold this usage into their caller's run. Background
+        // reports retain it as metadata; the shared meter already counted it.
+        if outcome == ExecutionOutcome::Succeeded
+            && let Some(checked) = &check
+        {
+            outcome = match &checked.outcome {
+                Outcome::Ran { code: 0, .. } => ExecutionOutcome::Succeeded,
+                Outcome::Ran { .. } => ExecutionOutcome::Failed,
+                Outcome::CutOff { .. } | Outcome::NoVerdict(_) => ExecutionOutcome::Incomplete,
+            };
+        }
         let unfinished = cut.is_some();
         let output = ToolOutput::text(with_model_notes(
             answer(&heard, cut.as_deref(), lost, &wrote, check.as_ref()),
@@ -697,7 +835,17 @@ impl Subagent {
         ))
         .with_preview(sketch(&args.description, &heard))
         .with_spent(heard.spent);
-        Ok(if unfinished { output.warned() } else { output })
+        if unfinished && outcome == ExecutionOutcome::Succeeded {
+            outcome = ExecutionOutcome::Incomplete;
+        }
+        Ok(Report {
+            outcome,
+            output: if outcome != ExecutionOutcome::Succeeded {
+                output.warned()
+            } else {
+                output
+            },
+        })
     }
 }
 

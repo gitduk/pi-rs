@@ -213,7 +213,9 @@ fn background_parts(
     let border = Line::from(paint.span_hovered(hovered, &paint.theme.muted, id));
     let mut spans = match execution.invocation.as_ref() {
         Invocation::Shell { .. } => paint.shell(description, hovered),
-        Invocation::Tool { name, .. } => paint.tool_call(name, description, hovered),
+        Invocation::Tool { name, .. } | Invocation::Task { name, .. } => {
+            paint.tool_call(name, description, hovered)
+        }
     };
     spans.push(paint.span_hovered(hovered, &paint.theme.muted, progress));
     (Line::from(spans), Some(border))

@@ -12,6 +12,7 @@ struct Wire {
     entered: Notify,
     release: Notify,
     panic: bool,
+    billed_input: u64,
 }
 
 #[async_trait::async_trait]
@@ -35,7 +36,10 @@ impl llm::Transport for Wire {
             }),
             Ok(StreamEvent::Done {
                 stop: StopReason::EndTurn,
-                usage: Usage::default(),
+                usage: Usage {
+                    input: self.billed_input,
+                    ..Default::default()
+                },
             }),
         ])))
     }

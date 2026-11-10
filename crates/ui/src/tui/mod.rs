@@ -662,7 +662,7 @@ impl Tui {
                 self.complete(
                     request,
                     pi_core::execution::Output::Notice(String::new()),
-                    pi_tools::runtime::channel::Outcome::Failed(why.to_string()),
+                    ::execution::channel::Outcome::Failed(why.to_string()),
                 );
                 Wake::Nothing
             }

@@ -3,10 +3,10 @@
 use super::run::Replies;
 use super::view::{Pending, Queued};
 use super::{Tui, clipboard, front_view, keys};
+use ::execution::channel::{Outcome, Response};
 use pi_core::driver::Origin;
 use pi_core::execution::{self, Action, Change, Completion, Output, Request};
 use pi_core::input::{Intent, Rewound};
-use pi_tools::runtime::channel::{Outcome, Response};
 
 impl Tui {
     /// Every admitted operation uses this executor, independently of where its

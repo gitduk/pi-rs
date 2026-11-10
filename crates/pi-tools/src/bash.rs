@@ -575,20 +575,30 @@ async fn wait(
 type Running = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Ran, ToolError>> + Send>>;
 
 fn supervise(running: Running, execution: Arc<dyn RunHandle>) {
-    tokio::spawn(async move {
-        match running.await {
+    use ::execution::background::{Outcome, Report};
+    ::execution::background::spawn(execution, async move {
+        let (outcome, output) = match running.await {
             Ok(ran) => {
                 let ended = format!("exited {}", ran.code);
-                execution.channel().result(if ran.body.is_empty() {
+                let outcome = if ran.code == 0 {
+                    Outcome::Succeeded
+                } else {
+                    Outcome::Failed
+                };
+                let body = if ran.body.is_empty() {
                     format!("{ended}, no output")
                 } else {
                     format!("{ended}:\n{}", ran.body)
-                });
+                };
+                (outcome, ToolOutput::text(body))
             }
-            Err(ToolError::Cancelled) => return,
-            Err(why) => execution.channel().result(why.to_string()),
-        }
-        execution.end();
+            Err(ToolError::Cancelled) => (
+                Outcome::Cancelled,
+                ToolOutput::text("execution cancelled").warned(),
+            ),
+            Err(why) => (Outcome::Failed, ToolOutput::text(why.to_string()).warned()),
+        };
+        Report { outcome, output }
     });
 }
 

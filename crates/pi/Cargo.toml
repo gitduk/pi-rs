@@ -26,5 +26,6 @@ tempfile = "3"
 tokio.workspace = true
 
 [dev-dependencies]
+execution.workspace = true
 pi-tools.workspace = true
 serde_json.workspace = true

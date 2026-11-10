@@ -631,6 +631,14 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
     stop.cancel();
     core.stop_runtime();
     core.finish_runtime_shutdown("single run completed");
+    if tokio::time::timeout(agent::STOP_GRACE, core.wait_background_shutdown())
+        .await
+        .is_err()
+    {
+        eprintln!(
+            "some background executions did not stop in time; their last save is what is on disk"
+        );
+    }
     drop(tx);
     let _ = painter.await;
     if keeps {

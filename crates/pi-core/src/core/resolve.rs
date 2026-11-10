@@ -456,7 +456,7 @@ pub fn resolve(
             summarize: prompt_files.prompt("summarize").into_owned(),
             effort,
             approver: std::sync::Arc::new(agent::Ceiling(tier)),
-            hooks: hooks.arm(std::sync::Arc::new(pi_tools::runtime::channel::NoOne)),
+            hooks: hooks.arm(std::sync::Arc::new(::execution::channel::NoOne)),
         }),
         prompt_blocks,
         hooks,

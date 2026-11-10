@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "The tools a run acts through"
 
 [dependencies]
+execution.workspace = true
 message.workspace = true
 llm.workspace = true
 tool.workspace = true

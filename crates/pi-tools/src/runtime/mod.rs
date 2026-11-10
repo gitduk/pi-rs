@@ -1,4 +1,3 @@
-//! Host capabilities injected into tools; execution and transport stay with their callers.
+//! Host execution contracts retained here for existing tool integrations.
 
-pub mod background;
-pub mod channel;
+pub use execution::{background, channel};

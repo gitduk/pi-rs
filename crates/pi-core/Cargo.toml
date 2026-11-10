@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "pi's session state and inputs: lanes, commands, drivers"
 
 [dependencies]
+execution.workspace = true
 message.workspace = true
 thiserror.workspace = true
 futures.workspace = true
@@ -21,7 +22,7 @@ mcp.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 clap.workspace = true
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true

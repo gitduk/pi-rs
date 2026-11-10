@@ -105,13 +105,13 @@ struct Setup {
     messages: Messages,
     input: crate::driver::input::Input,
     owner: crate::execution::messages::Responder,
-    channel: Arc<dyn pi_tools::runtime::background::RunHandle>,
+    channel: Arc<dyn ::execution::background::RunHandle>,
     _binding: Arc<crate::execution::ingress::Ingress>,
 }
 
 impl Setup {
     fn new() -> Self {
-        use pi_tools::runtime::background::RunSink as _;
+        use ::execution::background::RunSink as _;
         let dir = tempfile::tempdir().unwrap();
         let table = Arc::new(Table::default());
         let messages = Messages::new(message::SessionId::new("user-response".into()).unwrap());
@@ -133,14 +133,14 @@ impl Setup {
         let binding =
             table.bind_inputs(dir.path().into(), 17, messages.clone(), Default::default());
         let channel = Commands::new(table.clone()).start(
-            pi_tools::runtime::background::Scope {
+            ::execution::background::Scope {
                 root: dir.path().into(),
-                owner: Some(pi_tools::runtime::background::Owner {
+                owner: Some(::execution::background::Owner {
                     session: messages.session().as_str().into(),
                     request: None,
                 }),
             },
-            pi_tools::runtime::background::Invocation::shell("channel"),
+            ::execution::background::Invocation::shell("channel"),
             Default::default(),
         );
         Self {
@@ -414,7 +414,7 @@ async fn dropping_the_native_owner_closes_the_user_port_and_its_parent() {
 
 #[tokio::test]
 async fn concurrent_channels_commit_one_answer_and_retries_survive_reload() {
-    use pi_tools::runtime::background::RunSink as _;
+    use ::execution::background::RunSink as _;
     let mut setup = Setup::new();
     let tool = AskUser(Arc::new(Commands::new(setup.table.clone())));
     let args = json!({"text":"Choose"});
@@ -465,14 +465,14 @@ async fn concurrent_channels_commit_one_answer_and_retries_survive_reload() {
         Default::default(),
     );
     let channel = Commands::new(table).start(
-        pi_tools::runtime::background::Scope {
+        ::execution::background::Scope {
             root: setup.dir.path().into(),
-            owner: Some(pi_tools::runtime::background::Owner {
+            owner: Some(::execution::background::Owner {
                 session: restored.session().as_str().into(),
                 request: None,
             }),
         },
-        pi_tools::runtime::background::Invocation::shell("reconnected"),
+        ::execution::background::Invocation::shell("reconnected"),
         Default::default(),
     );
     let before = restored.cursor();

@@ -338,9 +338,9 @@ pub fn arm(
     let executions =
         executions.map(|table| Arc::new(crate::driver::background::Commands::new(table)));
     // Hooks ask where executions are kept, a child's gates as the lane's do.
-    let ask: Arc<dyn pi_tools::runtime::channel::Ask> = match &executions {
+    let ask: Arc<dyn ::execution::channel::Ask> = match &executions {
         Some(executions) => executions.clone(),
-        None => Arc::new(pi_tools::runtime::channel::NoOne),
+        None => Arc::new(::execution::channel::NoOne),
     };
     let mut brief = resolved.brief.clone();
     Arc::make_mut(&mut brief).hooks = resolved.hooks.arm(ask.clone());
@@ -353,6 +353,9 @@ pub fn arm(
         retry,
     )
     .with_tools(Arc::new(|_, registry| super::shells::foreground(registry)));
+    if let Some(executions) = &executions {
+        subagent = subagent.with_background(executions.clone());
+    }
     if let Some(deadline) = resolved.subagent_deadline {
         subagent = subagent.with_deadline(deadline);
     }
@@ -1070,9 +1073,6 @@ impl Core {
         let lane = self.lane_mut();
         lane.close_inputs();
         lane.talk = talk;
-        // In place, not a new `Arc`: the subagent tool holds this one. A command
-        // of the old session still out charges the new one from here.
-        lane.checkout.agent.meter.reset(Totals::default());
         lane.checkout.ctx = lane
             .checkout
             .ctx
@@ -1080,9 +1080,18 @@ impl Core {
             .with_session(&lane.talk.id, pi_store::spill_root());
         // What the old session's model saw, this one never did.
         lane.checkout.ctx.viewed = Default::default();
-        if let Some(table) = self.executions.clone() {
-            self.lane_mut().bind_inputs(&table);
-        }
+        let resolved = self.lane().resolved().clone();
+        let archive = self.archive(
+            self.lane().root().to_path_buf(),
+            self.lane().agent().spec().model.clone(),
+        );
+        let retry = resolved.retry;
+        let executions = self.executions.clone();
+        self.lane_mut()
+            .rearm(resolved, archive, retry, executions, |agent| {
+                // Detached children retain the meter belonging to their original session.
+                agent.meter = Arc::default();
+            });
         let path = self
             .store
             .journal_path(self.lane().root(), &self.lane().talk.id);
@@ -1580,14 +1589,14 @@ mod tests {
 
     #[test]
     fn changing_conversation_closes_its_input_binding_and_owns_a_new_queue() {
-        use pi_tools::runtime::background::RunSink as _;
+        use ::execution::background::RunSink as _;
         let dir = tempfile::tempdir().unwrap();
         let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
         let table = std::sync::Arc::new(crate::driver::background::Table::default());
         core.enable_background(table.clone());
         let service = crate::driver::background::Commands::new(table).start(
             core.lane().root().to_path_buf().into(),
-            pi_tools::runtime::background::Invocation::shell("service"),
+            ::execution::background::Invocation::shell("service"),
             Default::default(),
         );
         let old_messages = core.lane().messages();

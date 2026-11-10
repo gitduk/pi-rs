@@ -254,10 +254,7 @@ impl Core {
         }
     }
 
-    pub fn interrupt_session(
-        &mut self,
-        scope: &pi_tools::runtime::background::Scope,
-    ) -> Option<u64> {
+    pub fn interrupt_session(&mut self, scope: &::execution::background::Scope) -> Option<u64> {
         let at = self.lane_at(&scope.root)?;
         let lane = self.lanes.at_mut(at);
         if let Some(owner) = &scope.owner
@@ -292,6 +289,12 @@ impl Core {
                 lane.push_note(&format!("{why} pi stopped running background commands {} during shutdown. They did not finish normally; their results will not be reported.",stopped.join(", ")));
             }
         }
+        self.save_filed();
+    }
+
+    /// Join background cleanup before the final transcript flush.
+    pub async fn wait_background_shutdown(&mut self) {
+        self.execution_table().wait_tasks().await;
         self.save_filed();
     }
 

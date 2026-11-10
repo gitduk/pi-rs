@@ -1,10 +1,14 @@
-//! Lifecycle and controls for commands started by bash background.
+//! Lifecycle and controls for executions that can outlive a calling turn.
 
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
+use tracing::Instrument as _;
+
+pub use crate::shell::{Again, Controls, Environment, OutputMode};
 
 /// The original call, independent of the command prepared to execute it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -15,6 +19,11 @@ pub enum Invocation {
     Tool {
         name: String,
         args: serde_json::Value,
+    },
+    /// An execution started by a module rather than a tool invocation.
+    Task {
+        name: String,
+        description: String,
     },
 }
 
@@ -33,6 +42,7 @@ impl Invocation {
                 Cow::Borrowed(name)
             }
             Self::Tool { name, args } => Cow::Owned(format!("{name} {}", tool::arguments(args))),
+            Self::Task { name, description } => Cow::Owned(format!("{name}: {description}")),
         }
     }
 }
@@ -80,25 +90,6 @@ impl Peek {
 /// given and wound down by the token, as the first run was.
 pub type Rerun =
     Arc<dyn Fn(Arc<dyn RunHandle>, CancellationToken) -> Result<(), tool::ToolError> + Send + Sync>;
-
-/// A `Rerun` as data, for a pi started in this one's place, which has none
-/// of this one's closures: a shell command and where it ran. Every execution
-/// that can run again can say so both ways.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Again {
-    pub command: String,
-    pub cwd: PathBuf,
-    pub stdin: Option<String>,
-    pub environment: Environment,
-    pub output: OutputMode,
-}
-
-/// Per-command script settings; environment-file values stay out of saved state.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Environment {
-    pub directory: Option<PathBuf>,
-    pub arguments: Vec<(String, String)>,
-}
 
 /// The checkout and original conversation a command belongs to. A command
 /// started without a conversation can serve its checkout as a runtime service.
@@ -163,35 +154,94 @@ pub trait RunSink: Send + Sync {
     ) -> Arc<dyn RunHandle>;
 }
 
-/// Host-owned controls exposed through a shell. These add argument fields
-/// and handle control requests; the shell remains the registered tool.
-#[async_trait::async_trait]
-pub trait Controls: Send + Sync {
-    fn description(&self) -> &str;
-    fn parameters(&self) -> serde_json::Map<String, serde_json::Value>;
-    async fn execute(
-        &self,
-        args: serde_json::Value,
-        ctx: &tool::Ctx,
-    ) -> Result<tool::ToolOutput, tool::ToolError>;
-}
-
-/// One running command's lifecycle and output.
+/// One running execution's lifecycle and output.
 pub trait RunHandle: Send + Sync {
     fn id(&self) -> u64;
     fn owner(&self) -> Option<Owner> {
         None
     }
-    fn channel(&self) -> &dyn crate::runtime::channel::Channel;
+    fn channel(&self) -> &dyn crate::channel::Channel;
     fn watch(&self, output: Peek);
     fn rerun(&self, _how: Rerun, _again: Again) {}
     fn end(&self);
+    /// Track owned work until its cleanup and terminal report have completed.
+    fn tracker(&self) -> Option<TaskTracker> {
+        None
+    }
+    /// Publish a terminal report. Explicit stops do not request another turn.
+    /// Hosts can make this operation idempotent and retain structured facts.
+    fn complete(&self, report: Report) {
+        if report.outcome == Outcome::Cancelled {
+            return;
+        }
+        self.channel().result(report.text());
+        self.end();
+    }
 }
 
-/// Which captured streams accompany a successful command result.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum OutputMode {
-    #[default]
-    All,
-    Stdout,
+/// How an execution ended, separate from its human-readable output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    Succeeded,
+    Incomplete,
+    Failed,
+    Cancelled,
+}
+
+/// A terminal result. Usage is information, not an instruction to charge again.
+pub struct Report {
+    pub outcome: Outcome,
+    pub output: tool::ToolOutput,
+}
+
+impl Report {
+    /// Render a terminal result for hosts with a text result channel.
+    pub fn text(&self) -> String {
+        self.output.flatten()
+    }
+
+    /// Preserve terminal state and usage when admitting the result to a session.
+    pub fn metadata(&self) -> serde_json::Value {
+        serde_json::json!({
+            "outcome": self.outcome,
+            "usage": self.output.spent,
+            "warned": self.output.warned,
+        })
+    }
+}
+
+/// Drive an owned execution and report failure if it unwinds or is dropped.
+pub fn spawn(
+    execution: Arc<dyn RunHandle>,
+    running: impl std::future::Future<Output = Report> + Send + 'static,
+) {
+    // Construct before spawning: even a task dropped before its first poll ends.
+    let tracked = execution.tracker().map(|tracker| tracker.token());
+    let guard = CompletionGuard(Some(execution));
+    tokio::spawn(
+        async move {
+            let _tracked = tracked;
+            let mut guard = guard;
+            let report = running.await;
+            if let Some(execution) = guard.0.take() {
+                execution.complete(report);
+            }
+        }
+        .in_current_span(),
+    );
+}
+
+struct CompletionGuard(Option<Arc<dyn RunHandle>>);
+
+impl Drop for CompletionGuard {
+    fn drop(&mut self) {
+        if let Some(execution) = self.0.take() {
+            execution.complete(Report {
+                outcome: Outcome::Failed,
+                output: tool::ToolOutput::text("execution ended without a terminal report")
+                    .warned(),
+            });
+        }
+    }
 }

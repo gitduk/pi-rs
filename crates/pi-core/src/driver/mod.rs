@@ -10,9 +10,8 @@ pub mod input;
 use std::sync::Arc;
 
 use crate::execution::Request;
+use ::execution::channel::{Response, Told};
 use agent::Event;
-use pi_tools::runtime::channel::Response;
-use pi_tools::runtime::channel::Told;
 use tool::Ctx;
 
 /// Who sent a line.
@@ -39,13 +38,11 @@ pub enum Ended {
 }
 
 impl Ended {
-    pub fn outcome(&self) -> pi_tools::runtime::channel::Outcome {
+    pub fn outcome(&self) -> ::execution::channel::Outcome {
         match self {
-            Self::Done => pi_tools::runtime::channel::Outcome::Done,
-            Self::Stopped | Self::Unsent => {
-                pi_tools::runtime::channel::Outcome::Stopped(String::new())
-            }
-            Self::Failed(why) => pi_tools::runtime::channel::Outcome::Failed(why.clone()),
+            Self::Done => ::execution::channel::Outcome::Done,
+            Self::Stopped | Self::Unsent => ::execution::channel::Outcome::Stopped(String::new()),
+            Self::Failed(why) => ::execution::channel::Outcome::Failed(why.clone()),
         }
     }
 }
@@ -356,8 +353,8 @@ impl Drivers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pi_tools::runtime::background::RunSink as _;
-    use pi_tools::runtime::channel::Outcome;
+    use ::execution::background::RunSink as _;
+    use ::execution::channel::Outcome;
     use tool::Tool as _;
 
     // A background command belongs to the execution. Ending the turn that
@@ -420,17 +417,17 @@ mod tests {
         let sink = background::Commands::new(table.clone());
         let first = sink.start(
             root.into(),
-            pi_tools::runtime::background::Invocation::shell("build"),
+            ::execution::background::Invocation::shell("build"),
             Default::default(),
         );
         let other = sink.start(
             elsewhere.into(),
-            pi_tools::runtime::background::Invocation::shell("other"),
+            ::execution::background::Invocation::shell("other"),
             Default::default(),
         );
         let second = sink.start(
             root.into(),
-            pi_tools::runtime::background::Invocation::shell("test"),
+            ::execution::background::Invocation::shell("test"),
             Default::default(),
         );
         // Arrival order differs from registration order, as it can in a run.
@@ -476,7 +473,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         let build = sink.start(
             root.into(),
-            pi_tools::runtime::background::Invocation::shell("build"),
+            ::execution::background::Invocation::shell("build"),
             Default::default(),
         );
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -501,12 +498,12 @@ mod tests {
         let sink = background::Commands::new(drivers.background());
         let execution = sink.start(
             root.into(),
-            pi_tools::runtime::background::Invocation::shell("watch"),
+            ::execution::background::Invocation::shell("watch"),
             Default::default(),
         );
         let other = sink.start(
             root.into(),
-            pi_tools::runtime::background::Invocation::shell("build"),
+            ::execution::background::Invocation::shell("build"),
             Default::default(),
         );
         execution.channel().result("first".into());
@@ -553,7 +550,7 @@ mod tests {
         let sink = background::Commands::new(drivers.background());
         let execution = sink.start(
             root.into(),
-            pi_tools::runtime::background::Invocation::shell("driver"),
+            ::execution::background::Invocation::shell("driver"),
             Default::default(),
         );
         execution.channel().drive(true);
@@ -572,10 +569,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let mut drivers = Drivers::default();
-        let (tx, mut rx) = pi_tools::runtime::channel::channel();
+        let (tx, mut rx) = ::execution::channel::channel();
         let execution = background::Commands::new(drivers.background()).start(
             root.clone().into(),
-            pi_tools::runtime::background::Invocation::shell("bridge"),
+            ::execution::background::Invocation::shell("bridge"),
             Default::default(),
         );
         execution.channel().listen(tx);
@@ -684,10 +681,10 @@ mod tests {
             let mut drivers = Drivers::default();
             let execution = background::Commands::new(drivers.background()).start(
                 dir.path().to_path_buf().into(),
-                pi_tools::runtime::background::Invocation::shell("bridge"),
+                ::execution::background::Invocation::shell("bridge"),
                 Default::default(),
             );
-            let (tx, mut rx) = pi_tools::runtime::channel::channel();
+            let (tx, mut rx) = ::execution::channel::channel();
             execution.channel().listen(tx);
             let request = Request::new(Origin::Input(execution.id()), 1);
             drivers.started(request, true);
@@ -715,10 +712,10 @@ mod tests {
         let root = dir.path().to_path_buf();
         let ctx = Ctx::new(tool::Workspace::new(&root).unwrap());
         let mut drivers = Drivers::default();
-        let (tx, mut rx) = pi_tools::runtime::channel::channel();
+        let (tx, mut rx) = ::execution::channel::channel();
         let execution = background::Commands::new(drivers.background()).start(
             root.clone().into(),
-            pi_tools::runtime::background::Invocation::shell("wechat"),
+            ::execution::background::Invocation::shell("wechat"),
             Default::default(),
         );
         execution.channel().listen(tx);
@@ -762,10 +759,10 @@ mod tests {
         let drivers = Drivers::default();
         let execution = background::Commands::new(drivers.background()).start(
             dir.path().to_path_buf().into(),
-            pi_tools::runtime::background::Invocation::shell("bridge"),
+            ::execution::background::Invocation::shell("bridge"),
             Default::default(),
         );
-        let (tx, mut rx) = pi_tools::runtime::channel::channel();
+        let (tx, mut rx) = ::execution::channel::channel();
         execution.channel().listen(tx);
         let request = Request::new(Origin::Input(execution.id()), 1);
         for event in [
@@ -834,7 +831,7 @@ mod tests {
         let drivers = Drivers::default();
         let execution = background::Commands::new(drivers.background()).start(
             root.clone().into(),
-            pi_tools::runtime::background::Invocation::shell("http.server 8080"),
+            ::execution::background::Invocation::shell("http.server 8080"),
             Default::default(),
         );
         let Said::Noted(_, note) = drivers.stop_commands(&root, &[execution.id()]) else {
@@ -858,10 +855,10 @@ mod tests {
         let root = dir.path().to_path_buf();
         let ctx = Ctx::new(tool::Workspace::new(&root).unwrap());
         let mut drivers = Drivers::default();
-        let (tx, mut rx) = pi_tools::runtime::channel::channel();
+        let (tx, mut rx) = ::execution::channel::channel();
         let execution = background::Commands::new(drivers.background()).start(
             root.clone().into(),
-            pi_tools::runtime::background::Invocation::shell("wechat"),
+            ::execution::background::Invocation::shell("wechat"),
             Default::default(),
         );
         execution.channel().listen(tx);
@@ -914,17 +911,17 @@ mod tests {
         let ctx = Ctx::new(tool::Workspace::new(&root).unwrap());
         let mut drivers = Drivers::default();
         let sink = background::Commands::new(drivers.background());
-        let (tx, mut rx) = pi_tools::runtime::channel::channel();
+        let (tx, mut rx) = ::execution::channel::channel();
         let execution = sink.start(
             root.clone().into(),
-            pi_tools::runtime::background::Invocation::shell("wechat"),
+            ::execution::background::Invocation::shell("wechat"),
             Default::default(),
         );
         execution.channel().listen(tx);
-        let (quiet_tx, mut quiet) = pi_tools::runtime::channel::channel();
+        let (quiet_tx, mut quiet) = ::execution::channel::channel();
         let _quiet = sink.start(
             root.clone().into(),
-            pi_tools::runtime::background::Invocation::shell("build"),
+            ::execution::background::Invocation::shell("build"),
             Default::default(),
         );
         _quiet.channel().listen(quiet_tx);

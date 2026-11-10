@@ -10,10 +10,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use ::execution::channel::Ask;
 use agent::Event;
 use async_trait::async_trait;
 use pi_store::config::{Hook, HookOn};
-use pi_tools::runtime::channel::Ask;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tool::{Ctx, ToolOutput};
@@ -411,7 +411,7 @@ mod tests {
         of(
             &hooks,
             &ctx.workspace,
-            Arc::new(pi_tools::runtime::channel::NoOne),
+            Arc::new(::execution::channel::NoOne),
         )
     }
 
@@ -426,13 +426,13 @@ mod tests {
     // Answers every question with `picked` at once, as a person might.
     struct Says(&'static str);
 
-    impl pi_tools::runtime::channel::Ask for Says {
+    impl ::execution::channel::Ask for Says {
         fn ask(
             &self,
-            _scope: pi_tools::runtime::background::Scope,
+            _scope: ::execution::background::Scope,
             asker: &str,
-            asked: pi_tools::runtime::channel::Asked,
-        ) -> Result<Option<pi_tools::runtime::channel::Answer>, String> {
+            asked: ::execution::channel::Asked,
+        ) -> Result<Option<::execution::channel::Answer>, String> {
             assert_eq!(asker, "hook");
             assert!(asked.back, "a gate waits on its answer");
             let (to, answer) = tokio::sync::oneshot::channel();

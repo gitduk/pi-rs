@@ -423,8 +423,8 @@ fn focus_tracks_ids_and_keeps_stopped_rows_available_for_restart() {
 
 #[test]
 fn insert_mode_menus_and_pages_keep_their_keys() {
+    use ::execution::channel::Asked as QuestionText;
     use pi_core::core::question::Question;
-    use pi_tools::runtime::channel::Asked as QuestionText;
 
     let mut ui = vim_ui();
     let (_dir, lane) = a_running_lane();
@@ -489,7 +489,7 @@ fn leaving_the_lane_or_disabling_vim_releases_command_focus() {
 
 #[tokio::test]
 async fn focused_controls_use_the_existing_driver_and_preserve_restartability() {
-    use pi_tools::runtime::background::{RunHandle, RunSink};
+    use ::execution::background::{RunHandle, RunSink};
     use std::sync::Arc;
 
     let dir = tempfile::tempdir().unwrap();
@@ -500,12 +500,12 @@ async fn focused_controls_use_the_existing_driver_and_preserve_restartability() 
     let stop = tokio_util::sync::CancellationToken::new();
     let first = sink.start(
         root.clone().into(),
-        pi_tools::runtime::background::Invocation::shell("first"),
+        ::execution::background::Invocation::shell("first"),
         stop.clone(),
     );
     let second = sink.start(
         root.clone().into(),
-        pi_tools::runtime::background::Invocation::shell("second"),
+        ::execution::background::Invocation::shell("second"),
         Default::default(),
     );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Arc<dyn RunHandle>>();
@@ -647,10 +647,10 @@ async fn waiting_results_expand_and_open_the_original_output_without_delivering_
     let table = tui.drivers.background();
     let sink = pi_core::driver::background::Commands::new(table.clone());
     let command = format!("python3 -c '{}'", "long command ".repeat(30));
-    let execution = pi_tools::runtime::background::RunSink::start(
+    let execution = ::execution::background::RunSink::start(
         &sink,
         root.clone().into(),
-        pi_tools::runtime::background::Invocation::shell(command.clone()),
+        ::execution::background::Invocation::shell(command.clone()),
         Default::default(),
     );
     let output = "exited 1:\nTraceback (most recent call last):\nKeyError: 'agentId'";

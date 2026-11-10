@@ -1,12 +1,14 @@
 //! Session messages carried alongside command execution.
 
-use crate::runtime::background::Scope;
+use crate::background::Scope;
 use tokio::sync::oneshot;
 mod events;
 pub use events::{Receiver, Sender, channel};
 
-pub(crate) const EVENT_COUNT: usize = 128;
-pub(crate) const EVENT_BYTES: usize = 64 << 20;
+/// Maximum queued channel events.
+pub const EVENT_COUNT: usize = 128;
+/// Maximum bytes retained by queued channel events.
+pub const EVENT_BYTES: usize = 64 << 20;
 
 /// Where a call still in its turn puts a question to the person.
 pub trait Ask: Send + Sync {
