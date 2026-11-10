@@ -1,6 +1,7 @@
 //! Optional shell controls and restart data for execution hosts.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// A shell launch specification retained independently of in-memory callbacks.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -10,6 +11,10 @@ pub struct Again {
     pub stdin: Option<String>,
     pub environment: Environment,
     pub output: OutputMode,
+    /// The runtime limit a background run and a restart keep; `None` leaves
+    /// them untimed.
+    #[serde(default)]
+    pub timeout: Option<Duration>,
 }
 
 /// Per-command script settings; environment-file values stay out of saved state.

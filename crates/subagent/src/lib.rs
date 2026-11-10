@@ -1,4 +1,4 @@
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -7,7 +7,7 @@ use ::execution::background::{Invocation, Outcome as ExecutionOutcome, Report, R
 use async_trait::async_trait;
 use pi_tools::bash;
 use serde_json::{Value, json};
-use tokio::sync::{mpsc::unbounded_channel, watch};
+use tokio::sync::mpsc::unbounded_channel;
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
 use agent::session::Session;
@@ -41,8 +41,6 @@ struct Args {
     tools: Option<Vec<String>>,
     #[serde(default)]
     skills: Vec<String>,
-    #[serde(default)]
-    max_turns: Option<NonZeroUsize>,
     #[serde(default)]
     timeout_ms: Option<NonZeroU64>,
     // Run after the child stops, in the same checkout. Never seen by the
@@ -84,8 +82,6 @@ pub struct Subagent {
     // `subagent` of its own, so this does not nest.
     agent: Arc<Agent>,
     archive: Arc<dyn Archive>,
-    // Independent of each call's total time and turn budgets.
-    deadline: Duration,
     // The retry schedule the child runs on, handed in when the tool is hung:
     // a tool has no way to reach the config where it is called.
     retry: Retry,
@@ -94,10 +90,6 @@ pub struct Subagent {
     skills: Option<Arc<skills::Shelf>>,
     executions: Option<Arc<dyn RunSink>>,
 }
-
-// How long a child may run silent unless `with_deadline` says otherwise.
-const DEADLINE: Duration = Duration::from_secs(1800);
-const MAX_TURNS: NonZeroUsize = NonZeroUsize::new(64).expect("default turn limit is nonzero");
 
 /// Build tools owned by one child run, released when its context is cancelled.
 pub type ToolFactory = Arc<dyn Fn(&Ctx, tool::Registry) -> tool::Registry + Send + Sync>;
@@ -154,7 +146,6 @@ impl Subagent {
         Self {
             agent: Arc::new(agent),
             archive,
-            deadline: DEADLINE,
             retry,
             tools: None,
             models: None,
@@ -166,11 +157,6 @@ impl Subagent {
     /// Register calls that must continue independently of their calling turn.
     pub fn with_background(mut self, executions: Arc<dyn RunSink>) -> Self {
         self.executions = Some(executions);
-        self
-    }
-
-    pub fn with_deadline(mut self, deadline: Duration) -> Self {
-        self.deadline = deadline;
         self
     }
 
@@ -354,17 +340,11 @@ impl Tool for Subagent {
                     "uniqueItems": true,
                     "description": "Skill names whose full instructions and sources are loaded before the task starts. Missing or unreadable skills fail the call. Omit or pass [] to preload none. Preloading does not require the skill tool; allow that tool if the child needs supporting files or additional skills.",
                 },
-                "max_turns": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "default": MAX_TURNS.get(),
-                    "description": "Maximum model turns for this child. A turn can contain multiple tool calls. Reaching the limit returns an unfinished result. Choose a small budget for a bounded check.",
-                },
                 "timeout_ms": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": tool::limit::MAX_CALL.as_millis(),
-                    "default": tool::limit::MAX_CALL.as_millis(),
+                    "default": tool::limit::DEFAULT_CALL.as_millis(),
                     "description": "Total child runtime budget in milliseconds, including periods with progress. Reaching the budget cancels the child and returns an unfinished result after cleanup. Verification runs separately.",
                 },
             },
@@ -403,7 +383,7 @@ impl Tool for Subagent {
         if !args.background {
             let prepared = self.prepare(args, ctx).await?;
             return prepared
-                .run(self.archive.as_ref(), &self.retry, self.deadline, ctx)
+                .run(self.archive.as_ref(), &self.retry, ctx)
                 .await
                 .map(|report| report.output);
         }
@@ -440,12 +420,8 @@ impl Tool for Subagent {
         prepared.child = prepared.child.with_progress(progress);
         let archive = self.archive.clone();
         let retry = self.retry;
-        let deadline = self.deadline;
         ::execution::background::spawn(execution, async move {
-            let report = match prepared
-                .run(archive.as_ref(), &retry, deadline, &detached)
-                .await
-            {
+            let report = match prepared.run(archive.as_ref(), &retry, &detached).await {
                 Ok(report) => report,
                 Err(error) => Report {
                     outcome: ExecutionOutcome::Failed,
@@ -547,7 +523,6 @@ impl Prepared {
         self,
         archive: &dyn Archive,
         retry: &Retry,
-        deadline: Duration,
         ctx: &Ctx,
     ) -> Result<Report, ToolError> {
         let Self {
@@ -558,19 +533,15 @@ impl Prepared {
             mut model_notes,
             instructions,
         } = self;
-        let max_turns = args.max_turns.unwrap_or(MAX_TURNS);
-        let timeout = args
-            .timeout_ms
-            .map(|ms| Duration::from_millis(ms.get()))
-            .unwrap_or(tool::limit::MAX_CALL)
-            .min(tool::limit::MAX_CALL);
+        let timeout = tool::limit::timeout(
+            args.timeout_ms.map(|ms| ms.get()),
+            tool::limit::DEFAULT_CALL,
+            tool::limit::MAX_CALL,
+        );
         let stop = child.cancel.clone();
         let _stop = stop.clone().drop_guard();
         let expires = tokio::time::Instant::now() + timeout;
         let (tx, mut rx) = unbounded_channel();
-        // Every event resets the silence clock, whatever kind it is: an
-        // event is the child moving, and moving is all the watchdog asks.
-        let (ticked, ticking) = watch::channel(Instant::now());
         let caller = ctx.clone();
         let heard = tokio::spawn(async move {
             let mut heard = Heard::default();
@@ -592,7 +563,6 @@ impl Prepared {
                 };
                 let Some(event) = event else { break };
                 let now = Instant::now();
-                let _ = ticked.send(now);
                 match event {
                     Event::TurnStart { turn } => {
                         heard.turns = turn;
@@ -620,40 +590,15 @@ impl Prepared {
             }
             heard
         });
-        // The watchdog: silence for a whole deadline is a wedged call — a
-        // hung tool speaks no events. It trips the same token a stop does.
-        let watchdog_stop = stop.clone();
+        // One budget for the whole child: at `expires` its stop token trips,
+        // the same token a parent stop uses.
+        let budget_stop = stop.clone();
         let timed_out = Arc::new(AtomicBool::new(false));
         let expired = timed_out.clone();
-        let watchdog = tokio::spawn(async move {
-            let mut ticking = ticking;
-            loop {
-                let outlived = tokio::time::Instant::from(*ticking.borrow() + deadline);
-                tokio::select! {
-                    _ = tokio::time::sleep_until(expires) => {
-                        expired.store(true, Ordering::Relaxed);
-                        watchdog_stop.cancel();
-                        return;
-                    }
-                    _ = tokio::time::sleep_until(outlived) => {
-                        // A reset may have raced the trip; trust only the
-                        // value read after the sleep came back.
-                        if *ticking.borrow() + deadline <= Instant::now() {
-                            watchdog_stop.cancel();
-                            return;
-                        }
-                    }
-                    changed = ticking.changed() => {
-                        // The collector is gone (it panicked, and says so
-                        // itself): no tick will come, so stop watching rather
-                        // than wake on the closed channel forever.
-                        if changed.is_err() {
-                            return;
-                        }
-                    }
-                    _ = watchdog_stop.cancelled() => return,
-                }
-            }
+        let budget = tokio::spawn(async move {
+            tokio::time::sleep_until(expires).await;
+            expired.store(true, Ordering::Relaxed);
+            budget_stop.cancel();
         });
         // Keep selected instructions with the task: transient notes may be
         // omitted by compaction before the child has finished using them.
@@ -683,12 +628,12 @@ impl Prepared {
                 voice.warn(note.clone());
             }
         });
-        // The token ends the run — the watchdog or a stop — unwinding like a
+        // The token ends the run — the budget or a stop — unwinding like a
         // stop; one ignoring it is dropped after STOP_GRACE.
         let ran = {
             let mut run = std::pin::pin!(
                 agent
-                    .run_bounded(&mut session, &child, &tx, retry, max_turns)
+                    .run(&mut session, &child, &tx, retry)
                     .instrument(child_span)
             );
             let grace_stop = stop.clone();
@@ -704,7 +649,7 @@ impl Prepared {
                 None => Err(AgentError::Unstopped),
             }
         };
-        watchdog.abort();
+        budget.abort();
         stop.cancel();
         // The collector ends when the last sender goes, and `run` held one.
         drop(tx);
@@ -734,9 +679,6 @@ impl Prepared {
         let mut outcome = ExecutionOutcome::Succeeded;
         let cut = match ran {
             Ok(_) => None,
-            Err(AgentError::TurnLimit { turns }) => {
-                Some(format!("reached the limit of {turns} model turns"))
-            }
             // A stop only: our own token tripping leaves the parent's alone —
             // conflating them would end the caller's whole turn over a wedged child.
             // A child that outlived its grace was stopped all the same.
@@ -748,7 +690,7 @@ impl Prepared {
                 Some("execution cancelled".into())
             }
             // Our token trips only for the parent's stop, caught just above,
-            // or for the watchdog.
+            // or for the budget.
             Err(AgentError::Cancelled | AgentError::Unstopped)
                 if timed_out.load(Ordering::Relaxed) =>
             {
@@ -757,10 +699,6 @@ impl Prepared {
                     llm::figures::elapsed(timeout)
                 ))
             }
-            Err(AgentError::Cancelled | AgentError::Unstopped) => Some(format!(
-                "a call ran {} with no progress",
-                llm::figures::elapsed(deadline)
-            )),
             Err(why) => {
                 if !args.background {
                     // Error results cannot carry `.with_spent` into the caller's run.

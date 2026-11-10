@@ -56,14 +56,18 @@ mod tests {
     }
 
     #[test]
-    fn foreground_shell_only_accepts_commands_and_describes_the_wait() {
+    fn foreground_shell_accepts_commands_and_describes_the_wait() {
         let registry = foreground(pi_tools::builtin());
         let shell = registry.get(pi_tools::bash::Bash::NAME).unwrap();
         let schema = shell.schema();
-        let properties = schema["properties"].as_object().unwrap();
-        assert_eq!(properties.len(), 3);
-        assert!(properties.contains_key("command"));
-        assert!(properties.contains_key("cwd"));
+        let mut properties: Vec<&str> = schema["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        properties.sort_unstable();
+        assert_eq!(properties, ["command", "cwd", "stdin", "timeout_ms"]);
         assert_eq!(schema["required"], json!(["command"]));
         assert!(
             shell

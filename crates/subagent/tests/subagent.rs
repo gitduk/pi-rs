@@ -201,12 +201,11 @@ impl Archive for Kept {
 // Parent and child share one scripted transport, so the turns run in the order
 // written: the parent's call, then the whole child, then the parent's answer.
 fn harness(turns: Vec<Vec<StreamEvent>>) -> (tempfile::TempDir, Agent, Ctx, Arc<Seen>, Arc<Kept>) {
-    rigged(turns, std::time::Duration::from_secs(600), false)
+    rigged(turns, false)
 }
 
 fn rigged(
     turns: Vec<Vec<StreamEvent>>,
-    deadline: std::time::Duration,
     esc: bool,
 ) -> (tempfile::TempDir, Agent, Ctx, Arc<Seen>, Arc<Kept>) {
     let dir = tempfile::tempdir().unwrap();
@@ -236,8 +235,7 @@ fn rigged(
         kept.clone(),
         STANDING,
         Retry::default(),
-    )
-    .with_deadline(deadline);
+    );
     let registry = parent.brief.registry.clone().with(subagent);
     std::sync::Arc::make_mut(&mut parent.brief).registry = registry;
     (dir, parent, ctx, seen, kept)
@@ -366,18 +364,17 @@ async fn the_child_cannot_send_out_a_child_of_its_own() {
 // Work done before the cutoff is still work: answering beats an error (caller
 // paid, got nothing) or `Cancelled` (would end the caller's whole turn).
 #[tokio::test]
-async fn a_child_cut_off_by_the_deadline_answers_rather_than_fails() {
+async fn a_child_cut_off_by_its_budget_answers_rather_than_fails() {
     let (_dir, agent, ctx, _seen, _kept) = rigged(
         vec![
             call_turn(
                 "c1",
                 "subagent",
-                r#"{"description":"go round","prompt":"go round"}"#,
+                r#"{"description":"go round","prompt":"go round","timeout_ms":50}"#,
             ),
             call_turn("c2", "sleeper", "{}"),
             text_turn("it reported back"),
         ],
-        std::time::Duration::from_millis(50),
         false,
     );
     let (session, out) = drive(&agent, &ctx, "go").await;
@@ -389,7 +386,7 @@ async fn a_child_cut_off_by_the_deadline_answers_rather_than_fails() {
     assert!(transcript.contains("unfinished"), "{transcript}");
 }
 
-// A child the watchdog stopped is cut off the same whether it unwound in its
+// A child the budget stopped is cut off the same whether it unwound in its
 // grace or had to be dropped past it: the caller hears why, not a failure.
 #[tokio::test(start_paused = true)]
 async fn a_child_dropped_past_its_grace_still_says_why_it_was_cut() {
@@ -398,47 +395,21 @@ async fn a_child_dropped_past_its_grace_still_says_why_it_was_cut() {
             call_turn(
                 "c1",
                 "subagent",
-                r#"{"description":"wedged","prompt":"wedged"}"#,
+                r#"{"description":"wedged","prompt":"wedged","timeout_ms":50}"#,
             ),
             call_turn("c2", "stubborn", "{}"),
             text_turn("it reported back"),
         ],
-        std::time::Duration::from_millis(50),
         false,
     );
     let (session, out) = drive(&agent, &ctx, "go").await;
     assert!(out.is_ok(), "{out:?}");
     let transcript = format!("{:?}", session.entries());
-    assert!(transcript.contains("with no progress"), "{transcript}");
+    assert!(
+        transcript.contains("reached the total runtime budget"),
+        "{transcript}"
+    );
     assert!(!transcript.contains("after cancel"), "{transcript}");
-}
-
-// The deadline bounds silence, not the run or turn count — a child that
-// keeps events coming outlives it. 50ms gives the scheduler slack under load.
-#[tokio::test]
-async fn a_child_that_keeps_talking_outlives_the_deadline() {
-    let mut turns = vec![call_turn(
-        "c1",
-        "subagent",
-        r#"{"description":"chatty","prompt":"keep going"}"#,
-    )];
-    for n in 0..24 {
-        turns.push(call_turn(
-            &format!("c{}", n + 2),
-            "write",
-            &format!(r#"{{"path":"w{n}.txt","content":"{n}"}}"#),
-        ));
-    }
-    turns.push(text_turn("done"));
-    turns.push(text_turn("wrapped"));
-    let (_dir, agent, ctx, _seen, _kept) =
-        rigged(turns, std::time::Duration::from_millis(50), false);
-    let (session, out) = drive(&agent, &ctx, "go").await;
-
-    assert!(out.is_ok(), "progress kept the child alive: {out:?}");
-    let transcript = format!("{:?}", session.entries());
-    assert!(!transcript.contains("unfinished"), "{transcript}");
-    assert!(transcript.contains("done"), "{transcript}");
 }
 
 #[test]
@@ -471,7 +442,6 @@ fn the_subagent_takes_the_task_and_optional_overrides() {
         args,
         [
             "description",
-            "max_turns",
             "model",
             "prompt",
             "skills",
@@ -495,7 +465,6 @@ async fn esc_reaches_through_the_child_and_ends_the_callers_turn() {
             call_turn("c3", "sleeper", "{}"),
             text_turn("never gets here"),
         ],
-        std::time::Duration::from_secs(600),
         true,
     );
     let (_session, out) = drive(&agent, &ctx, "go").await;
@@ -682,7 +651,6 @@ async fn what_the_child_wrote_comes_back_beside_what_it_says() {
 async fn a_child_that_ran_out_of_time_is_still_checked() {
     let (_dir, parent, ctx, _seen, kept) = rigged(
         vec![call_turn("c1", "sleeper", "{}"), text_turn("never")],
-        std::time::Duration::from_millis(50),
         false,
     );
     let subagent = Subagent::new(
@@ -691,11 +659,10 @@ async fn a_child_that_ran_out_of_time_is_still_checked() {
         kept,
         STANDING,
         Retry::default(),
-    )
-    .with_deadline(std::time::Duration::from_millis(50));
+    );
     let out = subagent
         .execute(
-            json!({ "description": "go", "prompt": "go", "verify": "true" }),
+            json!({ "description": "go", "prompt": "go", "timeout_ms": 50, "verify": "true" }),
             &ctx,
         )
         .await
@@ -703,7 +670,7 @@ async fn a_child_that_ran_out_of_time_is_still_checked() {
         .flatten();
 
     assert!(out.contains("unfinished"), "{out}");
-    // The child's token is already tripped by the deadline; checking against
+    // The child's token is already tripped by the budget; checking against
     // it would cancel the check exactly when a check is most wanted — the timeout.
     assert!(out.contains("[verify `true`: exit 0]"), "{out}");
 }

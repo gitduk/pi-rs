@@ -1,8 +1,9 @@
 //! Duplex fd 3 frames, with semantic observation pulled directly by the writer.
-use crate::process::{Exited, Group, MAX_RUN, Streams, put_down, reap, spawn};
+use crate::process::{Exited, Group, MAX_RUN, Streams, past, put_down, reap, spawn};
 use crate::runtime::background::{OutputMode, RunHandle, Scope};
 use crate::runtime::channel::{Answer, Ask, Observation, Receiver, Sender, Told};
 use crate::scripts::wire::{self, Command as Control, Incoming};
+use ::execution::background::{Outcome, Report};
 use serde::Serialize;
 #[cfg(test)]
 use serde_json::Value;
@@ -15,7 +16,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
-use tool::{Ctx, ToolError};
+use tool::{Ctx, ToolError, ToolOutput};
 
 pub const FD_VAR: &str = "PI_EVENTS_FD";
 const FD: i32 = 3;
@@ -173,6 +174,7 @@ pub(crate) fn background(
     execution: Arc<dyn RunHandle>,
     stop: CancellationToken,
     output: OutputMode,
+    timeout: Option<Duration>,
 ) -> Result<(), ToolError> {
     let Process {
         mut child,
@@ -188,9 +190,22 @@ pub(crate) fn background(
         let _guard = guard;
         let group = child.id();
         let mut service = false;
+        let limit = timeout.map(|d| d.min(MAX_RUN));
+        let expires = limit.map(|d| tokio::time::Instant::now() + d);
         let status = loop {
             tokio::select! {biased;
                 ()=stop.cancelled()=>{put_down(&mut child,group).await;return;}
+                _=past(expires)=>{
+                    // A command that exited at the deadline keeps its own verdict.
+                    if let Ok(Some(status))=child.try_wait(){break Ok(status);}
+                    put_down(&mut child,group).await;
+                    let ms=limit.expect("a deadline arm has one").as_millis() as u64;
+                    let why=format!("{} (the command did not exit on its own)",
+                        ToolError::Timeout{ms,printed:streams.printed().await});
+                    let report=Report{outcome:Outcome::Failed,output:ToolOutput::text(why).warned()};
+                    execution.complete(report);
+                    return;
+                }
                 frame=fd3.next()=>match frame {
                     Ok(Incoming::Message {message})=>{
                         let id=message.id.clone();

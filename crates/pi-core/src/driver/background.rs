@@ -2651,7 +2651,6 @@ mod tests {
         let marker = dir.path().join("starts");
         for args in [
             json!({"wait": [10], "timeout_ms": 420000}),
-            json!({"command": "echo started > starts", "timeout_ms": 420000}),
             json!({"background": true, "command": "echo started > starts", "stop": "all"}),
             json!({"background": true, "command": "echo started > starts", "stop": [1]}),
             json!({"background": true, "command": " "}),

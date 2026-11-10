@@ -105,6 +105,7 @@ pub(crate) async fn settle(launched: Launched, ends: Ends) -> Result<Exited, Too
         guard: _guard,
     } = launched;
     let deadline = ends.deadline.map(|d| d.min(MAX_RUN));
+    let expires = deadline.map(|d| tokio::time::Instant::now() + d);
     let timed_out = |printed: String| ToolError::Timeout {
         ms: deadline
             .expect("only the deadline arm reports a timeout")
@@ -118,10 +119,10 @@ pub(crate) async fn settle(launched: Launched, ends: Ends) -> Result<Exited, Too
             tokio::select! {
                 biased;
                 () = unbounded.cancelled() => std::future::pending().await,
-                () = past(deadline) => {},
+                () = past(expires) => {},
             }
         } else {
-            past(deadline).await;
+            past(expires).await;
         }
     };
     tokio::pin!(over);
@@ -160,10 +161,11 @@ pub(crate) async fn settle(launched: Launched, ends: Ends) -> Result<Exited, Too
     })
 }
 
-// No deadline is a future that never fires, so every caller has the same arm.
-async fn past(deadline: Option<Duration>) {
-    match deadline {
-        Some(d) => tokio::time::sleep(d).await,
+// A deadline that never fires when the call named none. Absolute, because a
+// caller may rebuild the future in a loop without restarting the clock.
+pub(crate) async fn past(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending().await,
     }
 }

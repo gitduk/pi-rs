@@ -14,7 +14,7 @@ Follow this workflow:
 
 Subagents inherit the current model by default. Use `models` when you need to select another model. Use its results instead of shell commands to discover model choices. Reuse those results unless they are outdated or a model choice fails. Select from known capabilities and prices. Keep the inherited model when the available facts do not establish a suitable alternative.
 
-For basic tool or model checks, choose small tasks with explicit expected outputs. Set small `max_turns` and `timeout_ms` budgets. Use a named skill when checking skill preloading. Do not expand a basic check into a codebase survey. Distinguish model availability from measured capability. Unknown capabilities do not establish intelligence levels.
+For basic tool or model checks, choose small tasks with explicit expected outputs. Pass a small `timeout_ms` to `subagent`. Use a named skill when checking skill preloading. Do not expand a basic check into a codebase survey. Distinguish model availability from measured capability. Unknown capabilities do not establish intelligence levels.
 
 A parallel tool batch waits for synchronous calls; background calls return after submission. Check unfamiliar model connections with short probes before assigning long investigations. Diagnose request errors before retrying or selecting another model. A request-option error requires a compatible request, not a different model name. Report unresolved compatibility failures instead of repeating the same failure across models.
 

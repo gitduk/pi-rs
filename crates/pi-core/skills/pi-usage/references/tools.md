@@ -52,12 +52,10 @@ Optional `verify` runs a shell command after the child stops, with the caller's
 permissions, independently of the child's tool allowlist. Omit it for exploration
 that needs no separate check.
 
-Optional `max_turns` limits model turns, not individual tool calls. The default
-is 64. Optional `timeout_ms` limits total runtime, including progress. Its default
-and maximum are the shared tool runtime limit. Both accept positive integers.
-Reaching either budget returns an unfinished result and preserves the child
-transcript. Cancellation cleanup can extend past the runtime budget. Verification
-runs separately. The silence watchdog remains independent of these budgets.
+Optional `timeout_ms` limits total runtime, including progress. Its default is
+30 minutes and its maximum is one hour. Reaching the budget returns an unfinished
+result and preserves the child transcript. Cancellation cleanup can extend past
+the runtime budget. Verification runs separately.
 
 `background` defaults to `true`: a call submits a task and returns its `task_id`
 immediately. Model, tool, and skill validation happens before submission. The task
@@ -79,7 +77,7 @@ them. `command` and `args` start a server over stdio. `url` connects over
 Streamable HTTP. If a server cannot start, pi lists `<name>__unavailable` with
 the reason. `/mcp` shows servers and tools. `/mcp restart` reconnects them.
 
-pi stops waiting for an unanswered call after 10 minutes.
+pi stops waiting for an unanswered call after one hour.
 A server's prompts are also commands.
 `/<name>:<prompt> [args]` requests the prompt text from the server and submits
 it. Each argument receives one typed word. The last argument receives the
@@ -112,8 +110,10 @@ output. The original call and launch specification survive restart and session
 recovery. User stop and restart actions reach the model before its next
 response.
 
-pi stops a foreground command after ten minutes.
-It never automatically moves that command to the background.
+A foreground command stops after 30 minutes unless the call sets `timeout_ms`,
+which may name up to one hour. A background command has no deadline unless the
+call sets `timeout_ms`.
+pi never moves a running foreground command to the background on its own.
 Interrupting the run stops the command's process group.
 One-shot runs and subagents offer only foreground commands.
 A subagent call returns a task when the host offers background execution; otherwise

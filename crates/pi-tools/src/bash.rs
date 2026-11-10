@@ -19,6 +19,10 @@ struct Args {
     cwd: String,
     #[serde(default)]
     stdin: Option<String>,
+    // Bounds a foreground call by default and a background one only when set;
+    // zero reads as unset.
+    #[serde(default)]
+    timeout_ms: Option<u64>,
     // Not offered in the schema; accepted because models trained on other
     // shells send it, and shown in place of the command when they do.
     #[serde(default)]
@@ -32,6 +36,14 @@ impl Args {
             .map(first_line)
             .map(str::trim)
             .filter(|label| !label.is_empty())
+    }
+
+    // The limit the call named, already clamped: `None` leaves a background
+    // command untimed while a foreground call falls back to the default.
+    fn named_timeout(&self) -> Option<std::time::Duration> {
+        self.timeout_ms
+            .filter(|ms| *ms > 0)
+            .map(|ms| std::time::Duration::from_millis(ms).min(tool::limit::MAX_CALL))
     }
 }
 
@@ -54,6 +66,21 @@ const DESCRIPTION: &str = "Each call runs a shell command in a new shell. \
     These tools report failures you can use to correct errors. \
     Use `bash` for substitutions by pattern or position (`sed`, `perl`, `awk`). \
     Use `bash` to move files (`mv`) or delete files (`rm`).";
+
+// The default and the cap, said once for the description and the schema field.
+fn foreground_limit() -> String {
+    format!(
+        "A foreground command stops after {} unless the call sets `timeout_ms`, \
+         which may name up to {}.",
+        llm::figures::elapsed(tool::limit::DEFAULT_CALL),
+        llm::figures::elapsed(tool::limit::MAX_CALL),
+    )
+}
+
+fn background_limit() -> &'static str {
+    "A background command has no deadline unless the call sets `timeout_ms`, \
+     which then stops it the same way."
+}
 
 /// Run a written command to completion under the workspace's checks and rewrite.
 pub async fn foreground(command: &str, cwd: &str, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
@@ -144,6 +171,7 @@ async fn prepare(args: Args, tier: Tier, ctx: &Ctx, written: bool) -> Result<Aga
         stdin: args.stdin,
         environment: Environment::default(),
         output: OutputMode::All,
+        timeout: None,
     })
 }
 
@@ -166,6 +194,7 @@ impl Bash {
             command: command.to_string(),
             cwd: cwd.to_string(),
             stdin: None,
+            timeout_ms: None,
             description: None,
         };
         let prepared = prepare(args, Tier::Exec, ctx, true).await?;
@@ -189,13 +218,14 @@ impl Bash {
             description: format!(
                 "{DESCRIPTION}\n\nThe call waits for the command to exit. \
                  Stop the run to cancel the command. \
-                 The tool stops a foreground command after {}. \
+                 {} \
                  The user can move a running foreground command to the background; \
                  the call then returns its command ID. \
                  Use `background=true` to start in the background immediately.\n\n\
                  With `background=true`, the command runs independently of this turn. \
                  The call returns its command ID immediately. \
                  Its results, including a failure at startup, open a later turn. \
+                 {} \
                  Continue independent work or end this turn. \
                  Do not wait for the background result. \
                  Leave output unredirected so it can be read while the command runs. \
@@ -204,7 +234,8 @@ impl Bash {
                  Do not change files a running background command uses; restart the command after the change. \
                  To check that a server is ready, run one foreground command that waits for the ready condition, \
                  such as a request with retries.",
-                llm::figures::elapsed(tool::limit::MAX_CALL)
+                foreground_limit(),
+                background_limit()
             ),
         }
     }
@@ -217,8 +248,8 @@ impl Bash {
             description: format!(
                 "{DESCRIPTION}\n\nThe call waits for the command to exit. \
                  Stop the run to cancel the command. \
-                 The tool stops the command after {}.",
-                llm::figures::elapsed(tool::limit::MAX_CALL)
+                 {}",
+                foreground_limit()
             ),
         }
     }
@@ -254,9 +285,11 @@ async fn schedule(
     let preview = args
         .label()
         .map_or_else(|| invocation.title().into_owned(), str::to_string);
+    let timeout = args.named_timeout();
     let mut again = prepare(args, Tier::Exec, ctx, call.written).await?;
     again.environment = call.environment;
     again.output = call.output;
+    again.timeout = timeout;
     let stop = tokio_util::sync::CancellationToken::new();
     let execution = executions.start(ctx.into(), invocation, stop.clone());
     let id = execution.id();
@@ -303,6 +336,15 @@ impl Tool for Bash {
                 .expect("properties")
                 .extend(controls.parameters());
         }
+        schema["properties"]["timeout_ms"] = json!({
+            "type": "integer",
+            "minimum": 1,
+            "description": format!(
+                "Set the runtime limit in milliseconds. {} {}",
+                foreground_limit(),
+                background_limit(),
+            ),
+        });
         if self.executions.is_none() {
             return schema;
         }
@@ -341,12 +383,12 @@ impl Bash {
     ) -> Result<ToolOutput, ToolError> {
         let present = |key: &str| args.get(key).is_some_and(|v| !v.is_null());
         if !present("command") {
-            if ["cwd", "stdin", "background"]
+            if ["cwd", "stdin", "background", "timeout_ms"]
                 .iter()
                 .any(|key| present(key))
             {
                 return Err(ToolError::Invalid(
-                    "command is required for cwd, stdin, or background".into(),
+                    "command is required for cwd, stdin, background, or timeout_ms".into(),
                 ));
             }
             if let Some(controls) = &self.controls {
@@ -408,17 +450,15 @@ impl Bash {
             .unwrap_or_else(|| first_line(&args.command))
             .to_string();
         let invocation = invocation.unwrap_or_else(|| Invocation::shell(args.command.clone()));
+        let kept = args.named_timeout();
+        // A restart keeps only the limit the call named; the default bounds this wait.
+        let timeout = kept.unwrap_or(tool::limit::DEFAULT_CALL);
         let mut prepared = prepare(args, self.tier(), ctx, call.written).await?;
         prepared.environment = call.environment;
         prepared.output = call.output;
+        prepared.timeout = kept;
         Ok(self
-            .finish(
-                prepared,
-                invocation,
-                preview,
-                Some(tool::limit::MAX_CALL),
-                ctx,
-            )
+            .finish(prepared, invocation, preview, Some(timeout), ctx)
             .await?
             .into_output())
     }
@@ -499,20 +539,29 @@ pub fn rerun(again: Again, ctx: &Ctx) -> Rerun {
                 .unwrap_or_default()
                 .as_bytes()
                 .to_vec();
-            crate::scripts::fd3::background(cmd, input, &ctx, execution, stop, again.output)
+            crate::scripts::fd3::background(
+                cmd,
+                input,
+                &ctx,
+                execution,
+                stop,
+                again.output,
+                again.timeout,
+            )
         }
         #[cfg(not(unix))]
         {
             let launched = launch(&again, &ctx)?;
             execution.watch(launched.streams.peek());
-            supervise(Box::pin(wait(launched, stop, None, None)), execution);
+            supervise(
+                Box::pin(wait(launched, stop, again.timeout, None)),
+                execution,
+            );
             Ok(())
         }
     })
 }
 
-// What a rerun keeps of the call's context: where output spills, not the
-// turn's locks or progress.
 // A shell command just spawned, not yet anyone's execution.
 type Launched = crate::process::Launched;
 
@@ -719,7 +768,7 @@ mod background_tests {
                 .is_none()
         );
         for shell in [Bash::new(Arc::new(Sink::default())), Bash::foreground()] {
-            assert!(shell.schema()["properties"].get("timeout_ms").is_none());
+            assert!(shell.schema()["properties"]["timeout_ms"].is_object());
         }
         assert!(
             Bash::new(Arc::new(Sink::default())).schema()["properties"]["background"].is_object()
@@ -858,7 +907,7 @@ mod background_tests {
             });
             started(dir.path()).await;
             tokio::time::pause();
-            tokio::time::advance(tool::limit::MAX_CALL + Duration::from_secs(1)).await;
+            tokio::time::advance(tool::limit::DEFAULT_CALL + Duration::from_secs(1)).await;
             tokio::time::resume();
             let early = tokio::time::timeout(Duration::from_millis(100), &mut call).await;
             std::fs::write(dir.path().join("release"), "").unwrap();
@@ -899,7 +948,7 @@ mod background_tests {
             });
             started(dir.path()).await;
             tokio::time::pause();
-            tokio::time::advance(tool::limit::MAX_CALL + Duration::from_secs(1)).await;
+            tokio::time::advance(tool::limit::DEFAULT_CALL + Duration::from_secs(1)).await;
             tokio::time::resume();
             let error = tokio::time::timeout(Duration::from_secs(5), call)
                 .await
@@ -909,9 +958,63 @@ mod background_tests {
             let ToolError::Timeout { ms, printed } = error else {
                 panic!("expected timeout, got {error:?}")
             };
-            assert_eq!(ms, tool::limit::MAX_CALL.as_millis() as u64);
+            assert_eq!(ms, tool::limit::DEFAULT_CALL.as_millis() as u64);
             assert!(printed.contains("before"), "{printed}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_foreground_call_takes_the_timeout_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx(dir.path());
+        let call = tokio::spawn(async move {
+            Bash::foreground()
+                .execute(
+                    json!({"command": "echo ready > starts; sleep 6000", "timeout_ms": 120000}),
+                    &ctx,
+                )
+                .await
+        });
+        started(dir.path()).await;
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(121)).await;
+        tokio::time::resume();
+        let error = tokio::time::timeout(Duration::from_secs(5), call)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        let ToolError::Timeout { ms, .. } = error else {
+            panic!("expected timeout, got {error:?}")
+        };
+        assert_eq!(ms, 120_000);
+    }
+
+    #[tokio::test]
+    async fn a_background_command_takes_the_timeout_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        let ctx = ctx(dir.path());
+        let ended = sink.ended.notified();
+        Bash::new(sink.clone())
+            .execute(
+                json!({"command": "echo ready > starts; sleep 6000", "background": true, "timeout_ms": 2000}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        started(dir.path()).await;
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(3)).await;
+        tokio::time::resume();
+        tokio::time::timeout(Duration::from_secs(5), ended)
+            .await
+            .expect("the timed-out command ended");
+        let said = sink.said.lock().unwrap();
+        assert!(
+            said.iter().any(|line| line.contains("timed out")),
+            "{said:?}"
+        );
     }
 
     #[tokio::test]
@@ -950,7 +1053,7 @@ mod background_tests {
         assert!(peek.latest().contains("before"), "{}", peek.latest());
         ctx.cancel.cancel();
         tokio::time::pause();
-        tokio::time::advance(tool::limit::MAX_CALL + Duration::from_secs(1)).await;
+        tokio::time::advance(tool::limit::DEFAULT_CALL + Duration::from_secs(1)).await;
         tokio::time::resume();
         assert_eq!(
             sink.said.lock().unwrap().len(),

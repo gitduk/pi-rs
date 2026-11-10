@@ -5,8 +5,11 @@ use std::time::Duration;
 /// The size past which no tool reads a file whole.
 pub const MAX_BYTES: u64 = 10 << 20;
 
+/// The runtime a call gets when it names none.
+pub const DEFAULT_CALL: Duration = Duration::from_secs(1800);
+
 /// The longest one call may run, whatever its caller asked for.
-pub const MAX_CALL: Duration = Duration::from_secs(600);
+pub const MAX_CALL: Duration = Duration::from_secs(3600);
 
 /// The one refusal every over-limit file shares, whatever tool meets it.
 pub fn over_limit(name: &str, len: u64) -> String {

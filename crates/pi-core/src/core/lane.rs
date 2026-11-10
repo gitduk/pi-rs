@@ -356,9 +356,6 @@ pub fn arm(
     if let Some(executions) = &executions {
         subagent = subagent.with_background(executions.clone());
     }
-    if let Some(deadline) = resolved.subagent_deadline {
-        subagent = subagent.with_deadline(deadline);
-    }
     if let Some(models) = &resolved.subagent_models {
         subagent = subagent.with_models(models.clone());
     }
@@ -443,7 +440,6 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
         }),
         prompt_blocks: Vec::new(),
         hooks: Default::default(),
-        subagent_deadline: None,
         subagent_models: None,
         models: Arc::new(super::models::Models::new(&Default::default())),
         standing: standing.into(),

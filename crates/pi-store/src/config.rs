@@ -77,13 +77,6 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<Hook>,
 
-    /// How long a subagent may run silent, in seconds, before it is
-    /// read as wedged and stopped, independently of its total runtime and turn
-    /// budgets. Clamped up to 1 s: a zero would stop
-    /// every subagent the moment it started. Unset reads as 1800.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub subagent_deadline: Option<u64>,
-
     /// How many times to retry a request the provider could not serve. Unset
     /// is `Retry::default()` — the number lives there, not here, so that an
     /// unset field and a missing config agree by construction.

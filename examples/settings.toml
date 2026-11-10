@@ -48,10 +48,6 @@ api_key  = "$ANTHROPIC_API_KEY" # `$` reads the environment; anything else is th
 # effort = "medium"               # off | low | medium | high
 # tier   = "exec"                 # read | write | exec | net
 
-# Seconds a subagent may run silent before it is read as wedged. Unset is 1800.
-# Independent of the child call's total runtime and model-turn budgets.
-# subagent_deadline = 1800
-
 # How many times to retry a request the provider could not serve, and how many
 # seconds of silence before a stream counts as wedged. The second is generous
 # on purpose: a reasoning model can legitimately think for minutes before its

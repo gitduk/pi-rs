@@ -37,9 +37,6 @@ pub struct Resolved {
     /// machine and tier, but is addressed by neither of the tool-authoring
     /// blocks.
     pub standing: std::sync::Arc<str>,
-    /// How long a subagent may run silent before it is read as wedged; `None`
-    /// leaves the subagent's own default.
-    pub subagent_deadline: Option<std::time::Duration>,
     /// Model connections available to child calls, from this configuration snapshot.
     pub subagent_models: Option<subagent::ModelResolver>,
     pub(crate) models: Arc<super::models::Models>,
@@ -460,9 +457,6 @@ pub fn resolve(
         }),
         prompt_blocks,
         hooks,
-        subagent_deadline: config
-            .subagent_deadline
-            .map(|s| std::time::Duration::from_secs(s.max(1))),
         subagent_models: Some(super::dial::subagent_models(pinned, models.clone())),
         models,
         standing: for_child.into(),
