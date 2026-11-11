@@ -42,7 +42,8 @@ impl Spacing {
             }
             Block::Prompt => self.has_turn,
             Block::Prose => matches!(self.previous, Some(Block::Tools)),
-            Block::Tools | Block::Relayed | Block::Status | Block::Other => false,
+            Block::Status => self.previous.is_some(),
+            Block::Tools | Block::Relayed | Block::Other => false,
         };
         self.has_turn |= matches!(next, Block::Prompt | Block::Relayed);
         self.previous = Some(next);
