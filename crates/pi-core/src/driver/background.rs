@@ -1675,17 +1675,7 @@ impl Commands {
             else {
                 unreachable!("registered user input")
             };
-            let text = original
-                .body()
-                .iter()
-                .filter_map(|block| match block {
-                    message::Block::Text(text) => Some(text.as_str()),
-                    message::Block::Image(_)
-                    | message::Block::Data(_)
-                    | message::Block::Reasoning(_) => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            let text = super::text_of(original.body());
             if !asked.back || options != &asked.options || text != asked.question {
                 return Err("user input display does not match its request".into());
             }

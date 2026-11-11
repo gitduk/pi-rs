@@ -14,7 +14,7 @@ pub struct Deferred {
 }
 
 impl Core {
-    /// At most one completion per idle session per pass. Existing inputs keep priority.
+    /// At most one completion per session per pass, queued in admission order.
     pub fn admit_background_results(&self) -> Vec<Deferred> {
         let Some(table) = &self.executions else {
             return Vec::new();
@@ -28,7 +28,8 @@ impl Core {
 }
 
 pub(super) fn admit(lane: &Lane, table: &Arc<Table>) -> Option<Deferred> {
-    if !lane.ready_for_input() || !lane.queue().is_empty() || lane.session().is_none() {
+    // A run holds the transcript but still reads what queues behind it.
+    if lane.session().is_none() && !lane.is_running() {
         return None;
     }
     let delivery = table.claim_result(lane.root(), lane.id())?;

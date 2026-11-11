@@ -422,7 +422,7 @@ impl Turn {
             input,
         } = self;
         let messages = responder.messages();
-        let input = input.with_context(ctx.clone()).with_messages(
+        let input = input.with_messages(
             messages,
             responder
                 .request()

@@ -1,6 +1,6 @@
 //! Checked input admission and ownership while an input waits for execution.
 
-use super::{Error, Failure, LIMITS, Messages, Responder, new_id};
+use super::{Error, Failure, LIMITS, Messages, Responder, Table, new_id};
 use message::{Block, Kind, Message, MessageId, Request, RequestId, Status, WireKind, WireMessage};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -67,21 +67,6 @@ impl Messages {
                 started: false,
             },
         }))
-    }
-
-    fn start(&self, id: &MessageId) -> Result<Responder, Error> {
-        let mut table = self.lock();
-        if table.active.is_some() || table.waiting.front() != Some(id) {
-            return Err(Error::Busy);
-        }
-        table.waiting.pop_front();
-        table.queued_bytes -= table.requests[id].request.encoded_bytes();
-        table.active = Some(id.clone());
-        Ok(Responder {
-            messages: self.clone(),
-            original: table.requests[id].request.clone(),
-            finished: false,
-        })
     }
 
     fn stop_waiting(&self, id: &MessageId, status: Status) {
@@ -197,37 +182,25 @@ pub struct AdmittedInput {
     ticket: PendingInput,
 }
 
+/// Next in line for the request `owner` (None: a new one), under the table's lock.
+fn in_line(table: &Table, id: &MessageId, owner: Option<&MessageId>) -> bool {
+    table.active.as_ref() == owner && table.waiting.front() == Some(id)
+}
+
 impl AdmittedInput {
-    /// Join an automatic input to a running conversation without starting another run.
-    pub(crate) fn join(
-        self,
-        active: &RequestId,
-    ) -> Result<(agent::session::Prompt, Responder), Error> {
-        let Self { prompt, mut ticket } = self;
-        let mut table = ticket.messages.lock();
-        if table.active.as_ref() != Some(active.message())
-            || !matches!(
-                ticket.original.kind(),
-                Kind::Request(Request::ToModel(message::InputKind::Automatic))
-            )
-        {
-            return Err(Error::Parent);
-        }
-        let index = table
-            .waiting
-            .iter()
-            .position(|id| id == ticket.original.id())
-            .ok_or(Error::Busy)?;
-        table.waiting.remove(index);
-        table.queued_bytes -= ticket.original.encoded_bytes();
-        ticket.started = true;
-        let responder = Responder {
-            messages: ticket.messages.clone(),
-            original: ticket.original.clone(),
-            finished: false,
-        };
-        drop(table);
-        Ok((prompt, responder))
+    /// Whether this input is next in line for the request `owner` (None: a new one).
+    fn ready(&self, owner: Option<&MessageId>) -> bool {
+        let table = self.ticket.messages.lock();
+        in_line(&table, self.ticket.original.id(), owner)
+    }
+
+    pub fn is_next(&self) -> bool {
+        self.ready(None)
+    }
+
+    /// Next in line for the request `parent` owns, the only one that may take it now.
+    pub(crate) fn joins(&self, parent: &RequestId) -> bool {
+        self.ready(Some(parent.message()))
     }
 
     pub fn message(&self) -> &Message {
@@ -241,15 +214,40 @@ impl AdmittedInput {
     pub fn prompt(&self) -> &agent::session::Prompt {
         &self.prompt
     }
-    pub fn is_next(&self) -> bool {
-        let table = self.ticket.messages.lock();
-        table.active.is_none() && table.waiting.front() == Some(self.ticket.original.id())
-    }
 
     pub fn start(self) -> Result<(agent::session::Prompt, Responder), Error> {
+        self.attach(None)
+    }
+
+    /// Join the conversation's running request instead of starting another.
+    pub(crate) fn join(
+        self,
+        parent: &RequestId,
+    ) -> Result<(agent::session::Prompt, Responder), Error> {
+        self.attach(Some(parent))
+    }
+
+    /// Take the conversation's next request: a new one, or the running one `owner` names.
+    fn attach(
+        self,
+        owner: Option<&RequestId>,
+    ) -> Result<(agent::session::Prompt, Responder), Error> {
         let Self { prompt, mut ticket } = self;
-        let responder = ticket.messages.start(ticket.original.id())?;
+        let mut table = ticket.messages.lock();
+        if !in_line(&table, ticket.original.id(), owner.map(RequestId::message)) {
+            return Err(Error::Busy);
+        }
+        table.waiting.pop_front();
+        table.queued_bytes -= ticket.original.encoded_bytes();
+        if owner.is_none() {
+            table.active = Some(ticket.original.id().clone());
+        }
         ticket.started = true;
+        let responder = Responder {
+            messages: ticket.messages.clone(),
+            original: ticket.original.clone(),
+            finished: false,
+        };
         Ok((prompt, responder))
     }
 

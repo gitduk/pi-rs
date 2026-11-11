@@ -163,6 +163,11 @@ impl Held {
 pub struct Notes(Arc<Mutex<Vec<Held>>>);
 
 impl Notes {
+    /// Hold a note for the run to file before its next request.
+    pub fn hold(&self, text: String) {
+        self.0.lock().unwrap().push(Held::Note(text));
+    }
+
     /// The oldest note not yet taken.
     pub fn take(&self) -> Option<String> {
         let mut held = self.0.lock().unwrap();
