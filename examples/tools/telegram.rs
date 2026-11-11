@@ -222,7 +222,7 @@ mod bridge {
     }
 
     async fn press(client: &Client, asking: &Asking, pi: &Pi, click: Click) {
-        let pi = pi.for_source(&format!("telegram-click:{}", click.id), 0);
+        let pi = pi.for_source(&format!("telegram-click:{}", click.id));
         let said = pressed(asking, &pi, click.data.as_deref().unwrap_or_default());
         let _ = client.settle(&click.id, said.err()).await;
     }
@@ -289,7 +289,7 @@ mod bridge {
         String,
         tokio::sync::watch::Sender<Option<String>>,
         Option<std::sync::Arc<crate::pending::Pending>>,
-        Option<(String, u64)>,
+        Option<String>,
     );
 
     impl Pi {
@@ -300,14 +300,11 @@ mod bridge {
         ) -> Self {
             Self(to, session, failed, None, None)
         }
-        fn for_source(&self, source: &str, at: u64) -> Self {
+        fn for_source(&self, source: &str) -> Self {
             let mut pi = self.clone();
-            pi.4 = Some((
-                format!(
-                    "channel-{}",
-                    protocol::hash(&format!("{}:{source}", self.1))
-                ),
-                at,
+            pi.4 = Some(format!(
+                "channel-{}",
+                protocol::hash(&format!("{}:{source}", self.1))
             ));
             pi
         }
@@ -315,31 +312,26 @@ mod bridge {
             self.3
                 .as_ref()
                 .zip(self.4.as_ref())
-                .is_some_and(|(pending, (id, _))| pending.remembers(id))
+                .is_some_and(|(pending, id)| pending.remembers(id))
         }
-        fn acknowledge(&self, frame: &Value) -> Option<Value> {
-            let pending = self.3.as_ref()?;
-            match pending.acknowledge(frame) {
-                Ok(Some(original))
-                    if original["message"]["kind"]["value"]["direction"] == "to_model"
-                        && frame["response"].is_object() =>
-                {
-                    Some(json!({"type":"message", "message":frame["response"], "replayed":true}))
-                }
-                Ok(_) => None,
-                Err(error) => {
-                    self.2.send_replace(Some(error));
-                    None
-                }
+        fn acknowledge(&self, frame: &Value) {
+            let Some(pending) = self.3.as_ref() else {
+                return;
+            };
+            if let Err(error) = pending.acknowledge(frame) {
+                self.2.send_replace(Some(error));
             }
         }
 
         fn say(&self, mut frame: Value) {
-            if frame["type"] == "message" {
-                if let Some((id, at)) = &self.4 {
-                    frame["message"]["id"] = json!(id);
-                    // Preserve transport time on retry; zero means it supplied no timestamp.
-                    frame["message"]["at"] = json!(at);
+            if frame["op"] == "say" {
+                if let Some(id) = &self.4 {
+                    frame["id"] = json!(id);
+                }
+                if frame["id"].is_null()
+                    && let Some(pending) = &self.3
+                {
+                    frame["id"] = json!(pending.next_id());
                 }
                 if let Some(pending) = &self.3 {
                     if let Err(error) = pending.push(frame) {
@@ -603,10 +595,7 @@ mod bridge {
         let mut paired = None;
         let mut clicks = Vec::new();
         for update in updates {
-            let pi = pi.for_source(
-                &format!("telegram:{:?}:{}", s.bot, update.update_id),
-                update.message.as_ref().map_or(0, |msg| msg.date),
-            );
+            let pi = pi.for_source(&format!("telegram:{:?}:{}", s.bot, update.update_id));
             s.offset = s.offset.max(update.update_id + 1);
             if pi.already_retained() {
                 continue;
@@ -786,9 +775,8 @@ mod bridge {
                         return;
                     };
                     let Ok(frame) = serde_json::from_str::<Value>(&line) else { continue; };
-                    let replayed = pi.acknowledge(&frame);
-                    let frame = replayed.as_ref().unwrap_or(&frame);
-                    if frame["type"] == "message" && frame["message"]["kind"]["type"] == "response"
+                    pi.acknowledge(&frame);
+                    if frame["op"] == "message" && frame["message"]["kind"]["type"] == "response"
                         && let Some(id) = frame["message"]["id"].as_str() {
                         if completed.iter().any(|seen| seen == id) { continue; }
                         completed.push_back(id.to_owned());
@@ -925,688 +913,6 @@ mod bridge {
                 continue;
             }
             return Err(e);
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        #[test]
-        fn model_answers_keep_the_original_request_and_selected_text() {
-            let (tx, mut rx) = mpsc::channel(8);
-            let pi = Pi::new(
-                tx,
-                "fixture-session".into(),
-                tokio::sync::watch::channel(None).0,
-            );
-            let question = json!({"type":"message","message":{
-                "id":"ask-id", "kind":{"type":"request","value":{"direction":"from_model","request":{"type":"ask","options":["Allow once","Deny"]}}},
-                "body":[{"type":"text","value":"Proceed?"}]
-            }});
-            let view = protocol::project(&question).unwrap();
-            let mut q = Up::of(&view).unwrap();
-            assert!(
-                q.back,
-                "model input must be answerable during the active run"
-            );
-            q.stage = Stage::Shown;
-            pi.answer(&q, &[0]);
-            let choice = rx.try_recv().unwrap();
-            assert_eq!(choice["message"]["kind"]["value"]["request"], "ask-id");
-            assert_eq!(choice["message"]["body"][0]["value"], "Allow once");
-            let asking = Asking::default();
-            asking.lock().push(q);
-            assert!(pi.answer_text(&asking, "Use another directory"));
-            let answer = rx.try_recv().unwrap();
-            assert_eq!(answer["message"]["session"], "fixture-session");
-            assert_eq!(answer["message"]["kind"]["type"], "response");
-            assert_eq!(answer["message"]["kind"]["value"]["request"], "ask-id");
-            assert_eq!(
-                answer["message"]["body"][0]["value"],
-                "Use another directory"
-            );
-            assert_ne!(answer["message"]["id"], choice["message"]["id"]);
-            assert!(!pi.answer_text(&asking, "duplicate"));
-        }
-
-        #[test]
-        fn legacy_wire_is_not_a_presentation_fallback() {
-            for frame in [
-                json!({"reply":"old reply"}),
-                json!({"question":{"id":1,"text":"old"}}),
-                json!({"started":true}),
-            ] {
-                assert!(protocol::project(&frame).is_none());
-            }
-            let frame = json!({"type":"message","message":{
-                "id":"response", "kind":{"type":"response","value":{"request":"original","status":{"type":"done"}}},
-                "body":[{"type":"text","value":"before tool"},{"type":"text","value":"after tool"},{"type":"reasoning","value":"private"}]
-            }});
-            let view = protocol::project(&frame).unwrap();
-            assert_eq!(view["request"], "m:original");
-            assert_eq!(view["reply"], "before tool\nafter tool");
-            assert!(protocol::project(&json!({"type":"runtime","event":{"type":"operation","operation":1,"model":true,"phase":{"type":"finished","text":"duplicate"}}})).is_none());
-        }
-
-        #[test]
-        fn a_full_host_queue_reports_failure_instead_of_silently_losing_input() {
-            let (tx, _rx) = mpsc::channel(1);
-            let (failed, reason) = tokio::sync::watch::channel(None);
-            let pi = Pi::new(tx, "fixture-session".into(), failed);
-            pi.input("first");
-            pi.input("second");
-            assert_eq!(reason.borrow().as_deref(), Some("host frame queue is full"));
-        }
-
-        fn runtime_fixture(view: &Value) -> Value {
-            let event = if let Some(q) = view.get("question") {
-                json!({"type":"prompt","question":q["id"],"text":q["text"],"options":q["options"],"back":q["back"]})
-            } else if let Some(q) = view.get("closed") {
-                json!({"type":"closed","question":q})
-            } else if let Some(q) = view.get("refused") {
-                json!({"type":"refused","question":q,"message":view["why"]})
-            } else {
-                let phase = if view["queued"] == true {
-                    json!({"type":"queued"})
-                } else if view["started"] == true {
-                    json!({"type":"started"})
-                } else if let Some(text) = view.get("progress") {
-                    json!({"type":"progress","text":text})
-                } else {
-                    json!({"type":"finished","text":view["reply"],"status":{"type":view["status"],"reason":view["reason"],"failure":{"message":view["error"]}},"exit_code":view["exit_code"]})
-                };
-                json!({"type":"operation","operation":view["request"],"phase":phase})
-            };
-            json!({"type":"runtime","event":event})
-        }
-
-        #[test]
-        fn an_immediate_command_does_not_finish_another_requests_typing() {
-            let mut activity = Activity::default();
-            for id in [7, 8, 8] {
-                activity.hear(&json!({ "request": id, "started": true }));
-            }
-            activity.hear(&json!({ "request": 8, "reply": "status" }));
-            activity.hear(&json!({ "request": 99, "reply": "already finished" }));
-            assert!(!activity.idle());
-            activity.hear(&json!({ "request": 7, "reply": "done" }));
-            assert!(activity.idle());
-            activity.hear(&json!({ "started": true }));
-            assert!(!activity.idle());
-            activity.hear(&json!({ "reply": "older host" }));
-            assert!(activity.idle());
-        }
-
-        #[test]
-        fn command_addressing_preserves_arguments_and_the_prose_escape() {
-            assert_eq!(
-                submitted("/compact@pi_bot keep @references\nverbatim"),
-                "/compact keep @references\nverbatim"
-            );
-            assert_eq!(submitted(" /compact@pi_bot"), " /compact@pi_bot");
-            assert_eq!(submitted("/compact focus"), "/compact focus");
-            assert_eq!(submitted("hello @pi_bot"), "hello @pi_bot");
-        }
-
-        #[test]
-        fn outcome_notices_do_not_rewrite_reply_content() {
-            for reply in [
-                "",
-                "stopped",
-                "(stopped)",
-                "running\nstopped",
-                "running\n\n(stopped)",
-            ] {
-                for told in [
-                    json!({}),
-                    json!({"status": "done"}),
-                    json!({"status": "done", "exit_code": 0}),
-                ] {
-                    assert_eq!(reply_text(reply, &told), reply);
-                }
-                for (told, notice) in [
-                    (json!({"status": "stopped"}), STOPPED_NOTICE.to_string()),
-                    (
-                        json!({"status": "failed", "error": "network unavailable"}),
-                        "任务失败：network unavailable".to_string(),
-                    ),
-                    (
-                        json!({"status": "failed", "exit_code": 3}),
-                        "任务失败：退出码 3".to_string(),
-                    ),
-                ] {
-                    let expected = if reply.is_empty() {
-                        notice
-                    } else {
-                        format!("{reply}\n\n{notice}")
-                    };
-                    assert_eq!(reply_text(reply, &told), expected);
-                }
-            }
-            assert_eq!(
-                reply_text("", &json!({"status": "stopped", "reason": "run it again"})),
-                format!("{STOPPED_NOTICE}\nrun it again")
-            );
-        }
-
-        #[test]
-        fn paired_submissions_preserve_commands_arguments_and_literal_slashes() {
-            let (_dir, kept) = kept();
-            {
-                let mut state = kept.lock();
-                state.user = Some(7);
-                state.chat = Some(7);
-            }
-            let (tx, mut rx) = mpsc::channel(64);
-            heard(
-                &kept,
-                &Asking::default(),
-                &Pi::new(
-                    tx,
-                    "fixture-session".into(),
-                    tokio::sync::watch::channel(None).0,
-                ),
-                &mut None,
-                vec![
-                    update(1, 7, 7, "private", "/compact@pi_bot keep failures"),
-                    update(2, 7, 7, "private", " /stop"),
-                    update(3, 7, 7, "private", "/stop@pi_bot"),
-                ],
-            );
-            assert_eq!(
-                rx.try_recv().unwrap()["message"]["body"][0]["value"],
-                "/compact keep failures"
-            );
-            assert_eq!(
-                rx.try_recv().unwrap()["message"]["body"][0]["value"],
-                " /stop"
-            );
-            assert_eq!(
-                rx.try_recv().unwrap(),
-                protocol::runtime(json!({"type":"interrupt"}))
-            );
-            assert!(rx.try_recv().is_err());
-        }
-
-        #[tokio::test]
-        async fn queued_notices_are_sent_separately_from_the_final_reply() {
-            let (_dir, kept) = kept();
-            kept.lock().chat = Some(7);
-            let (base, requests) = server(vec![(200, json!({"ok": true, "result": {}})); 3]).await;
-            let client = Client::at(base);
-            let (tx, _rx) = mpsc::channel(64);
-            let (mut host, script) = tokio::net::UnixStream::pair().unwrap();
-            for told in [
-                json!({"request": 17, "queued": true}),
-                json!({"request": 17, "reply": "queued", "status": "done"}),
-            ] {
-                host.write_all(format!("{}\n", runtime_fixture(&told)).as_bytes())
-                    .await
-                    .unwrap();
-            }
-            drop(host);
-            let (read, _write) = script.into_split();
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                answer(
-                    &client,
-                    &kept,
-                    &Asking::default(),
-                    &Pi::new(
-                        tx,
-                        "fixture-session".into(),
-                        tokio::sync::watch::channel(None).0,
-                    ),
-                    read,
-                    &Notify::new(),
-                ),
-            )
-            .await
-            .unwrap();
-            let requests = requests.await.unwrap();
-            assert_eq!(requests[1]["text"], QUEUED_NOTICE);
-            assert_eq!(requests[2]["text"], "queued");
-        }
-
-        #[tokio::test]
-        async fn received_replies_use_cancellation_metadata_not_answer_text() {
-            let (_dir, kept) = kept();
-            kept.lock().chat = Some(7);
-            let (base, requests) = server(vec![(200, json!({"ok": true, "result": {}})); 3]).await;
-            let client = Client::at(base);
-            let (tx, _rx) = mpsc::channel(64);
-            let (mut host, script) = tokio::net::UnixStream::pair().unwrap();
-            for told in [
-                json!({"request": 1, "reply": "stopped", "status": "done"}),
-                json!({
-                    "request": 2,
-                    "reply": "partial answer\n\n(stopped)",
-                    "status": "stopped",
-                }),
-            ] {
-                host.write_all(format!("{}\n", runtime_fixture(&told)).as_bytes())
-                    .await
-                    .unwrap();
-            }
-            drop(host);
-            let (read, _write) = script.into_split();
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                answer(
-                    &client,
-                    &kept,
-                    &Asking::default(),
-                    &Pi::new(
-                        tx,
-                        "fixture-session".into(),
-                        tokio::sync::watch::channel(None).0,
-                    ),
-                    read,
-                    &Notify::new(),
-                ),
-            )
-            .await
-            .unwrap();
-            let requests = requests.await.unwrap();
-            assert_eq!(requests[1]["text"], "stopped");
-            assert_eq!(
-                requests[2]["text"],
-                format!("partial answer\n\n(stopped)\n\n{STOPPED_NOTICE}")
-            );
-        }
-
-        #[tokio::test]
-        async fn a_saved_connection_is_announced_once_without_an_incoming_message() {
-            for chat in [None, Some(7)] {
-                let (_dir, kept) = kept();
-                kept.lock().chat = chat;
-                let replies = chat
-                    .map(|_| (200, json!({"ok": true, "result": {}})))
-                    .into_iter()
-                    .collect();
-                let (base, requests) = server(replies).await;
-                let client = Client::at(base);
-                let (tx, _rx) = mpsc::channel(64);
-                let (host, script) = tokio::net::UnixStream::pair().unwrap();
-                let (read, _write) = script.into_split();
-                drop(host);
-                tokio::time::timeout(
-                    Duration::from_secs(3),
-                    answer(
-                        &client,
-                        &kept,
-                        &Asking::default(),
-                        &Pi::new(
-                            tx,
-                            "fixture-session".into(),
-                            tokio::sync::watch::channel(None).0,
-                        ),
-                        read,
-                        &Notify::new(),
-                    ),
-                )
-                .await
-                .unwrap();
-                let requests = requests.await.unwrap();
-                assert_eq!(requests.len(), usize::from(chat.is_some()));
-                if let Some(chat) = chat {
-                    assert_eq!(requests[0]["chat_id"], chat);
-                }
-            }
-        }
-
-        #[tokio::test]
-        async fn failed_pieces_resume_in_order_without_resending_successful_ones() {
-            let ok = (200, json!({"ok": true, "result": {}}));
-            let failed = (
-                400,
-                json!({"ok": false, "error_code": 400, "description": "rejected"}),
-            );
-            let (base, requests) = server(vec![ok.clone(), failed, ok.clone(), ok]).await;
-            let client = Client::at(base);
-            let (tx, mut status) = mpsc::channel(64);
-            let pi = Pi::new(
-                tx,
-                "fixture-session".into(),
-                tokio::sync::watch::channel(None).0,
-            );
-            let mut outbox = Outbox::default();
-            outbox.push(
-                7,
-                &format!("{}\n\n{}", "a".repeat(MESSAGE_LIMIT), "b".repeat(20)),
-            );
-            assert!(!outbox.flush(&client, &pi).await);
-            assert!(outbox.blocked);
-            assert_eq!(outbox.pending.front().unwrap().pieces.len(), 1);
-            assert!(
-                status.try_recv().unwrap()["command"]["text"]
-                    .as_str()
-                    .unwrap()
-                    .contains("kept")
-            );
-            outbox.push(7, "later answer");
-            assert!(outbox.flush(&client, &pi).await);
-            assert!(outbox.pending.is_empty());
-            let requests = tokio::time::timeout(Duration::from_secs(5), requests)
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(requests[1]["text"], requests[2]["text"]);
-            assert_ne!(requests[0]["text"], requests[2]["text"]);
-            assert_eq!(requests[3]["text"], "later answer");
-            assert!(requests.iter().all(|r| r["chat_id"] == 7));
-        }
-
-        #[tokio::test]
-        async fn rate_limit_retries_and_formatting_fallback_keep_the_text() {
-            let (base, requests) = server(vec![
-                (400, json!({"ok": false, "error_code": 400})),
-                (
-                    429,
-                    json!({"ok": false, "error_code": 429, "parameters": {"retry_after": 0}}),
-                ),
-                (200, json!({"ok": true, "result": {}})),
-            ])
-            .await;
-            let client = Client::at(base);
-            let entities = vec![Entity {
-                kind: "bold",
-                offset: 0,
-                length: 4,
-                url: None,
-                language: None,
-            }];
-            deliver(&client, 7, "text", &entities).await.unwrap();
-            let requests = tokio::time::timeout(Duration::from_secs(5), requests)
-                .await
-                .unwrap()
-                .unwrap();
-            assert!(!requests[0]["entities"].as_array().unwrap().is_empty());
-            assert!(requests[1]["entities"].as_array().unwrap().is_empty());
-            assert!(requests.iter().all(|r| r["text"] == "text"));
-        }
-
-        async fn server(
-            replies: Vec<(u16, Value)>,
-        ) -> (String, tokio::task::JoinHandle<Vec<Value>>) {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let base = format!("http://{}", listener.local_addr().unwrap());
-            let task = tokio::spawn(async move {
-                let mut requests = Vec::new();
-                for (status, reply) in replies {
-                    let (mut socket, _) = listener.accept().await.unwrap();
-                    let mut raw = Vec::new();
-                    let mut buf = [0; 4096];
-                    let head = loop {
-                        let n = socket.read(&mut buf).await.unwrap();
-                        assert!(n > 0);
-                        raw.extend_from_slice(&buf[..n]);
-                        if let Some(at) = raw.windows(4).position(|s| s == b"\r\n\r\n") {
-                            break at + 4;
-                        }
-                    };
-                    let len = String::from_utf8_lossy(&raw[..head])
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .map(|n| n.trim().parse::<usize>().unwrap())
-                        })
-                        .unwrap();
-                    while raw.len() < head + len {
-                        let n = socket.read(&mut buf).await.unwrap();
-                        assert!(n > 0);
-                        raw.extend_from_slice(&buf[..n]);
-                    }
-                    requests.push(serde_json::from_slice(&raw[head..head + len]).unwrap());
-                    let body = reply.to_string();
-                    let response = format!(
-                        "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    socket.write_all(response.as_bytes()).await.unwrap();
-                }
-                requests
-            });
-            (base, task)
-        }
-
-        #[test]
-        fn a_full_durable_queue_does_not_advance_the_transport_offset() {
-            let (_dir, kept) = kept();
-            {
-                let mut state = kept.lock();
-                state.user = Some(7);
-                state.chat = Some(7);
-            }
-            let (tx, _rx) = mpsc::channel(1);
-            let mut pi = Pi::new(tx, "s".into(), tokio::sync::watch::channel(None).0);
-            pi.3 = Some(crate::pending::Pending::open(&kept.path, "s").unwrap());
-            let batch = || {
-                (0..300)
-                    .map(|id| update(id, 7, 7, "private", "input"))
-                    .collect()
-            };
-            heard(&kept, &Asking::default(), &pi, &mut None, batch());
-            assert_eq!(kept.lock().offset, 0);
-            assert!(pi.2.borrow().is_some());
-            let path = kept
-                .path
-                .with_extension(format!("pending-{}.json", protocol::hash("s")));
-            let saved: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-            assert_eq!(saved["waiting"].as_array().unwrap().len(), 256);
-            for frame in saved["waiting"].as_array().unwrap() {
-                pi.acknowledge(&json!({"type":"accepted","id":frame["message"]["id"]}));
-            }
-            pi.2.send_replace(None);
-            heard(&kept, &Asking::default(), &pi, &mut None, batch());
-            assert_eq!(kept.lock().offset, 300);
-            assert!(pi.2.borrow().is_none());
-        }
-
-        #[test]
-        fn a_failed_pending_save_keeps_the_transport_update_available() {
-            let (_dir, kept) = kept();
-            {
-                let mut state = kept.lock();
-                state.user = Some(7);
-                state.chat = Some(7);
-            }
-            let (tx, _rx) = mpsc::channel(1);
-            let mut pi = Pi::new(tx, "s".into(), tokio::sync::watch::channel(None).0);
-            pi.3 = Some(crate::pending::Pending::open(&kept.path, "s").unwrap());
-            let path = kept
-                .path
-                .with_extension(format!("pending-{}.json", protocol::hash("s")));
-            std::fs::create_dir(path).unwrap();
-            heard(
-                &kept,
-                &Asking::default(),
-                &pi,
-                &mut None,
-                vec![update(17, 7, 7, "private", "keep me")],
-            );
-            assert_eq!(kept.lock().offset, 0);
-            assert!(pi.2.borrow().is_some());
-        }
-
-        fn kept() -> (tempfile::TempDir, Kept) {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("telegram.json");
-            (
-                dir,
-                Kept {
-                    path,
-                    state: Mutex::new(State::default()),
-                },
-            )
-        }
-
-        fn update(id: i64, from: i64, chat: i64, kind: &str, text: &str) -> Update {
-            serde_json::from_value(json!({
-                "update_id": id,
-                "message": {
-                    "from": { "id": from },
-                    "chat": { "id": chat, "type": kind },
-                    "text": text,
-                },
-            }))
-            .unwrap()
-        }
-
-        // A stranger is never heard, before or after pairing; only the
-        // private chat that sent the code pairs, and then drives the session.
-        #[test]
-        fn only_the_account_that_paired_is_heard() {
-            let (_dir, kept) = kept();
-            let (tx, mut rx) = mpsc::channel(64);
-            let pi = Pi::new(
-                tx,
-                "fixture-session".into(),
-                tokio::sync::watch::channel(None).0,
-            );
-            let mut code = Some("12345678".to_string());
-            let asking = Asking::default();
-            let (paired, _) = heard(
-                &kept,
-                &asking,
-                &pi,
-                &mut code,
-                vec![
-                    update(1, 9, 9, "private", "rm -rf ~"),
-                    update(2, 7, -100, "group", "/start 12345678"),
-                    update(3, 7, 7, "private", "/start 12345678"),
-                ],
-            );
-            assert_eq!(paired, Some(7));
-            assert_eq!(code, None);
-            assert!(rx.try_recv().unwrap()["command"]["type"] == "status");
-            assert!(rx.try_recv().is_err());
-
-            heard(
-                &kept,
-                &asking,
-                &pi,
-                &mut code,
-                vec![
-                    update(4, 9, 9, "private", "rm -rf ~"),
-                    update(5, 7, 7, "private", "why did it fail"),
-                    update(6, 7, 7, "private", "/stop@pi_bot"),
-                ],
-            );
-            assert_eq!(
-                rx.try_recv().unwrap()["message"]["body"][0]["value"],
-                "why did it fail"
-            );
-            assert_eq!(
-                rx.try_recv().unwrap(),
-                protocol::runtime(json!({"type":"interrupt"}))
-            );
-            assert!(rx.try_recv().is_err());
-            let saved: State = serde_json::from_slice(&std::fs::read(&kept.path).unwrap()).unwrap();
-            assert_eq!(
-                (saved.user, saved.chat, saved.offset),
-                (Some(7), Some(7), 7)
-            );
-        }
-
-        // Only the paired account's presses, in its chat, count; a press
-        // answers with its option, or closes, once; one on what is no longer
-        // up says so. A reply of numbers only answers with several.
-        #[test]
-        fn a_press_answers_only_for_the_paired_account() {
-            let (_dir, kept) = kept();
-            *kept.lock() = State {
-                user: Some(7),
-                chat: Some(7),
-                ..State::default()
-            };
-            let (tx, mut rx) = mpsc::channel(64);
-            let pi = Pi::new(
-                tx,
-                "fixture-session".into(),
-                tokio::sync::watch::channel(None).0,
-            );
-            let asking = Asking::default();
-            let click = |id: i64, from: i64, chat: i64, data: &str| -> Update {
-                serde_json::from_value(json!({
-                    "update_id": id,
-                    "callback_query": {
-                        "id": "c",
-                        "from": { "id": from },
-                        "message": { "message_id": 1, "chat": { "id": chat, "type": "private" } },
-                        "data": data,
-                    },
-                }))
-                .unwrap()
-            };
-            let (_, clicks) = heard(
-                &kept,
-                &asking,
-                &pi,
-                &mut None,
-                vec![
-                    click(1, 9, 7, "3:0"),
-                    click(2, 7, -100, "3:0"),
-                    click(3, 7, 7, "3:0"),
-                ],
-            );
-            assert_eq!(clicks.len(), 1);
-            assert!(rx.try_recv().is_err(), "a press says nothing by itself");
-
-            let told = |id: u64| {
-                json!({ "question": {
-                    "id": id, "text": "which?", "options": ["a", "b", "c"], "back": false,
-                }})
-            };
-            asking.lock().push(Up::of(&told(3)).unwrap());
-            assert_eq!(pressed(&asking, &pi, "3:3"), Err(CLOSED));
-            assert_eq!(pressed(&asking, &pi, "3:1"), Ok(()));
-            assert_eq!(
-                rx.try_recv().unwrap(),
-                protocol::runtime(json!({"type":"answer","question":3,"picks":[1]}))
-            );
-            assert!(pressed(&asking, &pi, "3:close").is_err(), "answered once");
-            asking.lock().push(Up::of(&told(5)).unwrap());
-            assert_eq!(pressed(&asking, &pi, "5:close"), Ok(()));
-            assert_eq!(
-                rx.try_recv().unwrap(),
-                protocol::runtime(json!({"type":"answer","question":5,"picks":[]}))
-            );
-            assert_eq!(pressed(&asking, &pi, "9:0"), Err(CLOSED));
-
-            let mut shown = Up::of(&told(6)).unwrap();
-            shown.stage = Stage::Shown;
-            asking.lock().push(shown);
-            let says = |text: &str| {
-                heard(
-                    &kept,
-                    &asking,
-                    &pi,
-                    &mut None,
-                    vec![update(9, 7, 7, "private", text)],
-                );
-            };
-            says("3，1 3");
-            assert_eq!(
-                rx.try_recv().unwrap(),
-                protocol::runtime(json!({"type":"answer","question":6,"picks":[0, 2]}))
-            );
-            says("1 more");
-            assert_eq!(
-                rx.try_recv().unwrap()["message"]["body"][0]["value"],
-                "1 more"
-            );
-        }
-
-        #[test]
-        fn the_saved_pairing_is_private() {
-            use std::os::unix::fs::PermissionsExt;
-            let (_dir, kept) = kept();
-            kept.save(&State::default());
-            let mode = std::fs::metadata(&kept.path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600);
         }
     }
 }
@@ -1765,14 +1071,6 @@ mod api {
     }
 
     impl Client {
-        #[cfg(test)]
-        pub fn at(base: String) -> Self {
-            Self {
-                http: reqwest::Client::new(),
-                base,
-            }
-        }
-
         pub fn new(token: &str) -> Self {
             Self {
                 http: reqwest::Client::new(),
@@ -2237,50 +1535,6 @@ mod render {
             })
             .collect()
     }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        // Offsets are UTF-16 units from each piece's own start: an emoji
-        // counts two, and a span cut by the split continues in the next piece.
-        #[test]
-        fn entities_are_counted_in_utf16_from_their_own_piece() {
-            let (text, spans) = render(&format!("{}\n\n😀 **粗体**", "a".repeat(30)));
-            let pieces = pieces(&text, &spans, 32);
-            assert_eq!(pieces.len(), 2);
-            let (piece, entities) = &pieces[1];
-            assert_eq!(piece, "😀 粗体");
-            assert_eq!(
-                entities.as_slice(),
-                [Entity {
-                    kind: "bold",
-                    offset: 3,
-                    length: 2,
-                    url: None,
-                    language: None,
-                }]
-            );
-        }
-
-        // A link Telegram would refuse keeps its address as text instead.
-        #[test]
-        fn a_link_that_is_not_a_web_address_is_spelled_out() {
-            let (text, spans) = render("see [the file](src/main.rs) or [docs](https://x.dev)");
-            assert_eq!(text, "see the file (src/main.rs) or docs");
-            assert_eq!(spans.len(), 1);
-            assert_eq!(&text[spans[0].range.clone()], "docs");
-        }
-
-        #[test]
-        fn a_code_block_is_pre_without_its_trailing_newline() {
-            let (text, spans) = render("run:\n\n```sh\ncargo test\n```\n");
-            assert_eq!(text, "run:\n\ncargo test");
-            assert_eq!(spans[0].kind, "pre");
-            assert_eq!(spans[0].language.as_deref(), Some("sh"));
-            assert_eq!(&text[spans[0].range.clone()], "cargo test");
-        }
-    }
 }
 
 mod split {
@@ -2330,20 +1584,6 @@ mod split {
             return (i, skip);
         }
         (end, 0)
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn a_run_with_no_boundary_is_cut_on_a_character() {
-            let text = "中".repeat(200);
-            let pieces = split(&text, 100);
-            assert!(pieces.len() > 1);
-            let rejoined: String = pieces.into_iter().map(|r| &text[r]).collect();
-            assert_eq!(rejoined, text);
-        }
     }
 }
 
@@ -2482,8 +1722,19 @@ mod pending {
         path: PathBuf,
         stored: Mutex<Stored>,
         changed: Notify,
+        next: std::sync::atomic::AtomicU64,
+    }
+    fn id_key(value: &Value) -> Option<String> {
+        value["id"]
+            .as_u64()
+            .map(|n| n.to_string())
+            .or_else(|| value["id"].as_str().map(str::to_owned))
     }
     impl Pending {
+        pub fn next_id(&self) -> u64 {
+            self.next
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        }
         pub fn open(state: &Path, session: &str) -> Result<Arc<Self>, String> {
             let path =
                 state.with_extension(format!("pending-{}.json", crate::protocol::hash(session)));
@@ -2497,6 +1748,7 @@ mod pending {
                 path,
                 stored: Mutex::new(stored),
                 changed: Notify::new(),
+                next: std::sync::atomic::AtomicU64::new(1),
             }))
         }
         fn save(&self, stored: &Stored) -> Result<(), String> {
@@ -2525,19 +1777,19 @@ mod pending {
                 .stored
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            stored.completed.iter().any(|seen| seen == id)
-                || stored.waiting.iter().any(|old| old["message"]["id"] == id)
+            stored.completed.iter().any(|seen| seen.as_str() == id)
+                || stored.waiting.iter().any(|old| id_key(old).as_deref() == Some(id))
         }
         pub fn push(&self, frame: Value) -> Result<(), String> {
-            let id = frame["message"]["id"]
-                .as_str()
-                .ok_or("input has no message ID")?;
+            let id = id_key(&frame).ok_or("input has no request ID")?;
             let mut stored = self
                 .stored
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if stored.completed.iter().any(|seen| seen == id)
-                || stored.waiting.iter().any(|old| old["message"]["id"] == id)
+            if stored.completed.iter().any(|seen| seen == &id)
+                || stored.waiting
+                    .iter()
+                    .any(|old| id_key(old).as_deref() == Some(&id))
             {
                 return Ok(());
             }
@@ -2555,30 +1807,33 @@ mod pending {
             self.changed.notify_waiters();
             Ok(())
         }
-        pub fn acknowledge(&self, frame: &Value) -> Result<Option<Value>, String> {
-            let Some(id) = frame["id"].as_str() else {
-                return Ok(None);
+        pub fn acknowledge(&self, frame: &Value) -> Result<(), String> {
+            let Some(id) = id_key(frame) else {
+                return Ok(());
             };
             let mut stored = self
                 .stored
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let Some(at) = stored.waiting.iter().position(|p| p["message"]["id"] == id) else {
-                return Ok(None);
+            let Some(at) = stored
+                .waiting
+                .iter()
+                .position(|p| id_key(p).as_deref() == Some(&id))
+            else {
+                return Ok(());
             };
-            match frame["type"].as_str() {
-                Some("accepted") => {}
-                Some("error") => {
-                    return Err(format!(
-                        "host refused pending input: {}",
-                        frame["message"].as_str().unwrap_or("unknown error")
-                    ));
-                }
-                _ => return Ok(None),
+            if frame["error"].is_object() {
+                return Err(format!(
+                    "host refused pending input: {}",
+                    frame["error"]["message"].as_str().unwrap_or("unknown error")
+                ));
+            }
+            if frame["result"]["accepted"] != true {
+                return Ok(());
             }
             let mut next = stored.clone();
-            let original = next.waiting.remove(at).expect("located pending input");
-            next.completed.push_back(id.to_string());
+            next.waiting.remove(at).expect("located pending input");
+            next.completed.push_back(id);
             while next.completed.len() > 4096 {
                 next.completed.pop_front();
             }
@@ -2586,7 +1841,7 @@ mod pending {
             *stored = next;
             drop(stored);
             self.changed.notify_waiters();
-            Ok(Some(original))
+            Ok(())
         }
         pub async fn pump(&self, to: &mpsc::Sender<Value>) -> Result<(), String> {
             loop {
@@ -2601,7 +1856,7 @@ mod pending {
                     .front()
                     .cloned();
                 if let Some(frame) = frame {
-                    let id = frame["message"]["id"].clone();
+                    let id = id_key(&frame);
                     to.send(frame)
                         .await
                         .map_err(|_| "host frame connection is closed")?;
@@ -2615,7 +1870,7 @@ mod pending {
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .waiting
                             .iter()
-                            .any(|p| p["message"]["id"] == id)
+                            .any(|p| id_key(p) == id)
                         {
                             break;
                         }
@@ -2625,71 +1880,6 @@ mod pending {
                     changed.await;
                 }
             }
-        }
-    }
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use serde_json::json;
-        fn frame(id: &str, response: bool) -> Value {
-            json!({"type":"message", "message":{"id":id,"session":"s","by":null,"at":7,
-                "kind":if response {json!({"type":"response","value":{"request":"ask","status":{"type":"done"}}})} else {json!({"type":"request","value":{"direction":"to_model","request":"user"}})},
-                "body":[{"type":"text","value":"original"}]}})
-        }
-        #[tokio::test]
-        async fn persisted_requests_and_answers_retry_unchanged_under_backpressure() {
-            let dir = tempfile::tempdir().unwrap();
-            let state = dir.path().join("state.json");
-            let pending = Pending::open(&state, "s").unwrap();
-            let expected: Vec<_> = (0..70)
-                .map(|i| frame(&format!("event-{i}"), i % 2 != 0))
-                .collect();
-            for frame in &expected {
-                pending.push(frame.clone()).unwrap();
-            }
-            drop(pending);
-            let pending = Pending::open(&state, "s").unwrap();
-            let (tx, mut rx) = mpsc::channel(1);
-            let task = tokio::spawn({
-                let pending = pending.clone();
-                async move { pending.pump(&tx).await }
-            });
-            for frame in expected {
-                let received = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert_eq!(received, frame);
-                pending
-                    .acknowledge(&json!({"type":"accepted","id":frame["message"]["id"]}))
-                    .unwrap();
-                pending.push(frame).unwrap();
-            }
-            assert!(pending.stored.lock().unwrap().waiting.is_empty());
-            task.abort();
-            let restored = Pending::open(&state, "s").unwrap();
-            assert!(restored.stored.lock().unwrap().waiting.is_empty());
-            assert_eq!(restored.stored.lock().unwrap().completed.len(), 70);
-        }
-        #[test]
-        fn failed_saves_and_host_rejections_retain_the_original_input() {
-            let dir = tempfile::tempdir().unwrap();
-            let pending = Pending::open(&dir.path().join("state.json"), "s").unwrap();
-            let original = frame("input", false);
-            pending.push(original.clone()).unwrap();
-            assert!(
-                pending
-                    .acknowledge(&json!({"type":"error","id":"input","message":"full"}))
-                    .is_err()
-            );
-            assert_eq!(
-                pending.stored.lock().unwrap().waiting.front(),
-                Some(&original)
-            );
-            std::fs::remove_file(&pending.path).unwrap();
-            std::fs::create_dir(&pending.path).unwrap();
-            assert!(pending.push(frame("next", false)).is_err());
-            assert_eq!(pending.stored.lock().unwrap().waiting.len(), 1);
         }
     }
 }

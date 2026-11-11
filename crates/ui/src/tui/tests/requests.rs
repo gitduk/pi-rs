@@ -32,6 +32,21 @@ async fn submit(tui: &mut Tui, execution: &dyn RunHandle, text: &str) {
     }
 }
 
+// The person's line, not a script's: shell work from `Origin::Input` is
+// refused, and these tests are about the shell, not who asked for it.
+async fn submit_typed(tui: &mut Tui, execution: &dyn RunHandle, text: &str) {
+    execution.channel().input(text.into(), String::new());
+    let (_origin, wake) = tui.driver_line().expect("the submission was received");
+    let (replies, _inb) = crate::tui::run::Replies::channels();
+    match wake {
+        Wake::Do(Asked::Core(intent), line) => {
+            tui.execute(intent, Origin::Typed, line, &replies).await;
+        }
+        Wake::Nothing => {}
+        _ => panic!("a submission must be admitted or queued"),
+    }
+}
+
 fn response(rx: &mut ::execution::channel::Receiver) -> (u64, Response) {
     loop {
         match rx.try_recv().expect("an operation response") {
@@ -410,32 +425,26 @@ async fn background_results_remain_model_input_while_remote_commands_are_admitte
 }
 
 #[tokio::test]
-async fn shell_exit_status_is_separate_from_actual_output() {
-    for (command, expected) in [("!printf 'exit 3'; exit 3", "exit 3"), ("!exit 3", "")] {
-        let dir = tempfile::tempdir().unwrap();
-        let mut tui = surface(dir.path());
-        tui.core
-            .lane_mut()
-            .return_session(agent::session::Session::default());
-        tui.core.lane_mut().finish();
-        let (execution, mut rx) = bridge(&tui);
-        submit(&mut tui, execution.as_ref(), command).await;
-        let (id, _) = response(&mut rx);
-        let completed = completed_run(&mut tui).await;
-        assert!(completed.result.is_err());
-        assert!(matches!(completed.ended, Ended::Failed(_)));
-        tui.present_settlement(pi_core::execution::host::Settlement::Returned(completed));
-        assert_eq!(
-            response(&mut rx),
-            (
-                id,
-                Response::Finished {
-                    text: expected.into(),
-                    outcome: Outcome::Exited(3),
-                }
-            )
-        );
-    }
+async fn a_script_line_cannot_run_shell_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tui = surface(dir.path());
+    tui.core
+        .lane_mut()
+        .return_session(agent::session::Session::default());
+    tui.core.lane_mut().finish();
+    let (execution, mut rx) = bridge(&tui);
+    submit(&mut tui, execution.as_ref(), "!printf 'exit 3'; exit 3").await;
+    let (_, event) = response(&mut rx);
+    assert_eq!(event, Response::Started);
+    let (_, event) = response(&mut rx);
+    assert_eq!(
+        event,
+        Response::Finished {
+            text: String::new(),
+            outcome: Outcome::Failed("a line from a script may not run shell commands".into()),
+        }
+    );
+    assert!(rx.try_recv().is_err());
 }
 
 #[tokio::test]
@@ -509,6 +518,17 @@ async fn queued_prompts_and_shell_commands_keep_one_identity_until_completion() 
         tui.core.lane_mut().finish();
         let (replies, _inb) = crate::tui::run::Replies::channels();
         assert!(!tui.resume_queued(queued, &replies).await);
+        if line.starts_with('!') {
+            assert_eq!(response(&mut rx), (id, Response::Started));
+            let (finished, Response::Finished { text, outcome }) = response(&mut rx) else {
+                panic!("a final reply")
+            };
+            assert_eq!(finished, id);
+            assert!(matches!(outcome, Outcome::Failed(_)));
+            assert!(text.is_empty());
+            assert!(rx.try_recv().is_err());
+            continue;
+        }
         assert_eq!(response(&mut rx), (id, Response::Started));
         let done = completed_run(&mut tui).await;
         assert_eq!(done.request.id, id);
@@ -517,22 +537,8 @@ async fn queued_prompts_and_shell_commands_keep_one_identity_until_completion() 
             panic!("a final reply")
         };
         assert_eq!(finished, id);
-        assert_eq!(
-            outcome,
-            if line.starts_with('!') {
-                Outcome::Exited(0)
-            } else {
-                Outcome::Done
-            }
-        );
-        assert_eq!(
-            text,
-            if line.contains("printf") {
-                "queued output"
-            } else {
-                ""
-            }
-        );
+        assert_eq!(outcome, Outcome::Done);
+        assert!(text.is_empty());
         assert!(
             rx.try_recv().is_err(),
             "following does not duplicate lifecycle events"
@@ -712,6 +718,23 @@ async fn remote_prompts_and_shell_commands_keep_their_own_async_response() {
         let (execution, mut rx) = bridge(&tui);
         execution.channel().follow();
         submit(&mut tui, execution.as_ref(), line).await;
+        if line.starts_with('!') {
+            let (_, event) = response(&mut rx);
+            assert_eq!(event, Response::Started);
+            let (_, event) = response(&mut rx);
+            assert!(
+                matches!(
+                    event,
+                    Response::Finished {
+                        outcome: Outcome::Failed(_),
+                        ..
+                    }
+                ),
+                "a script line may not run shell commands: {event:?}"
+            );
+            assert!(rx.try_recv().is_err());
+            continue;
+        }
         let (id, event) = response(&mut rx);
         assert_eq!(event, Response::Started);
         let completed = completed_run(&mut tui).await;
@@ -728,20 +751,8 @@ async fn remote_prompts_and_shell_commands_keep_their_own_async_response() {
             panic!("a final answer")
         };
         assert_eq!(finished, id);
-        assert_eq!(
-            outcome,
-            if line.starts_with('!') {
-                Outcome::Exited(0)
-            } else {
-                Outcome::Done
-            }
-        );
-        match line {
-            "!printf 'bridge output'" => assert_eq!(text, "bridge output"),
-            "!true" => assert!(text.is_empty()),
-            "!printf '(no output)'" => assert_eq!(text, "(no output)"),
-            _ => {}
-        }
+        assert_eq!(outcome, Outcome::Done);
+        assert!(text.is_empty());
         assert!(
             rx.try_recv().is_err(),
             "following does not duplicate the input's own reply"

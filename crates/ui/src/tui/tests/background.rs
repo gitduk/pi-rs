@@ -59,7 +59,7 @@ async fn named_scripts_use_bash_background_with_original_input_and_environment()
         dir.path().join("later"),
         "#!/bin/sh\n# ---\n# description = \"Keep a prompt\"\n# background = true\n# [optional]\n\
          # after = \"A delay\"\n# prompt = \"What to do\"\n# ---\n\
-         cat > received\nprintf '%s\\n' '{\"type\":\"runtime\",\"command\":{\"type\":\"status\",\"text\":\"waiting\"}}' >&3\nsleep 30\n",
+         cat > received\nprintf '%s\\n' '{\"op\":\"status\",\"text\":\"waiting\"}' >&3\nsleep 30\n",
     )
     .unwrap();
     let table = Arc::new(pi_core::driver::background::Table::default());

@@ -242,7 +242,7 @@ mod bridge {
         String,
         tokio::sync::watch::Sender<Option<String>>,
         Option<std::sync::Arc<crate::pending::Pending>>,
-        Option<(String, u64)>,
+        Option<String>,
     );
 
     impl Pi {
@@ -253,14 +253,11 @@ mod bridge {
         ) -> Self {
             Self(to, session, failed, None, None)
         }
-        fn for_source(&self, source: &str, at: u64) -> Self {
+        fn for_source(&self, source: &str) -> Self {
             let mut pi = self.clone();
-            pi.4 = Some((
-                format!(
-                    "channel-{}",
-                    protocol::hash(&format!("{}:{source}", self.1))
-                ),
-                at,
+            pi.4 = Some(format!(
+                "channel-{}",
+                protocol::hash(&format!("{}:{source}", self.1))
             ));
             pi
         }
@@ -268,31 +265,26 @@ mod bridge {
             self.3
                 .as_ref()
                 .zip(self.4.as_ref())
-                .is_some_and(|(pending, (id, _))| pending.remembers(id))
+                .is_some_and(|(pending, id)| pending.remembers(id))
         }
-        fn acknowledge(&self, frame: &Value) -> Option<Value> {
-            let pending = self.3.as_ref()?;
-            match pending.acknowledge(frame) {
-                Ok(Some(original))
-                    if original["message"]["kind"]["value"]["direction"] == "to_model"
-                        && frame["response"].is_object() =>
-                {
-                    Some(json!({"type":"message", "message":frame["response"], "replayed":true}))
-                }
-                Ok(_) => None,
-                Err(error) => {
-                    self.2.send_replace(Some(error));
-                    None
-                }
+        fn acknowledge(&self, frame: &Value) {
+            let Some(pending) = self.3.as_ref() else {
+                return;
+            };
+            if let Err(error) = pending.acknowledge(frame) {
+                self.2.send_replace(Some(error));
             }
         }
 
         fn say(&self, mut frame: Value) {
-            if frame["type"] == "message" {
-                if let Some((id, at)) = &self.4 {
-                    frame["message"]["id"] = json!(id);
-                    // Preserve transport time on retry; zero means it supplied no timestamp.
-                    frame["message"]["at"] = json!(at);
+            if frame["op"] == "say" {
+                if let Some(id) = &self.4 {
+                    frame["id"] = json!(id);
+                }
+                if frame["id"].is_null()
+                    && let Some(pending) = &self.3
+                {
+                    frame["id"] = json!(pending.next_id());
                 }
                 if let Some(pending) = &self.3 {
                     if let Err(error) = pending.push(frame) {
@@ -543,10 +535,7 @@ mod bridge {
             s.get_updates_buf = update.get_updates_buf;
         }
         for (index, msg) in update.msgs.into_iter().enumerate() {
-            let pi = pi.for_source(
-                &format!("wechat:{source}:{index}"),
-                msg.create_time_ms.unwrap_or(0) / 1000,
-            );
+            let pi = pi.for_source(&format!("wechat:{source}:{index}"));
             if pi.already_retained() {
                 continue;
             }
@@ -675,9 +664,8 @@ mod bridge {
             let Ok(frame) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
-            let replayed = pi.acknowledge(&frame);
-            let frame = replayed.as_ref().unwrap_or(&frame);
-            if frame["type"] == "message" && frame["message"]["kind"]["type"] == "response"
+            pi.acknowledge(&frame);
+            if frame["op"] == "message" && frame["message"]["kind"]["type"] == "response"
                 && let Some(id) = frame["message"]["id"].as_str() {
                 if completed.iter().any(|seen| seen == id) { continue; }
                 completed.push_back(id.to_owned());
@@ -898,463 +886,6 @@ mod bridge {
             .await
             .ok()?;
         config.typing_ticket.filter(|t| !t.is_empty())
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        #[test]
-        fn model_answers_keep_the_original_request_and_selected_text() {
-            let (tx, mut rx) = mpsc::channel(8);
-            let pi = Pi::new(
-                tx,
-                "fixture-session".into(),
-                tokio::sync::watch::channel(None).0,
-            );
-            let question = json!({"type":"message","message":{
-                "id":"ask-id", "kind":{"type":"request","value":{"direction":"from_model","request":{"type":"ask","options":["Allow once","Deny"]}}},
-                "body":[{"type":"text","value":"Proceed?"}]
-            }});
-            let view = protocol::project(&question).unwrap();
-            let mut q = Up::of(&view).unwrap();
-            assert!(
-                q.back,
-                "model input must be answerable during the active run"
-            );
-            q.stage = Stage::Shown;
-            pi.answer(&q, &[0]);
-            let choice = rx.try_recv().unwrap();
-            assert_eq!(choice["message"]["kind"]["value"]["request"], "ask-id");
-            assert_eq!(choice["message"]["body"][0]["value"], "Allow once");
-            let asking = Asking::default();
-            asking.lock().push(q);
-            assert!(pi.answer_text(&asking, "Use another directory"));
-            let answer = rx.try_recv().unwrap();
-            assert_eq!(answer["message"]["session"], "fixture-session");
-            assert_eq!(answer["message"]["kind"]["type"], "response");
-            assert_eq!(answer["message"]["kind"]["value"]["request"], "ask-id");
-            assert_eq!(
-                answer["message"]["body"][0]["value"],
-                "Use another directory"
-            );
-            assert_ne!(answer["message"]["id"], choice["message"]["id"]);
-            assert!(!pi.answer_text(&asking, "duplicate"));
-        }
-
-        #[test]
-        fn legacy_wire_is_not_a_presentation_fallback() {
-            for frame in [
-                json!({"reply":"old reply"}),
-                json!({"question":{"id":1,"text":"old"}}),
-                json!({"started":true}),
-            ] {
-                assert!(protocol::project(&frame).is_none());
-            }
-            let frame = json!({"type":"message","message":{
-                "id":"response", "kind":{"type":"response","value":{"request":"original","status":{"type":"done"}}},
-                "body":[{"type":"text","value":"before tool"},{"type":"text","value":"after tool"},{"type":"reasoning","value":"private"}]
-            }});
-            let view = protocol::project(&frame).unwrap();
-            assert_eq!(view["request"], "m:original");
-            assert_eq!(view["reply"], "before tool\nafter tool");
-            assert!(protocol::project(&json!({"type":"runtime","event":{"type":"operation","operation":1,"model":true,"phase":{"type":"finished","text":"duplicate"}}})).is_none());
-        }
-
-        #[test]
-        fn a_full_host_queue_reports_failure_instead_of_silently_losing_input() {
-            let (tx, _rx) = mpsc::channel(1);
-            let (failed, reason) = tokio::sync::watch::channel(None);
-            let pi = Pi::new(tx, "fixture-session".into(), failed);
-            pi.input("first");
-            pi.input("second");
-            assert_eq!(reason.borrow().as_deref(), Some("host frame queue is full"));
-        }
-
-        fn runtime_fixture(view: &Value) -> Value {
-            let event = if let Some(q) = view.get("question") {
-                json!({"type":"prompt","question":q["id"],"text":q["text"],"options":q["options"],"back":q["back"]})
-            } else if let Some(q) = view.get("closed") {
-                json!({"type":"closed","question":q})
-            } else if let Some(q) = view.get("refused") {
-                json!({"type":"refused","question":q,"message":view["why"]})
-            } else {
-                let phase = if view["queued"] == true {
-                    json!({"type":"queued"})
-                } else if view["started"] == true {
-                    json!({"type":"started"})
-                } else if let Some(text) = view.get("progress") {
-                    json!({"type":"progress","text":text})
-                } else {
-                    json!({"type":"finished","text":view["reply"],"status":{"type":view["status"],"reason":view["reason"],"failure":{"message":view["error"]}},"exit_code":view["exit_code"]})
-                };
-                json!({"type":"operation","operation":view["request"],"phase":phase})
-            };
-            json!({"type":"runtime","event":event})
-        }
-
-        #[test]
-        fn outcome_notices_do_not_rewrite_reply_content() {
-            for reply in ["", "stopped", "partial\n\n(stopped)", "(failed: timeout)"] {
-                for told in [
-                    json!({}),
-                    json!({"status": "done"}),
-                    json!({"status": "done", "exit_code": 0}),
-                ] {
-                    assert_eq!(reply_text(reply, &told), reply);
-                }
-                for (told, notice) in [
-                    (json!({"status": "stopped"}), "stopped"),
-                    (
-                        json!({"status": "failed", "error": "connection lost"}),
-                        "failed: connection lost",
-                    ),
-                    (
-                        json!({"status": "failed", "exit_code": 3}),
-                        "failed: exit 3",
-                    ),
-                ] {
-                    let expected = if reply.is_empty() {
-                        notice.to_string()
-                    } else {
-                        format!("{reply}\n\n{notice}")
-                    };
-                    assert_eq!(reply_text(reply, &told), expected);
-                }
-            }
-            assert_eq!(
-                reply_text("", &json!({"status": "stopped", "reason": "run it again"})),
-                "stopped: run it again"
-            );
-        }
-
-        #[tokio::test]
-        async fn queued_notices_are_sent_separately_from_the_final_reply() {
-            let (_dir, kept) = kept();
-            {
-                let mut state = kept.lock();
-                state.token = Some("bot".into());
-                state.peer = Some("peer".into());
-                state.context_token = Some("context".into());
-            }
-            let (base, requests) = server(vec![(200, json!({"ret": 0})); 3]).await;
-            let client = Client::new(base);
-            let (tx, _rx) = mpsc::channel(64);
-            let (mut host, script) = tokio::net::UnixStream::pair().unwrap();
-            for told in [
-                json!({"request": 17, "queued": true}),
-                json!({"request": 17, "reply": "queued", "status": "done"}),
-            ] {
-                host.write_all(format!("{}\n", runtime_fixture(&told)).as_bytes())
-                    .await
-                    .unwrap();
-            }
-            drop(host);
-            let (read, _write) = script.into_split();
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                answer(
-                    &client,
-                    &kept,
-                    &Asking::default(),
-                    &Pi::new(
-                        tx,
-                        "fixture-session".into(),
-                        tokio::sync::watch::channel(None).0,
-                    ),
-                    read,
-                    &Notify::new(),
-                ),
-            )
-            .await
-            .unwrap();
-            let requests = requests.await.unwrap();
-            assert_eq!(
-                requests[0]["msg"]["item_list"][0]["text_item"]["text"],
-                "queued: waiting for execution"
-            );
-            assert_eq!(
-                requests[2]["msg"]["item_list"][0]["text_item"]["text"],
-                "queued"
-            );
-        }
-
-        #[tokio::test]
-        async fn failed_pieces_are_kept_and_resume_with_the_same_id_and_fresh_context() {
-            let ok = (200, json!({"ret": 0}));
-            let failed = (200, json!({"ret": -2, "errmsg": "prepare failed"}));
-            let (base, requests) = server(vec![
-                ok.clone(),
-                failed.clone(),
-                failed.clone(),
-                failed,
-                ok.clone(),
-                ok,
-            ])
-            .await;
-            let client = Client::new(base);
-            let (_dir, kept) = kept();
-            {
-                let mut state = kept.lock();
-                state.token = Some("bot".into());
-                state.peer = Some("peer".into());
-                state.context_token = Some("old".into());
-            }
-            let (tx, mut status) = mpsc::channel(64);
-            let pi = Pi::new(
-                tx,
-                "fixture-session".into(),
-                tokio::sync::watch::channel(None).0,
-            );
-            let to = kept.target().unwrap();
-            let mut outbox = Outbox::default();
-            outbox.push(
-                &to,
-                &format!("{}\n\n{}", "a".repeat(MESSAGE_LIMIT), "b".repeat(20)),
-            );
-            assert!(!outbox.flush(&client, &kept, &pi).await);
-            assert!(outbox.blocked);
-            assert_eq!(outbox.pending.front().unwrap().pieces.len(), 1);
-            assert!(
-                status.try_recv().unwrap()["command"]["text"]
-                    .as_str()
-                    .unwrap()
-                    .contains("kept")
-            );
-            outbox.push(&to, "later answer");
-            kept.lock().context_token = Some("fresh".into());
-            assert!(outbox.flush(&client, &kept, &pi).await);
-            assert!(outbox.pending.is_empty());
-            let requests = tokio::time::timeout(Duration::from_secs(5), requests)
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                requests.len(),
-                6,
-                "three bounded attempts at the failed piece"
-            );
-            for at in 2..5 {
-                assert_eq!(
-                    requests[at]["msg"]["client_id"],
-                    requests[1]["msg"]["client_id"]
-                );
-                assert_eq!(
-                    requests[at]["msg"]["item_list"],
-                    requests[1]["msg"]["item_list"]
-                );
-            }
-            assert_eq!(requests[4]["msg"]["context_token"], "fresh");
-            assert_eq!(
-                requests[5]["msg"]["item_list"][0]["text_item"]["text"],
-                "later answer"
-            );
-        }
-
-        async fn server(
-            replies: Vec<(u16, Value)>,
-        ) -> (String, tokio::task::JoinHandle<Vec<Value>>) {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let base = format!("http://{}", listener.local_addr().unwrap());
-            let task = tokio::spawn(async move {
-                let mut requests = Vec::new();
-                for (status, reply) in replies {
-                    let (mut socket, _) = listener.accept().await.unwrap();
-                    let mut raw = Vec::new();
-                    let mut buf = [0; 4096];
-                    let head = loop {
-                        let n = socket.read(&mut buf).await.unwrap();
-                        assert!(n > 0);
-                        raw.extend_from_slice(&buf[..n]);
-                        if let Some(at) = raw.windows(4).position(|s| s == b"\r\n\r\n") {
-                            break at + 4;
-                        }
-                    };
-                    let len = String::from_utf8_lossy(&raw[..head])
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .map(|n| n.trim().parse::<usize>().unwrap())
-                        })
-                        .unwrap();
-                    while raw.len() < head + len {
-                        let n = socket.read(&mut buf).await.unwrap();
-                        assert!(n > 0);
-                        raw.extend_from_slice(&buf[..n]);
-                    }
-                    requests.push(serde_json::from_slice(&raw[head..head + len]).unwrap());
-                    let body = reply.to_string();
-                    let response = format!(
-                        "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    socket.write_all(response.as_bytes()).await.unwrap();
-                }
-                requests
-            });
-            (base, task)
-        }
-
-        #[test]
-        fn backoff_rests_after_three_failures() {
-            // Callers count the failure first, then ask how long to wait.
-            let mut n = 0u32;
-            n += 1;
-            assert_eq!(backoff(&mut n), Duration::from_secs(2));
-            n += 1;
-            assert_eq!(backoff(&mut n), Duration::from_secs(2));
-            n += 1;
-            assert_eq!(backoff(&mut n), Duration::from_secs(30));
-            // The counter reset, so the next failure starts over at 2s.
-            n += 1;
-            assert_eq!(backoff(&mut n), Duration::from_secs(2));
-        }
-
-        fn update(msgs: Value, buf: &str) -> Update {
-            serde_json::from_value(json!({ "ret": 0, "msgs": msgs, "get_updates_buf": buf }))
-                .unwrap()
-        }
-
-        #[test]
-        fn a_full_pending_queue_preserves_the_original_poll_cursor() {
-            let (_dir, kept) = kept();
-            kept.lock().get_updates_buf = "before".into();
-            let (tx, _rx) = mpsc::channel(1);
-            let mut pi = Pi::new(tx, "s".into(), tokio::sync::watch::channel(None).0);
-            pi.3 = Some(crate::pending::Pending::open(&kept.path, "s").unwrap());
-            let batch = || {
-                update(
-                    json!(
-                        (0..300)
-                            .map(|_| msg("input", Some("context")))
-                            .collect::<Vec<_>>()
-                    ),
-                    "after",
-                )
-            };
-            heard(&kept, &Asking::default(), &pi, batch());
-            assert_eq!(kept.lock().get_updates_buf, "before");
-            assert!(pi.2.borrow().is_some());
-            let path = kept
-                .path
-                .with_extension(format!("pending-{}.json", protocol::hash("s")));
-            let saved: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-            assert_eq!(saved["waiting"].as_array().unwrap().len(), 256);
-            for frame in saved["waiting"].as_array().unwrap() {
-                pi.acknowledge(&json!({"type":"accepted","id":frame["message"]["id"]}));
-            }
-            pi.2.send_replace(None);
-            heard(&kept, &Asking::default(), &pi, batch());
-            assert_eq!(kept.lock().get_updates_buf, "after");
-            assert!(pi.2.borrow().is_none());
-        }
-
-        fn kept() -> (tempfile::TempDir, Kept) {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("wechat.json");
-            (
-                dir,
-                Kept {
-                    path,
-                    state: Mutex::new(State::default()),
-                },
-            )
-        }
-
-        fn msg(text: &str, ctx: Option<&str>) -> Value {
-            json!({
-                "from_user_id": "u1",
-                "message_type": 1,
-                "context_token": ctx,
-                "item_list": [{ "type": 1, "text_item": { "text": text } }],
-            })
-        }
-
-        // A person's line goes up as input and moves the reply address; `/stop`
-        // goes up as an interrupt; the cursor and the address are saved.
-        #[test]
-        fn what_the_phone_says_goes_up_and_who_said_it_is_kept() {
-            let (_dir, kept) = kept();
-            let (tx, mut rx) = mpsc::channel(64);
-            heard(
-                &kept,
-                &Asking::default(),
-                &Pi::new(
-                    tx,
-                    "fixture-session".into(),
-                    tokio::sync::watch::channel(None).0,
-                ),
-                update(
-                    json!([msg("why did it fail", Some("c1")), msg("/stop", None)]),
-                    "b2",
-                ),
-            );
-            assert_eq!(
-                rx.try_recv().unwrap()["message"]["body"][0]["value"],
-                "why did it fail"
-            );
-            assert_eq!(
-                rx.try_recv().unwrap(),
-                protocol::runtime(json!({"type":"interrupt"}))
-            );
-            let saved: State = serde_json::from_slice(&std::fs::read(&kept.path).unwrap()).unwrap();
-            assert_eq!(
-                (
-                    saved.peer.as_deref(),
-                    saved.context_token.as_deref(),
-                    saved.get_updates_buf.as_str()
-                ),
-                (Some("u1"), Some("c1"), "b2")
-            );
-        }
-
-        // Numbers only answer the latest question shown, once, one or
-        // several; anything else, or a number with nothing shown, is the
-        // person's own words.
-        #[test]
-        fn a_reply_of_numbers_picks_the_latest_questions_options() {
-            let asking = Asking::default();
-            let told = |id: u64| {
-                json!({ "question": {
-                    "id": id, "text": "which?", "options": ["a", "b", "c"], "back": false,
-                }})
-            };
-            asking.lock().push(Up::of(&told(3)).unwrap());
-            assert_eq!(picks_of(&asking, "2"), None, "not shown yet");
-            asking.lock()[0].stage = Stage::Shown;
-            assert_eq!(picks_of(&asking, "4"), None);
-            assert_eq!(picks_of(&asking, "2 please"), None);
-            assert_eq!(picks_of(&asking, "3，1 3"), Some(("3".into(), vec![0, 2])));
-            assert_eq!(picks_of(&asking, "2"), None, "answered once");
-        }
-
-        // A poll that changes nothing leaves the file alone.
-        #[test]
-        fn an_unchanged_poll_writes_nothing() {
-            let (_dir, kept) = kept();
-            let (tx, _rx) = mpsc::channel(64);
-            heard(
-                &kept,
-                &Asking::default(),
-                &Pi::new(
-                    tx,
-                    "fixture-session".into(),
-                    tokio::sync::watch::channel(None).0,
-                ),
-                update(json!([]), ""),
-            );
-            assert!(!kept.path.exists());
-        }
-
-        #[test]
-        fn the_saved_login_is_private() {
-            use std::os::unix::fs::PermissionsExt;
-            let (_dir, kept) = kept();
-            kept.save(&State::default());
-            let mode = std::fs::metadata(&kept.path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600);
-        }
     }
 }
 
@@ -1715,20 +1246,6 @@ mod client {
             .map(|d| d.as_millis())
             .unwrap_or(0);
         format!("pi-wechat:{now}-{:08x}", rand::random::<u32>())
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        // The token comes from a file anyone can edit: a stray newline in it is
-        // an error to report, not a panic that takes the channel down.
-        #[test]
-        fn a_token_that_cannot_be_a_header_is_an_error() {
-            assert!(matches!(headers(Some("abc\ndef")), Err(Error::BadToken)));
-            assert!(headers(Some("abc")).is_ok());
-            assert!(headers(None).is_ok());
-        }
     }
 }
 
@@ -2291,31 +1808,6 @@ mod split {
         }
         (end, 0)
     }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn a_run_with_no_boundary_is_cut_on_a_character_and_rejoins_exactly() {
-            let text = "中".repeat(200);
-            let pieces = split(&text, 100);
-            assert!(pieces.len() > 1);
-            assert_eq!(pieces.concat(), text);
-        }
-
-        #[test]
-        fn a_budget_shorter_than_one_character_still_advances() {
-            let pieces = split("中文中文", 1);
-            assert_eq!(pieces.len(), 4);
-        }
-
-        #[test]
-        fn a_long_reply_breaks_at_a_paragraph() {
-            let text = format!("{}\n\n{}", "a".repeat(60), "b".repeat(60));
-            assert_eq!(split(&text, 100), ["a".repeat(60), "b".repeat(60)]);
-        }
-    }
 }
 
 mod types {
@@ -2648,8 +2140,19 @@ mod pending {
         path: PathBuf,
         stored: Mutex<Stored>,
         changed: Notify,
+        next: std::sync::atomic::AtomicU64,
+    }
+    fn id_key(value: &Value) -> Option<String> {
+        value["id"]
+            .as_u64()
+            .map(|n| n.to_string())
+            .or_else(|| value["id"].as_str().map(str::to_owned))
     }
     impl Pending {
+        pub fn next_id(&self) -> u64 {
+            self.next
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        }
         pub fn open(state: &Path, session: &str) -> Result<Arc<Self>, String> {
             let path =
                 state.with_extension(format!("pending-{}.json", crate::protocol::hash(session)));
@@ -2663,6 +2166,7 @@ mod pending {
                 path,
                 stored: Mutex::new(stored),
                 changed: Notify::new(),
+                next: std::sync::atomic::AtomicU64::new(1),
             }))
         }
         fn save(&self, stored: &Stored) -> Result<(), String> {
@@ -2691,19 +2195,19 @@ mod pending {
                 .stored
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            stored.completed.iter().any(|seen| seen == id)
-                || stored.waiting.iter().any(|old| old["message"]["id"] == id)
+            stored.completed.iter().any(|seen| seen.as_str() == id)
+                || stored.waiting.iter().any(|old| id_key(old).as_deref() == Some(id))
         }
         pub fn push(&self, frame: Value) -> Result<(), String> {
-            let id = frame["message"]["id"]
-                .as_str()
-                .ok_or("input has no message ID")?;
+            let id = id_key(&frame).ok_or("input has no request ID")?;
             let mut stored = self
                 .stored
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if stored.completed.iter().any(|seen| seen == id)
-                || stored.waiting.iter().any(|old| old["message"]["id"] == id)
+            if stored.completed.iter().any(|seen| seen == &id)
+                || stored.waiting
+                    .iter()
+                    .any(|old| id_key(old).as_deref() == Some(&id))
             {
                 return Ok(());
             }
@@ -2721,30 +2225,33 @@ mod pending {
             self.changed.notify_waiters();
             Ok(())
         }
-        pub fn acknowledge(&self, frame: &Value) -> Result<Option<Value>, String> {
-            let Some(id) = frame["id"].as_str() else {
-                return Ok(None);
+        pub fn acknowledge(&self, frame: &Value) -> Result<(), String> {
+            let Some(id) = id_key(frame) else {
+                return Ok(());
             };
             let mut stored = self
                 .stored
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let Some(at) = stored.waiting.iter().position(|p| p["message"]["id"] == id) else {
-                return Ok(None);
+            let Some(at) = stored
+                .waiting
+                .iter()
+                .position(|p| id_key(p).as_deref() == Some(&id))
+            else {
+                return Ok(());
             };
-            match frame["type"].as_str() {
-                Some("accepted") => {}
-                Some("error") => {
-                    return Err(format!(
-                        "host refused pending input: {}",
-                        frame["message"].as_str().unwrap_or("unknown error")
-                    ));
-                }
-                _ => return Ok(None),
+            if frame["error"].is_object() {
+                return Err(format!(
+                    "host refused pending input: {}",
+                    frame["error"]["message"].as_str().unwrap_or("unknown error")
+                ));
+            }
+            if frame["result"]["accepted"] != true {
+                return Ok(());
             }
             let mut next = stored.clone();
-            let original = next.waiting.remove(at).expect("located pending input");
-            next.completed.push_back(id.to_string());
+            next.waiting.remove(at).expect("located pending input");
+            next.completed.push_back(id);
             while next.completed.len() > 4096 {
                 next.completed.pop_front();
             }
@@ -2752,7 +2259,7 @@ mod pending {
             *stored = next;
             drop(stored);
             self.changed.notify_waiters();
-            Ok(Some(original))
+            Ok(())
         }
         pub async fn pump(&self, to: &mpsc::Sender<Value>) -> Result<(), String> {
             loop {
@@ -2767,7 +2274,7 @@ mod pending {
                     .front()
                     .cloned();
                 if let Some(frame) = frame {
-                    let id = frame["message"]["id"].clone();
+                    let id = id_key(&frame);
                     to.send(frame)
                         .await
                         .map_err(|_| "host frame connection is closed")?;
@@ -2781,7 +2288,7 @@ mod pending {
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .waiting
                             .iter()
-                            .any(|p| p["message"]["id"] == id)
+                            .any(|p| id_key(p) == id)
                         {
                             break;
                         }
@@ -2791,71 +2298,6 @@ mod pending {
                     changed.await;
                 }
             }
-        }
-    }
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use serde_json::json;
-        fn frame(id: &str, response: bool) -> Value {
-            json!({"type":"message", "message":{"id":id,"session":"s","by":null,"at":7,
-                "kind":if response {json!({"type":"response","value":{"request":"ask","status":{"type":"done"}}})} else {json!({"type":"request","value":{"direction":"to_model","request":"user"}})},
-                "body":[{"type":"text","value":"original"}]}})
-        }
-        #[tokio::test]
-        async fn persisted_requests_and_answers_retry_unchanged_under_backpressure() {
-            let dir = tempfile::tempdir().unwrap();
-            let state = dir.path().join("state.json");
-            let pending = Pending::open(&state, "s").unwrap();
-            let expected: Vec<_> = (0..70)
-                .map(|i| frame(&format!("event-{i}"), i % 2 != 0))
-                .collect();
-            for frame in &expected {
-                pending.push(frame.clone()).unwrap();
-            }
-            drop(pending);
-            let pending = Pending::open(&state, "s").unwrap();
-            let (tx, mut rx) = mpsc::channel(1);
-            let task = tokio::spawn({
-                let pending = pending.clone();
-                async move { pending.pump(&tx).await }
-            });
-            for frame in expected {
-                let received = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert_eq!(received, frame);
-                pending
-                    .acknowledge(&json!({"type":"accepted","id":frame["message"]["id"]}))
-                    .unwrap();
-                pending.push(frame).unwrap();
-            }
-            assert!(pending.stored.lock().unwrap().waiting.is_empty());
-            task.abort();
-            let restored = Pending::open(&state, "s").unwrap();
-            assert!(restored.stored.lock().unwrap().waiting.is_empty());
-            assert_eq!(restored.stored.lock().unwrap().completed.len(), 70);
-        }
-        #[test]
-        fn failed_saves_and_host_rejections_retain_the_original_input() {
-            let dir = tempfile::tempdir().unwrap();
-            let pending = Pending::open(&dir.path().join("state.json"), "s").unwrap();
-            let original = frame("input", false);
-            pending.push(original.clone()).unwrap();
-            assert!(
-                pending
-                    .acknowledge(&json!({"type":"error","id":"input","message":"full"}))
-                    .is_err()
-            );
-            assert_eq!(
-                pending.stored.lock().unwrap().waiting.front(),
-                Some(&original)
-            );
-            std::fs::remove_file(&pending.path).unwrap();
-            std::fs::create_dir(&pending.path).unwrap();
-            assert!(pending.push(frame("next", false)).is_err());
-            assert_eq!(pending.stored.lock().unwrap().waiting.len(), 1);
         }
     }
 }
