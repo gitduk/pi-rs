@@ -221,7 +221,7 @@ fn rejected_background_admission_keeps_the_result_for_a_later_retry() {
 }
 
 #[test]
-fn pending_inputs_and_active_runs_keep_priority_over_background_completion() {
+fn a_completion_queues_behind_the_input_already_waiting() {
     let dir = tempfile::tempdir().unwrap();
     let lane = lane(dir.path(), Arc::default());
     let table = Arc::new(Table::default());
@@ -233,26 +233,39 @@ fn pending_inputs_and_active_runs_keep_priority_over_background_completion() {
         pi_store::session::Store::new(dir.path().join("state")),
         table.clone(),
     );
-    let input = core
+    let typed = core
         .lane()
         .messages()
         .admit(Origin::Typed, prompt())
         .unwrap();
+    let typed_id = typed.message().id().clone();
     core.lane().queue().push(crate::execution::queue::Queued {
-        input: Pending::Prompt(input),
+        input: Pending::Prompt(typed),
         request: Request::new(Origin::Typed, core.lane().token()),
         line: None,
         note: String::new(),
     });
-    core.admit_background_results();
-    assert_eq!(core.lane().queue().lock().len(), 1);
-    drop(core.take_ready_inputs());
     core.lane_mut().begin(Default::default());
     core.admit_background_results();
-    assert!(core.lane().queue().is_empty());
-    core.lane_mut().finish();
-    core.admit_background_results();
-    assert_eq!(core.lane().queue().lock().len(), 1);
+    let waiting: Vec<_> = core
+        .lane()
+        .queue()
+        .lock()
+        .iter()
+        .filter_map(|queued| match &queued.input {
+            Pending::Prompt(input) => Some(input.message().id().clone()),
+            Pending::Intent(_) => None,
+        })
+        .collect();
+    assert_eq!(
+        waiting.len(),
+        2,
+        "a run in flight queues what arrives behind it"
+    );
+    assert_eq!(
+        waiting[0], typed_id,
+        "the input already waiting stays first"
+    );
 }
 
 #[tokio::test]

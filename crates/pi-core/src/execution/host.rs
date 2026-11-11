@@ -72,13 +72,14 @@ pub fn prepare(
             lane.root().to_path_buf(),
             executions,
             lane.notes(),
-        ),
+        )
+        .with_queue(lane.queue().clone()),
         retry,
     };
     let save = Save::of(lane, store);
     lane.seed_meter();
     lane.begin_for(request, cancel);
-    tracing::info!(target: "pi::session", request = request.id, lane = request.lane, message = turn.responder.request().id().as_str(), session = lane.id(), "model execution started");
+    tracing::info!(target: "pi::session", request = request.id, lane = request.lane, message_id = turn.responder.request().id().as_str(), session = lane.id(), "model execution started");
     Ok(Opened {
         input: entry,
         entries,

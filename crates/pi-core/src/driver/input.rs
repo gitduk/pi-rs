@@ -3,20 +3,29 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ::execution::channel::{Outcome, Response};
 use agent::seams::Note;
 use agent::session::Prompt;
 
 use super::background::Table;
 use crate::core::lane::Notes;
+use crate::execution::queue::{Pending, Queue, Queued};
 
-/// Notes and automatic results for an active run. User inputs wait until it ends.
+/// What a running turn takes at its request boundaries: notes, and the lane's
+/// queued inputs, joined rather than started.
 pub struct Input {
     root: PathBuf,
     executions: Arc<Table>,
     notes: Option<Notes>,
+    queue: Option<Queue>,
     messages: Option<Calls>,
-    ctx: Option<tool::Ctx>,
-    results: std::sync::Mutex<Vec<crate::execution::messages::Responder>>,
+    joined: std::sync::Mutex<Vec<Joined>>,
+}
+
+/// An input this run took, with the operation waiting to hear how it went.
+struct Joined {
+    responder: crate::execution::messages::Responder,
+    operation: crate::execution::Request,
 }
 
 struct Calls {
@@ -50,36 +59,54 @@ pub(crate) fn answer_content(body: &[message::Block]) -> Vec<llm::message::ToolR
         .collect()
 }
 
+/// How the run ended, for the operation whose input it took.
+fn outcome(status: &message::Status) -> Outcome {
+    match status {
+        message::Status::Done => Outcome::Done,
+        message::Status::Stopped => Outcome::Stopped(String::new()),
+        message::Status::Failed(failure) => Outcome::Failed(failure.message.clone()),
+    }
+}
+
 impl Input {
     pub fn new(root: PathBuf, executions: Arc<Table>, notes: Option<Notes>) -> Self {
         Self {
             root,
             executions,
             notes,
+            queue: None,
             messages: None,
-            ctx: None,
-            results: Default::default(),
+            joined: Default::default(),
         }
     }
 
-    /// Include changes made by this run when annotating a background result.
-    pub(crate) fn with_context(mut self, ctx: tool::Ctx) -> Self {
-        self.ctx = Some(ctx);
+    /// The lane's queue: what the frontend submitted while this run holds it.
+    pub(crate) fn with_queue(mut self, queue: Queue) -> Self {
+        self.queue = Some(queue);
         self
     }
 
-    /// Answer every automatic input consumed by this run with its terminal outcome.
+    /// Answer every input this run took with its terminal outcome.
     pub(crate) fn close_results(
         &self,
         status: message::Status,
         body: &[message::Block],
     ) -> Result<(), String> {
-        let mut results = self
-            .results
+        let mut joined = self
+            .joined
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for mut result in results.drain(..) {
-            result
+        if joined.is_empty() {
+            return Ok(());
+        }
+        let event = Response::Finished {
+            text: super::text_of(body),
+            outcome: outcome(&status),
+        };
+        for mut taken in joined.drain(..) {
+            super::tell_operation(&self.executions, taken.operation, event.clone());
+            taken
+                .responder
                 .complete(status.clone(), body.to_vec())
                 .map_err(|error| error.to_string())?;
         }
@@ -207,42 +234,37 @@ impl Drop for Input {
 impl agent::seams::Input for Input {
     fn take(&self) -> Option<Prompt> {
         let calls = self.messages.as_ref()?;
-        let ctx = self.ctx.as_ref()?;
-        // Keep refused producers reserved until this pass ends so other results can advance.
-        let mut deferred = Vec::new();
+        let queue = self.queue.as_ref()?;
         loop {
-            let session = calls.messages.session();
-            let delivery = self.executions.claim_result(&self.root, session.as_str())?;
-            let admitted = match calls.messages.admit_wire(delivery.message(session)) {
-                Ok(crate::execution::messages::Admission::Accepted(input)) => input,
-                Ok(crate::execution::messages::Admission::Existing { .. }) => {
-                    delivery.commit();
-                    continue;
-                }
-                Err(error) => {
-                    delivery.refused(&error.to_string());
-                    deferred.push(delivery);
-                    continue;
-                }
+            let Queued {
+                input,
+                request,
+                note,
+                ..
+            } = queue.pop_joining(&calls.parent)?;
+            let Pending::Prompt(admitted) = input else {
+                unreachable!("a host operation forms a boundary")
             };
-            let admitted =
-                admitted.presentation(delivery.due.label.clone(), delivery.due.note_for(ctx));
-            let (prompt, mut responder) = match admitted.join(&calls.parent) {
-                Ok(joined) => joined,
-                Err(error) => {
-                    delivery.refused(&error.to_string());
-                    deferred.push(delivery);
-                    continue;
-                }
-            };
-            if !delivery.commit() {
-                let _ = responder.complete(message::Status::Stopped, vec![]);
+            let linked = admitted.message().id().clone();
+            // Refused: the input left the queue elsewhere, answered or stopped.
+            let Ok((prompt, responder)) = admitted.join(&calls.parent) else {
                 continue;
+            };
+            super::tell_operation(&self.executions, request, Response::Started);
+            super::link_operation(&self.executions, request, linked.clone());
+            if !note.is_empty()
+                && let Some(notes) = &self.notes
+            {
+                notes.hold(note);
             }
-            self.results
+            self.joined
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(responder);
+                .push(Joined {
+                    responder,
+                    operation: request,
+                });
+            tracing::info!(target: "pi::session", lane = request.lane, request = request.id, message_id = linked.as_str(), "input joined the running turn");
             return Some(prompt);
         }
     }
@@ -379,8 +401,17 @@ mod tests {
     use ::execution::background::RunSink as _;
     use agent::seams::Input as _;
 
+    fn prompt(text: &str) -> Prompt {
+        Prompt {
+            text: text.into(),
+            images: vec![],
+            shown: None,
+            relayed: None,
+        }
+    }
+
     #[tokio::test]
-    async fn results_wait_for_the_next_run_without_entering_the_active_run() {
+    async fn a_turn_without_a_conversation_leaves_results_to_the_host() {
         let root = PathBuf::from("/checkout");
         let other = PathBuf::from("/elsewhere");
         let executions = Arc::new(Table::default());
@@ -441,19 +472,90 @@ mod tests {
         );
         assert!(input.take().is_none());
     }
+
+    #[tokio::test]
+    async fn a_joined_input_closes_the_operation_that_submitted_it() {
+        use crate::execution::messages::Messages;
+        use ::execution::channel::Told;
+        let root = PathBuf::from("/checkout");
+        let executions = Arc::new(Table::default());
+        let (tx, mut rx) = ::execution::channel::channel();
+        let operation = crate::driver::background::Commands::new(executions.clone()).start(
+            root.clone().into(),
+            ::execution::background::Invocation::shell("wechat"),
+            Default::default(),
+        );
+        operation.channel().listen(tx);
+        let messages = Messages::new(message::SessionId::new("session".into()).unwrap());
+        let (_, mut owner) = messages
+            .admit(crate::driver::Origin::Typed, prompt("run"))
+            .unwrap()
+            .start()
+            .unwrap();
+        let queued = messages
+            .admit(
+                crate::driver::Origin::Input(operation.id()),
+                prompt("steer"),
+            )
+            .unwrap();
+        let queued_id = queued.message().id().clone();
+        let queued_request = queued.message().request_id().unwrap();
+        let request =
+            crate::execution::Request::new(crate::driver::Origin::Input(operation.id()), 1);
+        let queue = Queue::default();
+        queue.push(Queued {
+            input: Pending::Prompt(queued),
+            request,
+            line: None,
+            note: String::new(),
+        });
+        let input = Input::new(root, executions.clone(), None)
+            .with_queue(queue)
+            .with_messages(messages.clone(), owner.request().request_id().unwrap());
+
+        assert_eq!(input.take().expect("the queued input joins").text, "steer");
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Told::Response {
+                request: request.id,
+                event: Response::Started,
+            })
+        );
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Told::Linked {
+                operation: request.id,
+                request: queued_id,
+            })
+        );
+        assert!(messages.response(&queued_request).unwrap().is_none());
+
+        input
+            .close_results(
+                message::Status::Done,
+                &[message::Block::Text("answer".into())],
+            )
+            .unwrap();
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Told::Response {
+                request: request.id,
+                event: Response::Finished {
+                    text: "answer".into(),
+                    outcome: Outcome::Done,
+                },
+            })
+        );
+        assert!(messages.response(&queued_request).unwrap().is_some());
+        owner.complete(message::Status::Done, vec![]).unwrap();
+    }
     #[test]
     fn tool_result_closes_its_parent_dependency_once() {
         use crate::execution::messages::Messages;
         use agent::seams::Input as _;
         let messages = Messages::new(message::SessionId::new("session".into()).unwrap());
-        let prompt = Prompt {
-            text: "run".into(),
-            images: vec![],
-            shown: None,
-            relayed: None,
-        };
         let (_, mut owner) = messages
-            .admit(crate::driver::Origin::Typed, prompt)
+            .admit(crate::driver::Origin::Typed, prompt("run"))
             .unwrap()
             .start()
             .unwrap();

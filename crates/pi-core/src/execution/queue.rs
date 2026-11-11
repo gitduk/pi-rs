@@ -1,4 +1,4 @@
-//! Pending operations in admission order. Active runs never consume new inputs.
+//! Pending operations in admission order. A run takes what it is next in line for.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -76,6 +76,15 @@ impl Queue {
 
     /// Reserve the next admitted model input without crossing a queued host operation.
     pub fn pop_ready(&self) -> Option<Queued> {
+        self.pop(|input| input.is_next())
+    }
+
+    /// Reserve the next input the run owning `parent` takes instead of starting another.
+    pub fn pop_joining(&self, parent: &message::RequestId) -> Option<Queued> {
+        self.pop(|input| input.joins(parent))
+    }
+
+    fn pop(&self, ready: impl Fn(&super::messages::AdmittedInput) -> bool) -> Option<Queued> {
         let mut queue = self.lock();
         // Concurrent producers can enqueue in a different order from admission.
         // The ticket decides readiness; a host operation still forms a boundary.
@@ -83,9 +92,7 @@ impl Queue {
             .entries
             .iter()
             .take_while(|queued| matches!(queued.input, Pending::Prompt(_)))
-            .position(
-                |queued| matches!(&queued.input, Pending::Prompt(input) if input.is_next()),
-            )?;
+            .position(|queued| matches!(&queued.input, Pending::Prompt(input) if ready(input)))?;
         queue.entries.remove(at)
     }
 

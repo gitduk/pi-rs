@@ -1547,10 +1547,10 @@ async fn a_note_is_filed_only_for_a_line_that_starts_a_turn() {
     );
 }
 
-// A note submitted under a run waits with its own line: the run in flight must
-// not read it as something about itself.
+// A note submitted under a run rides its own line: the run takes both together
+// at its next request, never the note alone.
 #[tokio::test]
-async fn a_queued_line_keeps_its_note_off_the_running_turn() {
+async fn a_queued_line_keeps_its_note_until_the_run_takes_both() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     let execution = ::execution::background::RunSink::start(
@@ -1573,7 +1573,7 @@ async fn a_queued_line_keeps_its_note_off_the_running_turn() {
     let held = (tui.core.lane().notes()).expect("the run holds the transcript");
     assert!(
         held.take().is_none(),
-        "the running turn reads no note meant for the line that waits"
+        "the note waits with its line, not with the request in flight"
     );
     let queued = (front_view(&mut tui.views, tui.core.lane())
         .queued

@@ -86,6 +86,49 @@ struct Owed {
     request: u64,
 }
 
+/// Report an operation's lifecycle to the execution that submitted it, if one did.
+pub(crate) fn tell_operation(executions: &background::Table, request: Request, event: Response) {
+    if let Origin::Input(execution) = request.origin {
+        executions.tell(
+            execution,
+            Told::Response {
+                request: request.id,
+                event,
+            },
+        );
+    }
+}
+
+/// The prose of a message body, in the order it was written.
+pub(crate) fn text_of(body: &[message::Block]) -> String {
+    body.iter()
+        .filter_map(|block| match block {
+            message::Block::Text(text) => Some(text.as_str()),
+            message::Block::Image(_) | message::Block::Data(_) | message::Block::Reasoning(_) => {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Say which conversation message the operation's turn began with.
+pub(crate) fn link_operation(
+    executions: &background::Table,
+    operation: Request,
+    request: message::MessageId,
+) {
+    if let Origin::Input(execution) = operation.origin {
+        executions.tell(
+            execution,
+            Told::Linked {
+                operation: operation.id,
+                request,
+            },
+        );
+    }
+}
+
 impl Drivers {
     /// Take a submitted user line without consuming background results.
     pub fn next_input(&self, root: &std::path::Path, ctx: &Ctx) -> Option<Next> {
@@ -116,29 +159,13 @@ impl Drivers {
     }
 
     pub fn link(&self, operation: Request, request: message::MessageId) {
-        if let Origin::Input(execution) = operation.origin {
-            self.executions.tell(
-                execution,
-                Told::Linked {
-                    operation: operation.id,
-                    request,
-                },
-            );
-        }
+        link_operation(&self.executions, operation, request);
     }
 
     /// Route a rendered response to its submitting execution. Local rendering
     /// is the caller's; this layer knows neither layouts nor terminal state.
     pub fn respond(&self, request: Request, event: Response) {
-        if let Origin::Input(execution) = request.origin {
-            self.executions.tell(
-                execution,
-                Told::Response {
-                    request: request.id,
-                    event,
-                },
-            );
-        }
+        tell_operation(&self.executions, request, event);
     }
 
     /// What the shell controls and calls that outlive their turn write into: the
