@@ -56,19 +56,40 @@ impl Tui {
                 }
             }
             Action::Bash(command) => {
-                if let Some(line) = line {
-                    self.echo(&line);
+                // A script's words are the person's, not the person's authority:
+                // the local shell stays with the keyboard.
+                if matches!(origin, Origin::Input(_)) {
+                    let why = "a line from a script may not run shell commands".to_string();
+                    self.complete(request, Output::Notice(String::new()), Outcome::Failed(why));
+                } else {
+                    if let Some(line) = line {
+                        self.echo(&line);
+                    }
+                    self.start_bash(command, request);
                 }
-                self.start_bash(command, request);
             }
             Action::Compact(focus) => self.start_compact(focus, request),
-            Action::Tool { name, args } => self.start_tool(name, args, request, &replies.started),
+            Action::Tool { name, args } => {
+                // `/bash`, `/write`, `/read` are tools, not commands: a script's
+                // line gets the commands and never the machine.
+                if matches!(origin, Origin::Input(_)) {
+                    let why = "a line from a script may not call tools".to_string();
+                    self.complete(request, Output::Notice(String::new()), Outcome::Failed(why));
+                } else {
+                    self.start_tool(name, args, request, &replies.started);
+                }
+            }
             Action::McpPrompt {
                 prompt,
                 args,
                 typed,
             } => {
-                self.start_fetch(prompt, args, typed, request, &replies.fetched);
+                if matches!(origin, Origin::Input(_)) {
+                    let why = "a line from a script may not call tools".to_string();
+                    self.complete(request, Output::Notice(String::new()), Outcome::Failed(why));
+                } else {
+                    self.start_fetch(prompt, args, typed, request, &replies.fetched);
+                }
             }
             Action::Removal(removal) => self.start_removal(removal, request, &replies.removed),
             Action::Edit(file) => {

@@ -512,7 +512,9 @@ mod tests {
             .channel()
             .input("what happened?".into(), String::new());
         execution.channel().result("third".into());
-        execution.channel().input("and now?".into(), String::new());
+        execution
+            .channel()
+            .input("and now?".into(), "round 2".into());
         other.channel().result("built".into());
         other.end();
 
@@ -529,6 +531,7 @@ mod tests {
         let input = drivers.next(root, &ctx).unwrap();
         assert_eq!(input.origin, Origin::Input(execution.id()));
         assert_eq!(input.line, "and now?");
+        assert_eq!(input.note, "round 2");
         assert!(drivers.next(root, &ctx).unwrap().line.ends_with("built"));
         assert!(drivers.next(root, &ctx).is_none());
 

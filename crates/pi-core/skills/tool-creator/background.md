@@ -28,38 +28,31 @@ if os.environ.get("PI_EVENTS_FD") != "3":
     sys.exit("needs pi to keep it running")
 fd3 = os.fdopen(os.dup(3), "w")
 replies = os.fdopen(os.dup(3), "r")
-def say(**m):
-    fd3.write(json.dumps(m) + "\n"); fd3.flush()
+def say(frame):
+    fd3.write(json.dumps(frame) + "\n"); fd3.flush()
 
-say(type="runtime", command={"type":"serve"})
 url = json.load(sys.stdin)["url"]
-say(type="runtime", command={"type":"status", "text":f"watching {url}"})
+say({"id":"hello", "op":"initialize", "protocol":4})
+say({"op":"status", "text":f"watching {url}"})
 source = "watch:" + uuid.uuid4().hex
 seen = None
 while True:
     digest = hashlib.sha256(urllib.request.urlopen(url).read()).hexdigest()
     if seen and digest != seen:
-        message_id = uuid.uuid4().hex
-        say(type="message", message={
-            "id":message_id, "session":os.environ["PI_SESSION_ID"],
-            "by":os.environ.get("PI_REQUEST_ID"), "at":time.time_ns() // 1_000_000,
-            "kind":{"type":"request", "value":{"direction":"to_model", "request":"automatic"}},
-            "body":[{"type":"text", "value":f"{url} changed"},
-                    {"type":"data", "value":{"source":source, "reason":"content changed", "event":uuid.uuid4().hex}}],
-        })
+        message = uuid.uuid4().hex
+        say({"id":message, "op":"say", "text":f"{url} changed",
+             "as":"task", "source":source, "reason":"content changed"})
         # Drain the receipt before producing another occurrence.
         while True:
             line = replies.readline()
             if not line:
                 sys.exit("host frame connection closed")
             reply = json.loads(line)
-            if reply.get("type") == "error":
-                sys.exit(reply["message"])
-            if reply.get("type") == "accepted" and reply.get("id") == message_id:
+            if reply.get("id") == message:
+                if "error" in reply:
+                    sys.exit(reply["error"]["message"])
                 break
     seen = digest
-    say(type="runtime", command={"type":"status", "text":f"checked {time.strftime('%H:%M')}"})
-    time.sleep(300)
 ```
 
 ## Background lifetime and channels

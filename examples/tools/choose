@@ -34,22 +34,13 @@ def main():
     if fd is None:
         fail("not run by pi: there is no one here to ask")
     asked = {
-        "type": "runtime",
-        "command": {
-            "type": "prompt",
-            "text": call.get("question") or "",
-            "options": options,
-            "back": False,
-        },
+        "op": "ask",
+        "text": call.get("question") or "",
+        "options": options,
     }
     # A socket, so no "r+": that wants a file it can seek. One end each way.
     with os.fdopen(os.dup(int(fd)), "w", buffering=1) as to_pi:
         to_pi.write(json.dumps(asked) + "\n")
-    with os.fdopen(os.dup(int(fd)), "r") as from_pi:
-        said = json.loads(from_pi.readline() or "{}")
-    event = said.get("event", {}) if said.get("type") == "runtime" else {}
-    if event.get("type") != "prompted":
-        fail(f"not put to the user: {event.get('message', 'pi gave no answer')}")
     print(f"Put to the user with {len(options)} options. End your turn now.")
 
 

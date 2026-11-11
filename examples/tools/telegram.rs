@@ -445,7 +445,6 @@ mod bridge {
             }
         });
         let mut pi = Pi::new(tx, session, failure);
-        pi.say(protocol::runtime(json!({"type":"serve"})));
 
         let token = std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_default();
         let token = token.trim();
@@ -490,7 +489,7 @@ mod bridge {
             pi.status("waiting for pairing");
             code = Some(fresh);
         }
-        pi.say(json!({"type":"observe","session":pi.1,"cursor":null}));
+        pi.say(protocol::runtime(json!({"type":"observe","cursor":null})));
         pi.say(protocol::runtime(json!({"type":"watch"})));
         let kept = Kept {
             path,
@@ -2371,14 +2370,31 @@ mod protocol {
             .or_else(|| value.as_u64().map(|id| id.to_string()))
     }
     pub fn runtime(command: Value) -> Value {
-        json!({"type":"runtime","command":command})
+        let kind = command["type"].as_str().unwrap_or_default();
+        match kind {
+            "status" => json!({"op":"status","text":command["text"]}),
+            "interrupt" | "stop" => json!({"op":"stop"}),
+            "watch" => json!({"id":"listen-questions","op":"listen","to":"questions"}),
+            "observe" => json!({"id":"listen-session","op":"listen","to":"session","cursor":command["cursor"]}),
+            "answer" => json!({"id":command["question"],"result":{"picks":command["picks"]}}),
+            "answer_text" => json!({"id":command["question"],"result":{"text":command["text"]}}),
+            _ => json!({"op":kind}),
+        }
     }
-    pub fn message(session: &str, kind: Value, body: Vec<Value>) -> Value {
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        json!({"type":"message","message":{"id":fresh(),"session":session,"by":null,"at":at,"kind":kind,"body":body}})
+    pub fn message(_session: &str, kind: Value, body: Vec<Value>) -> Value {
+        let text = body
+            .first()
+            .and_then(|block| block["value"].as_str())
+            .unwrap_or_default();
+        match kind["type"].as_str() {
+            Some("response") => json!({
+                "op":"say",
+                "re":kind["value"]["request"],
+                "text":text,
+                "stop":kind["value"]["status"]["type"] != "done",
+            }),
+            _ => json!({"op":"say","text":text}),
+        }
     }
     fn text(body: &Value) -> String {
         use std::borrow::Cow;
@@ -2406,68 +2422,43 @@ mod protocol {
         view
     }
     pub fn project(frame: &Value) -> Option<Value> {
-        match frame["type"].as_str()? {
-            "message" => {
-                let m = &frame["message"];
-                let kind = &m["kind"];
-                let value = &kind["value"];
-                match kind["type"].as_str()? {
-                    "request" => match value["direction"].as_str()? {
-                        "to_model" => Some(
-                            json!({"request":format!("m:{}",m["id"].as_str()?),"started":true}),
-                        ),
-                        "from_model" if value["request"]["type"] == "ask" => Some(
-                            json!({"question":{"id":format!("m:{}",m["id"].as_str()?),"text":text(&m["body"]),"options":value["request"]["options"],"back":true}}),
-                        ),
-                        _ => None,
-                    },
-                    "response" => {
-                        let id = format!("m:{}", value["request"].as_str()?);
-                        Some(result(
-                            json!({"request":id,"closed":id,"reply":text(&m["body"]),"semantic":true,"replayed":frame["replayed"]}),
-                            &value["status"],
-                        ))
-                    }
-                    _ => None,
-                }
-            }
-            "runtime" => {
-                let e = &frame["event"];
-                match e["type"].as_str()? {
-                    "operation" if e["model"] != true => {
-                        let phase = &e["phase"];
-                        let mut view = json!({"request":e["operation"]});
-                        match phase["type"].as_str()? {
-                            "queued" => view["queued"] = json!(true),
-                            "started" => view["started"] = json!(true),
-                            "progress" => view["progress"] = phase["text"].clone(),
-                            "finished" => {
-                                view["reply"] = phase["text"].clone();
-                                view["exit_code"] = phase["exit_code"].clone();
-                                view = result(view, &phase["status"]);
-                            }
-                            _ => return None,
+        if let Some(op) = frame["op"].as_str() {
+            return match op {
+                "message" => {
+                    let m = &frame["message"];
+                    let kind = &m["kind"];
+                    let value = &kind["value"];
+                    match kind["type"].as_str()? {
+                        "request" => match value["direction"].as_str()? {
+                            "to_model" => Some(
+                                json!({"request":format!("m:{}",m["id"].as_str()?),"started":true}),
+                            ),
+                            "from_model" if value["request"]["type"] == "ask" => Some(
+                                json!({"question":{"id":format!("m:{}",m["id"].as_str()?),"text":text(&m["body"]),"options":value["request"]["options"],"back":true}}),
+                            ),
+                            _ => None,
+                        },
+                        "response" => {
+                            let id = format!("m:{}", value["request"].as_str()?);
+                            Some(result(
+                                json!({"request":id,"closed":id,"reply":text(&m["body"]),"semantic":true,"replayed":frame["replayed"]}),
+                                &value["status"],
+                            ))
                         }
-                        Some(view)
+                        _ => None,
                     }
-                    "linked" => Some(json!({"linked":e["operation"]})),
-                    "prompt" => Some(
-                        json!({"question":{"id":e["question"],"text":e["text"],"options":e["options"],"back":e["back"]}}),
-                    ),
-                    "closed" => Some(json!({"closed":e["question"]})),
-                    "refused" => Some(json!({"refused":e["question"],"why":e["message"]})),
-                    "progress" => Some(json!({"progress":e["text"]})),
-                    "error" => Some(json!({"progress":e["message"]})),
-                    _ => None,
                 }
-            }
-            "error" => Some(match frame["request"].as_str() {
-                Some(id) => json!({"refused":format!("m:{id}"),"why":frame["message"]}),
-                None => json!({"progress":frame["message"]}),
-            }),
-            "accepted" | "observing" => None,
-            _ => None,
+                "ask" => Some(
+                    json!({"question":{"id":frame["id"],"text":frame["text"],"options":frame["options"],"back":false}}),
+                ),
+                "refused" => Some(json!({"refused":frame["question"],"why":frame["message"]})),
+                _ => None,
+            };
         }
+        if frame["error"].is_object() {
+            return Some(json!({"progress":frame["error"]["message"]}));
+        }
+        None
     }
 }
 
