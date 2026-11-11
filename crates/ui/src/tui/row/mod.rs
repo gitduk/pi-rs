@@ -264,6 +264,8 @@ enum Kind {
         times: usize,
         // Drawn only, never filed: what a tidy takes.
         aside: bool,
+        // A run's own tally: it belongs to the status line it replaces.
+        tally: bool,
     },
     Note(Note),
     Banner(Banner),
@@ -387,6 +389,7 @@ impl Row {
             text: line.into(),
             times: 1,
             aside: false,
+            tally: false,
         })
     }
 
@@ -396,6 +399,7 @@ impl Row {
             text: line.into(),
             times: 1,
             aside: true,
+            tally: false,
         })
     }
 
@@ -468,8 +472,18 @@ impl Row {
     pub fn tally_lines(text: &str, paint: &Paint) -> Vec<Self> {
         text.lines()
             .map(|line| crate::status::painted(line, paint))
-            .map(Self::notice)
+            .map(Self::tally)
             .collect()
+    }
+
+    /// A run's tally line: it keeps the gap the running status line had.
+    fn tally(line: Line<'static>) -> Self {
+        Self::new(Kind::Notice {
+            text: line,
+            times: 1,
+            aside: false,
+            tally: true,
+        })
     }
 
     /// A note — what the model is told, shown as it reads it — as one row,
@@ -489,13 +503,24 @@ impl Row {
     pub fn repeated(&mut self, row: &Self) -> bool {
         match (&mut self.0, &row.0) {
             (
-                Kind::Notice { text, times, aside },
+                Kind::Notice {
+                    text,
+                    times,
+                    aside,
+                    tally,
+                },
                 Kind::Notice {
                     text: next,
                     times: more,
                     aside: next_aside,
+                    tally: next_tally,
                 },
-            ) if text == next && aside == next_aside && self.2 == row.2 && text.width() > 0 => {
+            ) if text == next
+                && aside == next_aside
+                && tally == next_tally
+                && self.2 == row.2
+                && text.width() > 0 =>
+            {
                 *times += more;
                 self.1.clear();
                 true
@@ -1181,6 +1206,7 @@ impl Row {
             Kind::Steps(group) if group.has_tools() => Block::Tools,
             Kind::Answer(line, _) if !line.spans.is_empty() || self.2.is_some() => Block::Prose,
             Kind::CodeLine(_) | Kind::Code(_) | Kind::Block(_) => Block::Prose,
+            Kind::Notice { tally: true, .. } => Block::Status,
             _ => Block::Other,
         }
     }
