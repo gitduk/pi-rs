@@ -149,6 +149,8 @@ pub async fn foreground_result(
 // What a live view needs of a window: the newest lines, never half a
 // character.
 const LIVE_TAIL: usize = 4096;
+// How often a running call tells its caller what it printed.
+const LIVE_EVERY: std::time::Duration = std::time::Duration::from_millis(200);
 
 fn tail(text: &str, bytes: usize) -> &str {
     let mut at = text.len().saturating_sub(bytes);
@@ -496,25 +498,20 @@ impl Bash {
         let launched = launch(&prepared, ctx)?;
         // What the call prints while it runs, shown where the caller can
         // read it; the window is the same one a background execution keeps.
-        // Nobody listening means nobody pays for reading it every 200ms.
-        // The guard aborts on every way out of `finish`, `?` included.
+        // Nobody listening means nobody pays for reading it every tick.
+        // The guard aborts the task on every way out after it starts, `?`
+        // included; before it starts there is nothing to stop.
         let live = launched.streams.peek();
         let _live = ctx.hears_output().then(|| {
-            let stop = tokio_util::sync::CancellationToken::new();
-            let ticking = stop.clone();
             let ctx = ctx.clone();
             LiveTask(tokio::spawn(async move {
                 let mut seen = 0;
                 loop {
-                    tokio::select! {
-                        _ = ticking.cancelled() => break,
-                        _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
-                            let printed = live.since(0);
-                            if printed.total != seen {
-                                seen = printed.total;
-                                ctx.say_output(tail(&printed.text, LIVE_TAIL));
-                            }
-                        }
+                    tokio::time::sleep(LIVE_EVERY).await;
+                    let printed = live.since(0);
+                    if printed.total != seen {
+                        seen = printed.total;
+                        ctx.say_output(tail(&printed.text, LIVE_TAIL));
                     }
                 }
             }))
@@ -1034,6 +1031,33 @@ mod background_tests {
             panic!("expected timeout, got {error:?}")
         };
         assert_eq!(ms, 120_000);
+    }
+
+    // A running call hands out what it prints, and stops when it ends.
+    #[tokio::test]
+    async fn a_running_call_reports_what_it_prints() {
+        let dir = tempfile::tempdir().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = seen.clone();
+        let ctx = crate::testing::ctx(dir.path()).with_output(Arc::new(move |text| {
+            sink.lock().unwrap().push(text);
+        }));
+        Bash::foreground()
+            .execute(
+                json!({"command": "echo one; sleep 0.5; echo two; sleep 0.5"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let printed = seen.lock().unwrap().clone();
+        assert!(printed.iter().any(|t| t.contains("one")), "{printed:?}");
+        assert!(printed.iter().any(|t| t.contains("two")), "{printed:?}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            printed.len(),
+            "its end stops the reports"
+        );
     }
 
     #[tokio::test]

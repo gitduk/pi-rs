@@ -205,7 +205,9 @@ impl Ui {
                 }
             }
             Event::ToolPrinted { id, text } => {
-                if let Some(t) = view.state.tools.iter_mut().find(|t| t.id == *id) {
+                if let Some(t) = view.state.tools.iter_mut().find(|t| t.id == *id)
+                    && matches!(t.run, Run::Running { .. })
+                {
                     t.output = Some(text.clone());
                 }
             }
