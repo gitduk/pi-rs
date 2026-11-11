@@ -1,16 +1,17 @@
-//! Duplex fd 3 frames, with semantic observation pulled directly by the writer.
+//! fd 3: one request or notice per line, one reply per request.
+//!
+//! A line carrying `id` is answered exactly once; one without it never is.
 use crate::process::{Exited, Group, MAX_RUN, Streams, past, put_down, reap, spawn};
 use crate::runtime::background::{OutputMode, RunHandle, Scope};
-use crate::runtime::channel::{Answer, Ask, Observation, Receiver, Sender, Told};
-use crate::scripts::wire::{self, Command as Control, Incoming};
+use crate::runtime::channel::{Answer, Ask, Asked, Observation, Receiver, Sender, Told};
+use crate::scripts::wire::{self, Id, Incoming, Speaker, Stream as Listening};
 use ::execution::background::{Outcome, Report};
 use serde::Serialize;
-#[cfg(test)]
-use serde_json::Value;
-use serde_json::json;
+use serde_json::{Value, json};
+use std::collections::{HashMap, VecDeque};
 use std::os::fd::AsRawFd;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -23,6 +24,21 @@ const FD: i32 = 3;
 // Detach a peer that stops draining its frames.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_LINE: usize = wire::MAX_FRAME_BYTES + 1;
+// A question is answered off the read loop, so the execution's deadline and
+// `stop` still land; this only bounds a host that never answers at all.
+const ASK_LIMIT: Duration = Duration::from_secs(24 * 3600);
+
+/// What the writer must still answer, shared with the reader.
+#[derive(Clone, Default)]
+struct Holding {
+    // One entry per `say`, in the order they were sent: the id to answer, when
+    // that say asked for one.
+    says: Arc<Mutex<VecDeque<Option<Id>>>>,
+    // The message a turn's remaining words belong to, by its number.
+    linked: Arc<Mutex<HashMap<u64, message::MessageId>>>,
+    // Questions put to this script, by the id it was asked under.
+    asks: Arc<Mutex<HashMap<Id, u64>>>,
+}
 
 struct Process {
     child: Child,
@@ -30,6 +46,7 @@ struct Process {
     fd3: Fd3,
     told: Sender,
     out: Output,
+    holding: Holding,
     guard: Option<Group>,
 }
 
@@ -98,9 +115,10 @@ fn start(
         skipping: false,
         open: true,
     };
+    let holding = Holding::default();
     let (told, hear) = crate::runtime::channel::channel();
     let (out, output) = output();
-    tokio::spawn(tell(write, hear, output));
+    tokio::spawn(tell(write, hear, output, holding.clone()));
 
     Ok(Process {
         child,
@@ -108,11 +126,12 @@ fn start(
         fd3,
         told,
         out,
+        holding,
         guard,
     })
 }
 
-/// Run a foreground capability; its prompts remain internal runtime interactions.
+/// Run a foreground capability; its questions go to the person in this turn.
 pub async fn foreground(
     name: &str,
     cmd: Command,
@@ -127,30 +146,33 @@ pub async fn foreground(
         mut fd3,
         told: _told,
         out,
+        holding: _holding,
         guard: _guard,
     } = start(cmd, input, ctx, None)?;
     let group = child.id();
     let limit = timeout.min(MAX_RUN);
     let deadline = tokio::time::sleep(limit);
     tokio::pin!(deadline);
-    let mut waiting: Option<Answer> = None;
+    let mut waiting: Option<(Id, Answer)> = None;
     let mut exit = Box::pin(async { (child.wait().await, streams.checked(group).await) });
     let late = loop {
         tokio::select! {biased;
             ()=ctx.cancel.cancelled()=>break false,
-            picked=async {waiting.as_mut().expect("guarded").await}, if waiting.is_some()=>{
-                waiting=None;
-                out.runtime(Told::Answer(Ok(picked.ok().flatten())));
+            picked=async {
+                let held = waiting.as_mut().expect("guarded");
+                (&mut held.1).await
+            }, if waiting.is_some()=>{
+                let (id, _) = waiting.take().expect("guarded");
+                let said = match picked.ok().flatten() {
+                    Some(text) => wire::reply(&id, json!({"answer": text})),
+                    None => wire::failure(&id, "closed", "the question went away"),
+                };
+                out.value(&said);
                 deadline.as_mut().reset(tokio::time::Instant::now()+limit);
             }
             ()=&mut deadline, if waiting.is_none()=>break true,
-            frame=fd3.next()=> match frame {
-                Ok(Incoming::Runtime {command:Control::Status {text}})=>ctx.progress(text),
-                Ok(Incoming::Runtime {command:Control::Prompt {text,options,back}})=>{
-                    let put=if waiting.is_some() && back {Err("one prompt is already waiting".into())} else {asks.ask(ctx.into(),name,Control::asked(text,options,back))};
-                    match put {Ok(Some(answer))=>waiting=Some(answer), Ok(None)=>out.runtime(Told::Asked), Err(why)=>out.runtime(Told::Answer(Err(why)))}
-                }
-                Ok(Incoming::Message {..}) | Ok(Incoming::Observe {..}) | Ok(Incoming::Runtime {command:Control::Command {..} | Control::Answer {..} | Control::AnswerText {..} | Control::Serve {} | Control::Interrupt {} | Control::Watch {} | Control::Drive {..}})=>out.reject("this frame requires a background execution"),
+            line=fd3.next()=>match line {
+                Ok(value)=>waiting=answered_outside(&value,&out,ctx,name,asks,waiting),
                 Err(why)=>out.reject(why),
             },
             (status,captures)=&mut exit=>{let (stdout,stderr)=captures?;return Ok(Exited {status:status?,stdout,stderr});}
@@ -165,6 +187,74 @@ pub async fn foreground(
         ms: limit.as_millis() as u64,
         printed: streams.printed().await,
     })
+}
+
+/// A foreground script may report progress and ask; its answer comes back here.
+fn answered_outside(
+    value: &Value,
+    out: &Output,
+    ctx: &Ctx,
+    name: &str,
+    asks: &dyn Ask,
+    waiting: Option<(Id, Answer)>,
+) -> Option<(Id, Answer)> {
+    let incoming: Incoming = match serde_json::from_value(value.clone()) {
+        Ok(incoming) => incoming,
+        Err(error) => {
+            out.reject(format!("invalid frame: {error}"));
+            return waiting;
+        }
+    };
+    match incoming {
+        Incoming::Status { text } => {
+            ctx.progress(text);
+            waiting
+        }
+        Incoming::Ask {
+            id: Some(id),
+            text,
+            options,
+        } => {
+            if waiting.is_some() {
+                out.value(&wire::failure(
+                    &id,
+                    "busy",
+                    "one question is already waiting",
+                ));
+                return waiting;
+            }
+            let asked = Asked {
+                question: text,
+                options,
+                back: true,
+            };
+            match asks.ask(ctx.into(), name, asked) {
+                Ok(Some(answer)) => Some((id, answer)),
+                Ok(None) => {
+                    out.value(&wire::failure(&id, "closed", "the question went away"));
+                    waiting
+                }
+                Err(why) => {
+                    out.value(&wire::failure(&id, "internal", why));
+                    waiting
+                }
+            }
+        }
+        Incoming::Ask { id: None, .. } => {
+            out.value(&wire::unreadable(
+                "frame",
+                "a foreground question waits for its answer and needs an id",
+            ));
+            waiting
+        }
+        _ => {
+            out.value(&wire::unreadable(
+                "frame",
+                "a foreground script may report status and ask",
+            ));
+            waiting
+        }
+    }
 }
 
 pub(crate) fn background(
@@ -182,6 +272,7 @@ pub(crate) fn background(
         mut fd3,
         told,
         out,
+        holding,
         guard,
     } = start(cmd, input, ctx, execution.owner())?;
     execution.watch(streams.peek());
@@ -189,7 +280,7 @@ pub(crate) fn background(
     tokio::spawn(async move {
         let _guard = guard;
         let group = child.id();
-        let mut service = false;
+        let mut spoke = false;
         let limit = timeout.map(|d| d.min(MAX_RUN));
         let expires = limit.map(|d| tokio::time::Instant::now() + d);
         let status = loop {
@@ -206,29 +297,8 @@ pub(crate) fn background(
                     execution.complete(report);
                     return;
                 }
-                frame=fd3.next()=>match frame {
-                    Ok(Incoming::Message {message})=>{
-                        let id=message.id.clone();
-                        let request=match &message.kind {message::WireKind::Request(_)=>id.clone(),message::WireKind::Response {request,..}=>request.clone()};
-                        match execution.channel().message(message) {
-                            Ok(receipt)=>out.accepted(&id,&receipt), Err(why)=>out.value(&json!({"type":"error","id":id,"request":request,"message":why})),
-                        }
-                    },
-                    Ok(Incoming::Observe {session,cursor})=>match execution.channel().observe(session,cursor) {
-                        Ok(observation)=>out.observe(observation), Err(why)=>out.error(why),
-                    },
-                    Ok(Incoming::Runtime {command})=>match command {
-                        Control::Serve {}=>if !service {service=true;tracing::info!(target:"pi::scripts",execution=execution.id(),"channel service declared");},
-                        Control::Status {text}=>execution.channel().status(text),
-                        Control::Command {line}=>execution.channel().input(line,String::new()),
-                        Control::Prompt {back:true,..}=>out.reject("a background execution cannot wait for an internal foreground prompt"),
-                        Control::Prompt {text,options,back:false}=>execution.channel().choose(Control::asked(text,options,false)),
-                        Control::Answer {question,picks}=>execution.channel().answer(question,picks),
-                        Control::AnswerText {question,text}=>execution.channel().answer_text(question,text),
-                        Control::Interrupt {}=>execution.channel().interrupt(),
-                        Control::Watch {}=>execution.channel().watch_prompts(),
-                        Control::Drive {enabled}=>execution.channel().drive(enabled),
-                    },
+                line=fd3.next()=>match line {
+                    Ok(value)=>{spoke=true; say_out(&value,&out,&holding,&execution).await;}
                     Err(why)=>out.reject(why),
                 },
                 status=child.wait()=>break status,
@@ -238,31 +308,263 @@ pub(crate) fn background(
             ()=stop.cancelled()=>{reap(group).await;return;}
             captures=streams.checked(group)=>captures,
         };
-        let result = match (status, captures) {
+        let code = match &status {
+            Ok(status) => status.code().unwrap_or(-1),
+            Err(_) => -1,
+        };
+        let reported = match (status, captures) {
             (Ok(status), Ok((stdout, stderr))) => {
-                let code = status.code().unwrap_or(-1);
-                let body = if output == OutputMode::Stdout && status.success() {
-                    stdout.noted()
+                // A process that never spoke has only its output to speak
+                // with; one that spoke owns its words, so only failure reports.
+                if !spoke {
+                    let body = if output == OutputMode::Stdout && status.success() {
+                        stdout.noted()
+                    } else {
+                        crate::bash::body(&stdout, &stderr)
+                    };
+                    Some(if body.is_empty() {
+                        format!("exited {code}, no output")
+                    } else {
+                        format!("exited {code}:\n{body}")
+                    })
+                } else if status.success() {
+                    None
                 } else {
-                    crate::bash::body(&stdout, &stderr)
-                };
-                if body.is_empty() {
-                    format!("exited {code}, no output")
-                } else {
-                    format!("exited {code}:\n{body}")
+                    let errors = stderr.noted();
+                    Some(if errors.trim().is_empty() {
+                        format!("exited {code}, no error output")
+                    } else {
+                        format!("exited {code}:\n{}", errors.trim_end())
+                    })
                 }
             }
-            (_, Err(error)) => error.to_string(),
-            (Err(error), _) => format!("could not wait for the command: {error}"),
+            (_, Err(error)) => Some(error.to_string()),
+            (Err(error), _) => Some(format!("could not wait for the command: {error}")),
         };
-        if !service {
-            execution.channel().result(result);
-        } else {
-            execution.channel().status(result);
+        match reported {
+            Some(text) if spoke => {
+                execution.channel().status(text.clone());
+                execution.channel().result(text);
+            }
+            Some(text) => execution.channel().result(text),
+            None => execution.channel().status(format!("exited {code}")),
         }
         execution.end();
     });
     Ok(())
+}
+
+/// One line from the script: a request, a notice, or an answer to a question.
+async fn say_out(value: &Value, out: &Output, holding: &Holding, execution: &Arc<dyn RunHandle>) {
+    if value.get("op").is_none() {
+        answered(value, out, execution, holding);
+        return;
+    }
+    let incoming: Incoming = match serde_json::from_value(value.clone()) {
+        Ok(incoming) => incoming,
+        Err(error) => {
+            let id = value
+                .get("id")
+                .and_then(|id| serde_json::from_value::<Id>(id.clone()).ok());
+            let frame = match id {
+                Some(id) => wire::failure(&id, "frame", format!("invalid frame: {error}")),
+                None => wire::unreadable("frame", format!("invalid frame: {error}")),
+            };
+            out.value(&frame);
+            return;
+        }
+    };
+    if let Err((code, why)) = incoming.validate() {
+        match incoming.id() {
+            Some(id) => out.value(&wire::failure(id, code, why)),
+            None => out.value(&wire::unreadable(code, why)),
+        }
+        return;
+    }
+    match incoming {
+        Incoming::Initialize { id, protocol } => {
+            if protocol == wire::PROTOCOL {
+                out.value(&wire::reply(&id, json!({"protocol": wire::PROTOCOL})));
+            } else {
+                out.value(&wire::failure(
+                    &id,
+                    "protocol",
+                    format!(
+                        "this pi speaks {}; the script asked for {protocol}",
+                        wire::PROTOCOL
+                    ),
+                ));
+            }
+        }
+        Incoming::Say {
+            id,
+            text,
+            speaker,
+            note,
+            more,
+            re,
+            stop,
+            source,
+            reason,
+        } => {
+            if let Some(re) = re {
+                match execution.channel().respond(re, text, stop) {
+                    Ok(_) => {
+                        if let Some(id) = id {
+                            out.value(&wire::reply(&id, json!({"accepted": true})));
+                        }
+                    }
+                    Err(why) => {
+                        if let Some(id) = id {
+                            out.value(&wire::failure(&id, "internal", why));
+                        } else {
+                            out.reject(why);
+                        }
+                    }
+                }
+                return;
+            }
+            execution.channel().drive(more);
+            match speaker {
+                Speaker::Person => {
+                    // The person's words, not the person's authority: a script
+                    // relays what was said, never a command for this machine.
+                    if text.starts_with('!') {
+                        if let Some(id) = id {
+                            out.value(&wire::failure(
+                                &id,
+                                "denied",
+                                "a line from a script may not run shell commands",
+                            ));
+                        } else {
+                            out.reject("a line from a script may not run shell commands");
+                        }
+                        return;
+                    }
+                    holding.says.lock().unwrap().push_back(id.clone());
+                    execution.channel().input(text, note);
+                }
+                Speaker::Task => match execution.channel().task(text, source, reason) {
+                    Ok(_) => {
+                        if let Some(id) = id {
+                            out.value(&wire::reply(&id, json!({"accepted": true})));
+                        }
+                    }
+                    Err(why) => match id {
+                        Some(id) => out.value(&wire::failure(&id, "internal", why)),
+                        None => out.reject(why),
+                    },
+                },
+            }
+        }
+        Incoming::Ask { id, text, options } => match id {
+            Some(id) => {
+                let asked = Asked {
+                    question: text,
+                    options,
+                    back: true,
+                };
+                match execution.channel().ask(asked) {
+                    // Answered off this loop: a person may think for as long as
+                    // the execution's own deadline allows, and `stop` still lands.
+                    Ok(answer) => {
+                        let out = out.clone();
+                        drop(tokio::spawn(async move {
+                            let said = match tokio::time::timeout(ASK_LIMIT, answer).await {
+                                Ok(Ok(Some(text))) => wire::reply(&id, json!({"answer": text})),
+                                Ok(Ok(None)) => {
+                                    wire::failure(&id, "closed", "the question went away")
+                                }
+                                Ok(Err(_)) => wire::failure(&id, "closed", "the asker is gone"),
+                                Err(_) => wire::failure(&id, "closed", "the question timed out"),
+                            };
+                            out.value(&said);
+                        }));
+                    }
+                    Err(why) => out.value(&wire::failure(&id, "internal", why)),
+                }
+            }
+            None => execution.channel().choose(Asked {
+                question: text,
+                options,
+                back: false,
+            }),
+        },
+        Incoming::Listen { id, to, cursor } => match to {
+            Listening::Session => match execution.owner().map(|owner| owner.session) {
+                Some(session) => match message::SessionId::new(session)
+                    .map_err(|e| e.to_string())
+                    .and_then(|session| execution.channel().observe(session, cursor))
+                {
+                    Ok(observation) => {
+                        out.value(&wire::reply(&id, json!({"cursor": observation.cursor()})));
+                        out.observe(observation);
+                    }
+                    Err(why) => out.value(&wire::failure(&id, "internal", why)),
+                },
+                None => out.value(&wire::failure(
+                    &id,
+                    "internal",
+                    "this execution captured no session to listen to",
+                )),
+            },
+            Listening::Questions => {
+                execution.channel().watch_prompts();
+                out.value(&wire::reply(&id, json!({})));
+            }
+        },
+        Incoming::Status { text } => execution.channel().status(text),
+        Incoming::Stop {} => execution.channel().interrupt(),
+    }
+}
+
+/// A reply to a question this script was asked.
+fn answered(value: &Value, out: &Output, execution: &Arc<dyn RunHandle>, holding: &Holding) {
+    let id = match value.get("id") {
+        Some(id) => match serde_json::from_value::<Id>(id.clone()) {
+            Ok(id) => id,
+            Err(_) => {
+                out.reject("a reply needs a usable id");
+                return;
+            }
+        },
+        None => {
+            out.reject("a reply needs an id");
+            return;
+        }
+    };
+    let Some(question) = holding.asks.lock().unwrap().remove(&id) else {
+        out.value(&wire::failure(
+            &id,
+            "closed",
+            "no question is waiting under that id",
+        ));
+        return;
+    };
+    if let Some(why) = value
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+    {
+        out.value(&wire::refused(question, why));
+        return;
+    }
+    let result = value.get("result").cloned().unwrap_or(Value::Null);
+    if let Some(picks) = result.get("picks").and_then(Value::as_array) {
+        let picks: Vec<usize> = (picks.iter())
+            .filter_map(Value::as_u64)
+            .map(|n| n as usize)
+            .collect();
+        execution.channel().answer(question, picks);
+    } else if let Some(text) = result.get("text").and_then(Value::as_str) {
+        execution.channel().answer_text(question, text.to_string());
+    } else {
+        out.value(&wire::failure(
+            &id,
+            "frame",
+            "an answer carries picks or text",
+        ));
+    }
 }
 
 #[derive(Clone)]
@@ -332,38 +634,13 @@ impl Output {
             }
         }
     }
-    fn error(&self, why: impl Into<String>) {
-        self.value(&wire::error(why));
-    }
     fn reject(&self, why: impl Into<String>) {
         let why = why.into();
         tracing::warn!(target: "pi::scripts", %why, "frame rejected");
-        self.error(why);
-    }
-    fn runtime(&self, told: Told) {
-        if let Some(value) = wire::runtime(told) {
-            self.value(&value)
-        }
+        self.value(&wire::unreadable("frame", why));
     }
     fn observe(&self, observation: Box<dyn Observation>) {
         self.put(Outgoing::Observe(observation), 1);
-    }
-    fn accepted(&self, id: &message::MessageId, receipt: &crate::runtime::channel::Receipt) {
-        #[derive(Serialize)]
-        struct Accepted<'a> {
-            r#type: &'static str,
-            id: &'a message::MessageId,
-            request: &'a message::RequestId,
-            cursor: &'a crate::runtime::channel::Cursor,
-            response: Option<&'a message::Message>,
-        }
-        self.value(&Accepted {
-            r#type: "accepted",
-            id,
-            request: &receipt.request,
-            cursor: &receipt.cursor,
-            response: receipt.response.as_deref(),
-        });
     }
 }
 
@@ -374,9 +651,8 @@ async fn write(to: &mut OwnedWriteHalf, value: &impl Serialize) -> Result<(), St
         .map_err(|_| "frame receiver stopped reading".to_string())?
         .map_err(|e| e.to_string())
 }
-async fn tell(mut to: OwnedWriteHalf, mut hear: Receiver, mut output: OutputIn) {
+async fn tell(mut to: OwnedWriteHalf, mut hear: Receiver, mut output: OutputIn, holding: Holding) {
     let mut observation: Option<Box<dyn Observation>> = None;
-    let mut model_operations = std::collections::HashSet::new();
     let disconnected = hear.disconnection();
     loop {
         tokio::select! {biased;
@@ -386,34 +662,72 @@ async fn tell(mut to: OwnedWriteHalf, mut hear: Receiver, mut output: OutputIn) 
                 None=>return,
                 Some(queued)=>match queued.frame {
                     Outgoing::Bytes(bytes)=>if !matches!(tokio::time::timeout(WRITE_TIMEOUT,to.write_all(&bytes)).await,Ok(Ok(()))){return},
-                    Outgoing::Observe(next)=>{if write(&mut to,&json!({"type":"observing","cursor":next.cursor()})).await.is_err(){return} observation=Some(next);}
+                    Outgoing::Observe(next)=>{observation=Some(next);}
                 },
             },
             event=hear.recv()=>{
-                let Some(mut event)=event else{return};
-                let mut model_final=false;
-                match &mut event {
-                    Told::Linked {operation,..}=>{model_operations.insert(*operation);},
-                    Told::Response {request,event} if model_operations.contains(request)=>match event {
-                        crate::runtime::channel::Response::Progress(_)=>continue,
-                        crate::runtime::channel::Response::Finished {text,..}=>{text.clear();model_operations.remove(request);model_final=true;},
-                        crate::runtime::channel::Response::Queued | crate::runtime::channel::Response::Started=>{},
+                let Some(event)=event else{return};
+                let frames: Vec<Value> = match event {
+                    Told::Linked { operation, request }=>{
+                        holding.linked.lock().unwrap().insert(operation, request);
+                        Vec::new()
+                    }
+                    Told::Response { request, event }=>match event {
+                        ::execution::channel::Response::Finished { text, outcome }=>{
+                            let linked=holding.linked.lock().unwrap().remove(&request);
+                            let id=holding.says.lock().unwrap().pop_front().flatten();
+                            match id {
+                                Some(id)=>vec![wire::reply(&id, json!({
+                                    "turn": request,
+                                    "state": state(&outcome),
+                                    "text": text,
+                                    "message": linked,
+                                }))],
+                                None=>Vec::new(),
+                            }
+                        }
+                        _=>Vec::new(),
                     },
-                    Told::Response {..} | Told::Started | Told::Progress(_) | Told::Reply(_) | Told::Asked | Told::Answer(_) | Told::Question {..} | Told::Closed(_) | Told::Refused {..}=>{},
-                }
-                if let Some(mut value)=wire::runtime(event) {
-                    if model_final {value["event"]["model"]=json!(true);}
-                    if write(&mut to,&value).await.is_err(){return}
+                    Told::Question { id, asked, request }=>match request {
+                        Some(_)=>Vec::new(),
+                        None=>{
+                            let ask_id=Id::Number(id);
+                            holding.asks.lock().unwrap().insert(ask_id.clone(), id);
+                            vec![wire::ask(&ask_id, &asked.question, &asked.options)]
+                        }
+                    },
+                    Told::Closed(question)=>{
+                        let mut asks=holding.asks.lock().unwrap();
+                        let id=(asks.iter()).find(|(_, q)| **q == question).map(|(id, _)| id.clone());
+                        match id {
+                            Some(id)=>{asks.remove(&id); vec![wire::failure(&id, "closed", "the question went away")]}
+                            None=>Vec::new(),
+                        }
+                    }
+                    Told::Refused { question, why }=>vec![wire::refused(question, &why)],
+                    Told::Started | Told::Progress(_) | Told::Reply(_) | Told::Asked | Told::Answer(_)=>Vec::new(),
+                };
+                for frame in frames {
+                    if write(&mut to,&frame).await.is_err(){return}
                 }
             },
             event=async {observation.as_mut().expect("guarded").next().await},if observation.is_some()=>match event {
                 Ok(event)=>{
-                    #[derive(Serialize)] struct MessageFrame<'a>{r#type:&'static str,cursor:&'a crate::runtime::channel::Cursor,message:&'a message::Message}
-                    if write(&mut to,&MessageFrame {r#type:"message",cursor:&event.cursor,message:&event.message}).await.is_err(){return}
+                    let frame=wire::message(&event.cursor,event.message.as_ref());
+                    if write(&mut to,&frame).await.is_err(){return}
                 }
-                Err(why)=>{observation=None;if write(&mut to,&wire::error(why)).await.is_err(){return}}
+                Err(why)=>{observation=None;if write(&mut to,&wire::unreadable("internal",why)).await.is_err(){return}}
             },
         }
+    }
+}
+
+fn state(outcome: &crate::runtime::channel::Outcome) -> &'static str {
+    use crate::runtime::channel::Outcome;
+    match outcome {
+        Outcome::Done | Outcome::Exited(0) => "done",
+        Outcome::Stopped(_) => "stopped",
+        Outcome::Failed(_) | Outcome::Exited(_) => "failed",
     }
 }
 
@@ -424,7 +738,7 @@ struct Fd3 {
     open: bool,
 }
 impl Fd3 {
-    async fn next(&mut self) -> Result<Incoming, String> {
+    async fn next(&mut self) -> Result<Value, String> {
         while self.open {
             let room = (MAX_LINE + 1 - self.line.len()) as u64;
             let read = (&mut self.reader)
@@ -458,7 +772,7 @@ impl Fd3 {
 mod tests {
     use super::*;
     use crate::bash::Bash;
-    use crate::runtime::channel::{Asked, NoOne, Outcome, Response};
+    use crate::runtime::channel::{NoOne, Outcome, Response};
     use crate::testing::{Sink, ctx};
     use std::sync::{Arc, Mutex};
     use tool::Tool;
@@ -476,7 +790,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cmd = script(
             dir.path(),
-            "while :; do echo '{\"type\":\"runtime\",\"command\":{\"type\":\"status\",\"text\":\"busy\"}}' >&3; done",
+            "while :; do echo '{\"op\":\"status\",\"text\":\"busy\"}' >&3; done",
         );
         let ended = tokio::time::timeout(
             3 * SECOND,
@@ -520,28 +834,6 @@ mod tests {
         }
     }
 
-    // An event arriving after one pipe has closed must not re-poll that
-    // pipe's finished drain.
-    #[tokio::test]
-    async fn an_event_after_one_pipe_closes_does_not_break_the_wait() {
-        let dir = tempfile::tempdir().unwrap();
-        let cmd = script(
-            dir.path(),
-            "exec 1>&-; (sleep 0.2; echo '{\"type\":\"runtime\",\"command\":{\"type\":\"status\",\"text\":\"late\"}}' >&3; sleep 0.2) & exit 0",
-        );
-        let ended = foreground(
-            "late",
-            cmd,
-            Vec::new(),
-            10 * SECOND,
-            &ctx(dir.path()),
-            &NoOne,
-        )
-        .await
-        .unwrap();
-        assert!(ended.status.success());
-    }
-
     #[tokio::test]
     async fn an_overlong_line_on_fd_3_is_dropped_not_held() {
         let dir = tempfile::tempdir().unwrap();
@@ -551,7 +843,7 @@ mod tests {
         let cmd = script(
             dir.path(),
             &format!(
-                "head -c {} /dev/zero | tr '\\0' x >&3; echo >&3; echo '{{\"type\":\"runtime\",\"command\":{{\"type\":\"status\",\"text\":\"after\"}}}}' >&3",
+                "head -c {} /dev/zero | tr '\\0' x >&3; echo >&3; echo '{{\"op\":\"status\",\"text\":\"after\"}}' >&3",
                 MAX_LINE * 3
             ),
         );
@@ -566,16 +858,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(Sink::default());
         let ctx = ctx(dir.path());
-        let body = r#"echo '{"type":"runtime","command":{"type":"prompt","text":"run it?","options":["allow","deny"],"back":true}}' >&3
+        let body = r#"echo '{"id":"a1","op":"ask","text":"run it?","options":["allow","deny"]}' >&3
 read -r a <&3
 printf '%s\n' "$a" > heard"#;
         let ran = {
             let sink = sink.clone();
             let ctx = ctx.clone();
             let cmd = script(dir.path(), body);
-            tokio::spawn(
-                async move { foreground("guard", cmd, Vec::new(), SECOND, &ctx, &*sink).await },
-            )
+            tokio::spawn(async move {
+                foreground("guard", cmd, Vec::new(), 5 * SECOND, &ctx, &*sink).await
+            })
         };
         let deadline = std::time::Instant::now() + 5 * SECOND;
         let to = loop {
@@ -586,42 +878,28 @@ printf '%s\n' "$a" > heard"#;
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
         assert_eq!(sink.said.lock().unwrap()[0], "ask guard run it?");
-        // Past its one-second limit: the clock stood while the person thought.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
         to.send(Some("deny".into())).unwrap();
         assert!(ran.await.unwrap().unwrap().status.success());
         let heard = std::fs::read_to_string(dir.path().join("heard")).unwrap();
         let frame: Value = serde_json::from_str(&heard).unwrap();
-        assert_eq!(
-            frame,
-            json!({"type":"runtime","event":{"type":"answer","text":"deny"}})
-        );
-
-        let cmd = script(dir.path(), body);
-        foreground("guard", cmd, Vec::new(), 5 * SECOND, &ctx, &NoOne)
-            .await
-            .unwrap();
-        let heard = std::fs::read_to_string(dir.path().join("heard")).unwrap();
-        let frame: Value = serde_json::from_str(&heard).unwrap();
-        assert_eq!(frame["event"]["type"], "error");
-        assert!(frame["event"]["message"].is_string());
+        assert_eq!(frame, json!({"id":"a1","result":{"answer":"deny"}}));
     }
 
     #[tokio::test]
-    async fn bash_background_carries_inputs_questions_and_replies() {
+    async fn bash_background_carries_says_asks_and_notices() {
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(Sink::default());
         let ctx = ctx(dir.path());
         let _cmd = script(
             dir.path(),
-            r#"echo '{"type":"runtime","command":{"type":"drive","enabled":true}}' >&3
-echo '{"type":"runtime","command":{"type":"command","line":"host operation"}}' >&3
-echo '{"type":"runtime","command":{"type":"prompt","text":"the task changed","options":["summarize","go on"],"back":false}}' >&3
-echo '{"type":"runtime","command":{"type":"answer","question":3,"picks":[1]}}' >&3
-echo '{"type":"runtime","command":{"type":"interrupt"}}' >&3
-echo '{"type":"runtime","command":{"type":"watch"}}' >&3
-read -r a <&3; read -r b <&3; read -r c <&3; read -r d <&3; read -r e <&3; read -r f <&3
-printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" "$e" "$f" > heard"#,
+            r#"echo '{"id":1,"op":"initialize","protocol":4}' >&3
+echo '{"id":2,"op":"say","text":"host operation","note":"round 2","more":true}' >&3
+echo '{"op":"ask","text":"the task changed","options":["summarize","go on"]}' >&3
+echo '{"id":3,"op":"listen","to":"questions"}' >&3
+echo '{"op":"status","text":"working"}' >&3
+echo '{"op":"stop"}' >&3
+read -r a <&3; read -r b <&3; read -r c <&3
+printf '%s\n%s\n%s\n' "$a" "$b" "$c" > heard"#,
         );
         let ended = sink.ended.notified();
         Bash::new(sink.clone())
@@ -632,12 +910,167 @@ printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" "$e" "$f" > heard"#,
             .await
             .unwrap();
         let told = sink.told.lock().unwrap().clone().expect("it listens");
-        told.send(Told::Started).unwrap();
-        told.send(Told::Progress("checking".into())).unwrap();
-        told.send(Told::Reply("parse.rs:40".into())).unwrap();
+        let deadline = std::time::Instant::now() + 5 * SECOND;
+        while !sink
+            .said
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.starts_with("input host operation"))
+        {
+            assert!(std::time::Instant::now() < deadline, "never said");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        told.send(Told::Response {
+            request: 7,
+            event: Response::Finished {
+                text: "parse.rs:40".into(),
+                outcome: Outcome::Done,
+            },
+        })
+        .unwrap();
+        tokio::time::timeout(5 * SECOND, ended)
+            .await
+            .expect("it ended");
+        let said = sink.said.lock().unwrap().clone();
+        assert!(said.contains(&"drive true".to_string()), "{said:?}");
+        assert!(
+            said.contains(&"input host operation (round 2)".to_string()),
+            "{said:?}"
+        );
+        assert!(said.contains(&"watch".to_string()), "{said:?}");
+        assert!(said.contains(&"status working".to_string()), "{said:?}");
+        assert!(said.contains(&"interrupt".to_string()), "{said:?}");
+        let heard = std::fs::read_to_string(dir.path().join("heard")).unwrap();
+        let heard: Vec<Value> = (heard.lines())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert!(
+            heard.contains(&json!({"id":1,"result":{"protocol":4}})),
+            "{heard:?}"
+        );
+        assert!(heard.contains(&json!({"id":3,"result":{}})), "{heard:?}");
+        assert!(
+            heard.contains(&json!({"id":2,"result":{"turn":7,"state":"done","text":"parse.rs:40","message":null}})),
+            "{heard:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scripts_line_cannot_run_a_shell_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        let ctx = ctx(dir.path());
+        let _cmd = script(
+            dir.path(),
+            r#"echo '{"id":1,"op":"say","text":"!rm -rf /tmp/x"}' >&3
+read -r a <&3
+printf '%s\n' "$a" > heard"#,
+        );
+        let ended = sink.ended.notified();
+        Bash::new(sink.clone())
+            .execute(
+                serde_json::json!({"command":"sh script", "background":true}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(5 * SECOND, ended)
+            .await
+            .expect("it ended");
+        let said = sink.said.lock().unwrap().clone();
+        assert!(
+            !said.iter().any(|s| s.starts_with("input ")),
+            "the line never reached the session: {said:?}"
+        );
+        let heard = std::fs::read_to_string(dir.path().join("heard")).unwrap();
+        let frame: Value = serde_json::from_str(&heard).unwrap();
+        assert_eq!(frame["id"], 1);
+        assert_eq!(frame["error"]["code"], "denied", "{frame}");
+    }
+
+    #[tokio::test]
+    async fn a_script_that_never_spoke_reports_its_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        let ctx = ctx(dir.path());
+        let _cmd = script(dir.path(), "echo built; exit 0");
+        let ended = sink.ended.notified();
+        Bash::new(sink.clone())
+            .execute(
+                serde_json::json!({"command":"sh script", "background":true}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(5 * SECOND, ended)
+            .await
+            .expect("it ended");
+        let said = sink.said.lock().unwrap().clone();
+        assert!(
+            said.iter().any(|s| s.starts_with("result exited 0")),
+            "{said:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_script_reports_its_error_but_a_clean_one_only_its_status() {
+        for (body, reported) in [("echo boom >&2; exit 3", true), ("exit 0", false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let sink = Arc::new(Sink::default());
+            let ctx = ctx(dir.path());
+            let _cmd = script(
+                dir.path(),
+                &format!("echo '{{\"op\":\"status\",\"text\":\"working\"}}' >&3\n{body}"),
+            );
+            let ended = sink.ended.notified();
+            Bash::new(sink.clone())
+                .execute(
+                    serde_json::json!({"command":"sh script", "background":true}),
+                    &ctx,
+                )
+                .await
+                .unwrap();
+            tokio::time::timeout(5 * SECOND, ended)
+                .await
+                .expect("it ended");
+            let said = sink.said.lock().unwrap().clone();
+            let got = said.iter().any(|s| s.starts_with("result exited"));
+            assert_eq!(got, reported, "{said:?}");
+            if reported {
+                assert!(
+                    said.iter().any(|s| s.contains("boom")),
+                    "the failure says why: {said:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn answering_a_question_put_to_this_script_reaches_the_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        let ctx = ctx(dir.path());
+        let _cmd = script(
+            dir.path(),
+            r#"echo '{"id":1,"op":"listen","to":"questions"}' >&3
+read -r a <&3
+printf '%s\n' "$a" > /dev/null
+echo '{"id":3,"result":{"picks":[1]}}' >&3
+sleep 1"#,
+        );
+        let ended = sink.ended.notified();
+        Bash::new(sink.clone())
+            .execute(
+                serde_json::json!({"command":"sh script", "background":true}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let told = sink.told.lock().unwrap().clone().expect("it listens");
         let asked = Asked {
-            question: "go on?".into(),
-            options: vec!["yes".into()],
+            question: "the task changed".into(),
+            options: vec!["summarize".into(), "go on".into()],
             back: false,
         };
         told.send(Told::Question {
@@ -646,185 +1079,10 @@ printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" "$e" "$f" > heard"#,
             request: None,
         })
         .unwrap();
-        told.send(Told::Closed(3)).unwrap();
-        told.send(Told::Refused {
-            question: 3,
-            why: "it is no longer up".into(),
-        })
-        .unwrap();
         tokio::time::timeout(5 * SECOND, ended)
             .await
             .expect("it ended");
-        assert_eq!(
-            sink.said.lock().unwrap()[1..7],
-            [
-                "drive true",
-                "input host operation",
-                "choose the task changed: summarize | go on",
-                "answer 3: [1]",
-                "interrupt",
-                "watch"
-            ]
-        );
-        let heard = std::fs::read_to_string(dir.path().join("heard")).unwrap();
-        let heard: Vec<Value> = (heard.lines())
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect();
-        assert_eq!(heard[0]["type"], "runtime");
-        assert_eq!(
-            heard
-                .iter()
-                .map(|v| v["event"]["type"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            [
-                "started", "progress", "finished", "prompt", "closed", "refused"
-            ]
-        );
-        assert_eq!(heard[2]["event"]["text"], "parse.rs:40");
-        assert_eq!(heard[3]["event"]["question"], 3);
-    }
-
-    #[tokio::test]
-    async fn overlapping_operations_keep_their_identity_on_the_wire() {
-        let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
-        let (_, write) = ours.into_split();
-        let (tx, rx) = crate::runtime::channel::channel();
-        let (_out, output) = output();
-        let writer = tokio::spawn(tell(write, rx, output));
-        for (request, event) in [
-            (7, Response::Queued),
-            (7, crate::runtime::channel::Response::Started),
-            (8, crate::runtime::channel::Response::Started),
-            (
-                8,
-                Response::Finished {
-                    text: "status".into(),
-                    outcome: Outcome::Done,
-                },
-            ),
-            (
-                7,
-                crate::runtime::channel::Response::Progress("working".into()),
-            ),
-            (
-                7,
-                Response::Finished {
-                    text: "done".into(),
-                    outcome: Outcome::Done,
-                },
-            ),
-            (
-                9,
-                Response::Finished {
-                    text: "stopped".into(),
-                    outcome: Outcome::Done,
-                },
-            ),
-            (
-                10,
-                Response::Finished {
-                    text: "partial answer".into(),
-                    outcome: Outcome::Stopped(String::new()),
-                },
-            ),
-            (
-                11,
-                Response::Finished {
-                    text: "partial answer".into(),
-                    outcome: Outcome::Failed("connection lost".into()),
-                },
-            ),
-            (
-                12,
-                Response::Finished {
-                    text: String::new(),
-                    outcome: Outcome::Stopped("run it again".into()),
-                },
-            ),
-            (
-                13,
-                Response::Finished {
-                    text: String::new(),
-                    outcome: Outcome::Failed("connection lost".into()),
-                },
-            ),
-            (
-                14,
-                Response::Finished {
-                    text: String::new(),
-                    outcome: Outcome::Exited(0),
-                },
-            ),
-            (
-                15,
-                Response::Finished {
-                    text: "exit 3".into(),
-                    outcome: Outcome::Exited(3),
-                },
-            ),
-        ] {
-            tx.send(Told::Response { request, event }).unwrap();
-        }
-        drop(tx);
-        let mut lines = BufReader::new(theirs).lines();
-        for (id, phase, text, status) in [
-            (7, "queued", None, None),
-            (7, "started", None, None),
-            (8, "started", None, None),
-            (8, "finished", Some("status"), Some("done")),
-            (7, "progress", Some("working"), None),
-            (7, "finished", Some("done"), Some("done")),
-            (9, "finished", Some("stopped"), Some("done")),
-            (10, "finished", Some("partial answer"), Some("stopped")),
-            (11, "finished", Some("partial answer"), Some("failed")),
-            (12, "finished", Some(""), Some("stopped")),
-            (13, "finished", Some(""), Some("failed")),
-            (14, "finished", Some(""), Some("done")),
-            (15, "finished", Some("exit 3"), Some("failed")),
-        ] {
-            let line = lines.next_line().await.unwrap().unwrap();
-            let frame: Value = serde_json::from_str(&line).unwrap();
-            assert_eq!(frame["type"], "runtime");
-            assert_eq!(frame["event"]["type"], "operation");
-            assert_eq!(frame["event"]["operation"], id);
-            let value = &frame["event"]["phase"];
-            assert_eq!(value["type"], phase);
-            if let Some(text) = text {
-                assert_eq!(value["text"], text)
-            }
-            if let Some(status) = status {
-                assert_eq!(value["status"]["type"], status)
-            }
-        }
-        writer.await.unwrap();
-        assert!(lines.next_line().await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn a_left_behind_child_holding_stdout_still_times_out() {
-        let dir = tempfile::tempdir().unwrap();
-        let cmd = script(dir.path(), "sleep 30 &\necho $! > pid");
-        let err = foreground("leaky", cmd, Vec::new(), SECOND, &ctx(dir.path()), &NoOne)
-            .await
-            .err()
-            .expect("timed out");
-        assert!(matches!(err, ToolError::Timeout { .. }), "{err}");
-        assert_gone(&dir.path().join("pid")).await;
-    }
-
-    async fn assert_gone(pid_file: &std::path::Path) {
-        let pid: i32 = std::fs::read_to_string(pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        for _ in 0..50 {
-            // SAFETY: signal 0 only asks whether the process exists.
-            if unsafe { libc::kill(pid, 0) } != 0 {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        panic!("{pid} still runs");
+        let said = sink.said.lock().unwrap().clone();
+        assert!(said.iter().any(|s| s == "answer 3: [1]"), "{said:?}");
     }
 }

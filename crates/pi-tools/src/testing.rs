@@ -128,6 +128,42 @@ impl crate::runtime::channel::Channel for Handle {
         };
         self.said.lock().unwrap().push(said);
     }
+    fn task(
+        &self,
+        text: String,
+        source: String,
+        reason: String,
+    ) -> Result<crate::runtime::channel::Receipt, String> {
+        self.said
+            .lock()
+            .unwrap()
+            .push(format!("task {text} ({source}: {reason})"));
+        Err("no conversation is registered".into())
+    }
+    fn respond(
+        &self,
+        to: message::MessageId,
+        text: String,
+        stop: bool,
+    ) -> Result<crate::runtime::channel::Receipt, String> {
+        let _ = stop;
+        self.said
+            .lock()
+            .unwrap()
+            .push(format!("respond {} {text}", to.as_str()));
+        Err("no conversation is registered".into())
+    }
+    fn ask(
+        &self,
+        asked: crate::runtime::channel::Asked,
+    ) -> Result<crate::runtime::channel::Answer, String> {
+        self.said.lock().unwrap().push(format!(
+            "ask-wait {}: {}",
+            asked.question,
+            asked.options.join(" | ")
+        ));
+        Err("nothing here can put a question to the person".into())
+    }
     fn choose(&self, asked: crate::runtime::channel::Asked) {
         self.said.lock().unwrap().push(format!(
             "choose {}: {}",

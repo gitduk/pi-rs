@@ -1,64 +1,135 @@
-//! The sole fd 3 codec. Model messages and runtime operations are separate frames.
+//! The sole fd 3 codec: one request or notice per line, one reply per request.
+//!
+//! A line carrying `id` is a request and is answered exactly once; a line
+//! without it is a notice and is never answered. Both directions use the same
+//! two shapes, which is what keeps one dispatch table enough.
 
-use crate::runtime::channel::{Asked, Cursor, Outcome, Response, Told};
+use crate::runtime::channel::Cursor;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const MAX_FRAME_BYTES: usize = message::DEFAULT_MESSAGE_BYTES + 4096;
 pub const SESSION_VAR: &str = "PI_SESSION_ID";
 pub const REQUEST_VAR: &str = "PI_REQUEST_ID";
+/// The protocol revision this build speaks; a mismatch is refused, not guessed.
+pub const PROTOCOL: u32 = 4;
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Incoming {
-    Message {
-        message: message::WireMessage,
-    },
-    Observe {
-        session: message::SessionId,
-        cursor: Option<Cursor>,
-    },
-    Runtime {
-        command: Command,
-    },
+/// A request's name for itself: whatever the sender chose, echoed unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Id {
+    Number(u64),
+    Text(String),
+}
+
+impl std::fmt::Display for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Number(n) => write!(f, "{n}"),
+            Self::Text(text) => write!(f, "{text}"),
+        }
+    }
+}
+
+/// Whose words these are: a person's line, or a machine's task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Speaker {
+    #[default]
+    Person,
+    Task,
+}
+
+/// What a `listen` subscribes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stream {
+    #[default]
+    Session,
+    Questions,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Command {
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Incoming {
+    Initialize {
+        id: Id,
+        protocol: u32,
+    },
+    Say {
+        #[serde(default)]
+        id: Option<Id>,
+        text: String,
+        #[serde(rename = "as", default)]
+        speaker: Speaker,
+        #[serde(default)]
+        note: String,
+        #[serde(default)]
+        more: bool,
+        #[serde(default)]
+        re: Option<message::MessageId>,
+        #[serde(default)]
+        stop: bool,
+        #[serde(default)]
+        source: String,
+        #[serde(default)]
+        reason: String,
+    },
+    Ask {
+        #[serde(default)]
+        id: Option<Id>,
+        text: String,
+        #[serde(default)]
+        options: Vec<String>,
+    },
+    Listen {
+        id: Id,
+        #[serde(default)]
+        to: Stream,
+        #[serde(default)]
+        cursor: Option<Cursor>,
+    },
     Status {
         text: String,
     },
-    Command {
-        line: String,
-    },
-    Prompt {
-        text: String,
-        options: Vec<String>,
-        back: bool,
-    },
-    Answer {
-        question: u64,
-        picks: Vec<usize>,
-    },
-    AnswerText {
-        question: u64,
-        text: String,
-    },
-    Serve {},
-    Interrupt {},
-    Watch {},
-    Drive {
-        enabled: bool,
-    },
+    Stop {},
 }
 
-impl Command {
-    pub(super) fn asked(text: String, options: Vec<String>, back: bool) -> Asked {
-        Asked {
-            question: text,
-            options,
-            back,
+impl Incoming {
+    /// What only the frame's own contents can refuse, before it reaches pi.
+    pub fn validate(&self) -> Result<(), (&'static str, String)> {
+        match self {
+            Self::Say {
+                speaker: Speaker::Task,
+                source,
+                reason,
+                ..
+            } => {
+                if source.trim().is_empty() || reason.trim().is_empty() {
+                    return Err(("frame", "a task says where it comes from and why".into()));
+                }
+            }
+            Self::Ask { text, .. } if text.trim().is_empty() => {
+                return Err(("frame", "a question needs text".into()));
+            }
+            Self::Say {
+                stop: true,
+                re: None,
+                ..
+            } => {
+                return Err(("frame", "stop names the message it closes".into()));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// The request this line answers to, when it is one.
+    pub fn id(&self) -> Option<&Id> {
+        match self {
+            Self::Initialize { id, .. } | Self::Listen { id, .. } => Some(id),
+            Self::Say { id, .. } | Self::Ask { id, .. } => id.as_ref(),
+            Self::Status { .. } | Self::Stop {} => None,
         }
     }
 }
@@ -72,66 +143,34 @@ pub fn encode(value: &impl Serialize) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-pub fn error(message: impl Into<String>) -> Value {
-    json!({"type":"error", "message":message.into()})
+/// The answer to one request.
+pub fn reply(id: &Id, result: Value) -> Value {
+    json!({"id": id, "result": result})
 }
 
-pub fn runtime(told: Told) -> Option<Value> {
-    let event = match told {
-        Told::Response { request, event } => operation(request, event),
-        Told::Linked { operation, request } => {
-            json!({"type":"linked", "operation":operation, "request":request})
-        }
-        Told::Started => json!({"type":"started"}),
-        Told::Progress(text) => json!({"type":"progress", "text":text}),
-        Told::Reply(text) => json!({"type":"finished", "text":text, "status":{"type":"done"}}),
-        Told::Asked => json!({"type":"prompted"}),
-        Told::Answer(Ok(text)) => json!({"type":"answer", "text":text}),
-        Told::Answer(Err(message)) => json!({"type":"error", "message":message}),
-        Told::Question {
-            id,
-            asked,
-            request: None,
-        } => {
-            json!({"type":"prompt", "question":id, "text":asked.question, "options":asked.options, "back":asked.back})
-        }
-        Told::Question {
-            request: Some(_), ..
-        } => return None,
-        Told::Closed(question) => json!({"type":"closed", "question":question}),
-        Told::Refused { question, why } => {
-            json!({"type":"refused", "question":question, "message":why})
-        }
-    };
-    Some(json!({"type":"runtime", "event":event}))
+/// Why one request could not be done.
+pub fn failure(id: &Id, code: &str, message: impl Into<String>) -> Value {
+    json!({"id": id, "error": {"code": code, "message": message.into()}})
 }
 
-fn operation(request: u64, event: Response) -> Value {
-    let phase = match event {
-        Response::Queued => json!({"type":"queued"}),
-        Response::Started => json!({"type":"started"}),
-        Response::Progress(text) => json!({"type":"progress", "text":text}),
-        Response::Finished { text, outcome } => {
-            let (status, exit) = match outcome {
-                Outcome::Done => (json!({"type":"done"}), None),
-                Outcome::Stopped(reason) => (json!({"type":"stopped", "reason":reason}), None),
-                Outcome::Failed(error) => (
-                    json!({"type":"failed", "failure":{"code":"OPERATION_FAILED", "message":error}}),
-                    None,
-                ),
-                Outcome::Exited(code) => (
-                    if code == 0 {
-                        json!({"type":"done"})
-                    } else {
-                        json!({"type":"failed", "failure":{"code":"PROCESS_EXIT", "message":format!("exited {code}")}})
-                    },
-                    Some(code),
-                ),
-            };
-            json!({"type":"finished", "text":text, "status":status, "exit_code":exit})
-        }
-    };
-    json!({"type":"operation", "operation":request, "phase":phase})
+/// A line that could not even be read: there is no id to answer.
+pub fn unreadable(code: &str, message: impl Into<String>) -> Value {
+    json!({"error": {"code": code, "message": message.into()}})
+}
+
+/// A session message, pushed after `listen{to:"session"}`.
+pub fn message(cursor: &Cursor, message: &impl Serialize) -> Value {
+    json!({"op": "message", "cursor": cursor, "message": message})
+}
+
+/// A question put to a listening script, answered by its reply to `id`.
+pub fn ask(id: &Id, text: &str, options: &[String]) -> Value {
+    json!({"id": id, "op": "ask", "text": text, "options": options})
+}
+
+/// A question that closed before it was answered.
+pub fn refused(question: u64, why: &str) -> Value {
+    json!({"op": "refused", "question": question, "message": why})
 }
 
 #[cfg(test)]
@@ -139,15 +178,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn old_and_mixed_frames_are_rejected_without_guessing() {
+    fn an_id_is_what_makes_a_line_a_request() {
+        let reply_needed: Incoming =
+            serde_json::from_value(json!({"id":7,"op":"say","text":"hi"})).unwrap();
+        assert_eq!(reply_needed.id(), Some(&Id::Number(7)));
+        let notice: Incoming = serde_json::from_value(json!({"op":"say","text":"hi"})).unwrap();
+        assert_eq!(notice.id(), None);
+    }
+
+    #[test]
+    fn every_op_decodes_to_its_own_shape() {
+        for (frame, want) in [
+            (json!({"id":1,"op":"initialize","protocol":4}), "initialize"),
+            (json!({"op":"status","text":"3/10"}), "status"),
+            (json!({"op":"stop"}), "stop"),
+            (json!({"id":"q","op":"listen","to":"questions"}), "listen"),
+        ] {
+            let frame: Incoming = serde_json::from_value(frame.clone()).unwrap();
+            let got = match frame {
+                Incoming::Initialize { .. } => "initialize",
+                Incoming::Status { .. } => "status",
+                Incoming::Stop {} => "stop",
+                Incoming::Listen { .. } => "listen",
+                other => panic!("{want}: {other:?}"),
+            };
+            assert_eq!(got, want);
+        }
+    }
+
+    #[test]
+    fn a_task_must_say_where_it_came_from() {
+        let task: Incoming = serde_json::from_value(
+            json!({"op":"say","text":"tick","as":"task","source":"timer","reason":"elapsed"}),
+        )
+        .unwrap();
+        assert!(task.validate().is_ok());
+        let bare: Incoming =
+            serde_json::from_value(json!({"op":"say","text":"tick","as":"task"})).unwrap();
+        assert_eq!(bare.validate().unwrap_err().0, "frame");
+    }
+
+    #[test]
+    fn the_old_frames_are_not_guessed_at() {
         for value in [
-            json!({"input":"hello"}),
-            json!({"result":"finished"}),
-            json!({"follow":true}),
-            json!({"choose":"allow?", "options":["yes","no"]}),
-            json!({"type":"runtime", "command":{"type":"interrupt"}, "input":"hello"}),
-            json!({"type":"runtime", "command":{"type":"interrupt", "enabled":true}}),
-            json!({"type":"runtime", "command":{"type":"follow"}}),
+            json!({"type":"message","message":{}}),
+            json!({"type":"runtime","command":{"type":"drive","enabled":true}}),
+            json!({"type":"runtime","command":{"type":"command","line":"/new"}}),
+            json!({"op":"say","text":"hi","type":"runtime"}),
+            json!({"op":"serve"}),
+            json!({"op":"say","text":"hi","id":[]}),
         ] {
             assert!(
                 serde_json::from_value::<Incoming>(value.clone()).is_err(),
@@ -157,26 +236,12 @@ mod tests {
     }
 
     #[test]
-    fn semantic_content_cannot_silently_carry_runtime_fields() {
-        let message = json!({
-            "id":"input", "session":"session", "at":1,
-            "kind":{"type":"request","value":{"direction":"to_model","request":"user"}},
-            "body":[{"type":"text","value":"/new"}]
-        });
-        let frame = json!({"type":"message", "message":message});
-        assert!(serde_json::from_value::<Incoming>(frame.clone()).is_ok());
-        for pointer in ["/message/kind", "/message/kind/value", "/message/body/0"] {
-            let mut mixed = frame.clone();
-            mixed
-                .pointer_mut(pointer)
-                .unwrap()
-                .as_object_mut()
-                .unwrap()
-                .insert("interrupt".into(), json!(true));
-            assert!(
-                serde_json::from_value::<Incoming>(mixed.clone()).is_err(),
-                "{mixed}"
-            );
-        }
+    fn a_person_speaks_by_default() {
+        let frame: Incoming = serde_json::from_value(json!({"op":"say","text":"/new"})).unwrap();
+        let Incoming::Say { speaker, note, .. } = frame else {
+            panic!("not a say")
+        };
+        assert_eq!(speaker, Speaker::Person);
+        assert!(note.is_empty());
     }
 }

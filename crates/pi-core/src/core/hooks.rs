@@ -450,7 +450,7 @@ mod tests {
         let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
         let guard = hook(
             HookOn::ToolBefore,
-            r#"echo '{"type":"runtime","command":{"type":"prompt","text":"run it?","options":["allow","deny"],"back":true}}' >&3
+            r#"echo '{"id":"gate","op":"ask","text":"run it?","options":["allow","deny"]}' >&3
 read -r a <&3
 case "$a" in *'"allow"'*) exit 0;; *) echo "the user said no: $a"; exit 2;; esac"#,
         );

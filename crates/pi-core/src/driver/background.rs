@@ -167,8 +167,9 @@ impl Inner {
             }
             return None;
         }
+        let waiting = self.answers.remove(&id);
         let question = self.close(id, why)?;
-        match self.answers.remove(&id) {
+        match waiting {
             Some(to) => {
                 let _ = to.send(picked);
                 None
@@ -177,13 +178,21 @@ impl Inner {
         }
     }
 
+    // Take the question down unanswered: whoever waits on it is told so.
+    fn void(&mut self, id: u64, why: &str) {
+        if let Some(to) = self.answers.remove(&id) {
+            let _ = to.send(None);
+        }
+        self.close(id, why);
+    }
+
     fn withdraw(&mut self, id: u64, why: &str) {
         let asked: Vec<u64> = (self.standing.iter())
             .filter(|(_, q)| matches!(q.from, Asker::Background { id: of, .. } if of == id))
             .map(|(_, q)| q.id)
             .collect();
         for question in asked {
-            self.close(question, why);
+            self.void(question, why);
         }
     }
 
@@ -1978,7 +1987,7 @@ impl ::execution::channel::Channel for Handle {
             .map(|(_, q)| q.id)
             .collect();
         for id in lapsed {
-            inner.close(id, "the person wrote instead");
+            inner.void(id, "the person wrote instead");
         }
         inner.items[at].wait(Back::Input { text, note });
         drop(inner);
@@ -1986,34 +1995,54 @@ impl ::execution::channel::Channel for Handle {
     }
 
     fn choose(&self, asked: Asked) {
-        let mut inner = self.table.lock();
-        let Some(at) = inner.mine(self.id, self.run) else {
-            return;
-        };
-        let item = &inner.items[at];
-        let from = Asker::Background {
-            id: item.id,
-            name: item.name(),
-        };
-        let session = item.owner.as_ref().map(|owner| owner.session.clone());
-        let question = match Question::of(from, &asked) {
-            Ok(mut q) => {
-                q.session = session;
-                inner.number(q)
-            }
-            Err(why) => {
-                tracing::warn!(target: "pi::background", execution = self.id, %why, "a question dropped");
-                return;
-            }
-        };
-        tracing::info!(
-            target: "pi::background", execution = self.id, question = question.id, text = %question.text,
-            options = ?question.options, "choose"
-        );
-        let root = inner.items[at].root.clone();
-        inner.put(root, question);
-        drop(inner);
-        self.table.wake();
+        if let Err(why) = self.put_question(asked, None) {
+            tracing::warn!(target: "pi::background", execution = self.id, %why, "a question dropped");
+        }
+    }
+
+    fn ask(&self, asked: Asked) -> Result<Answer, String> {
+        let (to, answer) = oneshot::channel();
+        self.put_question(asked, Some(to))?;
+        Ok(answer)
+    }
+
+    fn task(
+        &self,
+        text: String,
+        source: String,
+        reason: String,
+    ) -> Result<::execution::channel::Receipt, String> {
+        let event = crate::execution::messages::new_id();
+        let wire = self.wire(
+            message::WireKind::Request(message::Request::ToModel(message::InputKind::Automatic)),
+            vec![
+                message::Block::Text(text),
+                message::Block::Data(json!({
+                    "source": source, "reason": reason, "event": event.as_str()
+                })),
+            ],
+        )?;
+        self.message(wire)
+    }
+
+    fn respond(
+        &self,
+        to: message::MessageId,
+        text: String,
+        stop: bool,
+    ) -> Result<::execution::channel::Receipt, String> {
+        let wire = self.wire(
+            message::WireKind::Response {
+                request: to,
+                status: if stop {
+                    message::Status::Stopped
+                } else {
+                    message::Status::Done
+                },
+            },
+            vec![message::Block::Text(text)],
+        )?;
+        self.message(wire)
     }
 
     fn answer(&self, question: u64, picks: Vec<usize>) {
@@ -2396,6 +2425,62 @@ impl Commands {
             out.push_str(QUIET);
         }
         Ok(out)
+    }
+}
+
+impl Handle {
+    // Put `asked` up on this execution's checkout. A waiter makes it a
+    // question whose answer comes back instead of going out as typed.
+    fn put_question(
+        &self,
+        asked: Asked,
+        waiter: Option<oneshot::Sender<Option<String>>>,
+    ) -> Result<(), String> {
+        let mut inner = self.table.lock();
+        let Some(at) = inner.mine(self.id, self.run) else {
+            return Err("this execution is no longer running".into());
+        };
+        let item = &inner.items[at];
+        let from = Asker::Background {
+            id: item.id,
+            name: item.name(),
+        };
+        let session = item.owner.as_ref().map(|owner| owner.session.clone());
+        let root = item.root.clone();
+        let mut question = Question::of(from, &asked)?;
+        question.session = session;
+        let question = inner.number(question);
+        tracing::info!(
+            target: "pi::background", execution = self.id, question = question.id,
+            text = %question.text, options = ?question.options, waits = waiter.is_some(),
+            "question"
+        );
+        if let Some(waiter) = waiter {
+            inner.answers.insert(question.id, waiter);
+        }
+        inner.put(root, question);
+        drop(inner);
+        self.table.wake();
+        Ok(())
+    }
+
+    // A message this execution speaks into its own session.
+    fn wire(
+        &self,
+        kind: message::WireKind,
+        body: Vec<message::Block>,
+    ) -> Result<message::WireMessage, String> {
+        let owner = self
+            .owner()
+            .ok_or("this execution captured no session to speak into")?;
+        Ok(message::WireMessage {
+            id: crate::execution::messages::new_id(),
+            session: message::SessionId::new(owner.session).map_err(|e| e.to_string())?,
+            by: None,
+            at: agent::session::now(),
+            kind,
+            body,
+        })
     }
 }
 
@@ -2873,10 +2958,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fd3_messages_retain_ownership_and_service_exit_does_not_open_a_turn() {
+    async fn a_script_that_speaks_owns_its_words_and_its_clean_exit_opens_no_turn() {
         use crate::execution::messages::Messages;
-        use crate::execution::queue::{Pending, Queue};
-        use message::{Block, InputKind, Status};
+        use crate::execution::queue::Queue;
         let (dir, ctx) = context();
         let messages = Messages::new(message::SessionId::new("wire-session".into()).unwrap());
         let admitted = messages
@@ -2890,7 +2974,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let (_, mut owner) = admitted.start().unwrap();
+        let (_, owner) = admitted.start().unwrap();
         let ctx = ctx.with_request(Some(owner.request()));
         let table = Arc::new(Table::default());
         let queue = Queue::default();
@@ -2898,72 +2982,49 @@ mod tests {
         let control = Arc::new(Commands::new(table.clone()));
         let executions = pi_tools::bash::Bash::new(control.clone()).with_controls(control);
         std::fs::write(
-            dir.path().join("service.py"),
+            dir.path().join("script.py"),
             r#"import json, os
 fd = int(os.environ["PI_EVENTS_FD"])
 to = os.fdopen(os.dup(fd), "w", buffering=1)
 from_pi = os.fdopen(os.dup(fd), "r")
-session = os.environ["PI_SESSION_ID"]
-request = os.environ["PI_REQUEST_ID"]
 def send(frame):
     to.write(json.dumps(frame) + "\n")
-send({"type":"runtime","command":{"type":"serve"}})
-send({"type":"observe","session":session,"cursor":None})
-send({"type":"message","message":{
-    "id":"external-input","session":session,"by":request,"at":1,
-    "kind":{"type":"request","value":{"direction":"to_model","request":"user"}},
-    "body":[{"type":"text","value":"/new"}]}})
+send({"id":1,"op":"initialize","protocol":4})
+send({"id":2,"op":"listen","to":"session"})
+send({"op":"say","text":"/new"})
 with open("frames", "w") as frames:
-    for line in from_pi:
+    for _ in range(2):
+        line = from_pi.readline()
+        if not line:
+            break
         frames.write(line)
         frames.flush()
-        frame = json.loads(line)
-        message = frame.get("message", {}) if frame["type"] == "message" else {}
-        kind = message.get("kind", {})
-        if kind.get("type") == "response" and kind["value"]["request"] == "external-input":
-            break
-print("service exit is not another model input")
 "#,
         )
         .unwrap();
         executions
             .execute(
-                json!({"background":true,"command":"python3 service.py"}),
+                json!({"background":true,"command":"python3 script.py"}),
                 &ctx,
             )
             .await
             .unwrap();
-        let queued = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let (id, taken) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                if let Some(queued) = queue.pop_front() {
-                    break queued;
+                if let Some(taken) = table.take_input(dir.path(), Some("wire-session")) {
+                    break taken;
                 }
                 tokio::task::yield_now().await;
             }
         })
         .await
         .unwrap();
-        assert_eq!(queued.request.origin, crate::driver::Origin::Message(1));
-        assert!(queued.line.is_none());
-        let Pending::Prompt(input) = queued.input else {
-            panic!()
+        assert_eq!(id, 1);
+        let Back::Input { text, note } = taken else {
+            panic!("a person's say is a host line")
         };
-        assert_eq!(input.prompt().text, "/new");
-        assert_eq!(input.message().id().as_str(), "external-input");
-        assert_eq!(input.message().by(), Some(owner.request().id()));
-        assert!(matches!(
-            input.message().kind(),
-            message::Kind::Request(message::Request::ToModel(InputKind::User))
-        ));
-        owner
-            .complete(Status::Done, vec![Block::Text("launched".into())])
-            .unwrap();
-        let (_, mut responder) = input.start().unwrap();
-        let body = vec![
-            Block::Text("before tool\nafter tool".into()),
-            Block::Data(json!({"value":7})),
-        ];
-        let answer = responder.complete(Status::Done, body).unwrap();
+        assert_eq!(text, "/new");
+        assert!(note.is_empty());
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while table.background(dir.path())[0].state == State::Running {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -2971,36 +3032,23 @@ print("service exit is not another model input")
         })
         .await
         .unwrap();
-        assert!(queue.is_empty());
         assert!(
             table.take_back(dir.path()).is_none(),
-            "service completion is runtime state only"
+            "a script that spoke leaves no exit result"
         );
-        let frames = std::fs::read_to_string(dir.path().join("frames")).unwrap();
-        let frames: Vec<Value> = frames
+        let frames: Vec<Value> = (std::fs::read_to_string(dir.path().join("frames")).unwrap())
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert!(
-            frames
-                .iter()
-                .any(|frame| frame["type"] == "accepted" && frame["request"] == "external-input")
+            frames.contains(&json!({"id":1,"result":{"protocol":4}})),
+            "{frames:?}"
         );
         assert!(
-            frames.iter().any(|frame| frame["type"] == "message"
-                && frame["message"]["id"] == owner.request().id().as_str()),
-            "subscription includes the active owner input"
-        );
-        let responses: Vec<_> = frames
-            .iter()
-            .filter(|frame| {
-                frame["type"] == "message" && frame["message"]["id"] == answer.id().as_str()
-            })
-            .collect();
-        assert_eq!(responses.len(), 1);
-        assert_eq!(
-            responses[0]["message"],
-            serde_json::to_value(answer.as_ref()).unwrap()
+            frames
+                .iter()
+                .any(|frame| frame["id"] == 2 && frame["result"].is_object()),
+            "{frames:?}"
         );
     }
 

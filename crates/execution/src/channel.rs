@@ -160,6 +160,12 @@ pub trait Channel: Send + Sync {
     fn result(&self, text: String);
     /// A line to submit, and what the model should know about it first.
     fn input(&self, text: String, note: String);
+    /// A machine's words: an automatic input carrying where it came from.
+    fn task(&self, text: String, source: String, reason: String) -> Result<Receipt, String>;
+    /// The answer to a question the model asked, named by that message.
+    fn respond(&self, to: message::MessageId, text: String, stop: bool) -> Result<Receipt, String>;
+    /// A question put to the person that this execution waits on.
+    fn ask(&self, asked: Asked) -> Result<Answer, String>;
     fn choose(&self, asked: Asked);
     fn answer(&self, question: u64, picks: Vec<usize>);
     fn interrupt(&self);
