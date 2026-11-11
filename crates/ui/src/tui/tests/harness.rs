@@ -240,12 +240,22 @@ pub(super) fn current_hit(ui: &crate::tui::Ui) -> Option<(usize, String)> {
     Some((y, ui.drawn[y].trim().to_string()))
 }
 
+// One event's wait, and enough of them for a whole run.
+const EVENT_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+const RUN_WAIT: std::time::Duration = EVENT_WAIT.saturating_mul(4);
+
+// The core's next event, failing instead of hanging when none comes.
+pub(super) async fn next_event(tui: &mut crate::tui::Tui) -> pi_core::execution::host::Event {
+    tokio::time::timeout(EVENT_WAIT, tui.core.next_runtime_event())
+        .await
+        .expect("the core sends an event")
+}
+
 // Wait through the same core event source used by the application.
 pub(super) async fn completed_run(tui: &mut crate::tui::Tui) -> pi_core::execution::host::Returned {
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    tokio::time::timeout(RUN_WAIT, async {
         loop {
-            let event = tui.core.next_runtime_event().await;
-            match event {
+            match next_event(tui).await {
                 pi_core::execution::host::Event::Settled(
                     pi_core::execution::host::Settlement::Returned(settled),
                 ) => return settled,

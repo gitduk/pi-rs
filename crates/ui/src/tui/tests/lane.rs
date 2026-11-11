@@ -1428,7 +1428,8 @@ async fn recalling_steering_and_waiting_commands_keeps_submission_order_and_remo
     assert!(queue.is_empty());
 }
 
-// Background output is an automatic input; command-like output is literal.
+// Background output is an automatic input; command-like output is literal. One
+// that arrives under the running turn joins it instead of opening another.
 #[tokio::test]
 async fn queued_command_results_open_one_turn_under_their_label() {
     let dir = tempfile::tempdir().expect("a checkout");
@@ -1444,19 +1445,36 @@ async fn queued_command_results_open_one_turn_under_their_label() {
         ::execution::background::Invocation::shell("build"),
         Default::default(),
     );
-    for text in ["check the build", "/compact"] {
+    let results = ["check the build", "/compact"];
+    for text in results {
         execution.channel().result(text.into());
     }
     execution.end();
-    for text in ["check the build", "/compact"] {
-        let event = tui.core.next_runtime_event().await;
-        let pi_core::execution::host::Event::Started(started) = &event else {
-            panic!("the core starts automatic input")
-        };
-        assert!(started.entries.iter().any(|entry|matches!(entry,agent::session::Entry::Ask {ask,..} if ask.text.contains(text) && ask.shown.is_some())));
-        tui.runtime_event(event);
-        let completed = completed_run(&mut tui).await;
-        tui.present_settlement(pi_core::execution::host::Settlement::Returned(completed));
+    let event = next_event(&mut tui).await;
+    let pi_core::execution::host::Event::Started(started) = &event else {
+        panic!("the core starts automatic input")
+    };
+    assert!(started.entries.iter().any(|entry|matches!(entry,agent::session::Entry::Ask {ask,..} if ask.text.contains(results[0]) && ask.shown.is_some())));
+    tui.runtime_event(event);
+    let completed = completed_run(&mut tui).await;
+    tui.present_settlement(pi_core::execution::host::Settlement::Returned(completed));
+    let asks: Vec<&agent::session::Prompt> = tui
+        .core
+        .lane()
+        .session()
+        .into_iter()
+        .flat_map(|session| session.entries())
+        .filter_map(|entry| match entry {
+            agent::session::Entry::Ask { ask, .. } => Some(ask),
+            _ => None,
+        })
+        .collect();
+    for text in results {
+        assert!(
+            asks.iter()
+                .any(|ask| ask.text.contains(text) && ask.shown.is_some()),
+            "{text} is admitted as prose under its label, got {asks:?}"
+        );
     }
     assert!(tui.driver_line().is_none());
 }
