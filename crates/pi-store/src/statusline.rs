@@ -18,8 +18,11 @@ pub fn path() -> Option<std::path::PathBuf> {
 
 /// The last request's readings, kept so a fresh run opens with them rather
 /// than blank: the run in flight has none until its first answer lands.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, serde::Serialize)]
 pub struct Last {
+    /// The session that wrote these: another one resuming wears nothing of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     #[serde(default)]
     pub cached: Option<u64>,
     #[serde(default)]

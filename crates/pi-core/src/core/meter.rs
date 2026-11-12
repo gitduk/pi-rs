@@ -77,6 +77,7 @@ impl Tally {
     pub fn seed(&mut self, pricing: Pricing) {
         let run = self.run_spend();
         let ended = pi_store::statusline::Last {
+            session: None,
             cached: cached(&run.usage),
             cost: run.cost,
             ctx: self.ctx,
@@ -85,7 +86,7 @@ impl Tally {
         // readings of the one before it standing.
         let ended = match self.reported {
             true => ended,
-            false => self.ended,
+            false => self.ended.clone(),
         };
         *self = Self {
             pricing,
@@ -98,6 +99,18 @@ impl Tally {
     /// screen need to say where the last run left off.
     pub fn prime(&mut self, ended: pi_store::statusline::Last) {
         self.ended = ended;
+    }
+
+    /// The readings a session starts with: what its own last run left, and
+    /// nothing from another session that wrote the file after it.
+    pub fn of(session: &str) -> Self {
+        let mut tally = Self::default();
+        if let Some(last) = pi_store::statusline::read_last() {
+            if last.session.as_deref() == Some(session) {
+                tally.prime(last);
+            }
+        }
+        tally
     }
 
     /// State the rate from outside a run: a surface that reads a receiver of
@@ -178,11 +191,12 @@ impl Tally {
         // says anything, the line keeps what the one before it said.
         let reading = match self.reported {
             true => pi_store::statusline::Last {
+                session: None,
                 cached: cached(&run.usage),
                 cost: run.cost,
                 ctx: self.ctx,
             },
-            false => self.ended,
+            false => self.ended.clone(),
         };
         Snapshot {
             elapsed,

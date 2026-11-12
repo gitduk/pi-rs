@@ -198,11 +198,11 @@ impl Conversation {
                 message::SessionId::new(id.clone()).expect("session identifier"),
             ),
             transcript: session.map_or_else(|| Transcript::Lent(Arc::default()), Transcript::Home),
+            tally: Tally::of(&id),
             id,
             created,
             _claim: claim.map(Arc::new),
             name: Arc::new(Mutex::new(name)),
-            tally: Tally::default(),
             unsaved: Arc::default(),
             filed: false,
         }

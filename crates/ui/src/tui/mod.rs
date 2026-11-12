@@ -267,13 +267,9 @@ impl Tui {
         if let Some(line) = last {
             tui.restarted(&line);
         }
-        // Before the first frame: the row the last run left behind, and the
-        // readings it ended on — a fresh run has none until it answers.
+        // Before the first frame: the row the last run left behind. The
+        // readings it ended on came with the session, when this pi took it up.
         tui.reload_statusline();
-        if let Some(last) = pi_store::statusline::read_last() {
-            tui.core.lane_mut().tally_mut().prime(last);
-            tui.ui.readings = Some(last);
-        }
         Ok(tui)
     }
 
@@ -417,11 +413,15 @@ impl Tui {
         // has its own figures, and the run that ended keeps the ones it had.
         let snap = self.core.lane().snapshot("", None, 0);
         let last = pi_store::statusline::Last {
+            session: Some(self.core.lane().id().to_string()),
             cached: snap.cached,
             cost: snap.cost,
             ctx: snap.ctx,
         };
-        if self.ui.readings == Some(last) || last == Default::default() {
+        // A session that has not run yet has nothing to hand on: writing it
+        // would erase the figures of the one still on the file.
+        let empty = last.cached.is_none() && last.cost == 0.0 && last.ctx.is_none();
+        if self.ui.readings.as_ref() == Some(&last) || empty {
             return;
         }
         match pi_store::statusline::write_last(&last) {
