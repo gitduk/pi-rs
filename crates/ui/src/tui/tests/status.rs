@@ -130,3 +130,13 @@ fn only_a_lone_line_folds_into_the_one_before() {
     ui.say(&mut view, "██  ██\n██  ██\n\n\n██  ██");
     assert_eq!(drawn_rows(&view).len(), 5);
 }
+
+// The line a run reports itself on is parted from what follows it, as it is
+// from what precedes it.
+#[test]
+fn a_block_after_the_status_line_keeps_its_blank_row() {
+    use crate::tui::spacing::{Block, Spacing};
+    let mut spacing = Spacing::default();
+    assert!(!spacing.push(Block::Status), "nothing above it");
+    assert!(spacing.push(Block::Relayed), "the next block stays apart");
+}

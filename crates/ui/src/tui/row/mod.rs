@@ -45,6 +45,8 @@ struct Height {
     measured: RefCell<Option<Measured>>,
     preview: RefCell<Option<Box<Preview>>>,
     hovered: Cell<Option<NonZeroUsize>>,
+    // The rows a fold may take on screen, as the last frame allowed.
+    budget: Cell<usize>,
 }
 
 struct Preview {
@@ -57,29 +59,15 @@ struct Preview {
 enum PreviewLine {
     // `rows` is what the line still shows when the window cut it short.
     Content { source: usize, rows: Option<usize> },
-    More { target: More, remaining: usize },
-}
-
-#[derive(Clone, Copy)]
-enum More {
-    // The line whose fold the page shows.
-    Page(usize),
-    Steps,
-    CollapseSteps,
+    // The footer that opens the rest of a cut, and the line it cuts.
+    More { heading: usize, remaining: usize },
 }
 
 impl PreviewLine {
     fn source(self) -> usize {
         match self {
             Self::Content { source, .. } => source,
-            Self::More {
-                target: More::Page(heading),
-                ..
-            } => heading,
-            Self::More {
-                target: More::Steps | More::CollapseSteps,
-                ..
-            } => 0,
+            Self::More { heading, .. } => heading,
         }
     }
 
@@ -106,34 +94,25 @@ impl Preview {
     }
 }
 
+// The rows a group's window takes: fixed, so a run's working reads the same
+// whatever the terminal's height, and never more than the history holds.
+const WINDOW_ROWS: usize = 7;
+
+// The rows an open fold may take: half the history, so a long one keeps
+// filling a tall screen.
+fn fold_budget(height: usize) -> usize {
+    (height / 2).max(2).min(height.max(1))
+}
+
 // What the window can hold of a fold's lines: all of them, or a cut that
 // spends its last row on a footer naming the rows left out.
-fn within_budget(
-    mut lines: Vec<PreviewLine>,
-    heights: &[usize],
-    budget: usize,
-) -> Vec<PreviewLine> {
-    // The row that folds the group back is the way out of a cut, so it keeps
-    // its row whatever the budget: content and footer share what is left.
-    let collapse = matches!(
-        lines.last(),
-        Some(PreviewLine::More {
-            target: More::CollapseSteps,
-            ..
-        })
-    )
-    .then(|| lines.pop().expect("the last line was a footer"));
-    let room = budget.saturating_sub(usize::from(collapse.is_some()));
+fn within_budget(lines: Vec<PreviewLine>, heights: &[usize], budget: usize) -> Vec<PreviewLine> {
     let total: usize = lines.iter().map(|line| line.rows(heights)).sum();
-    if total <= room {
-        lines.extend(collapse);
+    if total <= budget {
         return lines;
     }
-    if room == 0 {
-        return collapse.into_iter().collect();
-    }
-    let mut kept = Vec::with_capacity(room);
-    let mut left = room - 1;
+    let mut kept = Vec::with_capacity(budget);
+    let mut left = budget.saturating_sub(1);
     let mut shown = 0;
     let mut heading = 0;
     for line in lines {
@@ -157,40 +136,10 @@ fn within_budget(
         kept.push(line);
     }
     kept.push(PreviewLine::More {
-        target: More::Page(heading),
+        heading,
         remaining: total - shown,
     });
-    kept.extend(collapse);
     kept
-}
-
-// Keep the start for context and the newest steps for live progress.
-fn step_lines(group: &Group) -> Vec<PreviewLine> {
-    const FIRST: usize = 2;
-    const LAST: usize = 3;
-    let sections = group.sections();
-    let count = sections.len();
-    let hidden = count.saturating_sub(FIRST + LAST);
-    let mut lines = Vec::with_capacity(count + 1);
-    for (index, range) in sections.into_iter().enumerate() {
-        if hidden > 0 && !group.lists_all() && (FIRST..count - LAST).contains(&index) {
-            if index == FIRST {
-                lines.push(PreviewLine::More {
-                    target: More::Steps,
-                    remaining: hidden,
-                });
-            }
-            continue;
-        }
-        lines.extend((range.start..range.end).map(PreviewLine::content));
-    }
-    if hidden > 0 && group.lists_all() {
-        lines.push(PreviewLine::More {
-            target: More::CollapseSteps,
-            remaining: hidden,
-        });
-    }
-    lines
 }
 
 struct Measured {
@@ -344,6 +293,20 @@ trait Fold {
     // Whether lines are cut at `width` that only its opening shows whole.
     fn clipped(&self, _width: usize) -> bool {
         false
+    }
+    // The rows it takes once opened, its own line included.
+    fn opened_rows(&self) -> usize {
+        1
+    }
+    // Whether an opening too tall for the rows it may take is read on a page
+    // rather than cut here with a count to click through.
+    fn opens_on_a_page(&self) -> bool {
+        false
+    }
+    // Its own line as it reads once opened, where that differs from the line
+    // it shows shut — the measure below counts the opened one.
+    fn opened_head(&self, _paint: &Paint) -> Option<(Line<'static>, Option<Line<'static>>)> {
+        None
     }
 }
 
@@ -637,7 +600,7 @@ impl Row {
     /// Toggle the row's own line, returning true if toggled.
     #[cfg(test)]
     pub fn toggle_expand(&mut self) -> bool {
-        self.toggle_at(0, 80)
+        self.toggle_at(0, &Paint::new(false), 80)
     }
 
     fn preview_line(&self, i: usize) -> Option<PreviewLine> {
@@ -681,20 +644,39 @@ impl Row {
             .map_or(border, |fold| fold.click_start(self.source_line(i)))
     }
 
+    // Whether a click reads this row on a page: what it opens is taller than
+    // the frame allows, and it is not already open to be closed.
+    fn too_tall(&self, paint: &Paint, width: usize) -> bool {
+        let budget = self.1.budget.get();
+        // Before a frame the budget is zero: nothing is too tall yet.
+        budget > 0
+            && self
+                .fold()
+                .is_some_and(|f| f.opens_on_a_page() && !f.is_open())
+            && self.rows_open(paint, width) > budget
+    }
+
+    // The screen rows this row would take with everything it holds open,
+    // wraps counted: the measure a fold's budget is spent in.
+    fn rows_open(&self, paint: &Paint, width: usize) -> usize {
+        let fold = self.fold();
+        let head = fold.and_then(|f| f.opened_head(paint));
+        (0..fold.map_or(1, Fold::opened_rows))
+            .map(|i| {
+                let (line, border) = match (i, &head) {
+                    (0, Some((line, border))) => (line.clone(), border.clone()),
+                    _ => self.full_line(i, paint, width),
+                };
+                screen::wrap_rows(border.as_ref(), &line, width)
+            })
+            .sum()
+    }
+
     /// Open or close what line `i` heads — see `click_line` — and say
     /// whether anything moved.
-    pub fn toggle_at(&mut self, i: usize, width: usize) -> bool {
-        if matches!(
-            self.preview_line(i),
-            Some(PreviewLine::More {
-                target: More::Steps | More::CollapseSteps,
-                ..
-            })
-        ) && let Kind::Steps(group) = &mut self.0
-        {
-            group.toggle_all();
-            self.1.clear();
-            return true;
+    pub fn toggle_at(&mut self, i: usize, paint: &Paint, width: usize) -> bool {
+        if self.too_tall(paint, width) {
+            return false;
         }
         let source = self.source_line(i);
         let moved = self.fold_mut().is_some_and(|f| f.toggle_at(source, width));
@@ -711,17 +693,52 @@ impl Row {
         self.fold()?.opening(self.source_line(i), paint)
     }
 
-    pub fn has_page(&self, i: usize, width: usize) -> bool {
-        self.1.preview.borrow().as_deref().is_some_and(|p| {
-            p.width == width
-                && matches!(
-                    p.lines.get(i),
-                    Some(PreviewLine::More {
-                        target: More::Page(_),
-                        ..
-                    })
-                )
-        })
+    /// The page that reads line `i`, when the window cannot hold what the
+    /// line opens: a step taller than the group's window is read there.
+    pub fn page_at(&self, i: usize, paint: &Paint, width: usize) -> Option<Opening> {
+        if let Kind::Steps(group) = &self.0 {
+            return group.page_at(i, paint, width);
+        }
+        // The cut spends screen rows, so this does too: lines that wrap past
+        // the budget would be cut with a count to click through.
+        if !self.too_tall(paint, width) {
+            return None;
+        }
+        self.opening(i, paint)
+    }
+
+    /// Whether line `i` is a group window's bar: the handle the wheel turns
+    /// the window by.
+    pub fn is_bar(&self, i: usize) -> bool {
+        let Kind::Steps(group) = &self.0 else {
+            return false;
+        };
+        group.is_bar(i)
+    }
+
+    /// The columns line `i` of a bar takes: the cells and the count, and not
+    /// the blank rest of the row, which belongs to the transcript.
+    pub fn bar_width(&self, i: usize, paint: &Paint, width: usize) -> usize {
+        if !self.is_bar(i) {
+            return 0;
+        }
+        let (line, border) = self.line(i, paint, width);
+        let lead = border.as_ref().map_or(0, Line::width);
+        let text = pi_store::text::width(&screen::plain(&line));
+        lead + text
+    }
+
+    /// Turn a group's window by `step` lines; false when it has nowhere to
+    /// go, or holds no window.
+    pub fn scroll_window(&mut self, up: bool, step: usize) -> bool {
+        let Kind::Steps(group) = &mut self.0 else {
+            return false;
+        };
+        let moved = group.scroll(up, step);
+        if moved {
+            self.1.clear();
+        }
+        moved
     }
 
     pub(super) fn has_more(&self, i: usize, width: usize) -> bool {
@@ -967,16 +984,25 @@ impl Row {
         }
     }
 
-    /// Prepare startup spacing and height budgets for open folds.
-    pub(super) fn prepare_preview(&self, paint: &Paint, width: usize, height: usize) {
+    /// Give each fold the height its frame allows: a budget for an open
+    /// fold, a window for a group.
+    pub(super) fn prepare_preview(&mut self, paint: &Paint, width: usize, height: usize) {
+        let budget = fold_budget(height);
+        self.1.budget.set(budget);
+        // A group is a window over its steps: the frame says how tall it
+        // may be, and the window keeps the rest for the wheel.
+        if let Kind::Steps(group) = &mut self.0 {
+            if group.fit(WINDOW_ROWS.min(height.max(1))) {
+                self.1.clear();
+            }
+            return;
+        }
         if let Kind::Banner(banner) = &self.0 {
             if banner.prepare(height) {
                 self.1.clear();
             }
             return;
         }
-        // Keep a title and footer when possible, even in a very short window.
-        let budget = (height / 2).max(2).min(height.max(1));
         if self
             .1
             .preview
@@ -996,10 +1022,7 @@ impl Row {
             let (line, border) = self.full_line(i, paint, width);
             heights.push(screen::wrap_rows(border.as_ref(), &line, width));
         }
-        let lines = match &self.0 {
-            Kind::Steps(group) => step_lines(group),
-            _ => (0..heights.len()).map(PreviewLine::content).collect(),
-        };
+        let lines = (0..heights.len()).map(PreviewLine::content).collect();
         *self.1.preview.borrow_mut() = Some(Box::new(Preview {
             width,
             budget,
@@ -1028,26 +1051,15 @@ impl Row {
         width: usize,
     ) -> (Line<'static>, Option<Line<'static>>) {
         match self.preview_line(i) {
-            Some(PreviewLine::More { target, remaining }) => {
-                let heading = match target {
-                    More::Page(heading) => heading,
-                    More::Steps | More::CollapseSteps => 0,
-                };
-                let border = match target {
-                    More::Steps | More::CollapseSteps => Some(Line::from(steps::STEP_INDENT)),
-                    More::Page(_) => self
-                        .fold()
-                        .and_then(|fold| fold.more_border(heading, paint, width)),
-                }
-                .filter(|border| border.width() < width);
+            Some(PreviewLine::More { heading, remaining }) => {
+                let border = self
+                    .fold()
+                    .and_then(|fold| fold.more_border(heading, paint, width))
+                    .filter(|border| border.width() < width);
                 let room = width - border.as_ref().map_or(0, Line::width);
                 let line = Line::from(paint.action_hint(
                     self.1.hovered.get().map(|line| line.get() - 1) == Some(i),
-                    match (target, remaining) {
-                        (More::CollapseSteps, _) => "less".to_string(),
-                        (More::Steps, _) => format!("{} {remaining} more", icons::ELLIPSIS),
-                        (More::Page(_), _) => format!("{remaining} more"),
-                    },
+                    format!("{remaining} more"),
                 ));
                 (screen::clip_line(&line, room), border)
             }
@@ -1314,7 +1326,7 @@ mod height_tests {
         let text = |row: &Row, i| row.line(i, &paint, 80).0.to_string();
         assert!(text(&row, 0).starts_with("head"), "{}", text(&row, 0));
         assert_eq!(row.click_line(0, 80), Some(0));
-        assert!(row.toggle_at(0, 80));
+        assert!(row.toggle_at(0, &paint, 80));
         assert_eq!(row.len(), 3);
         assert_eq!(text(&row, 0), "head");
         assert_eq!(text(&row, 2), "two");

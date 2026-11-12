@@ -113,7 +113,7 @@ impl Ui {
             bar.len(),
             input.len(),
         );
-        for row in view.surface.scrollback.iter() {
+        for row in view.surface.scrollback.iter_mut() {
             row.prepare_preview(&self.paint, width, regions.history.height as usize);
         }
         if self.search_due() {
@@ -192,11 +192,10 @@ impl Ui {
         let lit = self.lit_text();
         let ruled = self.on_closer();
         let bold = lit.filter(|_| self.paint.color);
+        let paint = &self.paint;
         let text_stream = text.into_iter().enumerate().map(move |(at, mut line)| {
             if bold == Some(at) {
-                for span in &mut line.line.spans {
-                    span.style = render::Paint::lit(span.style);
-                }
+                paint.lit_spans(&mut line.line.spans);
             }
             (Piece::Live(line), Target::Text(at))
         });

@@ -545,17 +545,16 @@ impl Ui {
         }
     }
 
-    // The wheel scrolls what is shown: the reading page while one is up,
-    // else the transcript.
+    // The wheel turns a group's window under the pointer while it can move,
+    // and otherwise scrolls what is shown.
     fn mouse(&mut self, view: &mut View, mouse: crossterm::event::MouseEvent) -> Asked {
         match mouse.kind {
-            MouseEventKind::ScrollUp => {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let up = matches!(mouse.kind, MouseEventKind::ScrollUp);
                 self.selection = None;
-                self.scroll_view(view, true, 1);
-            }
-            MouseEventKind::ScrollDown => {
-                self.selection = None;
-                self.scroll_view(view, false, 1);
+                if !self.wheel_window(view, mouse.column, mouse.row, up) {
+                    self.scroll_view(view, up, 1);
+                }
             }
             MouseEventKind::Moved => self.on_mouse_move(view, mouse.column, mouse.row),
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {

@@ -91,13 +91,23 @@ impl Paint {
             return vec![self.span_hovered(hovered, &self.theme.prompt.color, text)];
         };
         let mut spans = vec![self.span_hovered(hovered, &self.theme.prompt.color, name)];
-        let args = if name == pi_tools::bash::Bash::NAME {
-            self.shell(args, hovered)
-        } else {
-            vec![self.span_hovered(hovered, &self.theme.code, args)]
-        };
+        let mut args = self.call_line(name, args);
+        if hovered {
+            self.lit_spans(&mut args);
+        }
         spans.extend(args);
         spans
+    }
+
+    /// A line of what a call asked for, painted as the call's own line is:
+    /// a shell command keeps its syntax colours, a path its own.
+    pub(super) fn call_line(&self, name: &str, text: &str) -> Vec<Span<'static>> {
+        // No colour check here: `shell` and `span` paint nothing without colour.
+        if name == pi_tools::bash::Bash::NAME {
+            self.shell(text, false)
+        } else {
+            vec![self.span(&self.theme.code, text)]
+        }
     }
 
     /// A shell command, with the same syntax colours on every surface.
@@ -107,9 +117,7 @@ impl Paint {
         }
         let mut spans = crate::markdown::shell(text, self.theme.syntax);
         if hovered {
-            for span in &mut spans {
-                span.style = Self::lit(span.style);
-            }
+            self.lit_spans(&mut spans);
         }
         spans
     }
@@ -204,6 +212,17 @@ impl Paint {
     /// A drawn span's style under the pointer, as `Style::lit` has it.
     pub fn lit(style: ratatui::style::Style) -> ratatui::style::Style {
         style.add_modifier(ratatui::style::Modifier::BOLD)
+    }
+
+    /// The bold `lit` gives one span, over a line painted span by span. A
+    /// surface with no colour has nothing to light.
+    pub(crate) fn lit_spans(&self, spans: &mut [Span<'static>]) {
+        if !self.color {
+            return;
+        }
+        for span in spans {
+            span.style = Self::lit(span.style);
+        }
     }
 
     /// The band `color` paints on this surface, or `None` on a surface that
@@ -990,6 +1009,25 @@ pub fn summarize(args: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::Paint;
+
+    // A line of a call's arguments keeps the colours the call's own line
+    // gives it: a shell command its syntax, another tool its code colour.
+    #[test]
+    fn a_lines_of_a_call_reads_as_the_call_does() {
+        let paint = Paint::new(true);
+        let head = paint.tool_call("bash", "bash cd /x && ls", false);
+        assert_eq!(paint.call_line("bash", " cd /x && ls"), head[1..]);
+        let read = paint.call_line("read", "a.rs");
+        assert_eq!(read.len(), 1);
+        assert_eq!(
+            read[0].style,
+            crate::sgr::style_to_ratatui(&paint.theme.code)
+        );
+        assert_eq!(
+            Paint::new(false).call_line("bash", "cd /x"),
+            vec![ratatui::text::Span::raw("cd /x")]
+        );
+    }
 
     // What the printed form writes, `parse_sgr` reads back unchanged: every
     // colour form, in either slot, with every attribute.

@@ -33,9 +33,11 @@ impl Spacing {
     pub(super) fn push(&mut self, next: Block) -> bool {
         let gap = match next {
             Block::PromptContinuation => false,
+            // A prompt and a run's own report both stand apart from what
+            // follows them, as they do from what precedes them.
             _ if matches!(
                 self.previous,
-                Some(Block::Prompt | Block::PromptContinuation)
+                Some(Block::Prompt | Block::PromptContinuation | Block::Status)
             ) =>
             {
                 true

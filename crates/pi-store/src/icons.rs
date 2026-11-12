@@ -41,7 +41,8 @@ pub const NOTE_MARK: &str = "≡"; // a fact filed for the model to read; nothin
 pub const FAIL_MARK: &str = "✘"; // a failure, a denial, a refused edit
 pub const UNOPENED_MARK: &str = "○"; // a checkout on the bar that no lane has open
 pub const COMPACT_RULE: &str = "───"; // the dashes a compaction banner wears
-pub const OVER_RULE: &str = "─"; // the line parting what lies over the transcript from it
+const RULE_CELL: &str = "─"; // one cell of a horizontal rule
+pub const OVER_RULE: &str = RULE_CELL; // the line parting what lies over the transcript from it
 
 pub const CURRENT_ITEM: &str = "●"; // the current row in a list to choose from
 
@@ -51,5 +52,6 @@ pub const BANG_SIGIL: &str = "!"; // the `!command` input prompt
 pub const BESIDE_SIGIL: &str = "!!"; // the `!!command` input prompt
 
 pub const ELLIPSIS: &str = "…"; // a folded or clipped run
+pub const BAR_CELL: &str = RULE_CELL; // one cell of the bar under a window; its colour says where the window sits
 pub const PART_SEP: &str = " · ";
 pub const KEY_NOTE_SEP: &str = "  ·  "; // between a binding's keys and its note

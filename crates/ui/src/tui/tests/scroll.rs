@@ -2,6 +2,7 @@ use crate::render::Paint;
 use crate::tui::row::{FoldedTool, Row, Step};
 use crate::tui::scrollback::{Folds, Scrollback, ScrollbackRows};
 use crate::tui::{View, following_terminal};
+use pi_store::icons;
 use pi_store::theme::{Color, Theme};
 
 #[test]
@@ -105,7 +106,7 @@ fn banner_height_tracks_wrapping_after_resizing() {
 fn banner_height_changes_invalidate_measurements() {
     let paint = Paint::new(true);
     let resolved = pi_core::core::lane::a_resolved("");
-    let row = Row::banner(&resolved, &paint);
+    let mut row = Row::banner(&resolved, &paint);
     let width = 80;
     let mut heights = Vec::new();
     for height in [40, 8, 40] {
@@ -1412,107 +1413,543 @@ fn a_page_lies_over_the_commands() {
     assert!((0..24).all(|row| ui.command_at(row).is_none()));
 }
 
-// A run whose open step overruns the window budget: the preview ends at the
-// footer that opens the rest, with nothing drawn under it.
+// A group of `n` calls, each on one line.
+fn step_calls(n: usize) -> Row {
+    let mut steps =
+        (1..=n).map(|i| Step::Tool(FoldedTool::new("read", &format!("file{i}.rs"), "", "")));
+    let mut row = Row::steps(steps.next().expect("a group of one"), true);
+    for step in steps {
+        assert!(row.join(step).is_ok());
+    }
+    row
+}
+
+// The bar's cells, as the colour each is drawn in: lit, then gone grey.
+fn bar_cells(row: &Row, i: usize, paint: &Paint, width: usize) -> (usize, usize) {
+    let line = row.line(i, paint, width).0;
+    let lit = crate::sgr::style_to_ratatui(&paint.theme.heading).fg;
+    let dim = crate::sgr::style_to_ratatui(&paint.theme.muted).fg;
+    let cell = icons::BAR_CELL.chars().next().expect("a cell");
+    let (mut on, mut off) = (0, 0);
+    for span in &line.spans {
+        let n = span.content.chars().filter(|c| *c == cell).count();
+        if span.style.fg == lit {
+            on += n;
+        } else if span.style.fg == dim {
+            off += n;
+        }
+    }
+    (on, off)
+}
+
+// A group taller than its window shows its newest steps over a bar that
+// says where the window sits; every step is still there.
 #[test]
-fn a_preview_the_window_cuts_ends_at_its_footer() {
+fn a_window_shows_its_newest_steps_over_its_bar() {
+    let paint = Paint::new(true);
+    let width = 80;
+    let mut row = step_calls(30);
+    // The window is its own height whatever the history holds: steps and a bar.
+    row.prepare_preview(&paint, width, 40);
+    let lines: Vec<String> = (0..row.len())
+        .map(|i| row.line(i, &paint, width).0.to_string())
+        .collect();
+    let bar = row.len() - 1;
+    assert!(lines[bar].contains("30"), "the bar says what it holds");
+    assert_eq!(
+        bar_cells(&row, bar, &paint, width),
+        (10, 0),
+        "at the bottom"
+    );
+    assert!(
+        lines[0].contains("file25.rs"),
+        "the oldest shown: {lines:?}"
+    );
+    assert!(
+        lines[bar - 1].contains("file30.rs"),
+        "the newest step: {lines:?}"
+    );
+
+    // Scrolled to the top, every cell has gone grey.
+    for _ in 0..64 {
+        if !row.scroll_window(true, 1) {
+            break;
+        }
+    }
+    let bar = row.len() - 1;
+    assert_eq!(bar_cells(&row, bar, &paint, width), (0, 10), "at the top");
+
+    // One step up from the bottom greys the last cell alone.
+    for _ in 0..64 {
+        if !row.scroll_window(false, 1) {
+            break;
+        }
+    }
+    assert!(row.scroll_window(true, 1));
+    assert_eq!(bar_cells(&row, bar, &paint, width), (9, 1));
+
+    // A group that fits the window has no bar under it.
+    let mut short = step_calls(5);
+    short.prepare_preview(&paint, width, 40);
+    assert_eq!(short.len(), 5);
+    assert!(!(0..short.len()).any(|i| {
+        short
+            .line(i, &paint, width)
+            .0
+            .to_string()
+            .contains(icons::BAR_CELL)
+    }));
+}
+
+// The wheel turns the window while it can move and says so, so the frame
+// knows when the turn belongs to the transcript again.
+#[test]
+fn a_window_scrolls_by_lines_and_stops_at_its_ends() {
     let paint = Paint::new(false);
     let width = 80;
-    let first = Step::thinking(
-        1,
-        (1..=20)
-            .map(|i| ratatui::text::Line::from(format!("thought {i}")))
+    let mut row = step_calls(30);
+    row.prepare_preview(&paint, width, 40);
+
+    let last = row.len() - 2;
+    let bottom = row.line(last, &paint, width).0.to_string();
+    assert!(row.scroll_window(true, 1), "the wheel turns it");
+    assert_ne!(row.line(last, &paint, width).0.to_string(), bottom);
+
+    for _ in 0..64 {
+        if !row.scroll_window(true, 1) {
+            break;
+        }
+    }
+    assert!(
+        row.line(0, &paint, width)
+            .0
+            .to_string()
+            .contains("file1.rs")
+    );
+    assert!(
+        !row.scroll_window(true, 1),
+        "at the top: the transcript's turn"
+    );
+
+    for _ in 0..64 {
+        if !row.scroll_window(false, 1) {
+            break;
+        }
+    }
+    let last = row.len() - 2;
+    assert!(
+        row.line(last, &paint, width)
+            .0
+            .to_string()
+            .contains("file30.rs")
+    );
+    assert!(!row.scroll_window(false, 1));
+}
+
+// A step whose lines the window holds opens in place, from its own line.
+#[test]
+fn a_step_that_fits_opens_in_the_window() {
+    let paint = Paint::new(false);
+    let width = 80;
+    let mut row = step_calls(6);
+    let ran = FoldedTool::new("bash", "cat a", "cat a", "one\ntwo\n");
+    assert!(row.join(Step::Tool(ran)).is_ok());
+    row.prepare_preview(&paint, width, 40);
+    let head = row.len() - 1;
+    assert!(
+        row.toggle_at(head, &paint, width),
+        "it fits, so it opens there"
+    );
+    let lines: Vec<String> = (0..row.len())
+        .map(|i| row.line(i, &paint, width).0.to_string())
+        .collect();
+    let head = lines
+        .iter()
+        .position(|line| line.contains("cat a"))
+        .expect("the opened call keeps its line");
+    assert!(lines[head + 1].is_empty(), "a blank under it: {lines:?}");
+    assert!(
+        lines[head + 2].contains("one"),
+        "its output sits under the blank: {lines:?}"
+    );
+
+    // A long line is cut to its row, with the mark that says so.
+    let long = "x".repeat(200);
+    let mut row = step_calls(2);
+    assert!(
+        row.join(Step::Tool(FoldedTool::new("bash", &long, "", "")))
+            .is_ok()
+    );
+    row.prepare_preview(&paint, width, 40);
+    let head = row.len() - 1;
+    let (text, border) = row.line(head, &paint, width);
+    let text = text.to_string();
+    assert!(text.ends_with(icons::ELLIPSIS), "{text}");
+    let border = border.map_or_else(String::new, |b| b.to_string());
+    assert_eq!(
+        pi_store::text::width(&(border + &text)),
+        79,
+        "one column for the bar"
+    );
+}
+
+// A step taller than the window stays closed and is read on a page.
+#[test]
+fn a_step_too_tall_for_the_window_opens_on_a_page() {
+    let paint = Paint::new(false);
+    let width = 80;
+    let body: String = (1..=15).map(|i| format!("line {i}\n")).collect();
+    let big = FoldedTool::new("bash", "cat big", "cat big", &body);
+    let mut row = Row::steps(Step::Tool(FoldedTool::new("read", "f0", "", "")), true);
+    assert!(row.join(Step::Tool(big)).is_ok());
+    row.prepare_preview(&paint, width, 40);
+    let head = (0..row.len())
+        .find(|&i| row.line(i, &paint, width).0.to_string().contains("cat big"))
+        .expect("the call keeps its line");
+
+    assert!(
+        !row.toggle_at(head, &paint, width),
+        "the window cannot hold it"
+    );
+    let page = row.page_at(head, &paint, width).expect("the page reads it");
+    assert_eq!(page.len(), 17, "its own line, a blank, and what it printed");
+    assert!(
+        row.line(head, &paint, width)
+            .0
+            .to_string()
+            .contains("cat big"),
+        "it stays closed"
+    );
+}
+
+// A background turn's text that outgrows the rows a fold may take is read on
+// a page: the row never cuts itself short for a count to click through.
+#[test]
+fn a_relayed_turn_too_tall_for_its_rows_opens_on_a_page() {
+    let paint = Paint::new(false);
+    let width = 80;
+    let long: String = (1..=30).map(|i| format!("line {i}\n\n")).collect();
+    let mut row = Row::relayed("automatic input", &long, 0, &paint);
+    row.prepare_preview(&paint, width, 20);
+    assert!(
+        !row.toggle_at(0, &paint, width),
+        "it does not open in place"
+    );
+    assert_eq!(row.len(), 1, "it stays one line");
+    let page = row.page_at(0, &paint, width).expect("the page reads it");
+    assert!(
+        page.len() > 10,
+        "the whole of it, past the rows a fold takes"
+    );
+
+    // One the rows hold opens in place, with no count at its end.
+    let short: String = (1..=4).map(|i| format!("line {i}\n\n")).collect();
+    let mut row = Row::relayed("automatic input", &short, 0, &paint);
+    row.prepare_preview(&paint, width, 20);
+    assert!(row.toggle_at(0, &paint, width), "it fits, so it opens");
+    assert!(row.len() > 1, "its text reads under its own line");
+    assert!(
+        !row.has_more(row.len() - 1, width),
+        "no count stands between the row and its text"
+    );
+}
+
+// A turn opened to be read loses the aside's grey: its own line reads as the
+// message it holds, on the row and on its page.
+#[test]
+fn an_opened_turn_reads_its_own_line_plain() {
+    let paint = Paint::new(true);
+    let text: String = (1..=3).map(|i| format!("line {i}\n\n")).collect();
+    let mut row = Row::relayed("automatic input", &text, 0, &paint);
+    row.prepare_preview(&paint, 80, 40);
+    let muted = crate::sgr::style_to_ratatui(&paint.theme.muted);
+    let plain = crate::sgr::style_to_ratatui(&paint.theme.input);
+    assert_eq!(row.line(0, &paint, 80).0.spans[0].style, muted, "shut");
+    assert!(row.toggle_at(0, &paint, 80));
+    assert_eq!(row.line(0, &paint, 80).0.spans[0].style, plain, "opened");
+    assert_eq!(
+        row.line(1, &paint, 80).0.to_string(),
+        "",
+        "a blank under it"
+    );
+    let page = row.opening(0, &paint).expect("a page");
+    assert_eq!(page[1].line.to_string(), "", "a blank under it there too");
+    assert_eq!(page[0].line.spans[0].style, plain, "read on its page");
+}
+
+// Under a page the transcript stands back: the wheel turns what is shown,
+// not the window row the pointer happens to lie over.
+#[test]
+fn the_wheel_under_a_page_leaves_the_window_alone() {
+    use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
+
+    let mut ui = test_ui(60, 16);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    view.surface.scrollback.push(step_calls(30));
+    ui.flush(&lane, &mut view);
+    let window_before = view.surface.scrollback[0]
+        .line(0, &ui.paint, 60)
+        .0
+        .to_string();
+
+    // A page short enough to leave transcript rows above it, where the
+    // pointer sits.
+    ui.open_page(
+        (0..3)
+            .map(|i| crate::tui::browse::PageLine::from(Line::from(format!("page {i}"))))
             .collect(),
-        false,
-        &paint,
     );
-    let mut row = Row::steps(first, false);
-    for i in 1..=4 {
-        let step = Step::thinking(
-            10 + i,
-            vec![ratatui::text::Line::from(format!("block {i}"))],
-            false,
-            &paint,
-        );
-        assert!(row.join(step).is_ok());
-    }
-    // Budget is half the history height: ten rows for ten of it.
-    row.prepare_preview(&paint, width, 20);
-    let lines: Vec<String> = (0..row.len())
-        .map(|i| row.line(i, &paint, width).0.to_string())
-        .collect();
-    let shown = 9;
-    let rows = 24;
-    assert_eq!(lines.len(), 10, "the preview fills the budget: {lines:?}");
-    assert_eq!(lines[0].trim(), "thought 1");
-    let footer = lines.last().expect("a footer");
-    assert_eq!(footer.trim(), format!("{} more", rows - shown));
-    assert!(row.has_page(row.len() - 1, width));
-    // The footer opens the step it cut short, whole.
-    let page = row.opening(row.len() - 1, &paint).ok_or("no page").unwrap();
-    assert_eq!(page.len(), 20);
+    ui.flush(&lane, &mut view);
+    let event = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 2,
+        row: ui.regions.history.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    ui.key(&lane, &mut view, event, false);
+    ui.flush(&lane, &mut view);
 
-    // A row that fills the budget exactly is shown whole, with no footer.
-    row.prepare_preview(&paint, width, 48);
-    assert_eq!(row.len(), rows);
-    assert!(!row.has_page(row.len() - 1, width));
+    assert_eq!(
+        view.surface.scrollback[0]
+            .line(0, &ui.paint, 60)
+            .0
+            .to_string(),
+        window_before,
+        "the window under it stayed put"
+    );
 }
 
-// A group opened in place keeps its way back: a cut spends the budget on
-// content and on the footer, never on the row that folds the group again.
+// What is already open closes on a click, even once the rows it may take
+// have shrunk: the page is for what cannot open, not for what is open.
 #[test]
-fn a_cut_keeps_the_row_that_folds_the_group_back() {
+fn an_open_turn_that_no_longer_fits_still_closes() {
     let paint = Paint::new(false);
     let width = 80;
-    let mut row = Row::steps(Step::thinking(1, vec!["head".into()], false, &paint), false);
-    for i in 2..=9 {
-        let step = Step::thinking(
-            i,
-            vec![ratatui::text::Line::from(format!("block {i}"))],
-            false,
-            &paint,
-        );
-        assert!(row.join(step).is_ok());
-    }
-    // A window of ten rows leaves a budget of five.
-    row.prepare_preview(&paint, width, 10);
-    let lines: Vec<String> = (0..row.len())
-        .map(|i| row.line(i, &paint, width).0.to_string())
-        .collect();
-    assert_eq!(lines.len(), 5, "{lines:?}");
+    let text: String = (1..=6).map(|i| format!("line {i}\n\n")).collect();
+    let mut row = Row::relayed("automatic input", &text, 0, &paint);
+    row.prepare_preview(&paint, width, 40);
     assert!(
-        lines.last().expect("a last line").contains("less"),
-        "{lines:?}"
+        row.toggle_at(0, &paint, width),
+        "a tall enough window opens it"
     );
-    assert!(row.has_page(row.len() - 2, width), "{lines:?}");
-    // And the row still folds the group back.
-    assert!(row.toggle_at(row.len() - 1, width), "{lines:?}");
+    row.prepare_preview(&paint, width, 8);
+    assert!(
+        row.page_at(0, &paint, width).is_none(),
+        "an open row is not read on a page"
+    );
+    assert!(row.toggle_at(0, &paint, width), "the click closes it");
+    assert_eq!(row.len(), 1);
 }
 
-// The footer names the rows left out and opens the step they are in: a cut
-// inside the second step must not open the group's first.
+// The wheel turns a group window by its bar alone: every other row of the
+// group belongs to the transcript.
 #[test]
-fn a_cut_inside_a_step_opens_that_step() {
-    let paint = Paint::new(false);
-    let width = 80;
-    let head = Step::thinking(1, vec!["head".into()], false, &paint);
-    let mut row = Row::steps(head, false);
-    for i in 2..=5 {
-        let lines = match i {
-            2 => (1..=20)
-                .map(|n| ratatui::text::Line::from(format!("deep {n}")))
-                .collect(),
-            _ => vec!["tail".into()],
+fn the_wheel_turns_a_window_by_its_bar_alone() {
+    use crate::tui::mouse::Target;
+    use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
+
+    let mut ui = test_ui(60, 16);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    for i in 0..20 {
+        view.surface
+            .scrollback
+            .extend(Row::answer(&format!("line {i}"), &ui.paint));
+    }
+    view.surface.scrollback.push(step_calls(30));
+    let group = view.surface.scrollback.len() - 1;
+    ui.flush(&lane, &mut view);
+    // The screen row of the group's bar, or of one of its steps.
+    let at = |ui: &crate::tui::Ui, view: &View, bar: bool| {
+        (0..ui.regions.history.height)
+            .map(|d| ui.regions.history.y + d)
+            .find(|&r| {
+                matches!(
+                    ui.target_at(r),
+                    Some(Target::Scrollback(idx, line))
+                        if idx == group && view.surface.scrollback[group].is_bar(line) == bar
+                )
+            })
+            .expect("the group takes some rows")
+    };
+    // Point at the cell, then turn the wheel there: a bar takes the wheel
+    // only where the reader pointed.
+    let wheel = |lane: &pi_core::core::lane::Lane,
+                 ui: &mut crate::tui::Ui,
+                 view: &mut View,
+                 col: u16,
+                 row: u16,
+                 up: bool| {
+        ui.on_mouse_move(view, col, row);
+        let kind = match up {
+            true => MouseEventKind::ScrollUp,
+            false => MouseEventKind::ScrollDown,
         };
-        assert!(row.join(Step::thinking(i, lines, false, &paint)).is_ok());
-    }
-    assert!(row.toggle_at(1, width), "the second step opens in place");
-    row.prepare_preview(&paint, width, 20);
-    let footer = row.len() - 1;
-    assert!(
-        row.has_page(footer, width),
-        "the preview ends at the footer"
+        let event = Event::Mouse(MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        ui.key(lane, view, event, false);
+        ui.flush(lane, view);
+    };
+    let head = |view: &View| {
+        view.surface.scrollback[group]
+            .line(0, &Paint::new(false), 60)
+            .0
+            .to_string()
+    };
+
+    // The bar's cells and count are the handle; the blank rest of that row
+    // scrolls the transcript like any other.
+    let before = head(&view);
+    let bar = at(&ui, &view, true);
+    wheel(&lane, &mut ui, &mut view, 2, bar, true);
+    assert_ne!(head(&view), before, "the bar turns the window");
+
+    let window = head(&view);
+    let bar = at(&ui, &view, true);
+    wheel(&lane, &mut ui, &mut view, 40, bar, true);
+    assert_eq!(
+        head(&view),
+        window,
+        "the blank rest of the bar scrolls history"
     );
-    let page = row.opening(footer, &paint).ok_or("no page").unwrap();
-    assert_eq!(page.len(), 20, "the step the cut is in");
+
+    // Back to the newest rows, where the group shows again.
+    for _ in 0..64 {
+        let top = ui.regions.history.y;
+        wheel(&lane, &mut ui, &mut view, 40, top, false);
+    }
+
+    // At the window's ends the bar keeps the wheel: history stays put.
+    for _ in 0..64 {
+        let bar = at(&ui, &view, true);
+        wheel(&lane, &mut ui, &mut view, 2, bar, true);
+    }
+    let top = ui.drawn.clone();
+    let bar = at(&ui, &view, true);
+    wheel(&lane, &mut ui, &mut view, 2, bar, true);
+    assert_eq!(ui.drawn, top, "at the top the history does not move");
+    for _ in 0..64 {
+        let bar = at(&ui, &view, true);
+        wheel(&lane, &mut ui, &mut view, 2, bar, false);
+    }
+    let bottom = ui.drawn.clone();
+    let bar = at(&ui, &view, true);
+    wheel(&lane, &mut ui, &mut view, 2, bar, false);
+    assert_eq!(ui.drawn, bottom, "at the bottom too");
+}
+
+// The window is its own height whatever the history holds, and what fits it
+// exactly has no bar under it.
+#[test]
+fn a_window_that_fits_exactly_carries_no_bar() {
+    let paint = Paint::new(false);
+    let width = 80;
+    let mut exact = step_calls(7);
+    exact.prepare_preview(&paint, width, 40);
+    assert_eq!(exact.len(), 7, "seven steps fill the window");
+    assert!(!(0..exact.len()).any(|i| {
+        exact
+            .line(i, &paint, width)
+            .0
+            .to_string()
+            .contains(icons::BAR_CELL)
+    }));
+
+    // A frame shorter than the window gives the window its rows alone.
+    let mut short = step_calls(10);
+    short.prepare_preview(&paint, width, 6);
+    assert_eq!(short.len(), 6, "the frame decides when it is shorter");
+}
+
+// A bar that scrolls under a still pointer belongs to history: only a bar the
+// reader pointed at takes the wheel.
+#[test]
+fn a_bar_under_a_still_pointer_stays_with_history() {
+    use crate::tui::mouse::Target;
+    use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
+
+    let mut ui = test_ui(60, 16);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    view.surface.scrollback.push(step_calls(30));
+    for i in 0..20 {
+        view.surface
+            .scrollback
+            .extend(Row::answer(&format!("line {i}"), &ui.paint));
+    }
+    view.surface.scrollback.push(step_calls(30));
+    ui.flush(&lane, &mut view);
+
+    // The wheel turns where the pointer was put; a scroll moves content under
+    // it without pointing at anything.
+    let turn = |lane: &pi_core::core::lane::Lane,
+                ui: &mut crate::tui::Ui,
+                view: &mut View,
+                col: u16,
+                row: u16,
+                up: bool| {
+        let kind = match up {
+            true => MouseEventKind::ScrollUp,
+            false => MouseEventKind::ScrollDown,
+        };
+        let event = Event::Mouse(MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        ui.key(lane, view, event, false);
+        ui.flush(lane, view);
+    };
+
+    // Park the pointer, then scroll the older group's bar under it.
+    let park = ui.regions.history.y + 4;
+    ui.on_mouse_move(&mut view, 40, park);
+    let mut landed = false;
+    for _ in 0..64 {
+        let bar = matches!(ui.target_at(park), Some(Target::Scrollback(0, line))
+            if view.surface.scrollback[0].is_bar(line));
+        if bar {
+            landed = true;
+            break;
+        }
+        turn(&lane, &mut ui, &mut view, 40, park, true);
+    }
+    assert!(landed, "the older window's bar reached the pointer");
+
+    let window = view.surface.scrollback[0]
+        .line(0, &Paint::new(false), 60)
+        .0
+        .to_string();
+    turn(&lane, &mut ui, &mut view, 2, park, true);
+    assert_eq!(
+        view.surface.scrollback[0]
+            .line(0, &Paint::new(false), 60)
+            .0
+            .to_string(),
+        window,
+        "a bar it did not point at leaves the window alone"
+    );
+}
+
+// A turn whose own line wraps once opened is measured as it reads opened:
+// the cut would spend those rows, so the budget is spent on them too.
+#[test]
+fn an_opened_line_that_wraps_counts_against_the_budget() {
+    let paint = Paint::new(false);
+    let width = 40;
+    let label = format!("automatic input {}", "of a long run ".repeat(4));
+    let mut row = Row::relayed(&label, "one line\n", 0, &paint);
+    // Budget 3: shut, the line is one row and the turn would open; opened,
+    // the line wraps to two and the turn no longer fits.
+    row.prepare_preview(&paint, width, 6);
+    assert!(
+        row.page_at(0, &paint, width).is_some(),
+        "the wrapped line is counted"
+    );
 }

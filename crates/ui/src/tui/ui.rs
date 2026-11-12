@@ -119,6 +119,9 @@ pub(super) struct Ui {
     pub(super) hovered_scrollback: Option<(usize, usize)>,
     // Where the mouse last was: rows move under a still one as output lands.
     pub(super) pointer: Option<(u16, u16)>,
+    // What lay under the pointer when it last moved, so a row that slides
+    // under a still pointer is told apart from one the reader pointed at.
+    pub(super) pointed_at: Option<(usize, usize)>,
     // The frame just drawn showed a hover its own layout disagrees with.
     pub(super) redraw: bool,
     pub(super) row_targets: Vec<Target>,
@@ -291,6 +294,7 @@ impl Ui {
             layout: Default::default(),
             hovered_scrollback: None,
             pointer: None,
+            pointed_at: None,
             redraw: false,
             row_targets: Vec::new(),
             row_of: Vec::new(),

@@ -33,6 +33,36 @@ impl Ui {
         }
     }
 
+    // A group window turns by its bar's cells and count alone; the blank rest
+    // of that row, and a page's transcript, belong to history.
+    pub(super) fn wheel_window(&self, view: &mut View, col: u16, row: u16, up: bool) -> bool {
+        if self.reading() {
+            return false;
+        }
+        let Some(Target::Scrollback(idx, line)) = self.target_at(row) else {
+            return false;
+        };
+        // A bar the reader pointed at takes the wheel; one that slid under a
+        // still pointer while history scrolled does not.
+        if self.pointed_at != Some((idx, line)) {
+            return false;
+        }
+        let width = self.screen.width();
+        let Some(target) = view.surface.scrollback.get(idx) else {
+            return false;
+        };
+        if (col as usize) >= target.bar_width(line, &self.paint, width) {
+            return false;
+        }
+        // The bar keeps the wheel even at its ends: a window already at its
+        // first or last lines does not hand the turn to the transcript.
+        let Some(row) = view.surface.scrollback.get_mut(idx) else {
+            return false;
+        };
+        row.scroll_window(up, 1);
+        true
+    }
+
     // The columns a drawn row's border takes before its text.
     pub(super) fn lead(&self, view: &View, at: usize) -> usize {
         if let Some(Target::Text(n)) = self.row_targets.get(at) {
@@ -200,6 +230,15 @@ impl Ui {
     pub(super) fn on_mouse_move(&mut self, view: &mut View, col: u16, row: u16) {
         self.pointer = Some((col, row));
         self.hovered_scrollback = self.hovered_row(view, col, row);
+        self.pointed_at = self.spot_at(row);
+    }
+
+    // The scrollback row and line a screen row shows, however it is drawn.
+    fn spot_at(&self, row: u16) -> Option<(usize, usize)> {
+        match self.target_at(row) {
+            Some(Target::Scrollback(idx, line) | Target::Separator(idx, line)) => Some((idx, line)),
+            _ => None,
+        }
     }
 
     // Whether screen row `row` is the one that jumps to the bottom.
@@ -209,6 +248,8 @@ impl Ui {
     }
 
     pub(super) fn on_mouse_click(&mut self, view: &mut View, col: u16, row: u16) {
+        // A click points at what is under it as plainly as a move does.
+        self.pointed_at = self.spot_at(row);
         if self.jump_at(row) {
             self.scroll_view(view, false, super::screen::TOP);
             return;
@@ -275,14 +316,17 @@ impl Ui {
                 } else if let Some((idx, line)) = hit
                     && let Some(row) = view.surface.scrollback.get_mut(idx)
                 {
-                    if row.has_page(clicked, width)
-                        && more
-                        && let Some(page) = row.opening(line, &self.paint)
-                    {
+                    // A cut's hint under the pointer, or a line too tall for
+                    // the window, is read on a page.
+                    let page = (more && row.has_more(clicked, width))
+                        .then(|| row.opening(line, &self.paint))
+                        .flatten()
+                        .or_else(|| row.page_at(line, &self.paint, width));
+                    if let Some(page) = page {
                         self.open_page(page);
                         return;
                     }
-                    if !row.toggle_at(line, width) {
+                    if !row.toggle_at(line, &self.paint, width) {
                         return;
                     }
                     // What changed is under the line clicked, so that line
