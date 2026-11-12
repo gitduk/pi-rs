@@ -130,15 +130,14 @@ impl Ui {
     /// The flash under screen cell (`col`, `row`), and whether its page action
     /// is under that cell.
     pub(super) fn flash_at(&self, col: u16, row: u16) -> Option<bool> {
-        let (at, hit) = self.flash_hit.as_ref()?;
-        let r = row_in(self.regions.bar, row)?;
-        let c = col.checked_sub(self.regions.bar.x)? as usize;
+        let (place, at, hit) = self.flash_hit.as_ref()?;
+        let strip = self.regions.strip(*place);
+        let r = row_in(strip, row)?;
+        let c = col.checked_sub(strip.x)? as usize;
         (r == *at && hit.cols.contains(&c)).then(|| {
-            hit.more.as_ref().is_some_and(|(_, areas)| {
-                areas
-                    .action
-                    .contains(Position::new(col - self.regions.bar.x, 0))
-            })
+            hit.more
+                .as_ref()
+                .is_some_and(|(_, areas)| areas.action.contains(Position::new(col - strip.x, 0)))
         })
     }
 
@@ -702,8 +701,10 @@ pub(super) struct Regions {
     pub(super) executions: Rect,
     // The input line, between the conversation and the bar.
     pub(super) editor: Rect,
-    // The bar: the checkouts, or the flash that took its row; the bottom.
-    pub(super) bar: Rect,
+    // The row over the input line, when the layout asks for one.
+    pub(super) statusline_top: Rect,
+    // The row under it: the checkouts, or the flash that took its row.
+    pub(super) statusline: Rect,
 }
 
 // `code` to the clipboard, and what the screen says of it.
@@ -728,6 +729,15 @@ pub(super) fn row_in(area: Rect, row: u16) -> Option<usize> {
 }
 
 impl Regions {
+    /// The row `place` draws on: the one over the input line, or the one
+    /// under it.
+    pub(super) fn strip(&self, place: pi_store::statusline::Place) -> Rect {
+        match place {
+            pi_store::statusline::Place::Top => self.statusline_top,
+            pi_store::statusline::Place::Bottom => self.statusline,
+        }
+    }
+
     /// The rows each part asks for, as many as `area` holds: the input line
     /// parts the conversation, executions and all, from the bar under it. A `page`
     /// up is read over all of the conversation, so the executions get no rows.
@@ -737,14 +747,17 @@ impl Regions {
         asked: usize,
         menu: usize,
         executions: usize,
-        bar: usize,
+        statusline_top: usize,
+        statusline: usize,
         editor: usize,
     ) -> Self {
-        // A short screen takes from the editor, then the executions, then the bar;
-        // a row of history and a row to type on stay.
+        // A short screen takes from the editor, then the executions, then the
+        // statusline; a row of history and a row to type on stay.
         let mut left = (area.height as usize).saturating_sub(1 + HISTORY_GAP as usize);
-        let bar = bar.min(left.saturating_sub(1));
-        left -= bar;
+        let statusline = statusline.min(left.saturating_sub(1));
+        left -= statusline;
+        let statusline_top = statusline_top.min(left.saturating_sub(1));
+        left -= statusline_top;
         let executions = if page {
             0
         } else {
@@ -760,15 +773,26 @@ impl Regions {
             let rule = usize::from(shown > option + 1);
             let asked = asked.min(shown - option - rule);
             let menu = shown - asked - rule;
-            let [history, gap, asked, rule, menu, executions, editor, bar] = Layout::vertical([
+            let [
+                history,
+                gap,
+                asked,
+                rule,
+                menu,
+                executions,
+                statusline_top,
+                editor,
+                statusline,
+            ] = Layout::vertical([
                 Constraint::Fill(1),
                 Constraint::Length(HISTORY_GAP),
                 Constraint::Length(asked as u16),
                 Constraint::Length(rule as u16),
                 Constraint::Length(menu as u16),
                 Constraint::Length(executions as u16),
+                Constraint::Length(statusline_top as u16),
                 Constraint::Length(editor as u16),
-                Constraint::Length(bar as u16),
+                Constraint::Length(statusline as u16),
             ])
             .areas(area);
             return Self {
@@ -778,16 +802,18 @@ impl Regions {
                 rule,
                 menu,
                 executions,
+                statusline_top,
                 editor,
-                bar,
+                statusline,
             };
         }
         let chunks = Layout::vertical([
             Constraint::Fill(1),
             Constraint::Length(HISTORY_GAP),
             Constraint::Length(executions as u16),
+            Constraint::Length(statusline_top as u16),
             Constraint::Length(editor as u16),
-            Constraint::Length(bar as u16),
+            Constraint::Length(statusline as u16),
         ])
         .split(area);
         // The list lies over the executions and the rows above them, next to the
@@ -810,8 +836,9 @@ impl Regions {
             rule,
             menu,
             executions: chunks[2],
-            editor: chunks[3],
-            bar: chunks[4],
+            statusline_top: chunks[3],
+            editor: chunks[4],
+            statusline: chunks[5],
         }
     }
 
@@ -824,7 +851,7 @@ impl Regions {
     // first row takes among them all.
     pub(super) fn readable(&self) -> [(Rect, usize); 3] {
         let mut base = 0;
-        [self.history, self.executions, self.bar].map(|r| {
+        [self.history, self.executions, self.statusline].map(|r| {
             let at = base;
             base += r.height as usize;
             (r, at)

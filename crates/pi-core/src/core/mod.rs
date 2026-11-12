@@ -6,7 +6,6 @@
 
 pub mod archive;
 pub mod ask;
-pub mod bar;
 pub mod bash;
 pub mod catalog;
 pub mod content;
@@ -27,6 +26,7 @@ pub mod saves;
 pub mod settings;
 pub mod shells;
 pub mod status;
+pub mod statusline;
 pub mod tools;
 pub mod update;
 pub mod worktree;

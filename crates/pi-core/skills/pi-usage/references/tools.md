@@ -283,5 +283,5 @@ The built-in `tool-creator` skill teaches the model to write tools.
 `pi-usage` holds these pages: what a session, a tool, a script or a file does.
 `architecture` guides the model to review a project's structure, or to design
 structure before it builds a change.
-`bar-setup` lays out the bar.
+`statusline` sets what the row above and under the input line shows.
 A skill with the same name on disk replaces the built-in.

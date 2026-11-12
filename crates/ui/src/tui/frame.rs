@@ -7,7 +7,6 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, TableState};
 
 use super::Ui;
-use super::bar::Facts;
 use super::call::{self, drawn, pending_line};
 use super::menu::MenuEntry;
 use super::mouse::{Regions, Target, row_in};
@@ -15,10 +14,10 @@ use super::row::{PendingTool, Row, count};
 use super::screen::{self, Rows};
 use super::scrollback::{Piece, ScrollbackRows, body};
 use super::search::{self, Anchor, Laid, Spot};
-use super::view::{Doing, Scroll, StreamKind, View, snapshot};
+use super::statusline::Facts;
+use super::view::{Scroll, StreamKind, View, snapshot};
 use crate::render;
 use crate::render::Paint;
-use crate::status;
 use pi_core::core::question::{Asker, Question};
 use pi_store::icons;
 use pi_store::keys::{Action, Layers};
@@ -65,7 +64,7 @@ impl Ui {
             let hovered = self.hovered_scrollback.filter(|h| h.0 == idx).map(|h| h.1);
             row.update_live(hovered, self.spinner, flight);
         }
-        let (live, live_targets, tool_ids) = self.live(lane, view, row_holds, now);
+        let (live, live_targets, tool_ids) = self.live(view, row_holds, now);
         self.tool_rows = tool_ids;
 
         let hovered_command = self.pointer.and_then(|(_, row)| {
@@ -90,7 +89,9 @@ impl Ui {
                 line.style = line.style.add_modifier(ratatui::style::Modifier::REVERSED);
             }
         }
-        let bar_rows = self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width);
+        let facts = Facts::of(lane, view.state.work.as_ref());
+        let (over_rows, bar_rows) = self.statusline_lines(&facts, &snapshot(lane, view), width);
+        let over_lines: Vec<_> = over_rows.iter().map(|row| row.line.clone()).collect();
         let mut bar: Vec<_> = bar_rows.iter().map(|row| row.line.clone()).collect();
         let (input, caret) = self.input_view(width, hint.as_deref());
         // A question heads its options, and stays up over words that match
@@ -110,6 +111,7 @@ impl Ui {
             asked.len(),
             menu.len(),
             executions.len(),
+            over_lines.len(),
             bar.len(),
             input.len(),
         );
@@ -173,7 +175,7 @@ impl Ui {
         if self.background_focus.is_some() && command_caret.is_none() {
             self.leave_background();
         }
-        bar.truncate(regions.bar.height as usize);
+        bar.truncate(regions.statusline.height as usize);
         // A paste taller than the terminal keeps the caret's row in view.
         let editor_h = regions.editor.height as usize;
         let editor_top = (caret.0 as usize + 1).saturating_sub(editor_h);
@@ -352,14 +354,15 @@ impl Ui {
             .unwrap_or_default();
 
         (self.more_hits, self.page_hits) = self.more_actions(view, regions);
-        let flash_body = self.flash_hit.as_ref().and_then(|(at, hit)| {
-            if *at >= regions.bar.height as usize {
+        let flash_body = self.flash_hit.as_ref().and_then(|(place, at, hit)| {
+            let strip = regions.strip(*place);
+            if *at >= strip.height as usize {
                 return None;
             }
             let (line, areas) = hit.more.as_ref()?;
             let body = Rect {
-                x: areas.body.x + regions.bar.x,
-                y: regions.bar.y + *at as u16,
+                x: areas.body.x + strip.x,
+                y: strip.y + *at as u16,
                 ..areas.body
             };
             Some((line.clone(), body))
@@ -432,19 +435,31 @@ impl Ui {
                 frame.render_stateful_widget(table.row_highlight_style(cursor), list, &mut state);
                 self.list.top = state.offset();
             }
-            frame.render_widget(Rows(&bar), regions.bar);
-            if self.selection.is_none() {
-                for (area, row) in regions.bar.rows().zip(&bar_rows) {
+            // The row over the input line and the one under it wear the same
+            // paint; only the place they are drawn at differs.
+            let strip = |frame: &mut ratatui::Frame,
+                         area: Rect,
+                         rows: &[super::statusline::StatuslineRow],
+                         lines: &[Line<'static>]| {
+                frame.render_widget(Rows(lines), area);
+                for (row_area, row) in area.rows().zip(rows) {
                     for (part, line) in &row.parts {
                         let part = Rect {
-                            x: area.x + part.x,
-                            y: area.y,
+                            x: row_area.x + part.x,
+                            y: row_area.y,
                             ..*part
                         };
                         frame.render_widget(ratatui::widgets::Clear, part);
                         frame.render_widget(line, part);
                     }
                 }
+            };
+            if !over_rows.is_empty() {
+                strip(frame, regions.statusline_top, &over_rows, &over_lines);
+            }
+            // A selection paints these rows itself.
+            if self.selection.is_none() {
+                strip(frame, regions.statusline, &bar_rows, &bar);
             }
             if let Some((line, body)) = &flash_body {
                 frame.render_widget(ratatui::widgets::Clear, *body);
@@ -557,15 +572,17 @@ impl Ui {
                 }
             }
         }
-        if let Some((at, hit)) = &self.flash_hit
-            && *at < regions.bar.height as usize
+        if let Some((place, at, hit)) = &self.flash_hit
             && let Some((_, areas)) = &hit.more
         {
-            actions.push(Rect {
-                x: areas.action.x + regions.bar.x,
-                y: regions.bar.y + *at as u16,
-                ..areas.action
-            });
+            let strip = regions.strip(*place);
+            if *at < strip.height as usize {
+                actions.push(Rect {
+                    x: areas.action.x + strip.x,
+                    y: strip.y + *at as u16,
+                    ..areas.action
+                });
+            }
         }
         actions.extend(row_actions);
         (actions, pages)
@@ -712,7 +729,6 @@ impl Ui {
 
     pub(super) fn live(
         &self,
-        lane: &Lane,
         view: &View,
         row_holds: bool,
         now: std::time::Instant,
@@ -789,50 +805,6 @@ impl Ui {
             out.push(row, None);
         }
 
-        if lane.is_running() {
-            let mut parts = status::parts(&self.status, &snapshot(lane, view), true);
-            if let Some(work) = &view.state.work {
-                if matches!(work.doing, Doing::Compact) {
-                    parts.insert(0, format!("compacting{}", icons::ELLIPSIS));
-                }
-                // A stopping run says so; an ordinary one needs no word — its
-                // ticking clock already says the turn is on.
-                if let Some(retry) = &work.retry
-                    && now < retry.until
-                {
-                    parts.push(format!(
-                        "retry {} in {}",
-                        retry.attempt,
-                        llm::figures::elapsed(std::time::Duration::from_secs(
-                            (retry.until - now).as_millis().div_ceil(1000).max(1) as u64,
-                        ))
-                    ));
-                }
-                if work.stopping {
-                    parts.push(format!("stopping{}", icons::ELLIPSIS));
-                }
-            }
-            // `status = []` asks for no line, and a blank row is not none.
-            if !parts.is_empty()
-                || (view.state.work.is_some()
-                    && self.status.contains(&pi_store::status::Segment::Elapsed))
-            {
-                if spacing.push(super::spacing::Block::Status) {
-                    out.push(Line::default(), None);
-                }
-                let line = parts.join(icons::PART_SEP);
-                let painted = status::painted(&line, &self.paint);
-                let marker = status::breath_style(self.spinner, self.paint.theme.syntax);
-                let prefix = render::Prefix::hanging(Line::from(
-                    self.paint.span(&marker, format!("{} ", icons::PI_MARK)),
-                ));
-                for row in
-                    screen::wrap_continued(Some(&prefix.first), Some(&prefix.rest), &painted, width)
-                {
-                    out.push(row, None);
-                }
-            }
-        }
         // Typed lines precede execution results to match delivery priority.
         let waiting = |mark: &str, line: &str| {
             let first = line.lines().next().unwrap_or_default();

@@ -32,21 +32,6 @@ async fn submit(tui: &mut Tui, execution: &dyn RunHandle, text: &str) {
     }
 }
 
-// The person's line, not a script's: shell work from `Origin::Input` is
-// refused, and these tests are about the shell, not who asked for it.
-async fn submit_typed(tui: &mut Tui, execution: &dyn RunHandle, text: &str) {
-    execution.channel().input(text.into(), String::new());
-    let (_origin, wake) = tui.driver_line().expect("the submission was received");
-    let (replies, _inb) = crate::tui::run::Replies::channels();
-    match wake {
-        Wake::Do(Asked::Core(intent), line) => {
-            tui.execute(intent, Origin::Typed, line, &replies).await;
-        }
-        Wake::Nothing => {}
-        _ => panic!("a submission must be admitted or queued"),
-    }
-}
-
 fn response(rx: &mut ::execution::channel::Receiver) -> (u64, Response) {
     loop {
         match rx.try_recv().expect("an operation response") {

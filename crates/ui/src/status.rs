@@ -1,6 +1,6 @@
 //! Draws the status line from parts; which parts show is the config's, in
-//! `pi_store::status`. Repainted while a turn runs, its last frame kept in
-//! scrollback once it ends.
+//! `pi_store::status`. Repainted while a turn runs, and gone once it ends:
+//! the run's figures outlive it on the statusline, never in the transcript.
 //!
 //! Shows only the run in flight, not the whole session's total.
 
@@ -9,40 +9,12 @@ use std::time::Duration;
 use pi_core::core::meter::Snapshot;
 use pi_store::icons;
 use pi_store::status::Segment;
-use pi_store::theme::{Attr, Color, PaletteColor, Style, Syntax};
+use pi_store::theme::Attr;
 use ratatui::text::{Line, Span};
 
 use crate::render::Paint;
 
 pub const SPIN: Duration = Duration::from_millis(90);
-
-/// A bold pulse that changes hue each breath while staying easy to see.
-pub fn breath_style(tick: usize, syntax: Syntax) -> Style {
-    let phase = tick % 60;
-    let breath = tick / 60 % PaletteColor::ALL.len();
-    let hue_phase = phase as f64 / 60.0;
-    let light = if phase < 28 {
-        (1.0 - (phase as f64 / 28.0 * std::f64::consts::PI).cos()) * 0.5
-    } else if phase < 32 {
-        1.0
-    } else {
-        (1.0 + ((phase - 32) as f64 / 28.0 * std::f64::consts::PI).cos()) * 0.5
-    };
-    let from = PaletteColor::ALL[breath].rgb(syntax);
-    let to = PaletteColor::ALL[(breath + 1) % PaletteColor::ALL.len()].rgb(syntax);
-    let blend = hue_phase * hue_phase * (3.0 - 2.0 * hue_phase);
-    let base = (
-        f64::from(from.0) + (f64::from(to.0) - f64::from(from.0)) * blend,
-        f64::from(from.1) + (f64::from(to.1) - f64::from(from.1)) * blend,
-        f64::from(from.2) + (f64::from(to.2) - f64::from(from.2)) * blend,
-    );
-    let color = Color::Rgb(
-        (base.0 * (0.55 + 0.45 * light)).round() as u8,
-        (base.1 * (0.55 + 0.45 * light)).round() as u8,
-        (base.2 * (0.55 + 0.45 * light)).round() as u8,
-    );
-    Style::color(color).adding(Attr::Bold)
-}
 
 /// What this part reads as, or None when the run has nothing to say for it.
 pub fn render(segment: Segment, s: &Snapshot, running: bool) -> Option<String> {
@@ -58,7 +30,7 @@ pub fn render(segment: Segment, s: &Snapshot, running: bool) -> Option<String> {
         // An unpriced model reports no cost rather than $0.
         Segment::Cost if s.cost <= 0.0 => return None,
         Segment::Cost => llm::figures::dollars(s.cost),
-        Segment::Ctx => return context(s.ctx?, s.refit),
+        Segment::Ctx => return context(s.ctx?),
         Segment::Compacted => return compacted(s.compactions),
         Segment::Queued if s.queued == 0 => return None,
         Segment::Queued => format!("{} queued", s.queued),
@@ -71,13 +43,12 @@ pub fn render(segment: Segment, s: &Snapshot, running: bool) -> Option<String> {
 }
 
 // Show both counts: a percentage hides useful detail in large windows.
-fn context((used, window): (usize, usize), refit: bool) -> Option<String> {
+fn context((used, window): (usize, usize)) -> Option<String> {
     if window == 0 {
         return None;
     }
-    let refit = if refit { "↓" } else { "" };
     Some(format!(
-        "ctx {}/{}{refit}",
+        "ctx {}/{}",
         llm::figures::short(used as u64),
         llm::figures::size(window as u64),
     ))
@@ -169,8 +140,7 @@ fn painted_part(text: &str, paint: &Paint) -> Vec<Span<'static>> {
     }
     if let Some(context) = text.strip_prefix("ctx ")
         && let Some((used, window)) = context.split_once('/')
-        && let (Some(used_value), Some(window_value)) =
-            (number(used), number(window.trim_end_matches('↓')))
+        && let (Some(used_value), Some(window_value)) = (number(used), number(window))
         && window_value > 0.0
     {
         let share = used_value / window_value;
@@ -221,45 +191,12 @@ mod tests {
             render(Segment::Ctx, &snapshot, false).as_deref(),
             Some("ctx 1.0k/1m")
         );
-        snapshot.refit = true;
-        assert_eq!(
-            render(Segment::Ctx, &snapshot, false).as_deref(),
-            Some("ctx 1.0k/1m↓")
-        );
         for (count, expected) in [(0, None), (1, Some("compacted")), (2, Some("compacted ×2"))] {
             snapshot.compactions = count;
             assert_eq!(
                 render(Segment::Compacted, &snapshot, false).as_deref(),
                 expected
             );
-        }
-    }
-
-    #[test]
-    fn breathing_stays_continuous_across_every_colour_and_the_cycle_boundary() {
-        for syntax in [Syntax::CatppuccinMocha, Syntax::CatppuccinLatte] {
-            let cycle = PaletteColor::ALL.len() * 60;
-            let rgb = |tick| match breath_style(tick, syntax).color.unwrap() {
-                Color::Rgb(r, g, b) => [r, g, b],
-                other => panic!("expected interpolated RGB, got {other:?}"),
-            };
-            let mut low = u8::MAX;
-            let mut high = 0;
-            for tick in 0..cycle {
-                let current = rgb(tick);
-                let next = rgb(tick + 1);
-                for (a, b) in current.into_iter().zip(next) {
-                    assert!(
-                        a.abs_diff(b) <= 8,
-                        "colour jumped at tick {tick}: {a} to {b}"
-                    );
-                    low = low.min(a);
-                    high = high.max(a);
-                }
-                assert!(breath_style(tick, syntax).sgr.contains(&Attr::Bold));
-            }
-            assert!(high - low > 100, "the animation must vary its colour");
-            assert_eq!(rgb(0), rgb(cycle));
         }
     }
 }

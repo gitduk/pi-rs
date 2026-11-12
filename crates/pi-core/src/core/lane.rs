@@ -142,7 +142,6 @@ impl Transcript {
 enum Held {
     Plain(String),
     Notice(String),
-    Tally(String),
     Note(String),
 }
 
@@ -151,7 +150,6 @@ impl Held {
         match self {
             Self::Plain(text) => session.push_plain(text),
             Self::Notice(text) => session.push_notice(text),
-            Self::Tally(text) => session.push_tally(text),
             Self::Note(text) => session.push_note(text),
         }
     }
@@ -377,6 +375,14 @@ pub fn arm(
             &mut said,
         );
     }
+
+    // A surface's row, but the layout it takes is a file: a headless run may
+    // set it for the screen that opens next.
+    offer_builtin(
+        Arc::make_mut(&mut brief),
+        Arc::new(super::statusline::Statusline),
+        &mut said,
+    );
 
     // The lane's copy only: a child never hears the user, whose words are
     // the only ones memory keeps.
@@ -853,6 +859,11 @@ impl Lane {
         &self.talk.tally
     }
 
+    /// The run's count, for a surface priming it from what it last showed.
+    pub fn tally_mut(&mut self) -> &mut Tally {
+        &mut self.talk.tally
+    }
+
     /// What this session has spent, counted at the wire: its runs, its
     /// compactions and the children and executions they started alike.
     pub fn spent(&self) -> Totals {
@@ -926,11 +937,6 @@ impl Lane {
     /// Keeps an agent report for the user without presentation markup.
     pub fn push_notice(&mut self, text: &str) -> Option<EntryId> {
         self.file(Held::Notice(text.to_string()))
-    }
-
-    /// Keeps a run's figures separately from plain text and reports.
-    pub fn push_tally(&mut self, text: &str) -> Option<EntryId> {
-        self.file(Held::Tally(text.to_string()))
     }
 
     fn file(&mut self, entry: Held) -> Option<EntryId> {
@@ -1464,7 +1470,7 @@ impl Core {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::tests::{Recording, a_lane, a_repl};
+    use crate::core::tests::{Recording, a_repl};
 
     // Lanes come back in the order given, the front one stays in front, and
     // what could not come back as asked is said rather than dropped.
@@ -1872,42 +1878,6 @@ mod tests {
         assert!(
             resolved.notes.is_empty(),
             "a filtered script was reported as a conflict"
-        );
-    }
-
-    // Reports must survive while a run owns the transcript.
-    #[test]
-    fn a_row_filed_while_a_run_holds_the_transcript_lands_with_it() {
-        let mut lane = a_lane("s");
-        // Test lanes start without a transcript.
-        lane.return_session(agent::session::Session::default());
-        let held = lane.take_session().expect("the run has it");
-
-        lane.push_tally("3s · 1.2k/340 · $0.01");
-        lane.push_plain("! the reply came back short");
-        lane.push_notice("settled");
-        lane.return_session(held);
-
-        let filed: Vec<_> = lane
-            .session()
-            .expect("the run gave it back")
-            .entries()
-            .iter()
-            .filter_map(|e| match e {
-                agent::session::Entry::Tally { text, .. } => Some((text.as_str(), "tally")),
-                agent::session::Entry::Plain { text, .. } => Some((text.as_str(), "plain")),
-                agent::session::Entry::Notice { text, .. } => Some((text.as_str(), "notice")),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            filed,
-            [
-                ("3s · 1.2k/340 · $0.01", "tally"),
-                ("! the reply came back short", "plain"),
-                ("settled", "notice")
-            ],
-            "in the order they were drawn, each still knowing what it is"
         );
     }
 

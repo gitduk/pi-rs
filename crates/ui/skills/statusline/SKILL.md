@@ -1,0 +1,104 @@
+---
+name: statusline
+description: Set what pi's statusline shows — the row under the input line — with fields, texts, groups, colours, and values an outside script prints.
+---
+
+# Set the statusline
+
+The statusline is the one row under the input line.
+Its layout is a single JSON document kept at `<pi_home>/statusline.json`.
+Use the directory in the `<pi_home>` block.
+This directory is `$PI_HOME` when set, otherwise `~/.pi`.
+Without that file, the default layout stands: `tabs`, `model` and `spent` on the
+left, `update` and `flash` on the right.
+
+Set it with the `statusline` tool.
+Pass the whole document as `layout`, or `reset: true` to remove the file and go
+back to the default.
+The tool checks the document and answers with what it set.
+pi reads the file again on the next second, so no restart is needed.
+
+Do not read pi's source to answer a customization question.
+This skill describes the interface.
+
+## The document
+
+```json
+{
+  "lines": [
+    {"place": "top", "left": [{"field": "flash", "style": "emphasis"}]},
+    {
+      "left":  ["project", {"group": ["model", {"text": " "}, "effort"]}],
+      "right": [{"script": {"command": "date +%H:%M", "every": 30}}],
+      "sep":   {"text": "  ", "style": "muted"}
+    }
+  ]
+}
+```
+
+`place` is `top` or `bottom`, and defaults to `bottom`.
+A `top` line stands between the input line and the conversation; a `bottom`
+line stands under the input line.
+Every line keeps its row whether or not it has something to say, so the input
+line never moves.
+
+`left` starts at the left edge; `right` stands against the right edge.
+`sep` stands between two items of one side, and defaults to a muted ` · `.
+A missing `style` is muted.
+
+## Items
+
+| Written as | Shows |
+|---|---|
+| `"model"` | one field, by name |
+| `{"field": "cache", "style": "ok"}` | one field in a colour |
+| `{"text": " \| ", "style": "muted"}` | fixed text |
+| `{"group": [item, …]}` | items joined without `sep`; the whole group disappears when each field in it has nothing to say |
+| `{"script": {"command": "…", "every": 30}}` | a value an outside command prints |
+| `{"script": "weather"}` | a value `<pi_home>/statusline.d/weather` prints |
+
+`tabs` cannot sit inside a group: it folds when the row runs out of width.
+
+## Fields
+
+`tabs` `flash` `model` `effort` `tier` `update` `spent` `state` `project`
+`elapsed` `in_out` `speed` `cache` `cost` `ctx` `compacted` `queued` `worktree`
+
+- `project` — the branch, then the lines the worktree added and removed, in a
+  diff's own colours.
+- `state` — `idle`, `working`, `compacting`, `stopping`, or a retry it waits
+  out. Always says something.
+- `spent` — what the session has cost so far; `cost` — what the run in flight,
+  or the one that last ended, cost.
+- `cache` `ctx` `cost` keep the last run's figures across a restart.
+
+## Styles
+
+`muted` `heading` `emphasis` `code` `input` `ok` `err` `add` `del` take their
+colours from the theme, so a theme change carries.
+An SGR number such as `"34"`, or `{"color": "#5c9cf5", "sgr": ["bold"]}`, sets
+colours outright.
+`{"tone": "code", "sgr": ["bold"]}` keeps the theme's colour for that tone and
+adds the emphasis.
+
+## Scripts
+
+A script item carries exactly one of `command` or `name`.
+
+- `command` runs through `sh -c`, so a one-line answer needs no file.
+- `name` runs `<pi_home>/statusline.d/<name>`, which must be executable. Write
+  the file, make it executable, then name it here. The name takes no `/`, no
+  `..`, and no leading `-`.
+- `every` is the seconds between runs, at least 15, default 60.
+- `timeout` is the seconds one run may take before it is killed, default 15.
+  A script says how long it needs, so a slow one is not mistaken for a hung one.
+- `style` colours its answer like any other item's text.
+- `placeholder` stands in until the first answer, default `…`.
+- Only the first line of output shows; control characters are dropped.
+- A failing script keeps its last answer; one that never answered keeps the
+  placeholder.
+- At most four scripts run at once, each one alone, and none of them blocks the
+  row.
+
+The statusline redraws from the last answer, so a slow script never stalls the
+screen.

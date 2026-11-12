@@ -2,7 +2,6 @@
 //! servicing the agent's events, the keyboard, and the animation timer.
 
 mod background;
-mod bar;
 mod browse;
 mod call;
 mod clipboard;
@@ -10,6 +9,7 @@ mod editor;
 mod execute;
 mod frame;
 mod keys;
+mod statusline;
 pub use keys::WORDS;
 mod menu;
 mod mouse;
@@ -203,7 +203,6 @@ pub struct Tui {
     // Stops the reader while a child holds the terminal.
     hold: Hold,
     drivers: Drivers,
-    bar: bar::BarScript,
 }
 
 impl Tui {
@@ -239,7 +238,6 @@ impl Tui {
         // reader would never see those bytes again.
         ui.editor.insert_str(&answer.typed);
         ui.at_root = core.lane().root().to_path_buf();
-        ui.status = core.config().status.to_vec();
         ui.set_vim(&core.config().vim);
         drop_shared_history();
         {
@@ -265,10 +263,16 @@ impl Tui {
             events,
             hold,
             drivers,
-            bar: bar::BarScript::find(),
         };
         if let Some(line) = last {
             tui.restarted(&line);
+        }
+        // Before the first frame: the row the last run left behind, and the
+        // readings it ended on — a fresh run has none until it answers.
+        tui.reload_statusline();
+        if let Some(last) = pi_store::statusline::read_last() {
+            tui.core.lane_mut().tally_mut().prime(last);
+            tui.ui.readings = Some(last);
         }
         Ok(tui)
     }
@@ -302,7 +306,6 @@ impl Tui {
             events: rx,
             hold: Hold::default(),
             drivers: Drivers::default(),
-            bar: bar::BarScript::at(None),
         }
     }
 
@@ -405,6 +408,51 @@ impl Tui {
             notes.extend(said);
         }
         self.notice(pi_core::input::notice(notes));
+    }
+
+    // The readings on show, kept for the next pi: written only when they
+    // move, so a second look costs a compare and nothing else.
+    fn keep_last_readings(&mut self) {
+        // What the row shows, kept as it shows it: a run in flight already
+        // has its own figures, and the run that ended keeps the ones it had.
+        let snap = self.core.lane().snapshot("", None, 0);
+        let last = pi_store::statusline::Last {
+            cached: snap.cached,
+            cost: snap.cost,
+            ctx: snap.ctx,
+        };
+        if self.ui.readings == Some(last) || last == Default::default() {
+            return;
+        }
+        match pi_store::statusline::write_last(&last) {
+            Ok(()) => self.ui.readings = Some(last),
+            Err(why) => tracing::warn!(target: "pi::statusline", error = %why, "readings not kept"),
+        }
+    }
+
+    // What the statusline draws is a file the `statusline` tool writes: read
+    // when it changes, and only then. A file that no longer parses falls back
+    // to the built-in default, and says why once.
+    fn reload_statusline(&mut self) {
+        let seen = pi_store::statusline::read_text();
+        let at = seen.as_ref().map(|(_, at)| *at);
+        if at == self.ui.statusline_at {
+            return;
+        }
+        self.ui.statusline_at = at;
+        // No file asks for the built-in default: `reset` has to be able to
+        // take a layout away as well as put one there.
+        let Some((text, _)) = seen else {
+            self.ui.layout = pi_store::statusline::Layout::default();
+            return;
+        };
+        match pi_store::statusline::parse(&text) {
+            Ok(layout) => self.ui.layout = layout,
+            Err(why) => {
+                self.ui.layout = pi_store::statusline::Layout::default();
+                self.notice(format!("statusline set aside: {why}"));
+            }
+        }
     }
 
     // The catalog's answer, when one has come: a poll on a channel, so it costs
@@ -736,9 +784,15 @@ impl Tui {
             if looked.elapsed() >= std::time::Duration::from_secs(1) {
                 looked = std::time::Instant::now();
                 self.refresh_files();
+                // Two `git` calls: only for a layout that draws the checkout.
+                self.ui.project = match self.ui.layout.uses(pi_store::statusline::Field::Project) {
+                    true => statusline::project_of(self.core.lane().root()),
+                    false => None,
+                };
+                self.reload_statusline();
+                self.keep_last_readings();
             }
             self.refresh_tabs();
-            self.bar.poke(self.core.lane());
             let executions = self.drivers.background();
             // Taken down first, or the copy would put them back up.
             for question in std::mem::take(&mut self.ui.answered) {
@@ -795,7 +849,6 @@ impl Tui {
                 origin = from;
                 wake
             } else if !host_waiting || running {
-                let bar_due = self.bar.due().map(tokio::time::Instant::from_std);
                 // A character held off the list shows in it once no pair took it back.
                 let held = self.ui.held().map(tokio::time::Instant::from_std);
                 // Only while the lane is free: a prompt due under a run would
@@ -818,6 +871,10 @@ impl Tui {
                         self.land_removal(removed);
                         Wake::Nothing
                     }
+                    Some((key, said)) = self.ui.scripts.rx.as_mut().unwrap().recv() => {
+                        self.ui.scripts.land(key, said);
+                        Wake::Nothing
+                    }
                     _ = tokio::time::sleep_until(tokio::time::Instant::from_std(
                         looked + std::time::Duration::from_secs(1)
                     )) => Wake::Nothing,
@@ -828,14 +885,6 @@ impl Tui {
                         self.ui.spinner += 1;
                         Wake::Nothing
                     }
-                    Some(out) = self.bar.rx.recv() => {
-                        if let Some(why) = self.bar.land(out, &mut self.ui.layout) {
-                            self.notice(why);
-                        }
-                        Wake::Nothing
-                    }
-                    _ = tokio::time::sleep_until(bar_due.unwrap_or_else(tokio::time::Instant::now)),
-                        if bar_due.is_some() => Wake::Nothing,
                     _ = tokio::time::sleep_until(held.unwrap_or_else(tokio::time::Instant::now)),
                         if held.is_some() => Wake::Nothing,
                     // Something was left, cancelled or finished: look again.

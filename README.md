@@ -105,8 +105,8 @@ You do not need to restart pi after a settings change.
 If the file does not parse, pi reports it once and keeps the old configuration.
 
 `PI_HOME` moves `~/.pi`. Sessions, tools, skills, memory and pasted images all
-live under it; `~/.pi/bar.rs` is a cargo script that lays out the bar, and
-`/status` prints the session's paths and spend.
+live under it; `~/.pi/statusline.json` is the layout of the row above and
+under the input line, and `/status` prints the session's paths and spend.
 
 ## Develop
 

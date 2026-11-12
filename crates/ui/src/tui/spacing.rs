@@ -9,7 +9,6 @@ pub(super) enum Block {
     Relayed,
     Tools,
     Prose,
-    Status,
     Other,
 }
 
@@ -33,18 +32,17 @@ impl Spacing {
     pub(super) fn push(&mut self, next: Block) -> bool {
         let gap = match next {
             Block::PromptContinuation => false,
-            // A prompt and a run's own report both stand apart from what
-            // follows them, as they do from what precedes them.
+            // A prompt stands apart from what follows it, as it does from
+            // what precedes it.
             _ if matches!(
                 self.previous,
-                Some(Block::Prompt | Block::PromptContinuation | Block::Status)
+                Some(Block::Prompt | Block::PromptContinuation)
             ) =>
             {
                 true
             }
             Block::Prompt => self.has_turn,
             Block::Prose => matches!(self.previous, Some(Block::Tools)),
-            Block::Status => self.previous.is_some(),
             Block::Tools | Block::Relayed | Block::Other => false,
         };
         self.has_turn |= matches!(next, Block::Prompt | Block::Relayed);

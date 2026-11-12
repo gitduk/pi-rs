@@ -21,9 +21,9 @@ pub enum Segment {
     Worktree,
 }
 
-/// Which parts the status line shows: one list, drawn while a run works and
-/// kept under its answer once it ends. A part with nothing to say drops out,
-/// which is how one list serves both.
+/// Which parts the status line shows, while a run works. A part with nothing
+/// to say drops out; the figures of the run that last ended stay readable
+/// from the statusline, which is where they outlive it.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(transparent)]
 pub struct Parts(pub Vec<Segment>);

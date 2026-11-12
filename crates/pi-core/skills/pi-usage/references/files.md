@@ -16,7 +16,9 @@
 | `~/.pi/tools/.env`                       | initial environment values for scripts, mode `0600` |
 | `.pi/tools/`                             | a project's script tools                   |
 | `~/.pi/images/`                          | images pasted with `ctrl+v`                |
-| `~/.pi/bar.rs`                           | a cargo script that lays out the bar       |
+| `~/.pi/statusline.json`                  | the layout of the statusline rows          |
+| `~/.pi/statusline.d/`                    | named scripts the layout may draw a value from |
+| `~/.pi/statusline.last.json`             | the last run's readings, so they survive a restart |
 | `~/.pi/sessions/<project>/<session>/`    | the transcript and `journal.jsonl`         |
 
 At startup, pi deletes sessions with no activity for 90 days.

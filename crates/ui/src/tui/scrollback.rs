@@ -650,12 +650,10 @@ pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
             );
             Some(rows)
         }
-        // Machine prose, not the user's line: muted, under the note mark
-        // rather than the prompt sigil.
-        LogEntry::Note { note, .. } => Some(Row::note_lines(note)),
+        // Neither is drawn: a note is the model's, a tally the statusline's.
+        LogEntry::Note { .. } | LogEntry::Tally { .. } => None,
         LogEntry::Plain { text, .. } => Some(Row::notice_lines(text, paint)),
         LogEntry::Notice { text, .. } => Some(Row::report_lines(text, paint)),
-        LogEntry::Tally { text, .. } => Some(Row::tally_lines(text, paint)),
         LogEntry::Tool {
             result: r,
             preview,

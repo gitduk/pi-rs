@@ -654,7 +654,7 @@ impl Tui {
 
         let ok = out.is_ok();
         // Non-model tasks have their ending in the operation output. The
-        // streamed model run still closes its own live rows and tally here.
+        // streamed model run still closes its own live rows here.
         self.close_run(
             lane,
             if was_turn {
@@ -662,14 +662,13 @@ impl Tui {
             } else {
                 Ok(Default::default())
             },
-            was_turn,
         );
         if lane == self.core.lanes.front() {
             if unsend && let Some(id) = self.core.lane().last_ask() {
                 self.rewind_turn(id);
             }
         } else {
-            // Out of sight: the lane says so in the bar until someone looks,
+            // Out of sight: the lane says so in the statusline until someone looks,
             // and a prompt asked back is taken back then.
             self.core.lanes.at_mut(lane).end(ok, unsend);
         }
@@ -703,39 +702,24 @@ impl Tui {
     }
 
     // Draw the end of a run into its lane's view, on screen or not.
-    pub(super) fn close_run(&mut self, lane: usize, out: RunResult, was_turn: bool) {
-        let on = self.core.lanes.at_mut(lane);
-        let view = view_at(&mut self.views, on.token());
+    pub(super) fn close_run(&mut self, lane: usize, out: RunResult) {
+        let token = self.core.lanes[lane].token();
+        let view = view_at(&mut self.views, token);
         self.ui.close(view);
         // A cancelled run's calls got no `ToolEnd`; their animated rows
         // need to reach scrollback before the next flush freezes them.
         self.ui.abandon_tools(view);
-        // Only `Done` keeps a turn's status line; a turn ending otherwise
-        // keeps it here, read before the clock stops.
-        let parts = match was_turn {
-            true => crate::status::parts(&self.ui.status, &super::view::snapshot(on, view), false),
-            false => Vec::new(),
-        };
         view.state.work = None;
         match out {
             Ok(_) => {}
-            Err(error) if error.is_cancelled() && parts.is_empty() => {
+            Err(error) if error.is_cancelled() => {
                 let stopped = Line::from(self.ui.paint.span(&self.ui.paint.theme.muted, "stopped"));
                 self.ui.say(view, stopped);
-            }
-            Err(error) if error.is_cancelled() => {
-                let mut parts = parts;
-                parts.insert(0, "stopped".to_string());
-                let line = crate::status::settled(&parts);
-                self.ui.say_tally(on, view, &line);
             }
             Err(e) => {
                 let mark = self.ui.paint.span(&self.ui.paint.theme.status.err, "error");
                 let rest = Span::from(format!(" {e}"));
                 self.ui.say(view, Line::from(vec![mark, rest]));
-                if !parts.is_empty() {
-                    self.ui.say_tally(on, view, &crate::status::settled(&parts));
-                }
             }
         }
     }

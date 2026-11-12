@@ -49,7 +49,7 @@ While a model reply is generating, completed background results and additional
 messages you type wait for that reply to finish. After its tool calls complete,
 they enter the next model request in the same run. A reply with no tool calls
 also continues when messages are waiting. Generation is never interrupted.
-Waiting messages show under the status line, and `up` takes them back. Typed
+Waiting messages show in the row over the input line, and `up` takes them back. Typed
 messages use a separate queue, so commands waiting for the run to end do not
 hold them back. Remote inputs continue to wait for their own run.
 

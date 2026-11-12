@@ -33,8 +33,6 @@ pub struct Snapshot {
     /// `None` until one turn of the run has streamed anything.
     pub speed: Option<f64>,
     pub compactions: usize,
-    /// The run had to resend smaller than its estimate allowed.
-    pub refit: bool,
     pub queued: usize,
     /// The model as its endpoint names it, as a line draws it.
     pub model_name: String,
@@ -65,6 +63,11 @@ pub struct Tally {
     // The rate this run is priced at, pinned at seed: costed at its own
     // model's rate regardless of what `/model` does meanwhile.
     pricing: Pricing,
+    // What the run that last ended reported, and whether this one has said
+    // anything yet: a status line reads the run in flight, or the one that
+    // last ended.
+    ended: pi_store::statusline::Last,
+    reported: bool,
 }
 
 impl Tally {
@@ -72,8 +75,29 @@ impl Tally {
     /// is answered at once, so a turn that began on one model and ends after a
     /// switch is still costed at what the model that ran it charges.
     pub fn seed(&mut self, pricing: Pricing) {
-        *self = Self::default();
-        self.pricing = pricing;
+        let run = self.run_spend();
+        let ended = pi_store::statusline::Last {
+            cached: cached(&run.usage),
+            cost: run.cost,
+            ctx: self.ctx,
+        };
+        // A run that reported nothing — a `!`, a compaction — leaves the
+        // readings of the one before it standing.
+        let ended = match self.reported {
+            true => ended,
+            false => self.ended,
+        };
+        *self = Self {
+            pricing,
+            ended,
+            ..Self::default()
+        };
+    }
+
+    /// Take readings read off a saved session: what the tests and a resumed
+    /// screen need to say where the last run left off.
+    pub fn prime(&mut self, ended: pi_store::statusline::Last) {
+        self.ended = ended;
     }
 
     /// State the rate from outside a run: a surface that reads a receiver of
@@ -88,10 +112,14 @@ impl Tally {
         match event {
             // A retry sends a second one for the same turn: the count it
             // carries replaces the abandoned attempt's rather than joining it.
-            agent::Event::Usage(usage) => self.turn = *usage,
+            agent::Event::Usage(usage) => {
+                self.reported = true;
+                self.turn = *usage;
+            }
             agent::Event::TurnEnd {
                 usage, generating, ..
             } => {
+                self.reported = true;
                 self.settled.add(usage, self.pricing.cost(usage));
                 self.turn = Usage::default();
                 if let Some(took) = generating {
@@ -99,7 +127,10 @@ impl Tally {
                     self.generated.1 += *took;
                 }
             }
-            agent::Event::Context { used, window } => self.ctx = Some((*used, *window)),
+            agent::Event::Context { used, window } => {
+                self.reported = true;
+                self.ctx = Some((*used, *window));
+            }
             agent::Event::Compacted(report) => {
                 self.compactions += 1;
                 self.compacted = Some(*report);
@@ -117,6 +148,7 @@ impl Tally {
                 compactions,
                 ..
             } => {
+                self.reported = true;
                 self.settled = Totals {
                     usage: *usage,
                     cost: self.pricing.cost(usage),
@@ -142,16 +174,25 @@ impl Tally {
         queued: usize,
     ) -> Snapshot {
         let run = self.run_spend();
+        // A run's first request reports only when it lands; until this run
+        // says anything, the line keeps what the one before it said.
+        let reading = match self.reported {
+            true => pi_store::statusline::Last {
+                cached: cached(&run.usage),
+                cost: run.cost,
+                ctx: self.ctx,
+            },
+            false => self.ended,
+        };
         Snapshot {
             elapsed,
             input: run.usage.input,
             output: run.usage.output,
-            cached: cached(&run.usage),
-            cost: run.cost,
-            ctx: self.ctx,
+            cached: reading.cached,
+            cost: reading.cost,
+            ctx: reading.ctx,
             speed: self.speed(),
             compactions: self.compactions,
-            refit: !self.refits.is_empty(),
             queued,
             model_name: model_name.to_string(),
             worktree: worktree.map(str::to_string),

@@ -1298,7 +1298,6 @@ mod tests {
             ),
             0,
         );
-        opens_as_in_place(Row::note_lines("first\nsecond\nthird").remove(0), 0);
     }
 
     // Every step is visible and answers only to its own heading.

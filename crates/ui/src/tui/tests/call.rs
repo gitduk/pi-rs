@@ -181,8 +181,6 @@ fn a_wrapped_pending_batch_tags_every_row_it_takes() {
     let mut ui = test_ui(40, 24);
     let (_dir, mut lane) = a_running_lane();
     let mut view = View::default();
-    // A run under way: its clock gives the status line something to say.
-    view.state.work = a_turn(false);
 
     ui.on_event(
         &mut lane,
@@ -224,7 +222,7 @@ fn a_wrapped_pending_batch_tags_every_row_it_takes() {
         "both rows of the wrapped one, and the row after it: {tagged}"
     );
 
-    // The tail of the wrapped batch answers; the status line after it does not.
+    // The tail of the wrapped batch answers; the rows after it do not.
     ui.key(
         &lane,
         &mut view,
@@ -246,18 +244,6 @@ fn a_wrapped_pending_batch_tags_every_row_it_takes() {
         false,
     );
     assert!(ui.live_tools_shown);
-    ui.flush(&lane, &mut view);
-    let last = ui.row_targets.len() - 1;
-    ui.key(
-        &lane,
-        &mut view,
-        mouse_event(
-            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            last as u16,
-        ),
-        false,
-    );
-    assert!(ui.live_tools_shown, "the status line is no click target");
 }
 
 // The same hand-over as a call starting under a row already there — why
@@ -312,7 +298,7 @@ fn a_modifying_call_keeps_its_line() {
     ui.flush(&lane, &mut view);
 
     assert_eq!(live_pending_rows(&ui), 1, "the edit holds a row of its own");
-    let (live, _, _) = ui.live(&lane, &view, true, std::time::Instant::now());
+    let (live, _, _) = ui.live(&view, true, std::time::Instant::now());
     assert!(
         plain(&live[0]).contains("edit b.rs"),
         "and that row is the edit's: {:?}",
@@ -358,7 +344,7 @@ fn a_click_opens_what_a_running_call_printed() {
         },
     );
     ui.flush(&lane, &mut view);
-    let (closed, _, _) = ui.live(&lane, &view, false, std::time::Instant::now());
+    let (closed, _, _) = ui.live(&view, false, std::time::Instant::now());
     assert_eq!(closed.len(), 1, "one line while closed");
 
     ui.key(
@@ -371,7 +357,7 @@ fn a_click_opens_what_a_running_call_printed() {
         false,
     );
     ui.flush(&lane, &mut view);
-    let (open, _, _) = ui.live(&lane, &view, false, std::time::Instant::now());
+    let (open, _, _) = ui.live(&view, false, std::time::Instant::now());
     assert!(open.len() > 1, "the printed lines open under it");
     assert!(
         open.iter().any(|l| plain(l).contains("more")),
@@ -481,7 +467,7 @@ fn a_failing_call_never_joins_the_row() {
     // The row is back to what it keeps, and the ✗ holds the line its own
     // row will take.
     assert_eq!(live_pending_rows(&ui), 1, "the ✗ keeps a line here");
-    let (live, _, _) = ui.live(&lane, &view, true, std::time::Instant::now());
+    let (live, _, _) = ui.live(&view, true, std::time::Instant::now());
     assert_eq!(
         plain(&live[0]),
         format!("{} read b.rs", icons::FAIL_MARK),
@@ -625,31 +611,6 @@ fn a_stopped_tool_call_is_silenced_in_tui() {
     // The rebuild filter drops the stopped call's closing entry.
     let stopped_entry = &session.entries()[2];
     assert!(crate::tui::scrollback::f_entry(stopped_entry, &tui.ui.paint).is_none());
-}
-
-// The live region tracks the turn, not the clock: one field for both would
-// force every ending path to reset the clock or leave the status line stuck.
-#[test]
-fn the_live_region_ends_with_the_turn_and_not_with_the_clock() {
-    let ui = test_ui(80, 24);
-    let (_dir, mut lane) = a_running_lane();
-    let mut view = View::default();
-    view.state.work = a_turn(false);
-    // Nothing else is live here, so the status line is the only row.
-    assert!(
-        !ui.live(&lane, &view, false, std::time::Instant::now())
-            .0
-            .is_empty(),
-        "a running lane draws the status line"
-    );
-
-    lane.finish();
-    assert!(
-        ui.live(&lane, &view, false, std::time::Instant::now())
-            .0
-            .is_empty(),
-        "the clock is still set; the turn is what says the run is over"
-    );
 }
 
 // The live rows the frame tagged as the calls in flight: what the surface

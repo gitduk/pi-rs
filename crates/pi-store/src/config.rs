@@ -62,7 +62,7 @@ pub struct Config {
     /// The SGR codes behind every colour the terminal uses.
     #[serde(default)]
     pub theme: crate::theme::Theme,
-    /// Which parts the status line under the answer shows, running or done.
+    /// Which figures the one-shot renderer prints when a run ends.
     #[serde(default)]
     pub status: crate::status::Parts,
     /// Vim keys: on unless a file turns them off.

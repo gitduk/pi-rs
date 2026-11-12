@@ -18,14 +18,12 @@ use pi_store::icons;
 
 mod banner;
 mod code;
-mod note;
 mod relayed;
 mod result;
 mod steps;
 
 use banner::Banner;
 use code::{Block, Code};
-use note::Note;
 use relayed::Relayed;
 use result::ToolOut;
 use steps::Group;
@@ -213,10 +211,7 @@ enum Kind {
         times: usize,
         // Drawn only, never filed: what a tidy takes.
         aside: bool,
-        // A run's own tally: it belongs to the status line it replaces.
-        tally: bool,
     },
-    Note(Note),
     Banner(Banner),
     // An empty group marks a removed row.
     Lines(Vec<(Line<'static>, Option<Line<'static>>)>),
@@ -330,7 +325,6 @@ impl Row {
             Kind::Steps(g) => Some(g),
             Kind::Result(r) => Some(r),
             Kind::Relayed(r) => Some(r),
-            Kind::Note(n) => Some(n),
             _ => None,
         }
     }
@@ -340,19 +334,17 @@ impl Row {
             Kind::Steps(g) => Some(g),
             Kind::Result(r) => Some(r),
             Kind::Relayed(r) => Some(r),
-            Kind::Note(n) => Some(n),
             _ => None,
         }
     }
 
-    /// Something only the screen ever knew (a tally line, a lane's
-    /// answer, a warning), in the surface's own muted voice.
+    /// Something only the screen ever knew (a lane's answer, a warning, a
+    /// command's output), in the surface's own muted voice.
     pub fn notice(line: impl Into<Line<'static>>) -> Self {
         Self::new(Kind::Notice {
             text: line.into(),
             times: 1,
             aside: false,
-            tally: false,
         })
     }
 
@@ -362,7 +354,6 @@ impl Row {
             text: line.into(),
             times: 1,
             aside: true,
-            tally: false,
         })
     }
 
@@ -429,35 +420,6 @@ impl Row {
         self
     }
 
-    /// `notice_lines` for a run's tally, whose figures carry their own
-    /// colours. Only a line written as a tally is read as one: prose that
-    /// happens to end in a figure keeps its muted appearance.
-    pub fn tally_lines(text: &str, paint: &Paint) -> Vec<Self> {
-        text.lines()
-            .map(|line| crate::status::painted(line, paint))
-            .map(Self::tally)
-            .collect()
-    }
-
-    /// A run's tally line: it keeps the gap the running status line had.
-    fn tally(line: Line<'static>) -> Self {
-        Self::new(Kind::Notice {
-            text: line,
-            times: 1,
-            aside: false,
-            tally: true,
-        })
-    }
-
-    /// A note — what the model is told, shown as it reads it — as one row,
-    /// or none for a note with no lines.
-    pub fn note_lines(text: &str) -> Vec<Self> {
-        match text.lines().next() {
-            Some(_) => vec![Self::new(Kind::Note(Note::new(text)))],
-            None => Vec::new(),
-        }
-    }
-
     /// Fold a repeat into this row, if it is the same notice: the scrollback
     /// then shows `line ×2` where a second row would have gone.
     ///
@@ -466,24 +428,13 @@ impl Row {
     pub fn repeated(&mut self, row: &Self) -> bool {
         match (&mut self.0, &row.0) {
             (
-                Kind::Notice {
-                    text,
-                    times,
-                    aside,
-                    tally,
-                },
+                Kind::Notice { text, times, aside },
                 Kind::Notice {
                     text: next,
                     times: more,
                     aside: next_aside,
-                    tally: next_tally,
                 },
-            ) if text == next
-                && aside == next_aside
-                && tally == next_tally
-                && self.2 == row.2
-                && text.width() > 0 =>
-            {
+            ) if text == next && aside == next_aside && self.2 == row.2 && text.width() > 0 => {
                 *times += more;
                 self.1.clear();
                 true
@@ -782,10 +733,6 @@ impl Row {
                 r.hover(hovered.is_some());
                 false
             }
-            Kind::Note(n) => {
-                n.hover(hovered.is_some());
-                false
-            }
             _ => false,
         };
         if reshaped {
@@ -988,7 +935,6 @@ impl Row {
             Kind::Lines(lines) => lines.len(),
             Kind::Result(r) => r.len(),
             Kind::Relayed(r) => r.len(),
-            Kind::Note(n) => n.len(),
             Kind::Steps(g) => g.len(),
         }
     }
@@ -1107,7 +1053,6 @@ impl Row {
             Kind::Banner(banner) => (banner.line(i, paint, width), None),
             Kind::Lines(lines) => lines[i].clone(),
             Kind::CodeLine(line) => (line.clone(), Some(Line::from(CODE_INDENT))),
-            Kind::Note(n) => n.line(i, paint, width),
             Kind::Code(c) => (c.line(paint), None),
             Kind::Block(b) => (b.line(paint, width), None),
             Kind::Notice { text, times, .. } if *times == 1 => (text.clone(), None),
@@ -1227,7 +1172,6 @@ impl Row {
             Kind::Steps(group) if group.has_tools() => Block::Tools,
             Kind::Answer(line, _) if !line.spans.is_empty() || self.2.is_some() => Block::Prose,
             Kind::CodeLine(_) | Kind::Code(_) | Kind::Block(_) => Block::Prose,
-            Kind::Notice { tally: true, .. } => Block::Status,
             _ => Block::Other,
         }
     }
@@ -1323,33 +1267,5 @@ mod height_tests {
         assert_eq!(row.line_height(0, &paint, 2), 3, "abcdef wraps to three");
         assert_eq!(row.line_height(1, &paint, 2), 1);
         assert_eq!(row.line_height(0, &paint, 80), 1);
-    }
-
-    // Closed, a note is its first line and a count of the rest; a click
-    // there opens it whole.
-    #[test]
-    fn a_note_shows_its_first_line_until_opened() {
-        let paint = Paint::new(false);
-        let mut row = Row::note_lines("head\none\ntwo").remove(0);
-        assert_eq!(row.len(), 1);
-        let text = |row: &Row, i| row.line(i, &paint, 80).0.to_string();
-        assert!(text(&row, 0).starts_with("head"), "{}", text(&row, 0));
-        assert_eq!(row.click_line(0, 80), Some(0));
-        assert!(row.toggle_at(0, &paint, 80));
-        assert_eq!(row.len(), 3);
-        assert_eq!(text(&row, 0), "head");
-        assert_eq!(text(&row, 2), "two");
-        assert_eq!(row.click_line(1, 80), None);
-
-        let lone = Row::note_lines("just this").remove(0);
-        assert_eq!(text(&lone, 0), "just this");
-        assert_eq!(lone.click_line(0, 80), None);
-
-        let long = Row::note_lines(&"word ".repeat(40)).remove(0);
-        assert_eq!(long.click_line(0, 40), Some(0), "cut, so it opens");
-        let page = long.opening(0, &paint).unwrap();
-        assert_eq!(page.len(), 1);
-        let head = page[0].line.to_string();
-        assert!(head.ends_with("word "), "uncut: {head}");
     }
 }

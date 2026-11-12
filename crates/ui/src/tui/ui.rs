@@ -22,7 +22,6 @@ use pi_core::core::resolve::Resolved;
 use pi_core::input::commands::{Choice, Command};
 use pi_store::icons;
 use pi_store::keys::Keys;
-use pi_store::status::{Segment, default_parts};
 use pi_store::theme::Style as ThemeStyle;
 
 pub(super) struct Ui {
@@ -93,16 +92,26 @@ pub(super) struct Ui {
     pub(super) vim: Option<pi_store::keys::Mode>,
     pub(super) insert_cursor: pi_store::config::Cursor,
     pub(super) normal_cursor: pi_store::config::Cursor,
-    // The segments the status line shows, in the order the config named them.
-    pub(super) status: Vec<Segment>,
     // What the bar says, in ring order. Rebuilt before every draw.
     pub(super) tabs: Vec<Tab>,
     // A note answering the last keypress, and when it landed. It stands
-    // where the layout puts it for `flash_for` and then goes — see `bar_lines`.
+    // where the layout puts it for `flash_for` and then goes — see `statusline_lines`.
     pub(super) flash: Option<(String, Instant)>,
+    // The checkout as the `project` field draws it, read once a second and
+    // nowhere else: two `git` calls per frame is not a bar's price.
+    pub(super) project: Option<pi_store::statusline::Project>,
+    // The readings last written for the next pi: what a compare reads, so the
+    // file is touched only when they move.
+    pub(super) readings: Option<pi_store::statusline::Last>,
+    // What each script last said: started from the row, read by the row.
+    pub(super) scripts: super::statusline::Scripts,
     // Where the last frame drew the flash: its row in the bar region, its
     // columns, and its page action. A pointer there holds it.
-    pub(super) flash_hit: Option<(usize, super::bar::FlashHit)>,
+    pub(super) flash_hit: Option<(
+        pi_store::statusline::Place,
+        usize,
+        super::statusline::FlashHit,
+    )>,
     pub(super) more_hits: Vec<ratatui::layout::Rect>,
     // Rows a click opens a page from without a hint of their own: an open
     // execution's `N more` line.
@@ -113,7 +122,10 @@ pub(super) struct Ui {
     // Each pasted image's file, `[Image #n …]` on the line naming `n - 1`.
     pub(super) images: Vec<std::path::PathBuf>,
     // What the bar's rows hold: the script's last answer, or the default.
-    pub(super) layout: pi_store::bar::Layout,
+    pub(super) layout: pi_store::statusline::Layout,
+    // When the file that layout came from last changed, so a second look
+    // costs a `stat` and nothing else.
+    pub(super) statusline_at: Option<std::time::SystemTime>,
     // The scrollback row and line under the mouse, when a click there
     // opens or closes something. Read off `pointer` and the last frame.
     pub(super) hovered_scrollback: Option<(usize, usize)>,
@@ -273,9 +285,12 @@ impl Ui {
             insert_cursor: pi_store::config::Cursor::Default,
             normal_cursor: pi_store::config::Cursor::Default,
             spinner: 0,
-            status: default_parts(),
             tabs: Vec::new(),
             flash: None,
+            project: None,
+            readings: None,
+            scripts: super::statusline::Scripts::new(),
+            statusline_at: None,
             flash_hit: None,
             more_hits: Vec::new(),
             page_hits: Vec::new(),
@@ -430,7 +445,6 @@ impl Ui {
         }
         self.set_vim(&core.config().vim);
         // And the segment lists, copied in at startup.
-        self.status = core.config().status.to_vec();
         self.refresh_model_page(core, view);
     }
 }

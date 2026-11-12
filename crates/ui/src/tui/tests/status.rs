@@ -3,16 +3,14 @@ use crate::tui::screen::plain;
 
 use super::harness::*;
 
-fn facts(model: &str) -> crate::tui::bar::Facts {
-    crate::tui::bar::Facts {
+fn facts(model: &str) -> crate::tui::statusline::Facts {
+    crate::tui::statusline::Facts {
         model: model.into(),
-        identity: format!("provider/{model}"),
         effort: llm::request::Effort::Off,
         tier: pi_store::args::TierArg::Exec,
+        may_run_scripts: true,
         running: false,
-        root: std::path::PathBuf::new(),
-        worktree: None,
-        ctx: None,
+        state: "idle".into(),
         spent: 0.0,
         alerts: Vec::new(),
         update: None,
@@ -26,94 +24,23 @@ fn facts(model: &str) -> crate::tui::bar::Facts {
 fn a_flash_stands_beside_the_bar_rather_than_over_it() {
     let mut ui = test_ui(60, 24);
     ui.flash("nothing to rewind to");
-    let row = plain(&ui.bar_lines(&facts("deepseek"), &Default::default(), 60)[0].line);
+    let row = plain(
+        &ui.statusline_lines(&facts("deepseek"), &Default::default(), 60)
+            .1[0]
+            .line,
+    );
     assert!(row.starts_with("deepseek"), "{row:?}");
     assert!(row.ends_with("nothing to rewind to"), "{row:?}");
     assert_eq!(row.chars().count(), 60);
 
     // Too narrow for both: the flash keeps half the row, cut with its `…`.
-    let row =
-        plain(&ui.bar_lines(&facts("a-rather-long-model-name"), &Default::default(), 30)[0].line);
+    let row = plain(
+        &ui.statusline_lines(&facts("a-rather-long-model-name"), &Default::default(), 30)
+            .1[0]
+            .line,
+    );
     assert!(row.ends_with('…'), "{row:?}");
     assert!(pi_store::text::width(&row) <= 30, "{row:?}");
-}
-
-// The reason (often a whole error body) lands as a row of its own; any
-// other event ends the wait.
-#[test]
-fn a_retry_waits_on_the_status_line_and_leaves_its_reason_in_a_row() {
-    let mut ui = test_ui(80, 24);
-    let (_dir, mut lane) = a_running_lane();
-    let mut view = View::default();
-    view.state.work = a_turn(false);
-    ui.on_event(
-        &mut lane,
-        &mut view,
-        agent::Event::Retrying {
-            attempt: 2,
-            delay_ms: 3000,
-            reason: "502 Bad Gateway: upstream connect error".into(),
-        },
-    );
-    let until = view
-        .state
-        .work
-        .as_ref()
-        .unwrap()
-        .retry
-        .as_ref()
-        .unwrap()
-        .until;
-    for (remaining_ms, expected) in [
-        (3000, Some("retry 2 in ")),
-        (1750, Some("retry 2 in ")),
-        (500, Some("retry 2 in ")),
-        (0, None),
-    ] {
-        let now = until - std::time::Duration::from_millis(remaining_ms);
-        let (live, _, _) = ui.live(&lane, &view, false, now);
-        let status = plain(live.last().expect("a status line"));
-        match expected {
-            Some(text) => assert!(status.contains(text), "{status:?}"),
-            None => assert!(!status.contains("retry"), "{status:?}"),
-        }
-    }
-    let (live, _, _) = ui.live(
-        &lane,
-        &view,
-        false,
-        until + std::time::Duration::from_secs(1),
-    );
-    assert!(!plain(live.last().unwrap()).contains("retry"));
-    let rows = drawn_rows(&view);
-    assert_eq!(rows.len(), 1, "{rows:?}");
-    assert!(rows[0].ends_with("502 Bad Gateway: upstream connect error"));
-
-    ui.on_event(&mut lane, &mut view, agent::Event::TextDelta("ok".into()));
-    assert!(view.state.work.as_ref().unwrap().retry.is_none());
-    let (live, _, _) = ui.live(
-        &lane,
-        &view,
-        false,
-        until - std::time::Duration::from_secs(1),
-    );
-    let status = plain(live.last().expect("a status line"));
-    assert!(!status.contains("retry"), "{status:?}");
-}
-
-// A running line with nothing to say goes, rather than leaving a blank row
-// between the stream and the bar.
-#[test]
-fn a_status_line_with_nothing_to_say_draws_no_row() {
-    let mut ui = test_ui(80, 24);
-    let (_dir, lane) = a_running_lane();
-    let mut view = View::default();
-    view.state.work = a_turn(false);
-    let (shown, _, _) = ui.live(&lane, &view, false, std::time::Instant::now());
-    assert_eq!(shown.len(), 1, "the clock has something to say");
-    ui.status = Vec::new();
-    let (gone, _, _) = ui.live(&lane, &view, false, std::time::Instant::now());
-    assert!(gone.is_empty(), "{gone:?}");
 }
 
 // A lone line said again folds into the row before it; a block, a QR's
@@ -129,14 +56,4 @@ fn only_a_lone_line_folds_into_the_one_before() {
     let mut view = View::default();
     ui.say(&mut view, "██  ██\n██  ██\n\n\n██  ██");
     assert_eq!(drawn_rows(&view).len(), 5);
-}
-
-// The line a run reports itself on is parted from what follows it, as it is
-// from what precedes it.
-#[test]
-fn a_block_after_the_status_line_keeps_its_blank_row() {
-    use crate::tui::spacing::{Block, Spacing};
-    let mut spacing = Spacing::default();
-    assert!(!spacing.push(Block::Status), "nothing above it");
-    assert!(spacing.push(Block::Relayed), "the next block stays apart");
 }

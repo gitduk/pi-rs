@@ -7,7 +7,6 @@ use pi_core::input::Builtin;
 use pi_core::input::commands::Choice;
 use pi_store::keys::Mode;
 use pi_store::listing::Listing;
-use pi_store::status::Segment;
 
 use super::harness::*;
 
@@ -75,7 +74,7 @@ async fn a_restart_confirmation_survives_redraw_and_resume_without_entering_mode
     tui.ui.tidy(view);
     tui.ui.flush(tui.core.lane(), view);
     let buf = tui.ui.screen.test_buffer();
-    assert!((0..tui.ui.regions.bar.y).any(|y| {
+    assert!((0..tui.ui.regions.statusline.y).any(|y| {
         (0..buf.area.width)
             .map(|x| buf[(x, y)].symbol())
             .collect::<String>()
@@ -350,42 +349,6 @@ async fn a_stopped_run_does_not_tell_the_model_a_request_was_cancelled() {
     );
 }
 
-// A stopped turn gets no `Done`, so its ending keeps the status line instead;
-// a `!` never had one to keep.
-#[tokio::test]
-async fn a_stopped_turn_keeps_its_status_line_and_a_stopped_bang_does_not() {
-    let dir = tempfile::tempdir().expect("a temp dir");
-    let last_row = |kind: crate::tui::run::Kind| {
-        let dir = dir.path().to_path_buf();
-        async move {
-            let mut tui = surface(&dir);
-            tui.ui.status = vec![Segment::Elapsed];
-            let token = tui.core.lanes[0].token();
-            view_at(&mut tui.views, token).state.work = a_turn(false);
-            tui.settle(crate::tui::run::Done {
-                request: pi_core::execution::Request::new(pi_core::driver::Origin::Typed, token),
-                kind,
-                ran: Some((
-                    agent::session::Session::new(),
-                    Err(agent::AgentError::Cancelled.into()),
-                )),
-            })
-            .await;
-            drawn_rows(view_at(&mut tui.views, token))
-                .pop()
-                .expect("a row for the ending")
-        }
-    };
-
-    let turn = last_row(crate::tui::run::Kind::Turn).await;
-    let bang = last_row(crate::tui::run::Kind::Bash { lines: Vec::new() }).await;
-    let figures = turn.strip_prefix("π ").expect("a settled status mark");
-    assert!(
-        figures.starts_with(bang.trim()) && figures.len() > bang.trim().len(),
-        "the turn says more than the bang: {turn:?} / {bang:?}"
-    );
-}
-
 // A flash is transient: it is not part of the transcript, and it is
 // dropped by the clock, not by whoever set it — who is long gone by then.
 #[test]
@@ -429,7 +392,10 @@ fn the_bar_keeps_its_row_when_a_flash_comes_and_goes() {
 
     ui.flush(&lane, &mut view);
     let quiet = ui.regions.history.height;
-    assert_eq!(ui.regions.bar.height, 1, "the bar is a row of its own");
+    assert_eq!(
+        ui.regions.statusline.height, 1,
+        "the bar is a row of its own"
+    );
 
     ui.flash("the only checkout there is");
     ui.flush(&lane, &mut view);
@@ -878,18 +844,14 @@ async fn an_edited_project_file_reaches_the_surface_and_names_what_outranks_it()
     let dir = tempfile::tempdir().expect("a temp dir");
     std::fs::create_dir(dir.path().join(".pi")).unwrap();
     let mut tui = surface(dir.path());
-    assert!(!tui.ui.status.contains(&Segment::Model));
     // An empty user file of its own, so the reload never reads the real one.
     let user = dir.path().join("settings.toml");
     std::fs::write(&user, "").expect("an empty settings file");
     tui.core.pinned.config = Some(user.display().to_string());
     tui.core.pinned.effort = Some(pi_store::args::EffortArg::High);
 
-    std::fs::write(
-        dir.path().join(".pi/settings.toml"),
-        "effort = \"low\"\nstatus = [\"model\"]\n",
-    )
-    .expect("the project file");
+    std::fs::write(dir.path().join(".pi/settings.toml"), "effort = \"low\"\n")
+        .expect("the project file");
     let said = tui.core.config_edited().expect("reloaded");
     assert!(
         said.iter()
@@ -897,7 +859,6 @@ async fn an_edited_project_file_reaches_the_surface_and_names_what_outranks_it()
         "{said:?}"
     );
     tui.land_lines(Listing::say(said));
-    assert_eq!(tui.ui.status, vec![Segment::Model]);
 }
 
 // File changes must not add transcript rows or repeat a refusal on every look.
@@ -916,11 +877,10 @@ fn a_saved_settings_file_lands_without_being_asked_and_a_broken_one_once() {
     view.state.work.as_mut().expect("a running turn").since =
         std::time::Instant::now() - std::time::Duration::from_secs(2);
     let before = drawn_rows(view);
-    std::fs::write(&file, "effort = \"high\"\nstatus = [\"elapsed\"]\n").expect("an edit");
+    std::fs::write(&file, "effort = \"high\"\n").expect("an edit");
     tui.refresh_files();
     let (said, _) = tui.ui.flash.as_ref().expect("the edit is taken up");
     assert!(said.starts_with("reloaded — "), "{said:?}");
-    assert_eq!(tui.ui.status, vec![Segment::Elapsed]);
     assert_eq!(
         tui.core.lane().agent().brief.effort,
         llm::request::Effort::High
@@ -932,7 +892,7 @@ fn a_saved_settings_file_lands_without_being_asked_and_a_broken_one_once() {
         before,
         "reload leaves the transcript alone"
     );
-    let bar = tui.ui.regions.bar;
+    let bar = tui.ui.regions.statusline;
     let buf = tui.ui.screen.test_buffer();
     let row = |y| {
         (0..buf.area.width)
@@ -942,10 +902,6 @@ fn a_saved_settings_file_lands_without_being_asked_and_a_broken_one_once() {
     assert!(
         row(bar.y).contains("reloaded"),
         "the bar carries the notice"
-    );
-    assert!(
-        (0..bar.y).any(|y| row(y).contains("2s")),
-        "the running status stays above the notice"
     );
 
     std::fs::write(&file, "effort = ").expect("a half-written file");
@@ -1698,55 +1654,13 @@ async fn leaving_with_a_command_preserves_its_stop_cause_on_resume() {
     }
 }
 
-// A row holds the colours it was made with, so a theme change has to make
-// it again: a screen half in the old theme and half in the new is the bug
-// patching the banner alone left behind.
-#[tokio::test]
-async fn a_new_theme_reaches_the_rows_already_on_the_screen() {
-    use std::sync::Arc;
-    let dir = tempfile::tempdir().expect("a checkout");
-    let mut tui = surface(dir.path());
-    let token = tui.core.lanes[0].token();
-    let mut session = agent::session::Session::default();
-    session.push_tally("3s · 1234 in · 567 out");
-    tui.core.lane_mut().return_session(session);
-    tui.core.lane_mut().finish();
-    tui.rebuild_front();
-    // The test screen paints without colour; this asks for the colours back.
-    tui.ui.paint = crate::render::Paint::new(true);
-
-    let fit =
-        |bg| crate::tui::following_terminal(&pi_store::theme::Theme::default(), Some(bg), None);
-    let wear =
-        |tui: &mut crate::tui::Tui, theme: pi_store::theme::Theme| -> Vec<ratatui::style::Style> {
-            let resolved = tui.core.lane().resolved().clone();
-            tui.ui
-                .set_theme(view_at(&mut tui.views, token), &resolved, Arc::new(theme));
-            let lane = tui.core.lane();
-            tui.ui.flush(lane, view_at(&mut tui.views, token));
-            let paint = crate::render::Paint::new(true);
-            let view = view_at(&mut tui.views, token);
-            (view.surface.scrollback.iter())
-                .map(|row| row.line(0, &paint, 80).0)
-                .flat_map(|line| line.spans)
-                .map(|span| span.style)
-                .collect()
-        };
-
-    let dark = wear(&mut tui, fit((0, 0, 0)));
-    assert!(!dark.is_empty(), "the row wears the theme it was made in");
-    let light = wear(&mut tui, fit((255, 255, 255)));
-    assert_ne!(dark, light, "the old rows kept the old theme");
-}
-
 // A line draws the model as its endpoint names it; the identity that
 // addresses the provider stays in the bar's input for a script that needs it.
 #[test]
 fn a_line_draws_the_models_name_and_the_input_keeps_its_identity() {
     let dir = tempfile::tempdir().expect("a checkout");
     let tui = surface(dir.path());
-    let facts = crate::tui::bar::Facts::of(tui.core.lane());
+    let facts = crate::tui::statusline::Facts::of(tui.core.lane(), None);
     assert_eq!(facts.model, "m", "the bar draws the endpoint's name");
-    assert_eq!(facts.identity, "local/m", "the identity still addresses it");
     assert_eq!(tui.core.lane().model(), "local/m", "/status names it whole");
 }

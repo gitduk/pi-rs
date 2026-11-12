@@ -1,44 +1,39 @@
-//! The bar under the input line: rows from the layout, or from the script
-//! at `~/.pi/bar.rs`, which the frame never waits on.
+//! The rows above and under the input line: the layout at
+//! `~/.pi/statusline.json`, whose scripts the frame never waits on.
 
-use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::Instant;
+use tokio::io::AsyncBufReadExt;
 
 use llm::request::Effort;
 use ratatui::layout::{Constraint, Layout as RowLayout, Rect};
 use ratatui::text::{Line, Span};
-use serde::Serialize;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+use super::view::Work;
 use super::{Mark, Ui, flash_for, screen};
 use pi_core::core::lane::Lane;
 use pi_core::core::meter::Snapshot;
 use pi_store::args::TierArg;
-use pi_store::bar::{self, Item, Layout, Look, Part, Tone};
 use pi_store::icons;
+use pi_store::statusline::{self, Field, Item, Look, Tone};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 const MUTED: Look = Look::Tone(Tone::Muted);
 // Room between the two sides of a row.
 const GAP: usize = 2;
-// A script asking for less would spend a process on every frame or two.
-const MIN_REFRESH: f64 = 0.5;
-// Retried: the cause may have passed, or the file been fixed.
-const RETRY: Duration = Duration::from_secs(5);
 
-/// What the bar reads off the lane in front, and what the script is told.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// What a statusline row reads off the lane in front.
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct Facts {
     /// The model as its endpoint names it: what a line draws.
     pub model: String,
-    /// The selection identity that addresses it, provider prefix included.
-    pub identity: String,
     pub effort: Effort,
     pub tier: TierArg,
+    /// Whether this run's ceiling lets a script run at all: an outside command
+    /// is the same power the `bash` tool asks for.
+    pub may_run_scripts: bool,
     pub running: bool,
-    pub root: PathBuf,
-    pub worktree: Option<String>,
-    /// Used against budget, in tokens, as the last turn left it.
-    pub ctx: Option<(usize, usize)>,
+    /// What the agent is doing, in the words a row draws: the `state` field.
+    pub state: String,
     /// What the session has spent, in dollars, as each call ends.
     pub spent: f64,
     /// What is wrong and stays so until it is fixed, drawn where a flash
@@ -51,20 +46,18 @@ pub(super) struct Facts {
 }
 
 impl Facts {
-    pub(super) fn of(lane: &Lane) -> Self {
+    pub(super) fn of(lane: &Lane, work: Option<&Work>) -> Self {
         Self {
             model: lane.model_name().to_string(),
-            identity: lane.model().to_string(),
             // A model that takes no effort thinks at no level the run sets.
             effort: match lane.agent().spec().accepts_effort {
                 true => lane.agent().brief.effort,
                 false => Effort::Off,
             },
             tier: lane.resolved().ceiling.into(),
+            may_run_scripts: pi_store::statusline::may_run_scripts(lane.resolved().ceiling),
             running: lane.is_running(),
-            root: lane.root().to_path_buf(),
-            worktree: lane.worktree().map(str::to_string),
-            ctx: lane.tally().ctx(),
+            state: state_of(work),
             spent: lane.spent().cost,
             alerts: [
                 lane.unsaved().map(|_| "unsaved"),
@@ -80,6 +73,58 @@ impl Facts {
     }
 }
 
+// The checkout as the `project` field draws it: the branch in front, and the
+// lines its worktree has changed against `HEAD`. Absent outside a repository.
+pub(super) fn project_of(root: &std::path::Path) -> Option<statusline::Project> {
+    let git = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .arg("--no-optional-locks")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let mut added = 0;
+    let mut removed = 0;
+    for line in git(&["diff", "--numstat", "HEAD"])
+        .unwrap_or_default()
+        .lines()
+    {
+        let mut cols = line.split('\t');
+        added += cols.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+        removed += cols.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+    }
+    Some(statusline::Project {
+        branch,
+        added,
+        removed,
+    })
+}
+
+// What the agent is doing, as a row says it: the run in flight's own word,
+// and `idle` between runs, so the part never goes blank.
+fn state_of(work: Option<&Work>) -> String {
+    let Some(work) = work else {
+        return "idle".to_string();
+    };
+    match work {
+        _ if matches!(work.doing, super::view::Doing::Compact) => "compacting".to_string(),
+        _ if work.stopping => "stopping".to_string(),
+        _ if let Some(retry) = &work.retry => {
+            format!(
+                "retry {} in {}",
+                retry.attempt,
+                llm::figures::elapsed(retry.wait)
+            )
+        }
+        _ => "working".to_string(),
+    }
+}
+
 // A part of a row before the row is fitted: the checkouts take whatever
 // room the rest leaves, so they are drawn last.
 enum Piece {
@@ -87,7 +132,7 @@ enum Piece {
     Tabs,
 }
 
-pub(super) struct BarRow {
+pub(super) struct StatuslineRow {
     // The spatial text used for selection. Drawing uses the regions below.
     pub(super) line: Line<'static>,
     pub(super) parts: [(Rect, Line<'static>); 2],
@@ -201,12 +246,12 @@ impl Ui {
     /// The bar's rows, one per layout line. The only place an expired flash
     /// is dropped: every frame passes through here. A flash under the
     /// pointer does not expire; its time starts over once the pointer leaves.
-    pub(super) fn bar_lines(
+    pub(super) fn statusline_lines(
         &mut self,
         facts: &Facts,
         snap: &Snapshot,
         width: usize,
-    ) -> Vec<BarRow> {
+    ) -> (Vec<StatuslineRow>, Vec<StatuslineRow>) {
         let held = self
             .pointer
             .is_some_and(|(col, row)| self.flash_at(col, row).is_some());
@@ -216,15 +261,31 @@ impl Ui {
             _ => {}
         }
         self.flash_hit = None;
-        let mut rows = Vec::new();
-        for (i, line) in self.layout.lines.iter().enumerate() {
+        // A script runs off the frame: started here, read back once it says
+        // something. What has not answered yet stands as its placeholder.
+        // A layout outlives the run that wrote it, and the ceiling does not:
+        // a command file may only run where `bash` itself would be offered.
+        self.scripts.start_due(&self.layout, facts.may_run_scripts);
+        let mut over = Vec::new();
+        let mut under = Vec::new();
+        for line in &self.layout.lines {
             let (row, hit) = self.bar_row(line, facts, snap, width);
-            if let Some(hit) = hit {
-                self.flash_hit = Some((i, hit));
+            match line.place {
+                statusline::Place::Top => {
+                    if let Some(hit) = hit {
+                        self.flash_hit = Some((line.place, over.len(), hit));
+                    }
+                    over.push(row);
+                }
+                statusline::Place::Bottom => {
+                    if let Some(hit) = hit {
+                        self.flash_hit = Some((line.place, under.len(), hit));
+                    }
+                    under.push(row);
+                }
             }
-            rows.push(row);
         }
-        rows
+        (over, under)
     }
 
     // The right side keeps up to half a row too narrow for both; the left
@@ -232,11 +293,11 @@ impl Ui {
     // holding a flash shown, and its page action's columns when present.
     fn bar_row(
         &self,
-        line: &bar::Line,
+        line: &statusline::Line,
         facts: &Facts,
         snap: &Snapshot,
         width: usize,
-    ) -> (BarRow, Option<FlashHit>) {
+    ) -> (StatuslineRow, Option<FlashHit>) {
         let left = self.pieces(&line.left, facts, snap);
         let right = self.pieces(&line.right, facts, snap);
         let sep = match &line.sep {
@@ -298,7 +359,7 @@ impl Ui {
             text.spans.extend(right_line.spans.clone());
         }
         (
-            BarRow {
+            StatuslineRow {
                 line: text,
                 parts: [(left_area, left_line), (right_text, right_line)],
             },
@@ -310,8 +371,8 @@ impl Ui {
         items
             .iter()
             .filter_map(|item| match item {
-                Item::Part(Part::Tabs) => self.tabs_piece(),
-                Item::Styled(s) if s.part == Part::Tabs => self.tabs_piece(),
+                Item::Field(Field::Tabs) => self.tabs_piece(),
+                Item::Styled(s) if s.field == Field::Tabs => self.tabs_piece(),
                 Item::Group(g) => self.group(g, facts, snap).map(Piece::Spans),
                 item => self.spans(item, facts, snap).map(Piece::Spans),
             })
@@ -329,8 +390,8 @@ impl Ui {
     // to say.
     fn spans(&self, item: &Item, facts: &Facts, snap: &Snapshot) -> Option<Vec<Span<'static>>> {
         let flash_slot = match item {
-            Item::Part(part) => *part == Part::Flash,
-            Item::Styled(s) => s.part == Part::Flash,
+            Item::Field(part) => *part == Field::Flash,
+            Item::Styled(s) => s.field == Field::Flash,
             _ => false,
         };
         if flash_slot && self.flash.is_none() && !facts.alerts.is_empty() {
@@ -338,16 +399,19 @@ impl Ui {
             return Some(vec![self.paint.span(&self.paint.theme.status.err, alerts)]);
         }
         let (text, look) = match item {
-            Item::Part(part @ Part::Status(_)) => {
-                let text = self.part(*part, facts, snap)?;
+            Item::Field(part @ Field::Status(_)) => {
+                let text = self.field(*part, facts, snap)?;
                 return Some(crate::status::painted(&text, &self.paint).spans);
             }
-            Item::Part(part) => (self.part(*part, facts, snap)?, &MUTED),
-            Item::Styled(s) => (self.part(s.part, facts, snap)?, &s.style),
+            Item::Field(Field::Project) => return self.project_spans(&MUTED),
+            Item::Field(part) => (self.field(*part, facts, snap)?, &MUTED),
+            Item::Styled(s) if s.field == Field::Project => return self.project_spans(&s.style),
+            Item::Styled(s) => (self.field(s.field, facts, snap)?, &s.style),
             Item::Text(t) => return self.text(t),
+            Item::Script(s) => (self.scripts.shown(s), &s.style),
             Item::Group(_) => return None,
         };
-        self.text(&bar::Text {
+        self.text(&statusline::Text {
             text,
             style: look.clone(),
         })
@@ -355,11 +419,16 @@ impl Ui {
 
     // A group goes whole when it holds parts and none of them had anything to
     // say: its labels would stand alone.
-    fn group(&self, g: &bar::Group, facts: &Facts, snap: &Snapshot) -> Option<Vec<Span<'static>>> {
+    fn group(
+        &self,
+        g: &statusline::Group,
+        facts: &Facts,
+        snap: &Snapshot,
+    ) -> Option<Vec<Span<'static>>> {
         let (mut spans, mut parts, mut said) = (Vec::new(), 0, 0);
         for item in &g.group {
             let got = self.spans(item, facts, snap);
-            if matches!(item, Item::Part(_) | Item::Styled(_)) {
+            if matches!(item, Item::Field(_) | Item::Styled(_)) {
                 parts += 1;
                 said += usize::from(got.is_some());
             }
@@ -368,42 +437,67 @@ impl Ui {
         (!spans.is_empty() && (parts == 0 || said > 0)).then_some(spans)
     }
 
+    // The checkout: the branch, then what changed, in the diff's own colours.
+    fn project_spans(&self, look: &Look) -> Option<Vec<Span<'static>>> {
+        let project = self.project.as_ref()?;
+        let mut spans = vec![
+            self.paint
+                .span(self.tone(look).as_ref(), project.branch.clone()),
+        ];
+        if project.added + project.removed > 0 {
+            spans.push(self.paint.span(&self.paint.theme.muted, " "));
+            if project.added > 0 {
+                spans.push(
+                    self.paint
+                        .span(&self.paint.theme.diff.add, format!("+{}", project.added)),
+                );
+            }
+            if project.added > 0 && project.removed > 0 {
+                spans.push(self.paint.span(&self.paint.theme.muted, "/"));
+            }
+            if project.removed > 0 {
+                spans.push(
+                    self.paint
+                        .span(&self.paint.theme.diff.del, format!("-{}", project.removed)),
+                );
+            }
+        }
+        Some(spans)
+    }
+
     // What a part other than the checkouts reads as, None when nothing.
-    fn part(&self, part: Part, facts: &Facts, snap: &Snapshot) -> Option<String> {
-        Some(match part {
-            Part::Tabs => return None,
-            Part::Flash => self.flash.as_ref()?.0.clone(),
-            Part::Model => facts.model.clone(),
-            Part::Effort if facts.effort == Effort::Off => return None,
-            Part::Effort => facts.effort.name().to_string(),
-            Part::Tier => facts.tier.name(),
-            Part::Update => match (&facts.update, &facts.released) {
+    fn field(&self, field: Field, facts: &Facts, snap: &Snapshot) -> Option<String> {
+        Some(match field {
+            Field::Tabs | Field::Project => return None,
+            Field::Flash => self.flash.as_ref()?.0.clone(),
+            Field::Model => facts.model.clone(),
+            Field::Effort if facts.effort == Effort::Off => return None,
+            Field::Effort => facts.effort.name().to_string(),
+            Field::Tier => facts.tier.name(),
+            Field::Update => match (&facts.update, &facts.released) {
                 (Some(installed), _) => format!("restart for {installed}"),
                 (None, Some(released)) => format!("{released} available"),
                 (None, None) => return None,
             },
-            Part::Spent if facts.spent <= 0.0 => return None,
-            Part::Spent => llm::figures::dollars(facts.spent),
-            Part::Status(segment) => return crate::status::render(segment, snap, facts.running),
+            Field::Spent if facts.spent <= 0.0 => return None,
+            Field::Spent => llm::figures::dollars(facts.spent),
+            Field::State => facts.state.clone(),
+            Field::Status(segment) => return crate::status::render(segment, snap, facts.running),
         })
     }
 
-    fn text(&self, t: &bar::Text) -> Option<Vec<Span<'static>>> {
+    fn text(&self, t: &statusline::Text) -> Option<Vec<Span<'static>>> {
         (!t.text.is_empty()).then(|| {
             vec![
                 self.paint
-                    .span(self.tone(&t.style), t.text.replace('\n', " ")),
+                    .span(self.tone(&t.style).as_ref(), t.text.replace('\n', " ")),
             ]
         })
     }
 
-    fn tone<'a>(&'a self, look: &'a Look) -> &'a pi_store::theme::Style {
+    fn tone<'a>(&'a self, look: &'a Look) -> std::borrow::Cow<'a, pi_store::theme::Style> {
         let theme = &self.paint.theme;
-        let tone = match look {
-            Look::Style(style) => return style,
-            Look::Tone(tone) => tone,
-        };
-        match tone {
+        let named = |tone: Tone| match tone {
             Tone::Muted => &theme.muted,
             Tone::Heading => &theme.heading,
             Tone::Emphasis => &theme.emphasis,
@@ -413,6 +507,21 @@ impl Ui {
             Tone::Err => &theme.status.err,
             Tone::Add => &theme.diff.add,
             Tone::Del => &theme.diff.del,
+        };
+        use std::borrow::Cow;
+        match look {
+            Look::Style(style) => Cow::Borrowed(style),
+            Look::Tone(tone) => Cow::Borrowed(named(*tone)),
+            // `adding` builds a fresh style: its SGR memo must not keep the
+            // theme's rendering, which has no such attribute in it.
+            Look::Toned { tone, sgr } => {
+                Cow::Owned(sgr.iter().fold(named(*tone).clone(), |style, attr| {
+                    match style.sgr.contains(attr) {
+                        true => style,
+                        false => style.adding(attr.clone()),
+                    }
+                }))
+            }
         }
     }
 
@@ -469,10 +578,10 @@ impl Ui {
 // Whether a side's items name the flash, in a group or not.
 fn holds_flash(items: &[Item]) -> bool {
     items.iter().any(|item| match item {
-        Item::Part(part) => *part == Part::Flash,
-        Item::Styled(s) => s.part == Part::Flash,
+        Item::Field(part) => *part == Field::Flash,
+        Item::Styled(s) => s.field == Field::Flash,
         Item::Group(g) => holds_flash(&g.group),
-        Item::Text(_) => false,
+        Item::Text(_) | Item::Script(_) => false,
     })
 }
 
@@ -480,119 +589,155 @@ fn spans_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(Span::width).sum()
 }
 
-/// The script behind the bar, when there is one: at most one run in flight,
-/// and another as soon as what it was told has changed.
-pub(super) struct BarScript {
-    path: Option<PathBuf>,
-    tx: UnboundedSender<Result<Layout, String>>,
-    pub(super) rx: UnboundedReceiver<Result<Layout, String>>,
-    // What the last run was told, and the script as it stood then: an edit
-    // to the file reruns it like any other change.
-    sent: Option<(Facts, Option<SystemTime>)>,
-    run: Run,
-    failing: bool,
+/// What each script last said, and the one run of it in flight. The row reads
+/// this every frame; a script that has not answered yet stands as its own
+/// placeholder, so nothing waits and nothing moves.
+#[derive(Default)]
+pub(super) struct Scripts {
+    answers: std::collections::HashMap<String, Answer>,
+    tx: Option<UnboundedSender<(String, Option<String>)>>,
+    pub(super) rx: Option<UnboundedReceiver<(String, Option<String>)>>,
 }
 
-// Whether the script is out, and when it is next due if not.
-enum Run {
-    Out,
-    // Its clock, if it keeps one, or a retry after a failure.
-    Idle { due: Option<Instant> },
+#[derive(Default)]
+struct Answer {
+    text: Option<String>,
+    ran: Option<Instant>,
+    running: bool,
 }
 
-impl BarScript {
-    /// `bar.rs` in the pi root, if one is there.
-    pub(super) fn find() -> Self {
-        let path = pi_store::dir()
-            .map(|d| d.join("bar.rs"))
-            .filter(|p| p.is_file());
-        Self::at(path)
-    }
+// How much of a script's answer is read: one line shows, so a flood is capped.
+const ANSWER_CAP: u64 = 4096;
+// How many script runs may be out at once: a row is not a job queue.
+const SCRIPT_RUNS: usize = 4;
 
-    pub(super) fn at(path: Option<PathBuf>) -> Self {
+impl Scripts {
+    pub(super) fn new() -> Self {
         let (tx, rx) = unbounded_channel();
         Self {
-            path,
-            tx,
-            rx,
-            sent: None,
-            run: Run::Idle { due: None },
-            failing: false,
+            answers: Default::default(),
+            tx: Some(tx),
+            rx: Some(rx),
         }
     }
 
-    /// Run the script if what it would be told changed, the file did, or its
-    /// clock is up.
-    pub(super) fn poke(&mut self, lane: &Lane) {
-        let Some(path) = &self.path else {
-            return;
-        };
-        let Run::Idle { due } = self.run else {
-            return;
-        };
-        let now = (
-            Facts::of(lane),
-            std::fs::metadata(path).and_then(|m| m.modified()).ok(),
-        );
-        let due = due.is_some_and(|at| Instant::now() >= at);
-        if self.sent.as_ref() == Some(&now) && !due {
+    /// One run of each script that is due, and none twice over.
+    pub(super) fn start_due(&mut self, layout: &statusline::Layout, may_run: bool) {
+        let runnable = scripts_of(layout);
+        // Keys the layout no longer names keep neither a slot nor an answer.
+        self.answers
+            .retain(|key, _| runnable.iter().any(|(_, k)| k == key));
+        if !may_run {
             return;
         }
-        let input = serde_json::to_vec(&now.0).unwrap_or_default();
-        self.run = Run::Out;
-        self.sent = Some(now);
-        // Its own way out: stopping the lane's run is not stopping the bar.
-        let ctx = lane.ctx_for(tokio_util::sync::CancellationToken::new());
-        let (path, tx) = (path.clone(), self.tx.clone());
-        tokio::spawn(async move {
-            let _ = tx.send(pi_core::core::bar::run(&path, input, &ctx).await);
-        });
-    }
-
-    /// When the loop should wake to run the script again unprompted.
-    pub(super) fn due(&self) -> Option<Instant> {
-        match self.run {
-            Run::Out => None,
-            Run::Idle { due } => due,
-        }
-    }
-
-    /// A finished run into the layout to draw. A failure puts the default
-    /// back, retries later, and the first time in a row says why.
-    pub(super) fn land(
-        &mut self,
-        out: Result<Layout, String>,
-        layout: &mut Layout,
-    ) -> Option<String> {
-        match out {
-            Ok(found) => {
-                if std::mem::take(&mut self.failing) {
-                    tracing::info!(target: "pi::bar", "script recovered");
-                }
-                let due = (found.refresh)
-                    .filter(|s| s.is_finite() && *s > 0.0)
-                    .map(|s| Instant::now() + Duration::from_secs_f64(s.max(MIN_REFRESH)));
-                self.run = Run::Idle { due };
-                *layout = found;
-                None
+        let mut running = self.answers.values().filter(|a| a.running).count();
+        for (script, key) in runnable {
+            if running >= SCRIPT_RUNS {
+                break;
             }
-            Err(why) => {
-                *layout = Layout::default();
-                self.run = Run::Idle {
-                    due: Some(Instant::now() + RETRY),
-                };
-                let first = !std::mem::replace(&mut self.failing, true);
-                if first {
-                    tracing::warn!(target: "pi::bar", error = %why, "script failed");
-                }
-                // Cargo's own warnings come first; the error is what to show.
-                let head = why
-                    .lines()
-                    .find(|l| l.trim_start().starts_with("error"))
-                    .or_else(|| why.lines().next())
-                    .unwrap_or_default();
-                first.then(|| format!("bar.rs: {head}"))
+            let due = self.answers.get(&key).map_or(true, |a| {
+                !a.running
+                    && a.ran
+                        .is_none_or(|at| at.elapsed().as_secs() >= script.every)
+            });
+            if !due {
+                continue;
+            }
+            let (Ok(run), Some(tx)) = (script.runnable(), self.tx.clone()) else {
+                continue;
+            };
+            let timeout =
+                std::time::Duration::from_secs(script.timeout.clamp(1, statusline::TIMEOUT_MOST));
+            let answer = self.answers.entry(key.clone()).or_default();
+            answer.running = true;
+            answer.ran = Some(Instant::now());
+            running += 1;
+            tokio::spawn(async move {
+                let said = run_once(run, timeout).await;
+                let _ = tx.send((key, said));
+            });
+        }
+    }
+
+    /// A finished run into its slot: the answer, or the last good one kept.
+    pub(super) fn land(&mut self, key: String, said: Option<String>) {
+        let answer = self.answers.entry(key.clone()).or_default();
+        answer.running = false;
+        answer.ran = Some(Instant::now());
+        match said {
+            Some(text) => answer.text = Some(text),
+            // Nothing said: killed, failed to start, or exited non-zero. The
+            // cell keeps its last answer, and the log says which script.
+            None => tracing::warn!(target: "pi::statusline", script = %key, "no answer"),
+        }
+    }
+
+    /// What stands in this script's place: its answer, or its own placeholder.
+    fn shown(&self, script: &statusline::Script) -> String {
+        let key = key_of(script);
+        match self.answers.get(&key).and_then(|a| a.text.clone()) {
+            Some(text) => text,
+            None => script.waiting().to_string(),
+        }
+    }
+}
+
+// One run: the shell's line, or the named file. Killed at its own deadline.
+async fn run_once(run: statusline::Runnable, timeout: std::time::Duration) -> Option<String> {
+    let mut command = match run {
+        statusline::Runnable::Shell(line) => {
+            let mut command = tokio::process::Command::new("sh");
+            command.arg("-c").arg(&line);
+            command
+        }
+        statusline::Runnable::File(path) => tokio::process::Command::new(path),
+    };
+    let command = command.kill_on_drop(true);
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut child = command.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    // One line is all that shows: a script that floods costs a few KiB, not
+    // the heap, and the deadline still holds over the read.
+    let mut reader = tokio::io::BufReader::new(tokio::io::AsyncReadExt::take(stdout, ANSWER_CAP));
+    let mut printed = String::new();
+    match tokio::time::timeout(timeout, reader.read_line(&mut printed)).await {
+        Ok(Ok(0)) | Err(_) | Ok(Err(_)) => {
+            let _ = child.start_kill();
+            return None;
+        }
+        Ok(Ok(_)) => {}
+    }
+    let _ = child.start_kill();
+    let first = printed.lines().next().unwrap_or_default();
+    // What a program prints is text to draw, never an escape to obey.
+    let said: String = first.chars().filter(|c| !c.is_control()).collect();
+    (!said.trim().is_empty()).then(|| said.trim().to_string())
+}
+
+// Every script in the layout, with the key its answer is kept under.
+fn scripts_of(layout: &statusline::Layout) -> Vec<(&statusline::Script, String)> {
+    fn walk<'a>(items: &'a [statusline::Item], out: &mut Vec<(&'a statusline::Script, String)>) {
+        for item in items {
+            match item {
+                statusline::Item::Script(s) => out.push((s, key_of(s))),
+                statusline::Item::Group(g) => walk(&g.group, out),
+                _ => {}
             }
         }
+    }
+    let mut out = Vec::new();
+    for line in &layout.lines {
+        walk(&line.left, &mut out);
+        walk(&line.right, &mut out);
+    }
+    out
+}
+
+fn key_of(script: &statusline::Script) -> String {
+    match script.name.is_some() {
+        true => format!("name:{}", script.label()),
+        false => format!("command:{}", script.label()),
     }
 }

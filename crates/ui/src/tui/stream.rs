@@ -5,9 +5,8 @@ use super::call::{Run, RunTool, push_tool_row};
 use super::row::Row;
 use super::scrollback::f_entry;
 use super::search::Spot;
-use super::view::{Doing, RetryWait, StreamKind, Surface, View, snapshot};
+use super::view::{Doing, Retry, StreamKind, Surface, View};
 use crate::render;
-use crate::status;
 use agent::Event;
 use agent::session::Entry as LogEntry;
 use pi_core::core::lane::Lane;
@@ -36,7 +35,7 @@ impl Ui {
         );
     }
 
-    // A short answer nobody reads back, for the bar row: no scrollback
+    // A short answer nobody reads back, for the statusline row: no scrollback
     // entry, since what a press did *not* do isn't part of the transcript.
     pub(super) fn flash(&mut self, line: impl Into<String>) {
         self.flash = Some((line.into(), Instant::now()));
@@ -144,20 +143,8 @@ impl Ui {
             | Event::TurnEnd { .. }
             | Event::TurnStart { .. }
             | Event::Context { .. } => {}
-            Event::Done { .. } => {
-                self.close(view);
-                // Still running as far as the screen is concerned: `turn`
-                // clears the clock only once the loop returns.
-                let snap = snapshot(lane, view);
-                // A run whose segments all had nothing to say leaves no row.
-                let parts = status::parts(&self.status, &snap, false);
-                if !parts.is_empty() {
-                    // Kept, not just said: nothing else holds these numbers,
-                    // so a rebuild could not draw an aside.
-                    let line = status::settled(&parts);
-                    self.say_tally(lane, view, &line);
-                }
-            }
+            // The run's figures are the statusline's: the transcript keeps none.
+            Event::Done { .. } => self.close(view),
             // What the endpoint left out of the reply just streamed: filed under
             // it, since it is about that reply and stays true of it.
             Event::Warning(w) => {
@@ -244,9 +231,9 @@ impl Ui {
             } => {
                 self.close(view);
                 if let Some(work) = &mut view.state.work {
-                    work.retry = Some(RetryWait {
+                    work.retry = Some(Retry {
                         attempt: *attempt,
-                        until: Instant::now() + Duration::from_millis(*delay_ms),
+                        wait: Duration::from_millis(*delay_ms),
                     });
                 }
                 self.say_notice(view, reason);
@@ -288,14 +275,10 @@ impl Ui {
         self.draw_kept(view, Row::report_lines(text, &self.paint), kept);
     }
 
-    pub(super) fn say_tally(&self, lane: &mut Lane, view: &mut View, line: &str) {
-        let kept = lane.push_tally(line);
-        self.draw_kept(view, Row::tally_lines(line, &self.paint), kept);
-    }
-
+    // A note is a fact filed for the model; the transcript draws no row for it.
     pub(super) fn say_note(&self, lane: &mut Lane, view: &mut View, line: &str) {
         let kept = lane.push_note(line);
-        self.draw_kept(view, Row::note_lines(line), kept);
+        self.draw_kept(view, Vec::new(), kept);
     }
 
     fn draw_kept(&self, view: &mut View, rows: Vec<Row>, kept: Option<agent::session::EntryId>) {

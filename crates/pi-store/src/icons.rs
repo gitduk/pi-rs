@@ -18,12 +18,6 @@ pub fn bar(icon: &str) -> String {
     }
 }
 
-/// The blank as wide as [`bar`] of `icon`, before each line after a barred
-/// one, so its wrap hangs under the text, not the mark.
-pub fn under_bar(icon: &str) -> String {
-    " ".repeat(crate::text::width(&bar(icon)))
-}
-
 pub const SAID_RULE: &str = PROMPT_BAR; // prefix beside a line the user said
 pub const PI_MARK: &str = "π"; // what pi itself says, and the banner it opens on
 pub const PENDING_MARK: &str = "○"; // a call started, on a progress line that cannot animate
@@ -37,7 +31,6 @@ pub const THINK_FRAMES: [&str; 12] = ["·", "✢", "*", "✶", "✻", "✽", "�
 pub const THINK_MARK: &str = THINK_FRAMES[5]; // reasoning ended: the frame the turn holds
 pub const DONE_MARK: &str = "✔"; // a tool row that finished well
 pub const RELAYED_MARK: &str = "◆"; // an automatically submitted turn
-pub const NOTE_MARK: &str = "≡"; // a fact filed for the model to read; nothing ran
 pub const FAIL_MARK: &str = "✘"; // a failure, a denial, a refused edit
 pub const UNOPENED_MARK: &str = "○"; // a checkout on the bar that no lane has open
 pub const COMPACT_RULE: &str = "───"; // the dashes a compaction banner wears

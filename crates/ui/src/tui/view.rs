@@ -84,13 +84,8 @@ pub(super) struct Work {
     pub(super) doing: Doing,
     // It has been asked to stop and is still winding down.
     pub(super) stopping: bool,
-    // The retry it is waiting out; any other event means the wait is over.
-    pub(super) retry: Option<RetryWait>,
-}
-
-pub(super) struct RetryWait {
-    pub(super) attempt: usize,
-    pub(super) until: Instant,
+    // The retry it is waiting out; any other event ends the wait.
+    pub(super) retry: Option<Retry>,
 }
 
 impl Work {
@@ -105,6 +100,11 @@ impl Work {
 }
 
 // What kind of run it is, with what only that kind carries.
+pub(super) struct Retry {
+    pub(super) attempt: usize,
+    pub(super) wait: std::time::Duration,
+}
+
 pub(super) enum Doing {
     // A prompt's turn. `committed` once it has produced anything — a word,
     // a thought, a call; from then Esc means stop rather than unsend.

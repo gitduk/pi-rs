@@ -60,13 +60,13 @@ api_key  = "$ANTHROPIC_API_KEY" # `$` reads the environment; anything else is th
 # everything.
 # keep_days = 90
 
-# Which parts the status line under the answer shows, in this order. One
-# list: the line repaints while a turn runs and stays in the scrollback once it
-# ends. Naming none keeps this default.
+# Which figures a one-shot run (`pi -p`) prints when it ends, in this order.
+# The screen's own row is the layout at `~/.pi/statusline.json`, which the
+# `statusline` tool writes. Naming none keeps this default.
 #
 # The spend parts — in_out, cache and cost — are the run's own: what this
 # answer has cost since you sent it, not what the session had before it. The
-# session's running total is the `spent:` line `/status` prints and the bar's
+# session's running total is the `spent:` line `/status` prints and the statusline's
 # `spent` part, and no part of the status line reads it.
 #
 #   elapsed    3s / 2m05s — nothing times a one-shot run, so it drops there
@@ -83,9 +83,9 @@ api_key  = "$ANTHROPIC_API_KEY" # `$` reads the environment; anything else is th
 #   model      deepseek-v4-flash
 #   worktree   feature-one, left out in the repository's own checkout
 #
-# A part with nothing to say is left out rather than shown empty, so one list
-# serves the running line and the finished one: `queued` is gone once the run
-# ends, `cost` until something has been spent.
+# A part with nothing to say is left out rather than shown empty: `queued` is
+# gone once the run ends, `cost` until something has been spent. The figures
+# of the run that last ended stay on the statusline, not in the transcript.
 # status = ["elapsed", "in_out", "speed", "cache", "ctx", "cost", "compacted", "queued"]
 
 # ---------------------------------------------------------------------------

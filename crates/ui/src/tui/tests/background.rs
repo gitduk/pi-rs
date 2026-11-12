@@ -480,81 +480,6 @@ fn leaving_the_lane_or_disabling_vim_releases_command_focus() {
     assert_eq!(ui.background_focus, None);
 }
 
-#[tokio::test]
-async fn focused_controls_use_the_existing_driver_and_preserve_restartability() {
-    use ::execution::background::{RunHandle, RunSink};
-    use std::sync::Arc;
-
-    let dir = tempfile::tempdir().unwrap();
-    let mut tui = surface(dir.path());
-    let root = tui.core.lane().root().to_path_buf();
-    let table = tui.drivers.background();
-    let sink = pi_core::driver::background::Commands::new(table.clone());
-    let stop = tokio_util::sync::CancellationToken::new();
-    let first = sink.start(
-        root.clone().into(),
-        ::execution::background::Invocation::shell("first"),
-        stop.clone(),
-    );
-    let second = sink.start(
-        root.clone().into(),
-        ::execution::background::Invocation::shell("second"),
-        Default::default(),
-    );
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Arc<dyn RunHandle>>();
-    second.rerun(
-        Arc::new(move |execution, _| {
-            let _ = tx.send(execution);
-            Ok(())
-        }),
-        Default::default(),
-    );
-    tui.ui.sync_background(table.background(&root));
-    tui.ui.vim = Some(Mode::Normal);
-    press(&mut tui, ctrl('k'));
-    let asked = press(&mut tui, typed('x'));
-    tui.carry(deed(asked)).await;
-    assert!(
-        drawn_rows(crate::tui::view_at(&mut tui.views, tui.core.lane().token()))
-            .iter()
-            .any(|line| line.contains("The user stopped background command")),
-        "stopping is recorded for the model"
-    );
-    assert!(!stop.is_cancelled(), "only the selected execution stopped");
-    tui.ui.sync_background(table.background(&root));
-    assert_eq!(tui.ui.background_focus, Some(second.id()));
-    assert_eq!(tui.ui.executions.last().unwrap().state, State::Stopped);
-    let asked = press(&mut tui, typed('r'));
-    tui.carry(deed(asked)).await;
-    assert!(
-        drawn_rows(crate::tui::view_at(&mut tui.views, tui.core.lane().token()))
-            .iter()
-            .any(|line| line.contains("The user restarted background command")),
-        "restarting is recorded for the model"
-    );
-    let id = second.id();
-    drop(second);
-    let restarted = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(restarted.id(), id);
-    tui.ui.sync_background(table.background(&root));
-    let asked = press(&mut tui, typed('X'));
-    tui.carry(deed(asked)).await;
-    assert!(
-        stop.is_cancelled(),
-        "stop-all includes the other running execution"
-    );
-    assert!(
-        table
-            .background(&root)
-            .iter()
-            .all(|j| j.state != State::Running)
-    );
-    drop((first, restarted));
-}
-
 #[test]
 fn global_cancel_keeps_working_and_paste_does_not_change_a_focused_draft() {
     let mut ui = vim_ui();
@@ -583,7 +508,6 @@ fn waiting_results_fold_without_wrapping_long_commands() {
     use crate::tui::mouse::Target;
     use crate::tui::screen::{plain, rows};
 
-    let (_dir, lane) = a_running_lane();
     let view = View::default();
     let mut pending = background(&(1..=14).collect::<Vec<_>>());
     for execution in &mut pending {
@@ -599,7 +523,7 @@ fn waiting_results_fold_without_wrapping_long_commands() {
     for width in [20, 40, 80] {
         let mut ui = test_ui(width, 24);
         ui.sync_background(pending.clone());
-        let (live, targets, _) = ui.live(&lane, &view, false, std::time::Instant::now());
+        let (live, targets, _) = ui.live(&view, false, std::time::Instant::now());
         assert_eq!(live.len(), targets.len());
         let at = targets
             .iter()
@@ -612,7 +536,7 @@ fn waiting_results_fold_without_wrapping_long_commands() {
         }
 
         ui.background_results_shown = true;
-        let (live, targets, _) = ui.live(&lane, &view, false, std::time::Instant::now());
+        let (live, targets, _) = ui.live(&view, false, std::time::Instant::now());
         let ids: Vec<_> = targets
             .iter()
             .filter_map(|t| match t {
