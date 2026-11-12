@@ -70,7 +70,8 @@ A missing `style` is muted.
   out. Always says something.
 - `spent` — what the session has cost so far; `cost` — what the run in flight,
   or the one that last ended, cost.
-- `cache` `ctx` `cost` keep the last run's figures across a restart.
+- `cache` `ctx` `cost` are kept in the session's own `statusline.json`, so a
+  resumed session opens with them rather than blank.
 
 ## Styles
 

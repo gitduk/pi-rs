@@ -189,6 +189,7 @@ impl Conversation {
         session: Option<Session>,
         name: Option<String>,
         claim: Option<session::Claim>,
+        kept: Option<pi_store::statusline::Shown>,
     ) -> Self {
         let id = if id.is_empty() { session::new_id() } else { id };
         Self {
@@ -198,7 +199,7 @@ impl Conversation {
                 message::SessionId::new(id.clone()).expect("session identifier"),
             ),
             transcript: session.map_or_else(|| Transcript::Lent(Arc::default()), Transcript::Home),
-            tally: Tally::of(&id),
+            tally: Tally::kept(kept),
             id,
             created,
             _claim: claim.map(Arc::new),
@@ -487,6 +488,8 @@ pub struct Opening {
     pub worktree: Option<String>,
     /// The hold on `id`, when the opener already took it.
     pub claim: Option<session::Claim>,
+    /// What `id`'s row last showed, for the lane that takes it up again.
+    pub kept: Option<pi_store::statusline::Shown>,
 }
 
 impl Opening {
@@ -507,6 +510,7 @@ impl Opening {
             name: None,
             worktree: None,
             claim: None,
+            kept: None,
         }
     }
 }
@@ -531,7 +535,14 @@ impl Lane {
                 worktree: parts.worktree,
                 read_at: None,
             },
-            talk: Conversation::new(parts.id, parts.created, None, parts.name, parts.claim),
+            talk: Conversation::new(
+                parts.id,
+                parts.created,
+                None,
+                parts.name,
+                parts.claim,
+                parts.kept,
+            ),
             runner: Runner {
                 run: Run::Idle,
                 events,
@@ -859,9 +870,10 @@ impl Lane {
         &self.talk.tally
     }
 
-    /// The run's count, for a surface priming it from what it last showed.
-    pub fn tally_mut(&mut self) -> &mut Tally {
-        &mut self.talk.tally
+    /// Count spend that was no run of its own past the row, so it adds to the
+    /// session's total and to nothing the row attributes to a turn.
+    pub fn pass_by_spend(&mut self) {
+        self.talk.tally.pass_by();
     }
 
     /// What this session has spent, counted at the wire: its runs, its
@@ -870,16 +882,15 @@ impl Lane {
         self.checkout.agent.meter.read()
     }
 
-    /// Fold an event into the meter. The loop's facts arrive here and nowhere
-    /// else: what a run has spent is only known from them.
+    /// Fold an event into the tally. The loop's facts arrive here and nowhere
+    /// else: what the meter cannot say of a run is only known from them.
     pub fn note(&mut self, event: &Event) {
         self.talk.tally.on(event);
     }
 
-    /// Start the run's count afresh and pin the rate it is priced at: a
-    /// `/model` answered mid-run does not reprice the turn in flight.
+    /// Start the run's count afresh, at the meter this lane runs on.
     pub fn seed_meter(&mut self) {
-        self.talk.tally.seed(self.checkout.agent.spec().pricing);
+        self.talk.tally.seed(self.checkout.agent.meter.clone());
     }
 
     /// Lend the transcript to an execution for the length of its run.
@@ -1140,6 +1151,7 @@ impl Core {
             Some(Session::default()),
             None,
             claim,
+            None,
         ));
     }
     // Take a stored transcript as the running one — entries, name and id.
@@ -1156,8 +1168,16 @@ impl Core {
         )
         .map_err(|e| refused("resume", e))?;
         let spent = stored.spent;
-        let mut talk =
-            Conversation::new(id, created, Some(stored.into_session()), name, Some(claim));
+        let kept =
+            pi_store::statusline::Shown::read(&self.store.session_dir(self.lane().root(), &id));
+        let mut talk = Conversation::new(
+            id,
+            created,
+            Some(stored.into_session()),
+            name,
+            Some(claim),
+            kept,
+        );
         talk.messages = messages;
         self.becomes(talk);
         self.lane().checkout.agent.meter.reset(spent);

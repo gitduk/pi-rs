@@ -100,9 +100,9 @@ pub(super) struct Ui {
     // The checkout as the `project` field draws it, read once a second and
     // nowhere else: two `git` calls per frame is not a bar's price.
     pub(super) project: Option<pi_store::statusline::Project>,
-    // The readings last written for the next pi: what a compare reads, so the
-    // file is touched only when they move.
-    pub(super) readings: Option<pi_store::statusline::Last>,
+    // What the last write put in a session's file, and which session that was:
+    // compared against, so the file is touched only when the numbers move.
+    pub(super) shown: Option<(String, pi_store::statusline::Shown)>,
     // What each script last said: started from the row, read by the row.
     pub(super) scripts: super::statusline::Scripts,
     // Where the last frame drew the flash: its row in the bar region, its
@@ -288,7 +288,7 @@ impl Ui {
             tabs: Vec::new(),
             flash: None,
             project: None,
-            readings: None,
+            shown: None,
             scripts: super::statusline::Scripts::new(),
             statusline_at: None,
             flash_hit: None,
@@ -444,7 +444,6 @@ impl Ui {
             self.commands = core.commands().clone();
         }
         self.set_vim(&core.config().vim);
-        // And the segment lists, copied in at startup.
         self.refresh_model_page(core, view);
     }
 }

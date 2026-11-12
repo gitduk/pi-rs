@@ -96,13 +96,13 @@ fn paint(
     mut rx: mpsc::UnboundedReceiver<agent::Event>,
     quiet: bool,
     theme: std::sync::Arc<pi_store::theme::Theme>,
-    status: Vec<pi_store::status::Segment>,
+    status: Vec<pi_store::statusline::Field>,
     model_name: String,
-    pricing: llm::model::Pricing,
+    meter: std::sync::Arc<llm::meter::Meter>,
     worktree: Option<String>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut r = render::Renderer::new(quiet, theme, status, model_name, pricing, worktree);
+        let mut r = render::Renderer::new(quiet, theme, status, model_name, meter, worktree);
         while let Some(event) = rx.recv().await {
             r.on(event);
         }
@@ -455,6 +455,8 @@ async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended
     } = start;
     let environment =
         core::environment::Environment::new(config, settings, resolved.commands.clone(), mcp);
+    // What the session's row last showed, filed beside its transcript.
+    let kept = store.shown(workspace.root(), &id);
     let ctx = tool::Ctx::new(workspace).with_session(&id, pi_store::spill_root());
     let mut first = lane::Lane::opened(lane::Opening {
         id,
@@ -462,6 +464,7 @@ async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended
         name,
         worktree,
         claim,
+        kept,
         ..lane::Opening::new(Arc::new(ag), resolved, ctx, environment)
     });
     first.return_session(carried);
@@ -535,7 +538,7 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         Arc::new(config.theme.clone()),
         config.status.to_vec(),
         ag.spec().wire_model().to_string(),
-        ag.spec().pricing,
+        ag.meter.clone(),
         worktree.clone(),
     );
     let mut ctx = tool::Ctx::new(workspace).with_cancel(cancel_on_interrupt());

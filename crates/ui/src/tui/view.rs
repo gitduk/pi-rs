@@ -22,7 +22,7 @@ use pi_core::execution::Request;
 pub struct View {
     // What this screen shows: a rewind replaces it whole.
     pub(super) surface: Surface,
-    // This run's readings and interaction state: it lives and dies with the
+    // This run's tools and interaction state: it lives and dies with the
     // run, and `arm_view` resets it.
     pub(super) state: State,
     // What arrived while the run worked, kept as intents (not lines): their
@@ -31,9 +31,6 @@ pub struct View {
     // Whether the opening banner has been drawn; drawing it twice would
     // stack two banners on one lane.
     pub(super) drawn: bool,
-    // The model in force, as a line draws it. Copied in before the run borrows
-    // the agent, which is what puts it out of reach for the rest of the turn.
-    pub(super) model_name: String,
     // The half-typed line parked when the surface last left this lane,
     // waiting in the view to come back to the editor with it.
     pub(super) draft: String,
@@ -79,7 +76,7 @@ pub struct State {
 
 // One run, as the screen draws it.
 pub(super) struct Work {
-    // When it began, for the timing segment.
+    // When it began, for the `elapsed` part.
     pub(super) since: Instant,
     pub(super) doing: Doing,
     // It has been asked to stop and is still winding down.
@@ -192,7 +189,7 @@ pub(super) fn view_at(views: &mut Views, token: u64) -> &mut View {
 // under the status line already, so only the unseen rest is counted.
 pub(super) fn snapshot(lane: &Lane, view: &View) -> Snapshot {
     lane.snapshot(
-        &view.model_name,
+        lane.model_name(),
         view.state.work.as_ref().map(|w| w.since.elapsed()),
         view.queued
             .lock()

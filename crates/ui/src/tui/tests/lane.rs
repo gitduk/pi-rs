@@ -1659,8 +1659,13 @@ async fn leaving_with_a_command_preserves_its_stop_cause_on_resume() {
 #[test]
 fn a_line_draws_the_models_name_and_the_input_keeps_its_identity() {
     let dir = tempfile::tempdir().expect("a checkout");
-    let tui = surface(dir.path());
-    let facts = crate::tui::statusline::Facts::of(tui.core.lane(), None);
-    assert_eq!(facts.model, "m", "the bar draws the endpoint's name");
+    let mut tui = surface(dir.path());
+    let view = crate::tui::front_view(&mut tui.views, tui.core.lane());
+    let facts = crate::tui::statusline::Facts::of(tui.core.lane(), view);
+    assert_eq!(
+        facts.value(pi_store::statusline::Field::Model).as_deref(),
+        Some("m"),
+        "the bar draws the endpoint's name"
+    );
     assert_eq!(tui.core.lane().model(), "local/m", "/status names it whole");
 }

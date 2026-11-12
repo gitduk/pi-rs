@@ -18,7 +18,7 @@
 | `~/.pi/images/`                          | images pasted with `ctrl+v`                |
 | `~/.pi/statusline.json`                  | the layout of the statusline rows          |
 | `~/.pi/statusline.d/`                    | named scripts the layout may draw a value from |
-| `~/.pi/statusline.last.json`             | the last run's readings, so they survive a restart |
+| `~/.pi/sessions/…/<id>/statusline.json`  | that session's last run's numbers, so a resume opens with them |
 | `~/.pi/sessions/<project>/<session>/`    | the transcript and `journal.jsonl`         |
 
 At startup, pi deletes sessions with no activity for 90 days.

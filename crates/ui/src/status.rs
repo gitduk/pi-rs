@@ -1,49 +1,22 @@
-//! Draws the status line from parts; which parts show is the config's, in
-//! `pi_store::status`. Repainted while a turn runs, and gone once it ends:
-//! the run's figures outlive it on the statusline, never in the transcript.
-//!
-//! Shows only the run in flight, not the whole session's total.
+//! Paints the one-shot run's end line from `status.parts`. What each part
+//! reads as is `Facts::value`, the same place the statusline's fields read it,
+//! so a figure is worded once however it is asked for.
 
 use std::time::Duration;
 
 use pi_core::core::meter::Snapshot;
 use pi_store::icons;
-use pi_store::status::Segment;
+use pi_store::statusline::Field;
 use pi_store::theme::Attr;
 use ratatui::text::{Line, Span};
 
 use crate::render::Paint;
+use crate::tui::statusline::Facts;
 
 pub const SPIN: Duration = Duration::from_millis(90);
 
-/// What this part reads as, or None when the run has nothing to say for it.
-pub fn render(segment: Segment, s: &Snapshot, running: bool) -> Option<String> {
-    Some(match segment {
-        Segment::Elapsed if running => return running_time(s.elapsed?),
-        Segment::Elapsed => llm::figures::elapsed(s.elapsed?),
-        // Each half appears once the provider states it: most state both only
-        // as the stream ends, and a waiting line of dashes reads as broken.
-        Segment::InOut if s.input == 0 && s.output == 0 => return None,
-        Segment::InOut => llm::figures::in_out_so_far(s.input, s.output),
-        Segment::Speed => format!("{:.0} t/s", s.speed?),
-        Segment::Cache => format!("{}% cached", s.cached?),
-        // An unpriced model reports no cost rather than $0.
-        Segment::Cost if s.cost <= 0.0 => return None,
-        Segment::Cost => llm::figures::dollars(s.cost),
-        Segment::Ctx => return context(s.ctx?),
-        Segment::Compacted => return compacted(s.compactions),
-        Segment::Queued if s.queued == 0 => return None,
-        Segment::Queued => format!("{} queued", s.queued),
-        Segment::Model if s.model_name.is_empty() => return None,
-        Segment::Model => s.model_name.clone(),
-        // Absent in the repository's own checkout, so the line reads as it
-        // always did for anyone not using worktrees.
-        Segment::Worktree => s.worktree.clone()?,
-    })
-}
-
 // Show both counts: a percentage hides useful detail in large windows.
-fn context((used, window): (usize, usize)) -> Option<String> {
+pub(crate) fn context((used, window): (usize, usize)) -> Option<String> {
     if window == 0 {
         return None;
     }
@@ -54,7 +27,7 @@ fn context((used, window): (usize, usize)) -> Option<String> {
     ))
 }
 
-fn compacted(count: usize) -> Option<String> {
+pub(crate) fn compacted(count: usize) -> Option<String> {
     match count {
         0 => None,
         1 => Some("compacted".into()),
@@ -63,16 +36,16 @@ fn compacted(count: usize) -> Option<String> {
 }
 
 /// The parts that have something to say, in the order asked for.
-pub fn parts(segments: &[Segment], s: &Snapshot, running: bool) -> Vec<String> {
-    segments
+pub(crate) fn parts(fields: &[Field], facts: &Facts) -> Vec<String> {
+    fields
         .iter()
-        .filter_map(|&seg| render(seg, s, running))
+        .filter_map(|&field| facts.value(field))
         .collect()
 }
 
 /// Those parts as one line.
-pub fn line(segments: &[Segment], s: &Snapshot) -> String {
-    settled(&parts(segments, s, false))
+pub fn line(fields: &[Field], snap: &Snapshot) -> String {
+    settled(&parts(fields, &Facts::from_snapshot(snap.clone())))
 }
 
 /// A running clock starts at one second and advances in whole seconds.
@@ -180,23 +153,21 @@ fn number(text: &str) -> Option<f64> {
 mod tests {
     use super::*;
 
+    fn value(snapshot: &Snapshot, field: Field) -> Option<String> {
+        Facts::from_snapshot(snapshot.clone()).value(field)
+    }
+
     #[test]
-    fn context_and_compaction_segments_keep_their_display_rules() {
+    fn context_and_compaction_parts_keep_their_display_rules() {
         let mut snapshot = Snapshot::default();
-        assert_eq!(render(Segment::Ctx, &snapshot, false), None);
+        assert_eq!(value(&snapshot, Field::Ctx), None);
         snapshot.ctx = Some((1000, 0));
-        assert_eq!(render(Segment::Ctx, &snapshot, false), None);
+        assert_eq!(value(&snapshot, Field::Ctx), None);
         snapshot.ctx = Some((1000, 1_000_000));
-        assert_eq!(
-            render(Segment::Ctx, &snapshot, false).as_deref(),
-            Some("ctx 1.0k/1m")
-        );
+        assert_eq!(value(&snapshot, Field::Ctx).as_deref(), Some("ctx 1.0k/1m"));
         for (count, expected) in [(0, None), (1, Some("compacted")), (2, Some("compacted ×2"))] {
             snapshot.compactions = count;
-            assert_eq!(
-                render(Segment::Compacted, &snapshot, false).as_deref(),
-                expected
-            );
+            assert_eq!(value(&snapshot, Field::Compacted).as_deref(), expected);
         }
     }
 }

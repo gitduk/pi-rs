@@ -9,7 +9,7 @@ mod editor;
 mod execute;
 mod frame;
 mod keys;
-mod statusline;
+pub(crate) mod statusline;
 pub use keys::WORDS;
 mod menu;
 mod mouse;
@@ -248,7 +248,6 @@ impl Tui {
         let mut views = Views::new();
         for lane in core.lanes.all() {
             let view = view::opened(&mut views, lane, &ui.paint);
-            view.model_name = lane.model_name().to_string();
             // A resumed session shows its transcript from the start: the whole
             // screen is rebuildable now, so there is no reason to hide it.
             if let Some(session) = lane.session().filter(|s| !s.is_empty()) {
@@ -268,7 +267,7 @@ impl Tui {
             tui.restarted(&line);
         }
         // Before the first frame: the row the last run left behind. The
-        // readings it ended on came with the session, when this pi took it up.
+        // numbers it ended on came with the session, when this pi took it up.
         tui.reload_statusline();
         Ok(tui)
     }
@@ -406,27 +405,27 @@ impl Tui {
         self.notice(pi_core::input::notice(notes));
     }
 
-    // The readings on show, kept for the next pi: written only when they
-    // move, so a second look costs a compare and nothing else.
-    fn keep_last_readings(&mut self) {
-        // What the row shows, kept as it shows it: a run in flight already
-        // has its own figures, and the run that ended keeps the ones it had.
+    // What the row shows of the parts nothing else holds, filed with the
+    // session: written only when they move, so a second look costs a compare.
+    fn save_shown(&mut self) {
         let snap = self.core.lane().snapshot("", None, 0);
-        let last = pi_store::statusline::Last {
-            session: Some(self.core.lane().id().to_string()),
+        let shown = pi_store::statusline::Shown {
             cached: snap.cached,
             cost: snap.cost,
             ctx: snap.ctx,
         };
-        // A session that has not run yet has nothing to hand on: writing it
-        // would erase the figures of the one still on the file.
-        let empty = last.cached.is_none() && last.cost == 0.0 && last.ctx.is_none();
-        if self.ui.readings.as_ref() == Some(&last) || empty {
+        // A session that has not run yet has nothing to hand on.
+        let id = self.core.lane().id().to_string();
+        let kept = (id.clone(), shown.clone());
+        if shown == pi_store::statusline::Shown::default() || self.ui.shown.as_ref() == Some(&kept)
+        {
             return;
         }
-        match pi_store::statusline::write_last(&last) {
-            Ok(()) => self.ui.readings = Some(last),
-            Err(why) => tracing::warn!(target: "pi::statusline", error = %why, "readings not kept"),
+        let lane = self.core.lane();
+        let dir = self.core.store.session_dir(lane.root(), &id);
+        match shown.write(&dir) {
+            Ok(()) => self.ui.shown = Some(kept),
+            Err(why) => tracing::warn!(target: "pi::statusline", error = %why, "not kept"),
         }
     }
 
@@ -790,7 +789,7 @@ impl Tui {
                     false => None,
                 };
                 self.reload_statusline();
-                self.keep_last_readings();
+                self.save_shown();
             }
             self.refresh_tabs();
             let executions = self.drivers.background();

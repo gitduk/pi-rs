@@ -74,6 +74,7 @@ impl Transport for Metered<'_> {
         Ok(Counted {
             events,
             usage: Usage::default(),
+            charged: Usage::default(),
             pricing: spec.pricing,
             meter: self.meter.clone(),
         }
@@ -81,13 +82,31 @@ impl Transport for Metered<'_> {
     }
 }
 
-// Charged when dropped rather than at `Done`: a call cut short, or abandoned
-// for a retry, was still billed for what it had reported.
+// Charged as the call reports, and once more when it drops: a call cut short
+// was still billed, and a mid-turn reader sees the tokens as they land.
 struct Counted {
     events: BoxStream<'static, Result<StreamEvent>>,
     usage: Usage,
+    // What of `usage` the meter already holds. Never exceeds it.
+    charged: Usage,
     pricing: Pricing,
     meter: Arc<Meter>,
+}
+
+impl Counted {
+    fn charge_reported(&mut self) {
+        let left = |now: u64, then: u64| now.saturating_sub(then);
+        let grew = Usage {
+            input: left(self.usage.input, self.charged.input),
+            output: left(self.usage.output, self.charged.output),
+            cache_read: left(self.usage.cache_read, self.charged.cache_read),
+            cache_write: left(self.usage.cache_write, self.charged.cache_write),
+        };
+        self.charged = self.usage;
+        if grew != Usage::default() {
+            self.meter.charge(&grew, self.pricing.cost(&grew));
+        }
+    }
 }
 
 impl Stream for Counted {
@@ -98,6 +117,7 @@ impl Stream for Counted {
         let polled = this.events.poll_next_unpin(cx);
         if let Poll::Ready(Some(Ok(ev))) = &polled {
             this.usage.observe(ev);
+            this.charge_reported();
         }
         polled
     }
@@ -105,8 +125,7 @@ impl Stream for Counted {
 
 impl Drop for Counted {
     fn drop(&mut self) {
-        self.meter
-            .charge(&self.usage, self.pricing.cost(&self.usage));
+        self.charge_reported();
     }
 }
 

@@ -8,49 +8,45 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
-use crate::status::Segment;
-
 /// Where the layout the model set waits between runs: one file for every
 /// checkout, beside the other state in the pi root.
 pub fn path() -> Option<std::path::PathBuf> {
     crate::dir().map(|d| d.join("statusline.json"))
 }
 
-/// The last request's readings, kept so a fresh run opens with them rather
-/// than blank: the run in flight has none until its first answer lands.
+/// What a row last showed of the parts nothing else holds — a resumed session
+/// paints them before anything runs. Its file is `statusline.json` inside the
+/// session's own directory: the layout's name, a different shape.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, serde::Serialize)]
-pub struct Last {
-    /// The session that wrote these: another one resuming wears nothing of it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<String>,
+pub struct Shown {
+    /// Percent of the last run's prompt tokens read from cache, floored.
     #[serde(default)]
     pub cached: Option<u64>,
+    /// What the last run cost, in dollars. Zero is an unpriced model.
     #[serde(default)]
     pub cost: f64,
+    /// What the last run's final request occupied against the window.
     #[serde(default)]
     pub ctx: Option<(usize, usize)>,
 }
 
-fn last_path() -> Option<std::path::PathBuf> {
-    crate::dir().map(|d| d.join("statusline.last.json"))
+impl Shown {
+    /// What the session filed in `dir` left, if anything ever did.
+    pub fn read(dir: &std::path::Path) -> Option<Self> {
+        let text = std::fs::read_to_string(dir.join(SHOWN)).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+
+    /// Keep these for the session's next run.
+    pub fn write(&self, dir: &std::path::Path) -> std::io::Result<()> {
+        let text = serde_json::to_string(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::create_dir_all(dir)?;
+        tool::state::write_private(&dir.join(SHOWN), text.as_bytes())
+    }
 }
 
-/// What the last run left, if anything ever did.
-pub fn read_last() -> Option<Last> {
-    let path = last_path()?;
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
-/// Keep these readings for the run after this one.
-pub fn write_last(last: &Last) -> std::io::Result<()> {
-    let path = last_path().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "no pi root to write in")
-    })?;
-    let text = serde_json::to_string(last)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, text)
-}
+const SHOWN: &str = "statusline.json";
 
 /// The file as it is on disk: its text, and when it last changed.
 pub fn read_text() -> Option<(String, std::time::SystemTime)> {
@@ -321,7 +317,7 @@ pub enum Item {
 
 /// What pi keeps current itself. One with nothing to say drops out, and the
 /// separator before it with it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Field {
     /// The checkouts, folded to the room the rest of the row leaves.
@@ -345,91 +341,51 @@ pub enum Field {
     State,
     /// The checkout: its branch, and what the worktree has changed.
     Project,
-    /// A status line part — `ctx`, `cost`, `elapsed` … — drawn as the status
-    /// line draws it, from the run in flight or the one that last ended.
-    Status(Segment),
+    /// The run in flight's clock, while one is on.
+    Elapsed,
+    /// What the run has sent and heard back, in tokens.
+    InOut,
+    /// Output tokens a second, over the time the model spent streaming them.
+    Speed,
+    /// The share of the run's prompt tokens that were read from cache.
+    Cache,
+    /// What the run cost, in dollars: the session's whole spend is `spent`.
+    Cost,
+    /// What the run's last request occupied against the model's window.
+    Ctx,
+    /// How many times the run's transcript was compacted.
+    Compacted,
+    /// Prompts typed while the run works and not yet sent.
+    Queued,
+    /// The worktree the session works in, absent in the repository's own.
+    Worktree,
 }
 
-// Pi's own names; any other is a status line field's.
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Own {
-    Tabs,
-    Flash,
-    Model,
-    Effort,
-    Tier,
-    Update,
-    Spent,
-    State,
-    Project,
-}
-
-impl<'de> Deserialize<'de> for Field {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        use serde::de::IntoDeserializer;
-        let name = String::deserialize(d)?;
-        let named = || name.as_str().into_deserializer();
-        let own = match Own::deserialize(named()) {
-            Ok(own) => own,
-            Err::<_, serde::de::value::Error>(_) => {
-                return Segment::deserialize(named()).map(Field::Status).map_err(
-                    |_: serde::de::value::Error| D::Error::unknown_variant(&name, &FIELD_NAMES),
-                );
-            }
-        };
-        Ok(match own {
-            Own::Tabs => Field::Tabs,
-            Own::Flash => Field::Flash,
-            Own::Model => Field::Model,
-            Own::Effort => Field::Effort,
-            Own::Tier => Field::Tier,
-            Own::Update => Field::Update,
-            Own::Spent => Field::Spent,
-            Own::State => Field::State,
-            Own::Project => Field::Project,
-        })
+impl Field {
+    /// The name a layout gives this field, as the config file spells it.
+    pub fn name(self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default()
     }
-}
 
-// Every name a part answers to, pi's own first: a script sees one list,
-// not which of two enums it missed.
-static FIELD_NAMES: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock::new(|| {
-    let own = variants::<Own>();
-    let status = variants::<Segment>().iter().filter(|n| !own.contains(n));
-    own.iter().chain(status).copied().collect()
-});
-
-// The names serde reads `T`'s variants by, taken from its derive so a new
-// variant can't be missing from an error's list.
-fn variants<T: for<'de> Deserialize<'de>>() -> &'static [&'static str] {
-    struct Grab<'a>(&'a mut &'static [&'static str]);
-    impl<'de> Deserializer<'de> for Grab<'_> {
-        type Error = serde::de::value::Error;
-        fn deserialize_any<V: serde::de::Visitor<'de>>(
+    /// Whether this is one of the status line's own parts, the numbers it
+    /// draws while a run works, rather than something pi adds to its row.
+    pub fn is_part(self) -> bool {
+        matches!(
             self,
-            _: V,
-        ) -> Result<V::Value, Self::Error> {
-            Err(Self::Error::custom("not an enum"))
-        }
-        fn deserialize_enum<V: serde::de::Visitor<'de>>(
-            self,
-            _: &'static str,
-            variants: &'static [&'static str],
-            _: V,
-        ) -> Result<V::Value, Self::Error> {
-            *self.0 = variants;
-            Err(Self::Error::custom("only the names were wanted"))
-        }
-        serde::forward_to_deserialize_any! {
-            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
-            bytes byte_buf option unit unit_struct newtype_struct seq tuple
-            tuple_struct map struct identifier ignored_any
-        }
+            Field::Elapsed
+                | Field::InOut
+                | Field::Speed
+                | Field::Cache
+                | Field::Cost
+                | Field::Ctx
+                | Field::Compacted
+                | Field::Queued
+                | Field::Worktree
+        )
     }
-    let mut names: &'static [&'static str] = &[];
-    let _ = T::deserialize(Grab(&mut names));
-    names
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -627,22 +583,21 @@ mod tests {
             r#"{"left":["ctx",{"group":[{"text":"$"},{"field":"cost","style":"ok"}]}]}"#,
         )
         .unwrap();
-        assert_eq!(line.left[0], Item::Field(Field::Status(Segment::Ctx)));
+        assert_eq!(line.left[0], Item::Field(Field::Ctx));
         let Item::Group(g) = &line.left[1] else {
             panic!("{line:?}");
         };
-        assert!(matches!(&g.group[1], Item::Styled(s) if s.field == Field::Status(Segment::Cost)));
+        assert!(matches!(&g.group[1], Item::Styled(s) if s.field == Field::Cost));
 
         let tabs = parse(r#"{"lines":[{"left":[{"group":["tabs"]}]}]}"#).unwrap_err();
         assert!(tabs.contains("not `tabs`"), "{tabs}");
         let clock = parse(r#"{"lines":[{"left":["clock"]}]}"#).unwrap_err();
         assert!(clock.contains("unknown variant `clock`"), "{clock}");
-        // One list, pi's own and the status line's, `model` named once.
+        // One list: pi's own names and the status line's, read as one.
         assert!(
             clock.contains("`spent`, `state`, `project`, `elapsed`"),
             "{clock}"
         );
-        assert_eq!(clock.matches("`model`").count(), 1, "{clock}");
     }
 
     #[test]

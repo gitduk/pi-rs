@@ -188,7 +188,6 @@ impl Tui {
             .collect();
         self.ui.adopt(view, &fresh);
         view.state.work = Some(Work::new(Doing::Turn { committed: false }));
-        view.model_name = started.model;
         self.drivers.started(request, true);
     }
 

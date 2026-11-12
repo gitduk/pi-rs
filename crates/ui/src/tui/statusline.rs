@@ -8,7 +8,7 @@ use llm::request::Effort;
 use ratatui::layout::{Constraint, Layout as RowLayout, Rect};
 use ratatui::text::{Line, Span};
 
-use super::view::Work;
+use super::view::{View, Work, snapshot};
 use super::{Mark, Ui, flash_for, screen};
 use pi_core::core::lane::Lane;
 use pi_core::core::meter::Snapshot;
@@ -23,11 +23,13 @@ const GAP: usize = 2;
 
 /// What a statusline row reads off the lane in front.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct Facts {
-    /// The model as its endpoint names it: what a line draws.
-    pub model: String,
-    pub effort: Effort,
-    pub tier: TierArg,
+pub(crate) struct Facts {
+    /// What the run in flight, or the one that last ended, spent and did: the
+    /// numbers every part but `spent` reads.
+    pub run: Snapshot,
+    /// Absent on a one-shot run's line, which has no lane behind it.
+    pub effort: Option<Effort>,
+    pub tier: Option<TierArg>,
     /// Whether this run's ceiling lets a script run at all: an outside command
     /// is the same power the `bash` tool asks for.
     pub may_run_scripts: bool,
@@ -46,18 +48,77 @@ pub(super) struct Facts {
 }
 
 impl Facts {
-    pub(super) fn of(lane: &Lane, work: Option<&Work>) -> Self {
+    /// What a field reads as, None when it has nothing to say. One arm per
+    /// field: its number has one source and its wording one place.
+    pub(crate) fn value(&self, field: Field) -> Option<String> {
+        let run = &self.run;
+        Some(match field {
+            Field::Model if run.model_name.is_empty() => return None,
+            Field::Model => run.model_name.clone(),
+            Field::Effort if self.effort? == Effort::Off => return None,
+            Field::Effort => self.effort?.name().to_string(),
+            Field::Tier => self.tier?.name(),
+            Field::Update => match (&self.update, &self.released) {
+                (Some(installed), _) => format!("restart for {installed}"),
+                (None, Some(released)) => format!("{released} available"),
+                (None, None) => return None,
+            },
+            Field::Spent if self.spent <= 0.0 => return None,
+            Field::Spent => llm::figures::dollars(self.spent),
+            Field::State if self.state.is_empty() => return None,
+            Field::State => self.state.clone(),
+            Field::Elapsed if self.running => return crate::status::running_time(run.elapsed?),
+            Field::Elapsed => llm::figures::elapsed(run.elapsed?),
+            // Each half appears once the provider states it: most state both
+            // only as the stream ends, and a waiting line of dashes reads as
+            // broken.
+            Field::InOut if run.input == 0 && run.output == 0 => return None,
+            Field::InOut => llm::figures::in_out_so_far(run.input, run.output),
+            Field::Speed => format!("{:.0} t/s", run.speed?),
+            Field::Cache => format!("{}% cached", run.cached?),
+            // An unpriced model reports no cost rather than $0.
+            Field::Cost if run.cost <= 0.0 => return None,
+            Field::Cost => llm::figures::dollars(run.cost),
+            Field::Ctx => return crate::status::context(run.ctx?),
+            Field::Compacted => return crate::status::compacted(run.compactions),
+            Field::Queued if run.queued == 0 => return None,
+            Field::Queued => format!("{} queued", run.queued),
+            Field::Worktree => run.worktree.clone()?,
+            // Drawn by the screen, from its own state: a flash, the folded
+            // checkouts, the checkout's diff.
+            Field::Tabs | Field::Flash | Field::Project => return None,
+        })
+    }
+
+    /// The one-shot line's facts: a run's numbers with no lane behind them,
+    /// which is all `status.parts` reads.
+    pub(crate) fn from_snapshot(run: Snapshot) -> Self {
         Self {
-            model: lane.model_name().to_string(),
+            run,
+            effort: None,
+            tier: None,
+            may_run_scripts: false,
+            running: false,
+            state: String::new(),
+            spent: 0.0,
+            alerts: Vec::new(),
+            update: None,
+            released: None,
+        }
+    }
+
+    pub(super) fn of(lane: &Lane, view: &View) -> Self {
+        Self {
+            run: snapshot(lane, view),
             // A model that takes no effort thinks at no level the run sets.
-            effort: match lane.agent().spec().accepts_effort {
+            effort: Some(match lane.agent().spec().accepts_effort {
                 true => lane.agent().brief.effort,
                 false => Effort::Off,
-            },
-            tier: lane.resolved().ceiling.into(),
+            }),
+            tier: Some(lane.resolved().ceiling.into()),
             may_run_scripts: pi_store::statusline::may_run_scripts(lane.resolved().ceiling),
             running: lane.is_running(),
-            state: state_of(work),
+            state: state_of(view.state.work.as_ref()),
             spent: lane.spent().cost,
             alerts: [
                 lane.unsaved().map(|_| "unsaved"),
@@ -249,7 +310,6 @@ impl Ui {
     pub(super) fn statusline_lines(
         &mut self,
         facts: &Facts,
-        snap: &Snapshot,
         width: usize,
     ) -> (Vec<StatuslineRow>, Vec<StatuslineRow>) {
         let held = self
@@ -269,7 +329,7 @@ impl Ui {
         let mut over = Vec::new();
         let mut under = Vec::new();
         for line in &self.layout.lines {
-            let (row, hit) = self.bar_row(line, facts, snap, width);
+            let (row, hit) = self.bar_row(line, facts, width);
             match line.place {
                 statusline::Place::Top => {
                     if let Some(hit) = hit {
@@ -295,11 +355,10 @@ impl Ui {
         &self,
         line: &statusline::Line,
         facts: &Facts,
-        snap: &Snapshot,
         width: usize,
     ) -> (StatuslineRow, Option<FlashHit>) {
-        let left = self.pieces(&line.left, facts, snap);
-        let right = self.pieces(&line.right, facts, snap);
+        let left = self.pieces(&line.left, facts);
+        let right = self.pieces(&line.right, facts);
         let sep = match &line.sep {
             Some(t) => self.text(t).unwrap_or_default(),
             None => vec![self.tab_sep.clone()],
@@ -367,14 +426,14 @@ impl Ui {
         )
     }
 
-    fn pieces(&self, items: &[Item], facts: &Facts, snap: &Snapshot) -> Vec<Piece> {
+    fn pieces(&self, items: &[Item], facts: &Facts) -> Vec<Piece> {
         items
             .iter()
             .filter_map(|item| match item {
                 Item::Field(Field::Tabs) => self.tabs_piece(),
                 Item::Styled(s) if s.field == Field::Tabs => self.tabs_piece(),
-                Item::Group(g) => self.group(g, facts, snap).map(Piece::Spans),
-                item => self.spans(item, facts, snap).map(Piece::Spans),
+                Item::Group(g) => self.group(g, facts).map(Piece::Spans),
+                item => self.spans(item, facts).map(Piece::Spans),
             })
             .collect()
     }
@@ -388,7 +447,7 @@ impl Ui {
 
     // One item other than the checkouts or a group, None when it has nothing
     // to say.
-    fn spans(&self, item: &Item, facts: &Facts, snap: &Snapshot) -> Option<Vec<Span<'static>>> {
+    fn spans(&self, item: &Item, facts: &Facts) -> Option<Vec<Span<'static>>> {
         let flash_slot = match item {
             Item::Field(part) => *part == Field::Flash,
             Item::Styled(s) => s.field == Field::Flash,
@@ -399,14 +458,14 @@ impl Ui {
             return Some(vec![self.paint.span(&self.paint.theme.status.err, alerts)]);
         }
         let (text, look) = match item {
-            Item::Field(part @ Field::Status(_)) => {
-                let text = self.field(*part, facts, snap)?;
+            Item::Field(part) if part.is_part() => {
+                let text = self.value(*part, facts)?;
                 return Some(crate::status::painted(&text, &self.paint).spans);
             }
             Item::Field(Field::Project) => return self.project_spans(&MUTED),
-            Item::Field(part) => (self.field(*part, facts, snap)?, &MUTED),
+            Item::Field(part) => (self.value(*part, facts)?, &MUTED),
             Item::Styled(s) if s.field == Field::Project => return self.project_spans(&s.style),
-            Item::Styled(s) => (self.field(s.field, facts, snap)?, &s.style),
+            Item::Styled(s) => (self.value(s.field, facts)?, &s.style),
             Item::Text(t) => return self.text(t),
             Item::Script(s) => (self.scripts.shown(s), &s.style),
             Item::Group(_) => return None,
@@ -419,15 +478,10 @@ impl Ui {
 
     // A group goes whole when it holds parts and none of them had anything to
     // say: its labels would stand alone.
-    fn group(
-        &self,
-        g: &statusline::Group,
-        facts: &Facts,
-        snap: &Snapshot,
-    ) -> Option<Vec<Span<'static>>> {
+    fn group(&self, g: &statusline::Group, facts: &Facts) -> Option<Vec<Span<'static>>> {
         let (mut spans, mut parts, mut said) = (Vec::new(), 0, 0);
         for item in &g.group {
-            let got = self.spans(item, facts, snap);
+            let got = self.spans(item, facts);
             if matches!(item, Item::Field(_) | Item::Styled(_)) {
                 parts += 1;
                 said += usize::from(got.is_some());
@@ -465,25 +519,13 @@ impl Ui {
         Some(spans)
     }
 
-    // What a part other than the checkouts reads as, None when nothing.
-    fn field(&self, field: Field, facts: &Facts, snap: &Snapshot) -> Option<String> {
-        Some(match field {
-            Field::Tabs | Field::Project => return None,
-            Field::Flash => self.flash.as_ref()?.0.clone(),
-            Field::Model => facts.model.clone(),
-            Field::Effort if facts.effort == Effort::Off => return None,
-            Field::Effort => facts.effort.name().to_string(),
-            Field::Tier => facts.tier.name(),
-            Field::Update => match (&facts.update, &facts.released) {
-                (Some(installed), _) => format!("restart for {installed}"),
-                (None, Some(released)) => format!("{released} available"),
-                (None, None) => return None,
-            },
-            Field::Spent if facts.spent <= 0.0 => return None,
-            Field::Spent => llm::figures::dollars(facts.spent),
-            Field::State => facts.state.clone(),
-            Field::Status(segment) => return crate::status::render(segment, snap, facts.running),
-        })
+    // What the screen itself has to say for a field: a flash it holds. Every
+    // other field is the facts'.
+    fn value(&self, field: Field, facts: &Facts) -> Option<String> {
+        match field {
+            Field::Flash => Some(self.flash.as_ref()?.0.clone()),
+            field => facts.value(field),
+        }
     }
 
     fn text(&self, t: &statusline::Text) -> Option<Vec<Span<'static>>> {

@@ -39,7 +39,6 @@ pub struct Started {
     pub message: Arc<message::Message>,
     pub input: EntryId,
     pub entries: Vec<Entry>,
-    pub model: String,
     pub line: Option<String>,
 }
 
@@ -129,7 +128,6 @@ impl Core {
         )?;
         let message = opened.run.message();
         entries.extend(opened.entries);
-        let model = self.lanes[at].model_name().to_owned();
         self.runtime.spawn(
             Owner {
                 request,
@@ -144,7 +142,6 @@ impl Core {
             message,
             input: opened.input,
             entries,
-            model,
             line: None,
         })
     }

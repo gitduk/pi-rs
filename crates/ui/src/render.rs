@@ -10,7 +10,6 @@ use std::io::{IsTerminal, Write};
 use std::sync::{Arc, OnceLock};
 
 use agent::Event;
-use llm::model::Pricing;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 
@@ -809,7 +808,7 @@ pub fn describe(
         )),
         Event::Warning(w) | Event::Refit(w) => Line::from(p.span(&p.theme.muted, w)),
         // Done is a status line rather than an event's wording, and each
-        // renderer composes it from its own configured segments.
+        // renderer composes it from its own configured parts.
         _ => return None,
     };
     Some(vec![line])
@@ -818,15 +817,15 @@ pub fn describe(
 pub struct Renderer {
     paint: Paint,
     quiet: bool,
-    // The segments this renderer ends a run with. A one-shot run times nothing
+    // The parts this renderer ends a run with. A one-shot run times nothing
     // and queues nothing, so `elapsed` and `queued` have nothing to say here.
-    status: Vec<pi_store::status::Segment>,
+    status: Vec<pi_store::statusline::Field>,
     // Read off the same events the terminal reads, so a one-shot run ends on
     // the line the terminal would have shown it.
     tally: pi_core::core::meter::Tally,
     model_name: String,
 
-    // The worktree this run is working in, for the segment that names it.
+    // The worktree this run is working in, for the part that names it.
     worktree: Option<String>,
     thinking: bool,
     // Each stream is tracked separately: they share a terminal when both are
@@ -839,15 +838,14 @@ impl Renderer {
     pub fn new(
         quiet: bool,
         theme: Arc<Theme>,
-        status: Vec<pi_store::status::Segment>,
+        status: Vec<pi_store::statusline::Field>,
         model_name: String,
-        pricing: Pricing,
+        meter: Arc<llm::meter::Meter>,
         worktree: Option<String>,
     ) -> Self {
-        // Priced once: a one-shot run cannot switch models, so the rate the
-        // events are added up at is the rate it started with.
+        // The run's own numbers are the wire's count from here on.
         let mut tally = pi_core::core::meter::Tally::default();
-        tally.set_pricing(pricing);
+        tally.seed(meter);
         Self {
             paint: Paint::with_theme(std::io::stderr().is_terminal(), theme),
             quiet,
@@ -1138,7 +1136,7 @@ mod tests {
             std::sync::Arc::new(super::Theme::default()),
             pi_store::status::default_parts(),
             String::new(),
-            llm::model::Pricing::default(),
+            std::sync::Arc::new(llm::meter::Meter::default()),
             None,
         );
         r.on(agent::Event::TextDelta("There".into()));

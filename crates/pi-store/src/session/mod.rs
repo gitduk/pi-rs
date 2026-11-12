@@ -377,6 +377,17 @@ impl Store {
         self.root.join(key_of(workspace))
     }
 
+    /// The directory one session's own files sit in, written or not yet: its
+    /// transcript, its messages, and what its statusline kept.
+    pub fn session_dir(&self, workspace: &Path, id: &str) -> PathBuf {
+        self.dir_of(workspace).join(tool::state::file_stem(id))
+    }
+
+    /// What this session's row last showed, if anything ever did.
+    pub fn shown(&self, workspace: &Path, id: &str) -> Option<crate::statusline::Shown> {
+        crate::statusline::Shown::read(&self.session_dir(workspace, id))
+    }
+
     /// What `k` recalls in this workspace, kept beside the transcripts
     /// since it answers to the same key and expires with them.
     ///
@@ -389,17 +400,14 @@ impl Store {
     /// Where a session's journal is written, beside its transcript, so
     /// dropping the session drops the record of how it went with it.
     pub fn journal_path(&self, workspace: &Path, id: &str) -> PathBuf {
-        self.dir_of(workspace)
-            .join(tool::state::file_stem(id))
+        self.session_dir(workspace, id)
             .join(super::journal::JOURNAL_FILE)
     }
 
     /// Where a session's background commands wait for the pi that opens it
     /// next, beside its transcript, so they go when the session does.
     pub fn background_path(&self, workspace: &Path, id: &str) -> PathBuf {
-        self.dir_of(workspace)
-            .join(tool::state::file_stem(id))
-            .join(BACKGROUND)
+        self.session_dir(workspace, id).join(BACKGROUND)
     }
 
     /// Moves with every write that can change what [`Store::choices`]
@@ -437,9 +445,7 @@ impl Store {
     /// it: a transcript nobody can find is one nobody reads back when a run
     /// goes wrong.
     pub fn path_of(&self, workspace: &Path, id: &str) -> PathBuf {
-        self.dir_of(workspace)
-            .join(tool::state::file_stem(id))
-            .join(TRANSCRIPT)
+        self.session_dir(workspace, id).join(TRANSCRIPT)
     }
 
     /// Whether `id` has been filed under `workspace`: a session nothing was
@@ -451,7 +457,7 @@ impl Store {
     /// Hold the session `id` saved under `workspace` for this process, so no
     /// other pi saves over it meanwhile; refused while one already holds it.
     pub fn claim(&self, workspace: &Path, id: &str) -> Result<Claim> {
-        claim_dir(self.dir_of(workspace).join(tool::state::file_stem(id)), id)
+        claim_dir(self.session_dir(workspace, id), id)
     }
 
     /// Claim `id` under `workspace`, then read it: read after the claim, it is
@@ -517,8 +523,7 @@ impl Store {
     /// Where a subagent's transcript is: inside its parent's session, so
     /// listing sessions never offers it and dropping the parent drops it too.
     pub fn subagent_path(&self, workspace: &Path, parent: &str, id: &str) -> PathBuf {
-        self.dir_of(workspace)
-            .join(tool::state::file_stem(parent))
+        self.session_dir(workspace, parent)
             .join(SUBAGENTS)
             .join(format!("{}.json", tool::state::file_stem(id)))
     }

@@ -1,13 +1,14 @@
-//! What the events have said was spent, counted and read.
+//! What a run spent, and the readings only its events can give.
 //!
-//! Nothing here draws: the tally is a reading taken from a run's events, and
+//! Nothing here draws: the tally is one run's share of the wire's meter, and
 //! the snapshot is what a surface reads once it is time to say it.
 
 use pi_store::icons;
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use llm::model::Pricing;
+use llm::meter::Meter;
 use llm::stream::Usage;
 use llm::totals::Totals;
 
@@ -15,8 +16,8 @@ use llm::totals::Totals;
 /// the run in flight's own figures, not the session's.
 ///
 /// A zero count reads as a dash (the provider stated nothing); every other
-/// zero drops its segment. Owned, not borrowed, so it outlives the lane.
-#[derive(Debug, Default, Clone)]
+/// zero drops its part. Owned, not borrowed, so it outlives the lane.
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Snapshot {
     pub elapsed: Option<Duration>,
     pub input: u64,
@@ -41,16 +42,15 @@ pub struct Snapshot {
     pub worktree: Option<String>,
 }
 
-/// What the events have said a run spent: one per lane and one per one-shot
-/// run, for the lines that say the run alone. The session's figure is counted
-/// at the wire instead, by `llm::meter`.
+/// What a run spent, read off the one counter every call passes: the wire's
+/// meter, minus what it held when the run began. The session's figure is the
+/// same meter undiminished, so the two can never disagree.
 #[derive(Debug, Default, Clone)]
 pub struct Tally {
-    // Turns of this run that have reported, and what they were priced at.
-    settled: Totals,
-    // The turn in flight; superseded (not added to) on `TurnEnd`, else the
-    // input would count twice. Unpriced until it ends.
-    turn: Usage,
+    // The meter every call is charged to, and what it read when this run
+    // began: what the run spent is the difference.
+    meter: Arc<Meter>,
+    base: Totals,
     ctx: Option<(usize, usize)>,
     compactions: usize,
     // The run's warnings, kept whole for `/status`.
@@ -60,81 +60,54 @@ pub struct Tally {
     // Output tokens of the turns that streamed, and the time they streamed
     // for: the run's speed, not skewed by waits or tool calls between.
     generated: (u64, Duration),
-    // The rate this run is priced at, pinned at seed: costed at its own
-    // model's rate regardless of what `/model` does meanwhile.
-    pricing: Pricing,
     // What the run that last ended reported, and whether this one has said
     // anything yet: a status line reads the run in flight, or the one that
     // last ended.
-    ended: pi_store::statusline::Last,
+    ended: pi_store::statusline::Shown,
     reported: bool,
 }
 
 impl Tally {
-    /// Start a run's counts afresh and pin the rate it is priced at. `/model`
-    /// is answered at once, so a turn that began on one model and ends after a
-    /// switch is still costed at what the model that ran it charges.
-    pub fn seed(&mut self, pricing: Pricing) {
-        let run = self.run_spend();
-        let ended = pi_store::statusline::Last {
-            session: None,
-            cached: cached(&run.usage),
-            cost: run.cost,
-            ctx: self.ctx,
-        };
-        // A run that reported nothing — a `!`, a compaction — leaves the
-        // readings of the one before it standing.
-        let ended = match self.reported {
-            true => ended,
-            false => self.ended.clone(),
-        };
+    /// Start a run's counts afresh: what it spends is what the meter gains
+    /// from here on, each call priced at the model it actually went to.
+    pub fn seed(&mut self, meter: Arc<Meter>) {
+        let ended = self.reading(&self.run_spend());
+        // Read after the run's own figure is taken: the meter may already hold
+        // the session's earlier calls.
+        let base = meter.read();
         *self = Self {
-            pricing,
+            meter,
+            base,
             ended,
             ..Self::default()
         };
     }
 
-    /// Take readings read off a saved session: what the tests and a resumed
-    /// screen need to say where the last run left off.
-    pub fn prime(&mut self, ended: pi_store::statusline::Last) {
-        self.ended = ended;
+    /// Calls that are no run of their own — a compaction asked for between
+    /// turns — are session spend: count them past, without putting them on
+    /// the last run's row.
+    pub fn pass_by(&mut self) {
+        self.base = self.meter.read();
     }
 
-    /// The readings a session starts with: what its own last run left, and
-    /// nothing from another session that wrote the file after it.
-    pub fn of(session: &str) -> Self {
-        let mut tally = Self::default();
-        if let Some(last) = pi_store::statusline::read_last() {
-            if last.session.as_deref() == Some(session) {
-                tally.prime(last);
-            }
+    /// Start as a session that has run before: the numbers its row last
+    /// showed, until this run says its own.
+    pub fn kept(shown: Option<pi_store::statusline::Shown>) -> Self {
+        Self {
+            ended: shown.unwrap_or_default(),
+            ..Self::default()
         }
-        tally
     }
 
-    /// State the rate from outside a run: a surface that reads a receiver of
-    /// its own knows when the model changed and the lane does not.
-    pub fn set_pricing(&mut self, pricing: Pricing) {
-        self.pricing = pricing;
-    }
-
-    /// Read one event for whatever number it carries, priced at the rate this
-    /// run was seeded with.
+    /// Read one event for what the meter cannot say: where the context stands,
+    /// how many compactions, how fast a turn streamed.
     pub fn on(&mut self, event: &agent::Event) {
         match event {
-            // A retry sends a second one for the same turn: the count it
-            // carries replaces the abandoned attempt's rather than joining it.
-            agent::Event::Usage(usage) => {
-                self.reported = true;
-                self.turn = *usage;
-            }
+            agent::Event::Usage(_) => self.reported = true,
             agent::Event::TurnEnd {
                 usage, generating, ..
             } => {
                 self.reported = true;
-                self.settled.add(usage, self.pricing.cost(usage));
-                self.turn = Usage::default();
                 if let Some(took) = generating {
                     self.generated.0 += usage.output;
                     self.generated.1 += *took;
@@ -153,20 +126,10 @@ impl Tally {
             }
             agent::Event::Refit(why) => self.refits.push(why.clone()),
             agent::Event::Warning(gap) => self.gaps.push(gap.clone()),
-            // Replaces the running count (not adds): a compaction summary
-            // is a paid call with no event of its own, only caught here.
             agent::Event::Done {
-                usage,
-                ctx,
-                compactions,
-                ..
+                ctx, compactions, ..
             } => {
                 self.reported = true;
-                self.settled = Totals {
-                    usage: *usage,
-                    cost: self.pricing.cost(usage),
-                };
-                self.turn = Usage::default();
                 if ctx.is_some() {
                     self.ctx = *ctx;
                 }
@@ -187,17 +150,7 @@ impl Tally {
         queued: usize,
     ) -> Snapshot {
         let run = self.run_spend();
-        // A run's first request reports only when it lands; until this run
-        // says anything, the line keeps what the one before it said.
-        let reading = match self.reported {
-            true => pi_store::statusline::Last {
-                session: None,
-                cached: cached(&run.usage),
-                cost: run.cost,
-                ctx: self.ctx,
-            },
-            false => self.ended.clone(),
-        };
+        let reading = self.reading(&run);
         Snapshot {
             elapsed,
             input: run.usage.input,
@@ -239,12 +192,22 @@ impl Tally {
         self.ctx
     }
 
-    // What this run has spent so far: the turns that have reported plus the
-    // one in flight.
+    // What a row should show: this run's numbers once it has any, else the ones
+    // the run before left — a `!` spends nothing, a first request lands later.
+    fn reading(&self, run: &Totals) -> pi_store::statusline::Shown {
+        match self.reported || *run != Totals::default() {
+            true => pi_store::statusline::Shown {
+                cached: cached(&run.usage),
+                cost: run.cost,
+                ctx: self.ctx,
+            },
+            false => self.ended.clone(),
+        }
+    }
+
+    // What this run has spent so far: the meter, less what it held at seed.
     fn run_spend(&self) -> Totals {
-        let mut t = self.settled;
-        t.usage.add(&self.turn);
-        t
+        self.meter.read().since(&self.base)
     }
 }
 
@@ -347,81 +310,95 @@ mod tests {
 
     // Round numbers, so the arithmetic an assertion checks is checkable by
     // eye: a token in costs 10 per million, one out 100.
-    fn priced() -> Pricing {
-        Pricing {
+    fn priced() -> llm::model::Pricing {
+        llm::model::Pricing {
             input_per_mtok: 10.0,
             output_per_mtok: 100.0,
             ..Default::default()
         }
     }
 
-    // A tally on the rate `priced()` states, which is what a run starts with.
-    fn seeded() -> Tally {
+    // A meter and a tally that started on it, as a run does.
+    fn seeded() -> (Arc<Meter>, Tally) {
+        let meter = Arc::new(Meter::default());
         let mut t = Tally::default();
-        t.seed(priced());
-        t
+        t.seed(meter.clone());
+        (meter, t)
     }
 
-    // The running count is the turns that have reported plus the one in
-    // flight, and a turn's own report supersedes what it had said so far.
+    // What one call leaves on the meter: the wire charges every call this way,
+    // and it, not the events, is what a run's numbers are read off.
+    fn charge(meter: &Meter, usage: &Usage) {
+        let mut totals = meter.read();
+        totals.add(usage, priced().cost(usage));
+        meter.reset(totals);
+    }
+
+    // The run's numbers are the meter's, less what it held at seed: a call
+    // counted once, however many events describe it.
     #[test]
-    fn a_tally_carries_the_finished_turns_and_the_one_in_flight() {
-        let mut t = seeded();
+    fn a_tally_reads_the_meter_since_the_run_began() {
+        let (meter, mut t) = seeded();
         t.on(&agent::Event::TurnStart { turn: 1 });
-        t.on(&agent::Event::Usage(usage(100, 5)));
-        t.on(&agent::Event::Usage(usage(100, 20)));
+        charge(&meter, &usage(100, 5));
+        charge(&meter, &usage(100, 20));
         let mid = t.snapshot("m", None, None, 0);
-        assert_eq!((mid.input, mid.output), (100, 20));
+        assert_eq!((mid.input, mid.output), (200, 25));
 
         t.on(&agent::Event::TurnEnd {
             usage: usage(100, 30),
             text: String::new(),
             generating: Some(Duration::from_secs(2)),
         });
-        t.on(&agent::Event::TurnStart { turn: 2 });
-        t.on(&agent::Event::Usage(usage(400, 7)));
+        charge(&meter, &usage(400, 7));
         let s = t.snapshot("m", None, None, 0);
-        assert_eq!((s.input, s.output), (500, 37));
-        // 100 in at 10/mtok, 30 out at 100/mtok. The turn in flight is not
-        // priced until it ends, so it contributes to neither figure.
-        assert_eq!(s.cost, 0.004);
+        assert_eq!((s.input, s.output), (600, 32));
+        // 600 in at 10/mtok, 32 out at 100/mtok.
+        assert!((s.cost - 0.0092).abs() < 1e-9, "cost was {}", s.cost);
         // Speed is the finished turn's: 30 out over its 2s of streaming.
         assert_eq!(s.speed, Some(15.0));
+    }
+
+    // The session's figure and the run's are one count: what the meter held
+    // before the run is all that separates them.
+    #[test]
+    fn the_session_total_is_the_same_meter_undiminished() {
+        let meter = Arc::new(Meter::default());
+        charge(&meter, &usage(1_000, 100));
+        let mut t = Tally::default();
+        t.seed(meter.clone());
+        charge(&meter, &usage(2_000, 200));
+        let run = t.snapshot("m", None, None, 0);
+        assert_eq!((run.input, run.output), (2_000, 200));
+        assert_eq!(meter.read().usage.output, 300);
     }
 
     // The cache share is weighted over the run's requests, not the latest
     // one's, and a mid-stream report of output alone leaves it be.
     #[test]
     fn the_cache_share_is_the_runs() {
-        let mut t = seeded();
+        let (meter, mut t) = seeded();
         assert_eq!(t.snapshot("m", None, None, 0).cached, None);
         let hit = |input, cache_read| Usage {
             input,
             cache_read,
             ..Default::default()
         };
-        t.on(&agent::Event::TurnEnd {
-            usage: hit(1_000, 0),
-            text: String::new(),
-            generating: None,
-        });
-        t.on(&agent::Event::TurnEnd {
-            usage: hit(51, 27_800),
-            text: String::new(),
-            generating: None,
-        });
+        charge(&meter, &hit(1_000, 0));
+        charge(&meter, &hit(51, 27_800));
         // 27,800 of 28,851 prompt tokens.
         assert_eq!(t.snapshot("m", None, None, 0).cached, Some(96));
         t.on(&agent::Event::Usage(usage(0, 12)));
         assert_eq!(t.snapshot("m", None, None, 0).cached, Some(96));
     }
 
-    // A run's own total replaces the running one (same turns counted once):
-    // an automatic compaction's summary is in it but in no event at all.
+    // A run's own total is the meter's word too: the events only say where the
+    // context stands and how many compactions there were.
     #[test]
-    fn a_finished_run_states_the_total_rather_than_adding_to_it() {
-        let mut t = seeded();
+    fn a_finished_run_leaves_the_count_to_the_meter() {
+        let (meter, mut t) = seeded();
         t.on(&agent::Event::TurnStart { turn: 1 });
+        charge(&meter, &usage(8_400, 390));
         t.on(&agent::Event::TurnEnd {
             usage: usage(8_400, 390),
             text: String::new(),
@@ -434,10 +411,8 @@ mod tests {
             compactions: 1,
         });
         let s = t.snapshot("m", None, None, 0);
-        // The run's word replaces the running tally rather than joining it:
-        // the same turns counted twice would double every number here.
         assert_eq!((s.input, s.output), (8_400, 390));
-        assert_eq!(s.cost, 0.123);
+        assert!((s.cost - 0.123).abs() < 1e-9, "cost was {}", s.cost);
         assert_eq!(s.ctx, Some((72_400, 114_000)));
         assert_eq!(s.compactions, 1);
         // Nothing streamed, so no time to divide by.
@@ -451,7 +426,7 @@ mod tests {
         let quiet = Tally::default().snapshot("m", None, None, 0);
         assert_eq!((quiet.input, quiet.output), (0, 0));
 
-        let mut t = seeded();
+        let (_meter, mut t) = seeded();
         t.on(&agent::Event::TurnStart { turn: 1 });
         let started = t.snapshot("m", None, None, 0);
         assert_eq!((started.input, started.output), (0, 0));

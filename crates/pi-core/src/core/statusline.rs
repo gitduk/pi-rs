@@ -60,31 +60,25 @@ impl Tool for Statusline {
 
 // What was set, said back: the model reads this instead of the screen.
 fn summary(layout: &pi_store::statusline::Layout) -> String {
-    use pi_store::statusline::{Field, Item};
-    // The words the model writes, so what it is told back is what it sent.
-    let name = |field: Field| {
-        serde_json::to_value(field)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_string))
-            .unwrap_or_default()
-    };
+    use pi_store::statusline::Item;
     let mut said = Vec::new();
-    fn walk(items: &[Item], said: &mut Vec<String>, name: &dyn Fn(Field) -> String) {
+    // The words the model writes, so what it is told back is what it sent.
+    fn walk(items: &[Item], said: &mut Vec<String>) {
         for item in items {
             match item {
-                Item::Field(field) => said.push(name(*field)),
-                Item::Styled(s) => said.push(name(s.field)),
+                Item::Field(field) => said.push(field.name()),
+                Item::Styled(s) => said.push(s.field.name()),
                 Item::Script(script) => {
                     said.push(format!("{} every {}s", script.label(), script.every))
                 }
-                Item::Group(g) => walk(&g.group, said, name),
+                Item::Group(g) => walk(&g.group, said),
                 Item::Text(_) => {}
             }
         }
     }
     for line in &layout.lines {
-        walk(&line.left, &mut said, &name);
-        walk(&line.right, &mut said, &name);
+        walk(&line.left, &mut said);
+        walk(&line.right, &mut said);
     }
     format!(
         "statusline set: {} row(s), fields: {}",

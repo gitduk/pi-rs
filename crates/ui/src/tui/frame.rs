@@ -15,7 +15,7 @@ use super::screen::{self, Rows};
 use super::scrollback::{Piece, ScrollbackRows, body};
 use super::search::{self, Anchor, Laid, Spot};
 use super::statusline::Facts;
-use super::view::{Scroll, StreamKind, View, snapshot};
+use super::view::{Scroll, StreamKind, View};
 use crate::render;
 use crate::render::Paint;
 use pi_core::core::question::{Asker, Question};
@@ -89,8 +89,8 @@ impl Ui {
                 line.style = line.style.add_modifier(ratatui::style::Modifier::REVERSED);
             }
         }
-        let facts = Facts::of(lane, view.state.work.as_ref());
-        let (over_rows, bar_rows) = self.statusline_lines(&facts, &snapshot(lane, view), width);
+        let facts = Facts::of(lane, view);
+        let (over_rows, bar_rows) = self.statusline_lines(&facts, width);
         let over_lines: Vec<_> = over_rows.iter().map(|row| row.line.clone()).collect();
         let mut bar: Vec<_> = bar_rows.iter().map(|row| row.line.clone()).collect();
         let (input, caret) = self.input_view(width, hint.as_deref());

@@ -70,6 +70,12 @@ impl Core {
                 (Err(RunError::Crashed), recovery)
             }
         };
+        // A compaction's summary call is the session's spend, not the number
+        // of the turn that ran last: counted past, so the row keeps saying
+        // what that turn cost.
+        if matches!(kind, Kind::Compact(_)) {
+            self.lanes.at_mut(at).pass_by_spend();
+        }
         let persist = match kind {
             Kind::Turn | Kind::Bash { .. } | Kind::BashBackground { .. } => true,
             Kind::Compact(report) => report.is_some(),
