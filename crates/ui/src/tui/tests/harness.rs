@@ -226,7 +226,8 @@ pub(super) fn bar(ui: &crate::tui::Ui, width: usize) -> String {
     ratatui::text::Line::from(ui.tabs_strip(width)).to_string()
 }
 
-// The row the view's hit is marked on, and its text.
+// The row the view's hit is marked on, and its text: a marked row of what
+// the transcript drew, not the hint under it.
 pub(super) fn current_hit(ui: &crate::tui::Ui) -> Option<(usize, String)> {
     let here = ui.rat_style(&ui.paint.theme.match_current);
     let buf = ui.screen.test_buffer();
@@ -236,7 +237,7 @@ pub(super) fn current_hit(ui: &crate::tui::Ui) -> Option<(usize, String)> {
             Some(cell.fg) == here.fg && cell.modifier.contains(ratatui::style::Modifier::REVERSED)
         })
     };
-    let y = (0..buf.area.height).find(|&y| marked(y))? as usize;
+    let y = (0..ui.regions.history.height).find(|&y| marked(y))? as usize;
     Some((y, ui.drawn[y].trim().to_string()))
 }
 

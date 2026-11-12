@@ -1,6 +1,7 @@
-//! Where a mouse event landed, and what that row means: the frame's four
-//! regions, and the row under the pointer.
+//! Where a mouse event landed, and what that row means: the frame's regions,
+//! and the row under the pointer.
 
+use pi_store::statusline::Place;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 
 use super::Ui;
@@ -682,8 +683,8 @@ pub(super) enum Target {
     Gap,
 }
 
-// The frame's four regions, laid out once and drawn by name. The only place
-// the vertical arrangement is stated; everything else reads the rects back.
+// The frame's regions, laid out once and drawn by name. The only place the
+// vertical arrangement is stated; everything else reads the rects back.
 #[derive(Clone, Copy, Default)]
 pub(super) struct Regions {
     // The scrolled transcript, the live region's rows included.
@@ -701,7 +702,9 @@ pub(super) struct Regions {
     pub(super) executions: Rect,
     // The input line, between the conversation and the bar.
     pub(super) editor: Rect,
-    // The row over the input line, when the layout asks for one.
+    // The row over the input line, when the layout asks for one. A menu
+    // covers it while one is open: an option sits beside the input, not
+    // above a row of blank.
     pub(super) statusline_top: Rect,
     // The row under it: the checkouts, or the flash that took its row.
     pub(super) statusline: Rect,
@@ -723,6 +726,54 @@ fn copy_out(code: &str) -> String {
 /// a panel or the bar — so its last line never reads as part of them.
 pub(super) const HISTORY_GAP: u16 = 1;
 
+/// One band under the transcript, listed in the order it is laid: the order
+/// is also what a short screen keeps, so the input line goes first and the
+/// last pane squeezes first.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Pane {
+    /// The statusline's rows: the ones over the input line, or the ones
+    /// under it. One variant, since they differ only in where they sit.
+    Statusline { place: Place, rows: usize },
+    /// The input line.
+    Editor(usize),
+    /// A question and the options that answer it, when one is open. It
+    /// covers the rows over the input line rather than taking its own: a
+    /// list that opened would otherwise move what it lies beside.
+    Panel { asked: usize, menu: usize },
+    /// The background commands.
+    Executions(usize),
+}
+
+/// What a panel keeps once the rows are shared out.
+#[derive(Clone, Copy, Debug, Default)]
+struct Panel {
+    asked: usize,
+    rule: usize,
+    menu: usize,
+}
+
+impl Panel {
+    fn height(&self) -> usize {
+        self.asked + self.rule + self.menu
+    }
+
+    /// As many rows as `room` allows: the question first, a rule whenever it
+    /// has anything to part and a row under it, the options with what is left.
+    fn fitted(asked: usize, menu: usize, room: usize) -> Self {
+        let rule = usize::from(room > 1 && asked + menu > 0);
+        let asked = asked.min(room.saturating_sub(rule));
+        let menu = menu.min(room.saturating_sub(rule + asked));
+        Self { asked, rule, menu }
+    }
+}
+
+// `n` rows of what is left, and what is left after them.
+fn take(room: &mut usize, n: usize) -> usize {
+    let got = n.min(*room);
+    *room -= got;
+    got
+}
+
 // `row`'s place among `area`'s rows, if it is one of them.
 pub(super) fn row_in(area: Rect, row: u16) -> Option<usize> {
     (area.contains(Position::new(area.x, row))).then(|| (row - area.y) as usize)
@@ -731,114 +782,82 @@ pub(super) fn row_in(area: Rect, row: u16) -> Option<usize> {
 impl Regions {
     /// The row `place` draws on: the one over the input line, or the one
     /// under it.
-    pub(super) fn strip(&self, place: pi_store::statusline::Place) -> Rect {
+    pub(super) fn strip(&self, place: Place) -> Rect {
         match place {
-            pi_store::statusline::Place::Top => self.statusline_top,
-            pi_store::statusline::Place::Bottom => self.statusline,
+            Place::Top => self.statusline_top,
+            Place::Bottom => self.statusline,
         }
     }
 
-    /// The rows each part asks for, as many as `area` holds: the input line
-    /// parts the conversation, executions and all, from the bar under it. A `page`
-    /// up is read over all of the conversation, so the executions get no rows.
-    pub(super) fn layout(
-        area: Rect,
-        page: bool,
-        asked: usize,
-        menu: usize,
-        executions: usize,
-        statusline_top: usize,
-        statusline: usize,
-        editor: usize,
-    ) -> Self {
-        // A short screen takes from the editor, then the executions, then the
-        // statusline; a row of history and a row to type on stay.
-        let mut left = (area.height as usize).saturating_sub(1 + HISTORY_GAP as usize);
-        let statusline = statusline.min(left.saturating_sub(1));
-        left -= statusline;
-        let statusline_top = statusline_top.min(left.saturating_sub(1));
-        left -= statusline_top;
-        let executions = if page {
-            0
-        } else {
-            executions.min(left.saturating_sub(1))
-        };
-        left -= executions;
-        let editor = editor.min(left);
-        left -= editor;
-        if asked > 0 {
-            // The question needs its conversation visible for context.
-            let shown = (asked + menu + 1).min(left.div_ceil(2));
-            let option = usize::from(menu > 0).min(shown);
-            let rule = usize::from(shown > option + 1);
-            let asked = asked.min(shown - option - rule);
-            let menu = shown - asked - rule;
-            let [
-                history,
-                gap,
-                asked,
-                rule,
-                menu,
-                executions,
-                statusline_top,
-                editor,
-                statusline,
-            ] = Layout::vertical([
-                Constraint::Fill(1),
-                Constraint::Length(HISTORY_GAP),
-                Constraint::Length(asked as u16),
-                Constraint::Length(rule as u16),
-                Constraint::Length(menu as u16),
-                Constraint::Length(executions as u16),
-                Constraint::Length(statusline_top as u16),
-                Constraint::Length(editor as u16),
-                Constraint::Length(statusline as u16),
-            ])
-            .areas(area);
-            return Self {
-                history,
-                gap,
-                asked,
-                rule,
-                menu,
-                executions,
-                statusline_top,
-                editor,
-                statusline,
-            };
+    /// What sits under the transcript, as many rows as `area` holds: the
+    /// panes take their turn in the order `panes` lists them.
+    pub(super) fn layout(area: Rect, panes: &[Pane]) -> Self {
+        // A row of history and the gap under it stay whatever else is asked
+        // for: a conversation with no row of its own has nothing to read.
+        let mut room = (area.height as usize).saturating_sub(1 + HISTORY_GAP as usize);
+        let (mut bar, mut editor, mut top, mut executions) = (0, 0, 0, 0);
+        let (mut asked, mut menu) = (0, 0);
+        for pane in panes {
+            match *pane {
+                Pane::Statusline {
+                    place: Place::Bottom,
+                    rows,
+                } => bar = take(&mut room, rows),
+                Pane::Statusline {
+                    place: Place::Top,
+                    rows,
+                } => top = take(&mut room, rows),
+                Pane::Editor(n) => editor = take(&mut room, n),
+                Pane::Panel {
+                    asked: questions,
+                    menu: options,
+                } => (asked, menu) = (questions, options),
+                Pane::Executions(n) => executions = take(&mut room, n),
+            }
         }
-        let chunks = Layout::vertical([
+        // One stack, top to bottom: what a screen shows when the panes above
+        // it have taken their rows.
+        let [history, gap, executions, statusline_top, editor, statusline] = Layout::vertical([
             Constraint::Fill(1),
             Constraint::Length(HISTORY_GAP),
             Constraint::Length(executions as u16),
-            Constraint::Length(statusline_top as u16),
+            Constraint::Length(top as u16),
             Constraint::Length(editor as u16),
-            Constraint::Length(statusline as u16),
+            Constraint::Length(bar as u16),
         ])
-        .split(area);
-        // The list lies over the executions and the rows above them, next to the
-        // line it completes: nothing under it moves as it grows and shrinks.
-        // Half the history at most, so what it moves the view to stays in sight.
-        let shown = (asked + menu).min(executions + left.div_ceil(2));
-        let asked = asked.min(shown);
-        let above = chunks[0].union(chunks[2]);
-        let [_, asked, rule, menu] = Layout::vertical([
-            Constraint::Fill(1),
-            Constraint::Length(asked as u16),
-            Constraint::Length(u16::from(shown > 0)),
-            Constraint::Length((shown - asked) as u16),
-        ])
-        .areas(above);
+        .areas(area);
+        // The panel covers the rows just over the input line — the gap and
+        // the row above it with them, so an option sits beside the line it
+        // completes. At most half of what stands above, so the conversation
+        // the question is about still reads around it.
+        let above = editor.y.saturating_sub(history.y) as usize;
+        let panel = Panel::fitted(asked, menu, above.div_ceil(2));
+        let [asked, rule, menu] = match panel.height() {
+            0 => [Rect::default(); 3],
+            height => {
+                let foot = Rect {
+                    y: editor.y - height as u16,
+                    height: height as u16,
+                    ..history
+                };
+                Layout::vertical([
+                    Constraint::Length(panel.asked as u16),
+                    Constraint::Length(panel.rule as u16),
+                    Constraint::Length(panel.menu as u16),
+                ])
+                .areas::<3>(foot)
+            }
+        };
         Self {
-            history: chunks[0],
-            gap: chunks[1],
+            history,
+            gap,
             asked,
             rule,
             menu,
-            executions: chunks[2],
-            statusline_top: chunks[3],
-            editor: chunks[4],
-            statusline: chunks[5],
+            executions,
+            statusline_top,
+            editor,
+            statusline,
         }
     }
 

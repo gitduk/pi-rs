@@ -2,6 +2,7 @@
 //! up, the menu, the bar and the editor, laid bottom-up and drawn.
 
 use pi_core::core::lane::Lane;
+use pi_store::statusline::Place;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, TableState};
@@ -9,7 +10,7 @@ use ratatui::widgets::{Block, Borders, TableState};
 use super::Ui;
 use super::call::{self, drawn, pending_line};
 use super::menu::MenuEntry;
-use super::mouse::{Regions, Target, row_in};
+use super::mouse::{Pane, Regions, Target, row_in};
 use super::row::{PendingTool, Row, count};
 use super::screen::{self, Rows};
 use super::scrollback::{Piece, ScrollbackRows, body};
@@ -105,16 +106,31 @@ impl Ui {
             _ => Vec::new(),
         };
         let area = self.screen.area();
-        let regions = Regions::layout(
-            area,
-            paged,
-            asked.len(),
-            menu.len(),
-            executions.len(),
-            over_lines.len(),
-            bar.len(),
-            input.len(),
-        );
+        // Rows come from the layout, not from what they drew: a flash that
+        // comes and goes must not move the panel under it.
+        // The input line first: a bar cut short beats a line nobody can see.
+        let panes = [
+            Pane::Editor(input.len()),
+            Pane::Statusline {
+                place: Place::Bottom,
+                rows: self.layout.rows(Place::Bottom),
+            },
+            Pane::Panel {
+                asked: asked.len(),
+                menu: menu.len(),
+            },
+            Pane::Statusline {
+                place: Place::Top,
+                rows: self.layout.rows(Place::Top),
+            },
+            // A page is read over all of the conversation: its own rows take
+            // the room the background commands would.
+            Pane::Executions(match paged {
+                true => 0,
+                false => executions.len(),
+            }),
+        ];
+        let regions = Regions::layout(area, &panes);
         for row in view.surface.scrollback.iter_mut() {
             row.prepare_preview(&self.paint, width, regions.history.height as usize);
         }
@@ -414,27 +430,6 @@ impl Ui {
                 frame.render_widget(gap, regions.gap);
             }
             frame.render_widget(Rows(&executions), regions.executions);
-            if regions.overlay().height > 0 {
-                frame.render_widget(ratatui::widgets::Clear, regions.overlay());
-                frame.render_widget(Rows(&asked), regions.asked);
-                frame.render_widget(&menu_rule, regions.rule);
-                let list = regions.menu;
-                // Kept full: ratatui won't pull back an offset that a taller
-                // screen or a changed list left past the end.
-                let room = list.height as usize;
-                let padding = MENU_PADDING.min(room / 2);
-                let top = self
-                    .list
-                    .top
-                    .min(picked.saturating_sub(padding))
-                    .max((picked + padding + 1).saturating_sub(room))
-                    .min(menu.len().saturating_sub(room));
-                let mut state = TableState::default()
-                    .with_offset(top)
-                    .with_selected(Some(picked));
-                frame.render_stateful_widget(table.row_highlight_style(cursor), list, &mut state);
-                self.list.top = state.offset();
-            }
             // The row over the input line and the one under it wear the same
             // paint; only the place they are drawn at differs.
             let strip = |frame: &mut ratatui::Frame,
@@ -460,6 +455,29 @@ impl Ui {
             // A selection paints these rows itself.
             if self.selection.is_none() {
                 strip(frame, regions.statusline, &bar_rows, &bar);
+            }
+            // Drawn last of the pinned rows: the list may cover the gap
+            // row and the row over the input line.
+            if regions.overlay().height > 0 {
+                frame.render_widget(ratatui::widgets::Clear, regions.overlay());
+                frame.render_widget(Rows(&asked), regions.asked);
+                frame.render_widget(&menu_rule, regions.rule);
+                let list = regions.menu;
+                // Kept full: ratatui won't pull back an offset that a taller
+                // screen or a changed list left past the end.
+                let room = list.height as usize;
+                let padding = MENU_PADDING.min(room / 2);
+                let top = self
+                    .list
+                    .top
+                    .min(picked.saturating_sub(padding))
+                    .max((picked + padding + 1).saturating_sub(room))
+                    .min(menu.len().saturating_sub(room));
+                let mut state = TableState::default()
+                    .with_offset(top)
+                    .with_selected(Some(picked));
+                frame.render_stateful_widget(table.row_highlight_style(cursor), list, &mut state);
+                self.list.top = state.offset();
             }
             if let Some((line, body)) = &flash_body {
                 frame.render_widget(ratatui::widgets::Clear, *body);

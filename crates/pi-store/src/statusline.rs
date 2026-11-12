@@ -124,6 +124,12 @@ impl Default for Layout {
 }
 
 impl Layout {
+    /// How many rows this layout takes in `place`, said or not: a row that
+    /// comes and goes would move the panel under it.
+    pub fn rows(&self, place: Place) -> usize {
+        self.lines.iter().filter(|line| line.place == place).count()
+    }
+
     /// Whether any row draws `field`: the work behind it is worth doing only
     /// then.
     pub fn uses(&self, field: Field) -> bool {
