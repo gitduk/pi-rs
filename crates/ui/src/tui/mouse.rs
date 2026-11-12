@@ -323,15 +323,16 @@ impl Ui {
                 {
                     // A cut's hint under the pointer, or a line too tall for
                     // the window, is read on a page.
+                    let screen = self.screen.area().height as usize;
                     let page = (more && row.has_more(clicked, width))
                         .then(|| row.opening(line, &self.paint))
                         .flatten()
-                        .or_else(|| row.page_at(line, &self.paint, width));
+                        .or_else(|| row.page_at(line, &self.paint, width, screen));
                     if let Some(page) = page {
                         self.open_page(page);
                         return;
                     }
-                    if !row.toggle_at(line, &self.paint, width) {
+                    if !row.toggle_at(line, &self.paint, width, screen) {
                         return;
                     }
                     // What changed is under the line clicked, so that line

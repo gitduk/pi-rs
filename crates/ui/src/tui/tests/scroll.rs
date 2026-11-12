@@ -1557,7 +1557,7 @@ fn a_step_that_fits_opens_in_the_window() {
     row.prepare_preview(&paint, width, 40);
     let head = row.len() - 1;
     assert!(
-        row.toggle_at(head, &paint, width),
+        row.toggle_at(head, &paint, width, usize::MAX),
         "it fits, so it opens there"
     );
     let lines: Vec<String> = (0..row.len())
@@ -1608,10 +1608,12 @@ fn a_step_too_tall_for_the_window_opens_on_a_page() {
         .expect("the call keeps its line");
 
     assert!(
-        !row.toggle_at(head, &paint, width),
+        !row.toggle_at(head, &paint, width, usize::MAX),
         "the window cannot hold it"
     );
-    let page = row.page_at(head, &paint, width).expect("the page reads it");
+    let page = row
+        .page_at(head, &paint, width, usize::MAX)
+        .expect("the page reads it");
     assert_eq!(page.len(), 17, "its own line, a blank, and what it printed");
     assert!(
         row.line(head, &paint, width)
@@ -1632,11 +1634,13 @@ fn a_relayed_turn_too_tall_for_its_rows_opens_on_a_page() {
     let mut row = Row::relayed("automatic input", &long, 0, &paint);
     row.prepare_preview(&paint, width, 20);
     assert!(
-        !row.toggle_at(0, &paint, width),
+        !row.toggle_at(0, &paint, width, usize::MAX),
         "it does not open in place"
     );
     assert_eq!(row.len(), 1, "it stays one line");
-    let page = row.page_at(0, &paint, width).expect("the page reads it");
+    let page = row
+        .page_at(0, &paint, width, usize::MAX)
+        .expect("the page reads it");
     assert!(
         page.len() > 10,
         "the whole of it, past the rows a fold takes"
@@ -1646,7 +1650,10 @@ fn a_relayed_turn_too_tall_for_its_rows_opens_on_a_page() {
     let short: String = (1..=4).map(|i| format!("line {i}\n\n")).collect();
     let mut row = Row::relayed("automatic input", &short, 0, &paint);
     row.prepare_preview(&paint, width, 20);
-    assert!(row.toggle_at(0, &paint, width), "it fits, so it opens");
+    assert!(
+        row.toggle_at(0, &paint, width, usize::MAX),
+        "it fits, so it opens"
+    );
     assert!(row.len() > 1, "its text reads under its own line");
     assert!(
         !row.has_more(row.len() - 1, width),
@@ -1665,7 +1672,7 @@ fn an_opened_turn_reads_its_own_line_plain() {
     let muted = crate::sgr::style_to_ratatui(&paint.theme.muted);
     let plain = crate::sgr::style_to_ratatui(&paint.theme.input);
     assert_eq!(row.line(0, &paint, 80).0.spans[0].style, muted, "shut");
-    assert!(row.toggle_at(0, &paint, 80));
+    assert!(row.toggle_at(0, &paint, 80, usize::MAX));
     assert_eq!(row.line(0, &paint, 80).0.spans[0].style, plain, "opened");
     assert_eq!(
         row.line(1, &paint, 80).0.to_string(),
@@ -1730,15 +1737,18 @@ fn an_open_turn_that_no_longer_fits_still_closes() {
     let mut row = Row::relayed("automatic input", &text, 0, &paint);
     row.prepare_preview(&paint, width, 40);
     assert!(
-        row.toggle_at(0, &paint, width),
+        row.toggle_at(0, &paint, width, usize::MAX),
         "a tall enough window opens it"
     );
     row.prepare_preview(&paint, width, 8);
     assert!(
-        row.page_at(0, &paint, width).is_none(),
+        row.page_at(0, &paint, width, usize::MAX).is_none(),
         "an open row is not read on a page"
     );
-    assert!(row.toggle_at(0, &paint, width), "the click closes it");
+    assert!(
+        row.toggle_at(0, &paint, width, usize::MAX),
+        "the click closes it"
+    );
     assert_eq!(row.len(), 1);
 }
 
@@ -1949,7 +1959,7 @@ fn an_opened_line_that_wraps_counts_against_the_budget() {
     // the line wraps to two and the turn no longer fits.
     row.prepare_preview(&paint, width, 6);
     assert!(
-        row.page_at(0, &paint, width).is_some(),
+        row.page_at(0, &paint, width, usize::MAX).is_some(),
         "the wrapped line is counted"
     );
 }

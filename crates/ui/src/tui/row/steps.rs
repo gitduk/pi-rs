@@ -487,8 +487,9 @@ impl Step {
         self.is_open() && self.fits(rows)
     }
 
-    // Whether a click on it reads it on a page: more lines than the window
-    // holds, or a line cut to one row at this width.
+    // Whether a click on it reads it on a page: read in place it would be
+    // cut, being more lines than the rows it may take, or a line wider than
+    // the row. One window row is one screen row, so nothing wraps there.
     fn opens_on_a_page(&self, rows: usize, width: usize) -> bool {
         (self.opened_len() > 1 && !self.fits(rows)) || self.head(0).cut(width)
     }
@@ -742,14 +743,20 @@ impl Group {
 
     // The page that reads window row `i`, when the window cannot show what
     // the line opens: the step stays closed and the page reads it whole.
-    pub(super) fn page_at(&self, i: usize, paint: &Paint, width: usize) -> Option<Opening> {
+    pub(super) fn page_at(
+        &self,
+        i: usize,
+        paint: &Paint,
+        width: usize,
+        screen: usize,
+    ) -> Option<Opening> {
         let k = self.step_at(i)?;
         let step = &self.steps[k];
-        let rows = self.height();
-        if step.shows_open(rows) {
+        // Open and shown whole, a line of it is closed by a click, not paged.
+        if step.shows_open(self.height()) {
             return None;
         }
-        if !(step.opens_on_a_page(rows, width) || step.head(0).cut(width)) {
+        if !step.opens_on_a_page(self.page_rows(screen), width) {
             return None;
         }
         Some(step_page(step, paint))
@@ -766,6 +773,15 @@ impl Group {
         match self.whole {
             true => usize::MAX,
             false => self.window.rows.max(1),
+        }
+    }
+
+    // The rows a step may take before a click reads it on a page instead:
+    // its window's, or half the screen when the group has no window.
+    fn page_rows(&self, screen: usize) -> usize {
+        match self.whole {
+            true => (screen / 2).max(1),
+            false => self.height(),
         }
     }
 
@@ -1041,7 +1057,7 @@ impl Fold for Group {
         self.steps[k].opens(width).then_some(i)
     }
 
-    fn toggle_at(&mut self, i: usize, width: usize) -> bool {
+    fn toggle_at(&mut self, i: usize, width: usize, screen: usize) -> bool {
         if self.is_bar(i) {
             self.toggle_whole();
             return true;
@@ -1056,9 +1072,9 @@ impl Fold for Group {
             self.steps[k].flip();
             return true;
         }
-        // Too tall for the window, or cut to one row: the page reads it, and
-        // `page_at` answers.
-        if self.steps[k].opens_on_a_page(self.height(), width) || self.steps[k].head(0).cut(width) {
+        // Taller than it may open here: the page reads it, `page_at` answers.
+        let rows = self.page_rows(screen);
+        if self.steps[k].opens_on_a_page(rows, width) {
             return false;
         }
         self.steps[k].flip();
@@ -1189,7 +1205,7 @@ mod tests {
         row.set_folded(false);
         assert_eq!(row.folded(), Some(false), "opened whole");
         assert!(
-            row.toggle_at(0, &paint, 80),
+            row.toggle_at(0, &paint, 80, usize::MAX),
             "a call with an argument opens"
         );
         assert_eq!(row.folded(), Some(true), "closed by its own line");
@@ -1259,7 +1275,7 @@ mod tests {
             let page: Vec<String> = (row.opening(i, &paint).expect("it opens").iter())
                 .map(|l| plain(&l.line))
                 .collect();
-            assert!(row.toggle_at(i, &paint, 80));
+            assert!(row.toggle_at(i, &paint, 80, usize::MAX));
             let drawn: Vec<String> = (i..i + page.len())
                 .map(|at| plain(&row.line(at, &paint, 80).0))
                 .collect();
@@ -1269,7 +1285,7 @@ mod tests {
             }
         };
         // A call short enough to show opens in place; one cut to its row is
-        // read on the page instead.
+        // read on the page instead, the only place that shows it whole.
         let long = format!(
             "grep -rn banner {}",
             "crates/ui/src/tui/tests/*.rs ".repeat(4)
@@ -1280,10 +1296,13 @@ mod tests {
         assert!(listed.join(Step::Tool(ran)).is_ok());
         listed.prepare_preview(&paint, 80, 40);
         assert!(
-            !listed.toggle_at(2, &paint, 80),
+            !listed.toggle_at(2, &paint, 80, usize::MAX),
             "a cut line is read on a page"
         );
-        assert!(listed.page_at(2, &paint, 80).is_some(), "the page holds it");
+        assert!(
+            listed.page_at(2, &paint, 80, usize::MAX).is_some(),
+            "the page holds it"
+        );
 
         let short = FoldedTool::new("bash", "cat a", "cat a", "one\ntwo\n");
         let mut plain_row = bundle(vec![tool("read", "a.rs")]);
@@ -1314,10 +1333,13 @@ mod tests {
         assert_eq!(unfolded.len(), 3, "one line per step");
 
         assert_eq!(row.click_line(0, 80), None, "nothing under the read");
-        assert!(row.toggle_at(1, &paint, 80), "the reasoning opens");
+        assert!(
+            row.toggle_at(1, &paint, 80, usize::MAX),
+            "the reasoning opens"
+        );
         assert_eq!(row.len(), 5);
         assert!(
-            row.toggle_at(4, &paint, 80),
+            row.toggle_at(4, &paint, 80, usize::MAX),
             "the call past it still answers"
         );
         assert_eq!(
@@ -1329,7 +1351,9 @@ mod tests {
         assert_eq!(lines[7].trim(), "", "a blank row parts command from output");
         assert_eq!(lines[8].trim(), "hi", "what it printed, under the blank");
         assert_eq!(row.click_line(5, 80), None, "a body line opens nothing");
-        assert!(row.toggle_at(1, &paint, 80) && row.toggle_at(2, &paint, 80));
+        assert!(
+            row.toggle_at(1, &paint, 80, usize::MAX) && row.toggle_at(2, &paint, 80, usize::MAX)
+        );
         assert_eq!(shown(&row, 80), unfolded);
     }
 
@@ -1348,7 +1372,7 @@ mod tests {
             "a.rs",
             "fn main() {}",
         )]);
-        assert!(one.toggle_at(0, &paint, 80));
+        assert!(one.toggle_at(0, &paint, 80, usize::MAX));
         assert_eq!(one.len(), 3, "its line, a blank, and what it printed");
 
         // Before its first line lands there is nothing to unfold.

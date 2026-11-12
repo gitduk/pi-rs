@@ -121,7 +121,7 @@ impl Fold for ToolOut {
         self.expanded
     }
 
-    fn toggle_at(&mut self, i: usize, width: usize) -> bool {
+    fn toggle_at(&mut self, i: usize, width: usize, _screen: usize) -> bool {
         if i != 0 || !(self.expanded || self.expandable() || self.clipped(width)) {
             return false;
         }

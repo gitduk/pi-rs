@@ -276,8 +276,9 @@ trait Fold {
     fn click_line(&self, _i: usize, _width: usize) -> Option<usize> {
         self.expandable().then_some(0)
     }
-    // Open or close what line `i` heads; whether anything moved.
-    fn toggle_at(&mut self, _i: usize, _width: usize) -> bool {
+    // Open or close what line `i` heads; whether anything moved. `screen` is
+    // the screen's rows: a group opened whole has no window, and caps at half.
+    fn toggle_at(&mut self, _i: usize, _width: usize, _screen: usize) -> bool {
         self.expandable() && {
             self.flip();
             true
@@ -551,7 +552,7 @@ impl Row {
     /// Toggle the row's own line, returning true if toggled.
     #[cfg(test)]
     pub fn toggle_expand(&mut self) -> bool {
-        self.toggle_at(0, &Paint::new(false), 80)
+        self.toggle_at(0, &Paint::new(false), 80, usize::MAX)
     }
 
     fn preview_line(&self, i: usize) -> Option<PreviewLine> {
@@ -624,13 +625,16 @@ impl Row {
     }
 
     /// Open or close what line `i` heads — see `click_line` — and say
-    /// whether anything moved.
-    pub fn toggle_at(&mut self, i: usize, paint: &Paint, width: usize) -> bool {
+    /// whether anything moved. `screen` is the screen's rows, which cap a
+    /// step a group opened whole may take before a page reads it.
+    pub fn toggle_at(&mut self, i: usize, paint: &Paint, width: usize, screen: usize) -> bool {
         if self.too_tall(paint, width) {
             return false;
         }
         let source = self.source_line(i);
-        let moved = self.fold_mut().is_some_and(|f| f.toggle_at(source, width));
+        let moved = self
+            .fold_mut()
+            .is_some_and(|f| f.toggle_at(source, width, screen));
         if moved {
             self.1.clear();
         }
@@ -644,11 +648,12 @@ impl Row {
         self.fold()?.opening(self.source_line(i), paint)
     }
 
-    /// The page that reads line `i`, when the window cannot hold what the
-    /// line opens: a step taller than the group's window is read there.
-    pub fn page_at(&self, i: usize, paint: &Paint, width: usize) -> Option<Opening> {
+    /// The page that reads line `i`, when it cannot be shown whole where it
+    /// lies: a step taller than the group's window — or, the group opened
+    /// whole, than half a screen — or one with a line wider than the row.
+    pub fn page_at(&self, i: usize, paint: &Paint, width: usize, screen: usize) -> Option<Opening> {
         if let Kind::Steps(group) = &self.0 {
-            return group.page_at(i, paint, width);
+            return group.page_at(i, paint, width, screen);
         }
         // The cut spends screen rows, so this does too: lines that wrap past
         // the budget would be cut with a count to click through.
