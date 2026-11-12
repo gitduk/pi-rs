@@ -622,24 +622,29 @@ impl Default for Window {
     }
 }
 
-// What the window shows this frame: `body` content rows from `top` on, and
-// `past` lines kept for the wheel.
+// What the window shows this frame: `body` content rows from `top` on,
+// `past` lines kept for the wheel, and whether the bar is drawn.
 struct Framed {
     body: usize,
     top: usize,
     past: usize,
+    bar: bool,
 }
 
 impl Framed {
-    // The rows drawn: the content, and the bar under it when it runs past.
+    // The rows drawn: the content, and the bar under it.
     fn len(&self) -> usize {
-        self.body + usize::from(self.past > 0)
+        self.body + usize::from(self.bar)
     }
 
     // Where in the content window row `i` falls; the bar row holds none.
     fn at(&self, i: usize) -> Option<usize> {
         (i < self.body).then_some(self.top + i)
     }
+}
+
+fn bar_row(framed: &Framed, i: usize) -> bool {
+    framed.bar && i == framed.body
 }
 
 /// The run's working: read-only calls that landed well and
@@ -652,6 +657,8 @@ pub(super) struct Group {
     // The window over the steps' lines: every line is there, the frame
     // shows a slice of them.
     window: Window,
+    // Every line shows, not the frame's slice of them.
+    whole: bool,
     // The line under the mouse, when it is one a click opens or closes.
     hovered: Option<usize>,
     // The tick the marks of calls still out turn at.
@@ -665,6 +672,7 @@ impl Group {
             steps: vec![first],
             pending: Vec::new(),
             window: Window::default(),
+            whole: false,
             hovered: None,
             spinner: 0,
         }
@@ -685,11 +693,24 @@ impl Group {
         for step in &mut self.steps {
             step.set_open(!to);
         }
-        // A group folded and opened again starts from its newest line.
+        // Folded is the frame's slice again, however the reader left it.
+        self.whole = false;
+        self.follow_newest();
+    }
+
+    // Start over at the newest line, keeping the height the frame allowed.
+    fn follow_newest(&mut self) {
         self.window = Window {
             rows: self.window.rows,
             ..Window::default()
         };
+    }
+
+    // Show every line, or the frame's slice of them again. The bar stays as
+    // the way back.
+    fn toggle_whole(&mut self) {
+        self.whole = !self.whole;
+        self.follow_newest();
     }
 
     // The height the frame allows the window; true when it moved. A step
@@ -698,6 +719,7 @@ impl Group {
         let moved = self.window.rows != rows;
         self.window.rows = rows;
         if moved {
+            let rows = self.height();
             for step in &mut self.steps {
                 if !step.fits(rows) {
                     step.set_open(false);
@@ -738,9 +760,13 @@ impl Group {
         step_index(&self.steps, self.height(), self.framed().at(i)?)
     }
 
-    // The rows the window may show: what the frame gave, and always one.
+    // The rows the window may show: opened whole, every line; otherwise what
+    // the frame gave, and always one.
     fn height(&self) -> usize {
-        self.window.rows.max(1)
+        match self.whole {
+            true => usize::MAX,
+            false => self.window.rows.max(1),
+        }
     }
 
     // The lines every step and call takes, one each unless a step opens
@@ -775,7 +801,14 @@ impl Group {
             true => past,
             false => self.window.top.min(past),
         };
-        Framed { body, top, past }
+        // Under a window opened whole the bar is the way back, so it stays
+        // with nothing past it.
+        Framed {
+            body,
+            top,
+            past,
+            bar: past > 0 || self.whole,
+        }
     }
 
     /// Move the window `step` lines; false when it had nowhere to go, so a
@@ -802,11 +835,15 @@ impl Group {
         self.framed().len()
     }
 
-    // Whether window row `i` is the bar: the row that shows where the window
-    // sits, and the handle the wheel turns it by.
+    // Whether window row `i` of `framed` is the bar: the row that shows where
+    // the window sits, which a click opens or closes the whole of.
     pub(super) fn is_bar(&self, i: usize) -> bool {
-        let framed = self.framed();
-        framed.past > 0 && i == framed.body
+        bar_row(&self.framed(), i)
+    }
+
+    // Whether the wheel over the bar has a window to turn.
+    pub(super) fn turns_window(&self) -> bool {
+        self.framed().past > 0
     }
 
     pub(super) fn line(
@@ -816,8 +853,12 @@ impl Group {
         width: usize,
     ) -> (Line<'static>, Option<Line<'static>>) {
         let framed = self.framed();
-        if framed.past > 0 && i == framed.body {
-            return (cut_line(self.bar_line(&framed, paint), width), None);
+        if bar_row(&framed, i) {
+            let mut bar = self.bar_line(&framed, paint);
+            if self.hovered == Some(i) {
+                paint.lit_spans(&mut bar.spans);
+            }
+            return (cut_line(bar, width), None);
         }
         let Some(at) = framed.at(i) else {
             return (Line::default(), None);
@@ -837,11 +878,10 @@ impl Group {
     fn bar_line(&self, framed: &Framed, paint: &Paint) -> Line<'static> {
         const CELLS: usize = 10;
         let past = framed.past;
-        if past == 0 {
-            return Line::default();
-        }
-        let from_bottom = past.saturating_sub(framed.top);
-        let spent = (from_bottom * CELLS).div_ceil(past).min(CELLS);
+        // Nothing past the window — the whole of it shown — lights every cell.
+        let spent = (past.saturating_sub(framed.top) * CELLS)
+            .div_ceil(past.max(1))
+            .min(CELLS);
         let lit = CELLS - spent;
         let mut spans = Vec::with_capacity(4);
         if lit > 0 {
@@ -994,11 +1034,18 @@ impl Fold for Group {
     }
 
     fn click_line(&self, i: usize, width: usize) -> Option<usize> {
+        if self.is_bar(i) {
+            return Some(i);
+        }
         let k = self.step_at(i)?;
         self.steps[k].opens(width).then_some(i)
     }
 
     fn toggle_at(&mut self, i: usize, width: usize) -> bool {
+        if self.is_bar(i) {
+            self.toggle_whole();
+            return true;
+        }
         let Some(k) = self.step_at(i) else {
             return false;
         };

@@ -51,6 +51,11 @@ impl Ui {
         let Some(target) = view.surface.scrollback.get(idx) else {
             return false;
         };
+        // A bar over a window opened whole turns nothing: the wheel is the
+        // transcript's there, not a bar's.
+        if !target.turns_window() {
+            return false;
+        }
         if (col as usize) >= target.bar_width(line, &self.paint, width) {
             return false;
         }

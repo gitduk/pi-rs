@@ -707,8 +707,8 @@ impl Row {
         self.opening(i, paint)
     }
 
-    /// Whether line `i` is a group window's bar: the handle the wheel turns
-    /// the window by.
+    /// Whether line `i` is a group window's bar: the row saying where the
+    /// window sits, and the one a click answers.
     pub fn is_bar(&self, i: usize) -> bool {
         let Kind::Steps(group) = &self.0 else {
             return false;
@@ -726,6 +726,15 @@ impl Row {
         let lead = border.as_ref().map_or(0, Line::width);
         let text = pi_store::text::width(&screen::plain(&line));
         lead + text
+    }
+
+    /// Whether the wheel over this row's bar turns a window: under a window
+    /// opened whole there is none, so the transcript keeps the wheel.
+    pub fn turns_window(&self) -> bool {
+        let Kind::Steps(group) = &self.0 else {
+            return false;
+        };
+        group.turns_window()
     }
 
     /// Turn a group's window by `step` lines; false when it has nowhere to
