@@ -211,8 +211,6 @@ The repository's `examples/tools/` holds tools to copy:
 - `search` searches the web.
 - `judge` asks a judgment model and reads its key from the tool directory's
   `.env`.
-- `choose` asks the person a question.
-  The model then ends its turn.
 - `wechat` connects the session to a WeChat chat.
   Request it, then scan its QR code on first use.
   Phone messages arrive as turns, including `/stop`.
