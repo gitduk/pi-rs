@@ -1,5 +1,7 @@
 //! The calls and reasoning of a run, each step opening on its own.
 
+use std::collections::BTreeMap;
+
 use ratatui::text::{Line, Span};
 
 use super::{Fold, Opening, page_of};
@@ -602,14 +604,17 @@ fn opened_border(j: usize) -> Option<Line<'static>> {
     (j > 0).then(|| Line::from(STEP_INDENT))
 }
 
-// A group's viewport. `rows` is what the frame's history region allows,
-// `top` the first content line shown, `follow` keeping the newest at the
-// bottom. Counted in content lines; the edge rows are the frame's business.
+// A group's viewport, counted in content lines: `rows` is what the window
+// may take, the bar's row off; `top` the first shown; `follow` the newest.
 struct Window {
     top: usize,
     follow: bool,
     rows: usize,
 }
+
+// The rows a group's window takes: fixed, so a run's working reads the same
+// whatever the terminal's height. The bar, when one is drawn, sits under it.
+const WINDOW_ROWS: usize = 7;
 
 impl Default for Window {
     // Before a frame has said: no ceiling, so a row asked to draw itself
@@ -714,9 +719,10 @@ impl Group {
         self.follow_newest();
     }
 
-    // The height the frame allows the window; true when it moved. A step
-    // too tall for the new height closes, so what is open is what shows.
+    // The height the frame allows the group; true when it moved. The bar's
+    // row comes off it, and a step too tall for what is left closes.
     pub(super) fn fit(&mut self, rows: usize) -> bool {
+        let rows = WINDOW_ROWS.min(rows.saturating_sub(1).max(1));
         let moved = self.window.rows != rows;
         self.window.rows = rows;
         if moved {
@@ -807,11 +813,8 @@ impl Group {
     fn framed(&self) -> Framed {
         let total = self.content_len();
         let rows = self.height();
-        // Past the window, the last row is the bar's.
-        let body = match total > rows {
-            true => rows - 1,
-            false => total,
-        };
+        // The bar is the row under the window, not one of its rows.
+        let body = total.min(rows);
         let past = total - body;
         let top = match self.window.follow {
             true => past,
@@ -889,8 +892,8 @@ impl Group {
         (cut_line(page.line, width.saturating_sub(edge)), border)
     }
 
-    // The row under the steps: a bar for where the window sits, and the
-    // count of what it holds.
+    // The row under the steps: a bar for where the window sits, and what
+    // it holds.
     fn bar_line(&self, framed: &Framed, paint: &Paint) -> Line<'static> {
         const CELLS: usize = 10;
         let past = framed.past;
@@ -911,16 +914,27 @@ impl Group {
         Line::from(spans)
     }
 
-    // What the group holds, said under it.
+    // What the group holds: each tool with how often it ran, the heaviest
+    // first, then the reasoning. A tool's name is never pluralised.
     fn summary(&self) -> String {
-        let (mut calls, mut lines) = (self.pending.len(), 0);
+        let mut tools: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut lines = 0;
         for step in &self.steps {
             match step {
-                Step::Tool(_) => calls += 1,
+                Step::Tool(tool) => *tools.entry(&tool.name).or_default() += 1,
                 Step::Thinking { lines: held, .. } => lines += held.len(),
             }
         }
-        let mut said = vec![super::count(calls, "call")];
+        for tool in &self.pending {
+            *tools.entry(&tool.name).or_default() += 1;
+        }
+        // Heaviest first; the map has read the equal ones by name already.
+        let mut tools: Vec<(&str, usize)> = tools.into_iter().collect();
+        tools.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+        let mut said: Vec<String> = tools
+            .into_iter()
+            .map(|(name, n)| format!("{n} {name}"))
+            .collect();
         if lines > 0 {
             said.push(super::count(lines, "thinking line"));
         }

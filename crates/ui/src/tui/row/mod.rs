@@ -92,10 +92,6 @@ impl Preview {
     }
 }
 
-// The rows a group's window takes: fixed, so a run's working reads the same
-// whatever the terminal's height, and never more than the history holds.
-const WINDOW_ROWS: usize = 7;
-
 // The rows an open fold may take: half the history, so a long one keeps
 // filling a tall screen.
 fn fold_budget(height: usize) -> usize {
@@ -952,7 +948,7 @@ impl Row {
         // A group is a window over its steps: the frame says how tall it
         // may be, and the window keeps the rest for the wheel.
         if let Kind::Steps(group) = &mut self.0 {
-            if group.fit(WINDOW_ROWS.min(height.max(1))) {
+            if group.fit(height) {
                 self.1.clear();
             }
             return;

@@ -1462,12 +1462,18 @@ fn a_window_shows_its_newest_steps_over_its_bar() {
         "at the bottom"
     );
     assert!(
-        lines[0].contains("file25.rs"),
-        "the oldest shown: {lines:?}"
-    );
-    assert!(
         lines[bar - 1].contains("file30.rs"),
-        "the newest step: {lines:?}"
+        "the newest step sits on the bar: {lines:?}"
+    );
+    // The window keeps its own rows whatever the history holds: a room of
+    // eight fills with its steps and the bar, not with seven and nothing.
+    let mut taller = step_calls(30);
+    let room = 8;
+    taller.prepare_preview(&paint, width, room);
+    assert_eq!(
+        taller.len(),
+        room,
+        "the bar's row comes out of the history's, not the window's"
     );
 
     // Scrolled to the top, every cell has gone grey.
