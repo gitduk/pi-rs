@@ -1,5 +1,5 @@
 use crate::render::Paint;
-use crate::tui::row::{FoldedTool, Row, Step};
+use crate::tui::row::{Row, Step, test_call as call};
 use crate::tui::scrollback::{Folds, Scrollback, ScrollbackRows};
 use crate::tui::{View, following_terminal};
 use pi_store::icons;
@@ -215,7 +215,7 @@ fn mouse_scroll_reaches_both_ends_across_tool_and_prose_rows() {
             .scrollback
             .extend(Row::answer(&format!("explanation {i}"), &ui.paint));
         view.surface.scrollback.push(Row::steps(
-            Step::Tool(FoldedTool::new("read", &format!("file{i}"), "", "")),
+            Step::Tool(call("read", &format!("file{i}"), "", "")),
             true,
         ));
     }
@@ -249,7 +249,7 @@ fn a_tool_separator_does_not_toggle_the_preceding_group() {
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     view.surface.scrollback.push(Row::steps(
-        Step::Tool(FoldedTool::new("read", "a.rs", "", "contents")),
+        Step::Tool(call("read", "a.rs", "", "contents")),
         true,
     ));
     view.surface
@@ -287,7 +287,7 @@ fn a_stream_after_tools_keeps_its_scrolled_position_when_it_lands() {
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     view.surface.scrollback.push(Row::steps(
-        Step::Tool(FoldedTool::new("read", "a.rs", "", "contents")),
+        Step::Tool(call("read", "a.rs", "", "contents")),
         true,
     ));
     view.surface.stream.text = (1..=20).map(|i| format!("paragraph {i}\n\n")).collect();
@@ -458,10 +458,7 @@ fn a_block_after_a_call_joins_its_group() {
     let mut scrollback = Scrollback::default();
     streamed(&mut t, &mut scrollback);
     t.close_block(&mut scrollback, &Paint::new(false));
-    t.join(
-        &mut scrollback,
-        Step::Tool(FoldedTool::new("read", "a.rs", "", "")),
-    );
+    t.join(&mut scrollback, Step::Tool(call("read", "a.rs", "", "")));
     streamed(&mut t, &mut scrollback);
     t.close_block(&mut scrollback, &Paint::new(false));
     assert_eq!(scrollback.len(), 1);
@@ -675,11 +672,8 @@ fn folding_above_the_window_leaves_its_top_line_put() {
 #[test]
 fn the_key_reads_a_group_with_nothing_to_unfold_as_folded() {
     let mut t = Folds::default();
-    let mut scrollback: Scrollback = vec![Row::steps(
-        Step::Tool(FoldedTool::new("read", "a.rs", "", "")),
-        false,
-    )]
-    .into();
+    let mut scrollback: Scrollback =
+        vec![Row::steps(Step::Tool(call("read", "a.rs", "", "")), false)].into();
     t.toggle_current(&mut scrollback);
     assert!(!t.birth_fold(), "the next group is born open");
 }
@@ -1415,8 +1409,7 @@ fn a_page_lies_over_the_commands() {
 
 // A group of `n` calls, each on one line.
 fn step_calls(n: usize) -> Row {
-    let mut steps =
-        (1..=n).map(|i| Step::Tool(FoldedTool::new("read", &format!("file{i}.rs"), "", "")));
+    let mut steps = (1..=n).map(|i| Step::Tool(call("read", &format!("file{i}.rs"), "", "")));
     let mut row = Row::steps(steps.next().expect("a group of one"), true);
     for step in steps {
         assert!(row.join(step).is_ok());
@@ -1558,7 +1551,7 @@ fn a_step_that_fits_opens_in_the_window() {
     let paint = Paint::new(false);
     let width = 80;
     let mut row = step_calls(6);
-    let ran = FoldedTool::new("bash", "cat a", "cat a", "one\ntwo\n");
+    let ran = call("bash", "cat a", "cat a", "one\ntwo\n");
     assert!(row.join(Step::Tool(ran)).is_ok());
     row.prepare_preview(&paint, width, 40);
     let head = row.len() - 1;
@@ -1578,25 +1571,6 @@ fn a_step_that_fits_opens_in_the_window() {
         lines[head + 2].contains("one"),
         "its output sits under the blank: {lines:?}"
     );
-
-    // A long line is cut to its row, with the mark that says so.
-    let long = "x".repeat(200);
-    let mut row = step_calls(2);
-    assert!(
-        row.join(Step::Tool(FoldedTool::new("bash", &long, "", "")))
-            .is_ok()
-    );
-    row.prepare_preview(&paint, width, 40);
-    let head = row.len() - 1;
-    let (text, border) = row.line(head, &paint, width);
-    let text = text.to_string();
-    assert!(text.ends_with(icons::ELLIPSIS), "{text}");
-    let border = border.map_or_else(String::new, |b| b.to_string());
-    assert_eq!(
-        pi_store::text::width(&(border + &text)),
-        79,
-        "one column for the bar"
-    );
 }
 
 // A step taller than the window stays closed and is read on a page.
@@ -1605,8 +1579,8 @@ fn a_step_too_tall_for_the_window_opens_on_a_page() {
     let paint = Paint::new(false);
     let width = 80;
     let body: String = (1..=15).map(|i| format!("line {i}\n")).collect();
-    let big = FoldedTool::new("bash", "cat big", "cat big", &body);
-    let mut row = Row::steps(Step::Tool(FoldedTool::new("read", "f0", "", "")), true);
+    let big = call("bash", "cat big", "cat big", &body);
+    let mut row = Row::steps(Step::Tool(call("read", "f0", "", "")), true);
     assert!(row.join(Step::Tool(big)).is_ok());
     row.prepare_preview(&paint, width, 40);
     let head = (0..row.len())

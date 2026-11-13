@@ -3,14 +3,13 @@
 
 use std::time::Instant;
 
-use llm::message::ToolResult;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 
 use super::browse::PageLine;
 use super::mouse::Target;
-use super::row::{self, PendingTool, Row, Stage, StepMark};
+use super::row::{self, Call, PendingTool, Row, Stage, StepMark};
 use super::scrollback::{Folds, Scrollback};
 use super::ui::OpenCommand;
 use crate::render::Outcome;
@@ -45,9 +44,9 @@ pub(super) enum Run {
         since: Instant,
         progress: Option<String>,
     },
-    // Ended: the row its entry will adopt, parked until the committed
+    // Ended: the call its entry will adopt, parked until the committed
     // entries arrive — and what decides whether it can still fold.
-    Landed(Row),
+    Landed(Call),
 }
 
 impl RunTool {
@@ -63,7 +62,7 @@ impl RunTool {
         let secs = match &self.run {
             Run::Queued => return None,
             Run::Running { since, .. } => now.saturating_duration_since(*since),
-            Run::Landed(row) => row.took()?,
+            Run::Landed(call) => call.took?,
         };
         Some(secs.as_secs())
     }
@@ -75,8 +74,7 @@ impl RunTool {
             Run::Running { progress, .. } => Stage::Running {
                 progress: progress.clone(),
             },
-            // A parked row is always a result's, so it has an outcome.
-            Run::Landed(row) => Stage::Landed(row.outcome().unwrap_or(Outcome::Failed)),
+            Run::Landed(call) => Stage::Landed(call.outcome),
         }
     }
 
@@ -85,7 +83,7 @@ impl RunTool {
     fn held(&self) -> bool {
         !modifies(&self.name)
             && match &self.run {
-                Run::Landed(row) => row.outcome() != Some(Outcome::Failed),
+                Run::Landed(call) => call.outcome != Outcome::Failed,
                 Run::Queued | Run::Running { .. } => true,
             }
     }
@@ -140,35 +138,19 @@ pub(super) fn drawn(tools: &[RunTool], row_holds: bool) -> Vec<&RunTool> {
     tools.iter().filter(|t| !(row_holds && t.held())).collect()
 }
 
-// Where a tool's row goes: a call that landed well, and whose result says no
-// more than its line, is a step of the group; anything else is a line of its
-// own that ends it. `asked` is what the call asked for, as `Folds::take_asked`
-// keeps it.
-pub(super) fn push_tool_row(
-    scrollback: &mut Scrollback,
-    folds: &mut Folds,
-    row: Row,
-    asked: &str,
-    result: &ToolResult,
-) {
-    // Rows under the head are a change told: a step would drop them.
-    let sketched = row.tool_preview().is_some_and(|p| p.contains('\n'));
-    if let Some(name) = row.tool_name().filter(|&n| !modifies(n) && !sketched)
-        && let Some(outcome @ (Outcome::Done | Outcome::Warned)) = row.outcome()
-    {
-        let tool = row::FoldedTool::new(
-            name,
-            row.tool_preview().unwrap_or_default(),
-            asked,
-            &llm::message::flatten(&result.content),
-        )
-        .at(row.place().map(str::to_string))
-        .ended(outcome)
-        .timed(row.took());
-        folds.join(scrollback, row::Step::Tool(tool));
+// Where a tool's row goes: a call that landed well with rows of its own is a
+// step of the group; anything else is a line of its own that ends it.
+pub(super) fn push_tool_row(scrollback: &mut Scrollback, folds: &mut Folds, call: Call) {
+    // A change to files wants a window of its own: the fold's budget cuts it,
+    // and the count under it opens the page. So does a writer's report — where
+    // it ran is not what it changed — and anything that failed. The rest is a
+    // step of the group, closed with it, where the window says what it cannot
+    // hold.
+    if call.holds() && !call.sketched() && !modifies(&call.name) {
+        folds.join(scrollback, row::Step::Tool(call));
         return;
     }
-    scrollback.push(row);
+    scrollback.push(Row::call(call));
 }
 
 // More than this and the list would crowd out the history it sits under.

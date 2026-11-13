@@ -89,10 +89,12 @@ pub(super) fn content(
             {
                 path = named.to_string();
                 streams = Streams::new(&path, p.theme.syntax);
+                // The file names the block the rows under it belong to: it
+                // leads them, rather than standing back from them.
                 let head = format!("{named} +{plus} -{minus}");
                 return Line::from(Span::styled(
                     clip(&head, room),
-                    super::style_to_ratatui(&p.theme.muted),
+                    super::style_to_ratatui(&p.theme.heading),
                 ));
             }
             let tokens = streams.line(row.source, &path, p.theme.syntax);
@@ -375,8 +377,8 @@ mod tests {
             place: None,
             took: None,
         };
-        let lines = super::super::result_rows(&call, super::super::Shown::Open, false, &p, 80);
-        let page = super::super::result_rows(&call, super::super::Shown::Page, false, &p, 80);
+        let lines = super::super::result_rows(&call, false, &p, 80);
+        let page = super::super::result_rows(&call, false, &p, usize::MAX);
         for (inline, page) in lines[1..].iter().zip(&page[1..]) {
             assert_eq!(inline.to_string(), page.to_string());
             for needle in [

@@ -498,10 +498,9 @@ mod tests {
             place: None,
             took: None,
         };
-        for shown in [crate::render::Shown::Open, crate::render::Shown::Page] {
+        {
             let lines = crate::render::result_rows(
                 &call,
-                shown,
                 false,
                 &crate::render::Paint::new(true),
                 usize::MAX,

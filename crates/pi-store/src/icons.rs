@@ -45,6 +45,6 @@ pub const BANG_SIGIL: &str = "!"; // the `!command` input prompt
 pub const BESIDE_SIGIL: &str = "!!"; // the `!!command` input prompt
 
 pub const ELLIPSIS: &str = "…"; // a folded or clipped run
-pub const BAR_CELL: &str = RULE_CELL; // one cell of the bar under a window: its colour says where the window sits
+pub const BAR_CELL: &str = "━"; // one cell of the bar under a window, heavy where a rule is light: its colour says where the window sits
 pub const PART_SEP: &str = " · ";
 pub const KEY_NOTE_SEP: &str = "  ·  "; // between a binding's keys and its note

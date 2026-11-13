@@ -1,7 +1,7 @@
 use crate::render::Paint;
 use crate::tui::View;
 use crate::tui::mouse::Target;
-use crate::tui::row::Row;
+use crate::tui::row::{Call, Row};
 use crate::tui::screen::plain;
 use crate::tui::scrollback::{Folds, scrollback_from};
 use pi_core::core::lane::Lane;
@@ -594,8 +594,6 @@ fn a_call_keeps_how_long_it_ran() {
 
 #[test]
 fn a_stopped_tool_call_is_silenced_in_tui() {
-    let dir = tempfile::tempdir().expect("a temp dir");
-    let tui = surface(dir.path());
     let mut session = agent::session::Session::new();
     session.prompt("run check");
     session.push_assistant(vec![llm::message::AssistantContent::ToolCall(
@@ -608,9 +606,21 @@ fn a_stopped_tool_call_is_silenced_in_tui() {
     session.close_open(agent::session::STOPPED_CALL);
     session.send_prompt("do something else", None::<String>);
 
-    // The rebuild filter drops the stopped call's closing entry.
+    // The rebuild draws nothing of it: the call it would leave is none.
     let stopped_entry = &session.entries()[2];
-    assert!(crate::tui::scrollback::f_entry(stopped_entry, &tui.ui.paint).is_none());
+    let agent::session::Entry::Tool { result, .. } = stopped_entry else {
+        panic!("a tool entry, {:?}", stopped_entry)
+    };
+    assert!(
+        crate::tui::scrollback::call_of(&mut Folds::default(), result, None, false, None).is_none(),
+        "an interrupted call leaves no row"
+    );
+    // One that landed leaves one, on the same path.
+    let landed = llm::message::ToolResult::text("c2", "bash", "done");
+    assert!(
+        crate::tui::scrollback::call_of(&mut Folds::default(), &landed, None, false, None)
+            .is_some()
+    );
 }
 
 // The live rows the frame tagged as the calls in flight: what the surface
@@ -716,41 +726,49 @@ fn an_open_commands_tail_counts_what_it_leaves_out() {
     assert_eq!((from, rows.len()), (1, 8));
 }
 
-// A call whose result says more than its line keeps a row of its own: a step
-// shows one line, and the rows under a change report are the change.
+// A change to files keeps a row of its own — an edit's and a command's
+// alike: the fold's budget cuts it to a window, and the count under it opens
+// the rest on a page.
 #[test]
 fn a_change_report_keeps_its_own_row() {
     use crate::render::Outcome;
     use crate::tui::call::push_tool_row;
     use crate::tui::scrollback::{Folds, Scrollback};
-    use llm::message::ToolResult;
 
-    let result = ToolResult::text("c", "bash", "ok");
-    let drawn = |preview: &str| Row::result(Outcome::Done, "bash", preview);
-
-    let mut bare = Scrollback::default();
-    push_tool_row(
-        &mut bare,
-        &mut Folds::default(),
-        drawn("sed -i 's/POST/post/g' README.md"),
-        "",
-        &result,
+    let command = Call::new(
+        Outcome::Done,
+        "bash",
+        "README.md +1 -1\n-1 POST /a\n+1 post /a",
+        "sed -i 's/POST/post/g' README.md",
+        Some("ok"),
     );
-    assert!(bare.iter().any(Row::is_steps), "a bare command is a step");
-
-    let change = "sed -i 's/POST/post/g' README.md\nREADME.md +1 -1\n-1 POST /a\n+1 post /a";
-    let mut changed = Scrollback::default();
-    push_tool_row(
-        &mut changed,
-        &mut Folds::default(),
-        drawn(change),
-        "",
-        &result,
-    );
+    let mut scrollback = Scrollback::default();
+    push_tool_row(&mut scrollback, &mut Folds::default(), command);
+    assert_eq!(scrollback.len(), 1);
     assert!(
-        !changed.iter().any(Row::is_steps),
-        "the change keeps its rows"
+        !scrollback.iter().any(Row::is_steps),
+        "a change keeps its rows"
     );
-    assert_eq!(changed.len(), 1);
-    assert_eq!(changed[0].tool_preview(), Some(change));
+
+    let bare = Call::new(
+        Outcome::Done,
+        "bash",
+        "sed -i 's/POST/post/g' README.md",
+        "sed -i 's/POST/post/g' README.md",
+        Some("ok"),
+    );
+    let mut scrollback = Scrollback::default();
+    push_tool_row(&mut scrollback, &mut Folds::default(), bare);
+    assert!(
+        scrollback.iter().any(Row::is_steps),
+        "a bare command is a step"
+    );
+
+    let edit = Call::new(Outcome::Done, "edit", "a.rs +1 -1\n-1 x\n+1 y", "", None);
+    let mut scrollback = Scrollback::default();
+    push_tool_row(&mut scrollback, &mut Folds::default(), edit);
+    assert!(
+        !scrollback.iter().any(Row::is_steps),
+        "and so does an edit's"
+    );
 }

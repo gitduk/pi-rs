@@ -58,9 +58,8 @@ pub const SHELL: &str = "bash";
 const ARGS_HINT: &str = "`bash` requires `command`. Use optional `cwd` for the working directory. Use optional `stdin` for input text.";
 
 const DESCRIPTION: &str = "Each call runs a shell command in a new shell. \
-    Use `cwd` to set the working directory instead of a leading `cd`. \
-    If you omit `cwd`, the command runs in the workspace root. \
-    Directory changes and environment changes do not persist between calls.\n\n\
+    When the call passes `cwd`, the command runs in that directory; \
+    otherwise it runs in the workspace root.\n\n\
     Use `bash` for substitutions by pattern or position (`sed`, `perl`, `awk`). \
     Use `bash` to move files (`mv`) or delete files (`rm`).";
 

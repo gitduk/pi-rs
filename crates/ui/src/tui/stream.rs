@@ -2,8 +2,8 @@
 //! they run and finish, and the block that closes when the turn does.
 use super::Ui;
 use super::call::{Run, RunTool, push_tool_row};
-use super::row::Row;
-use super::scrollback::f_entry;
+use super::row::{Call, Row};
+use super::scrollback::{call_of, f_entry};
 use super::search::Spot;
 use super::view::{Doing, Retry, StreamKind, Surface, View};
 use crate::render;
@@ -208,10 +208,12 @@ impl Ui {
                 self.close(view);
                 // Parked until the entry commits; adoption checks it against
                 // what the entry derives to.
+                let asked = view.surface.folds.peek_asked(id);
                 if let Some(t) = view.state.tools.iter_mut().find(|t| t.id == *id) {
-                    let row =
-                        Row::result(*outcome, name.clone(), preview.clone()).timed(Some(*took));
-                    t.run = Run::Landed(row.at(t.place.clone()));
+                    let call = Call::new(*outcome, name, preview, &asked, None)
+                        .at(t.place.clone())
+                        .timed(Some(*took));
+                    t.run = Run::Landed(call);
                     t.output = None;
                     t.open = false;
                 }
@@ -294,7 +296,7 @@ impl Ui {
         for t in std::mem::take(&mut view.state.tools) {
             view.surface.folds.take_asked(&t.id);
             let row = match t.run {
-                Run::Landed(row) => row,
+                Run::Landed(call) => Row::call(call),
                 Run::Queued | Run::Running { .. } => {
                     Row::tool_start(&t.name, &t.summary, &self.paint)
                 }
@@ -303,31 +305,37 @@ impl Ui {
         }
     }
 
-    // Folds freshly committed entries through `f_entry`, retiring the
-    // pending live-region lines they supersede — checked for drift.
+    // Folds freshly committed entries into rows — a tool's through `call_of`,
+    // the rest through `f_entry` — retiring the pending live-region lines they
+    // supersede, checked for drift.
     pub(super) fn adopt(&self, view: &mut View, entries: &[LogEntry]) {
-        let width = self.screen.width();
         for entry in entries {
             if view.surface.tail.is_some_and(|t| entry.id() <= t) {
                 continue;
             }
-            if let Some(rows) = f_entry(entry, &self.paint) {
-                if let LogEntry::Tool { result, .. } = entry {
-                    // Placed before the drift check paints them: a row is
-                    // never drawn without where its call ran.
-                    let (asked, place) = view.surface.folds.take_asked(&result.call);
-                    let rows: Vec<Row> = rows.into_iter().map(|r| r.at(place.clone())).collect();
-                    self.check_pending(view, &result.call, rows.last(), width);
-                    for r in rows {
-                        push_tool_row(
-                            &mut view.surface.scrollback,
-                            &mut view.surface.folds,
-                            r,
-                            &asked,
-                            result,
-                        );
-                    }
-                } else if matches!(entry, LogEntry::Ask { .. }) {
+            if let LogEntry::Tool {
+                result,
+                preview,
+                warned,
+                took,
+                ..
+            } = entry
+            {
+                // Placed before the drift check paints it: a row is never
+                // drawn without where its call ran.
+                let call = call_of(
+                    &mut view.surface.folds,
+                    result,
+                    preview.as_deref(),
+                    *warned,
+                    *took,
+                );
+                if let Some(call) = call {
+                    self.check_pending(view, &result.call, &call);
+                    push_tool_row(&mut view.surface.scrollback, &mut view.surface.folds, call);
+                }
+            } else if let Some(rows) = f_entry(entry, &self.paint) {
+                if matches!(entry, LogEntry::Ask { .. }) {
                     self.submit_rows(view, rows);
                 } else {
                     view.surface.scrollback.append(rows);
@@ -339,18 +347,17 @@ impl Ui {
 
     // Retires the row `ToolEnd` parked, checked against what the entry
     // derives to; disagreement is drift, caught only in debug builds.
-    fn check_pending(&self, view: &mut View, call: &str, row: Option<&Row>, width: usize) {
+    fn check_pending(&self, view: &mut View, call: &str, derived: &Call) {
         let Some(at) = view.state.tools.iter().position(|t| t.id == call) else {
             return;
         };
-        let Run::Landed(pending) = view.state.tools.remove(at).run else {
+        let Run::Landed(parked) = view.state.tools.remove(at).run else {
             return;
         };
-        if let Some(row) = row {
-            let parked = pending.line(0, &self.paint, width).0;
-            let derived = row.line(0, &self.paint, width).0;
-            debug_assert_eq!(parked, derived, "a tool's two lines disagreed");
-        }
+        // Uncut, so a width the two are read at cannot tell them apart.
+        let parked = parked.head(false, &self.paint, usize::MAX).0;
+        let derived = derived.head(false, &self.paint, usize::MAX).0;
+        debug_assert_eq!(parked, derived, "a call's two lines disagreed");
     }
 
     // Rebuilds from the transcript, discarding the old drawing — a rewind

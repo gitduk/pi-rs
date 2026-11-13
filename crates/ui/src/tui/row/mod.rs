@@ -4,7 +4,6 @@
 use std::cell::{Cell, RefCell};
 use std::num::NonZeroUsize;
 
-use llm::message::ToolResult;
 use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
 
@@ -17,17 +16,19 @@ use pi_core::core::resolve::Resolved;
 use pi_store::icons;
 
 mod banner;
+mod call;
 mod code;
 mod relayed;
-mod result;
 mod steps;
 
 use banner::Banner;
+pub use call::Call;
+#[cfg(test)]
+pub(crate) use call::test_call;
 use code::{Block, Code};
 use relayed::Relayed;
-use result::ToolOut;
 use steps::Group;
-pub use steps::{FoldedTool, PendingTool, Stage, Step, StepMark, out_for};
+pub use steps::{PendingTool, Stage, Step, StepMark, out_for};
 
 pub struct Row(
     Kind,
@@ -211,7 +212,7 @@ enum Kind {
     Banner(Banner),
     // An empty group marks a removed row.
     Lines(Vec<(Line<'static>, Option<Line<'static>>)>),
-    Result(ToolOut),
+    Result(Call),
     Relayed(Relayed),
     Steps(Group),
 }
@@ -272,6 +273,11 @@ trait Fold {
     fn click_line(&self, _i: usize, _width: usize) -> Option<usize> {
         self.expandable().then_some(0)
     }
+    // `click_line`, with the rows the row's place allows it: a call lays a
+    // count row out among them, and the count reads on a page.
+    fn click_at(&self, i: usize, _rows: usize, width: usize) -> Option<usize> {
+        self.click_line(i, width)
+    }
     // Open or close what line `i` heads; whether anything moved. `screen` is
     // the screen's rows: a group opened whole has no window, and caps at half.
     fn toggle_at(&mut self, _i: usize, _width: usize, _screen: usize) -> bool {
@@ -280,10 +286,16 @@ trait Fold {
             true
         }
     }
+    // Whether line `i` is read on a page where it lies, whatever its height:
+    // a call's count row reads the rest of it.
+    fn paged(&self, _i: usize, _rows: usize, _width: usize) -> bool {
+        false
+    }
     // What a page reads for line `i`: the row's lines whole.
     fn opening(&self, i: usize, paint: &Paint) -> Option<Opening>;
-    // Whether lines are cut at `width` that only its opening shows whole.
-    fn clipped(&self, _width: usize) -> bool {
+    // Whether it draws its own rows inside the budget, in place of the slice
+    // a preview is otherwise measured and cut to.
+    fn lays_out(&self) -> bool {
         false
     }
     // The rows it takes once opened, its own line included.
@@ -559,8 +571,19 @@ impl Row {
         self.preview_line(i).map_or(i, PreviewLine::source)
     }
 
-    /// The line a click on line `i` opens or closes, if any: a result from
-    /// its head or footer, a group from its own line or a step's.
+    // The line under the pointer, when there is one: the hover is kept
+    // 1-based, a zero there meaning none.
+    fn hover(&self) -> Option<usize> {
+        self.1.hovered.get().map(|line| line.get() - 1)
+    }
+
+    // Whether line `i` is the one under the pointer.
+    fn lit(&self, i: usize) -> bool {
+        self.hover() == Some(i)
+    }
+
+    /// The line a click on line `i` opens or closes, if any: a call from its
+    /// own line or the count under it, a group from its own line or a step's.
     pub fn click_line(&self, i: usize, width: usize) -> Option<usize> {
         if self.has_more(i, width) {
             return Some(i);
@@ -568,7 +591,7 @@ impl Row {
         let source = self.source_line(i);
         let heading = match &self.0 {
             Kind::Code(_) | Kind::Block(_) => Some(0),
-            _ => self.fold()?.click_line(source, width),
+            _ => self.fold()?.click_at(source, self.budget(), width),
         }?;
         self.1
             .preview
@@ -651,6 +674,15 @@ impl Row {
         if let Kind::Steps(group) = &self.0 {
             return group.page_at(i, paint, width, screen);
         }
+        // A fold says itself which of its lines reads the rest, and which
+        // line is cut.
+        let line = self.source_line(i);
+        if self
+            .fold()
+            .is_some_and(|f| f.paged(line, self.budget(), width))
+        {
+            return self.opening(i, paint);
+        }
         // The cut spends screen rows, so this does too: lines that wrap past
         // the budget would be cut with a count to click through.
         if !self.too_tall(paint, width) {
@@ -723,10 +755,6 @@ impl Row {
             .map(|i| self.source_line(i));
         let reshaped = match &mut self.0 {
             Kind::Steps(g) => g.update(hovered, spin, held),
-            Kind::Result(r) => {
-                r.hover(hovered.is_some());
-                false
-            }
             Kind::Code(Code { note, .. }) | Kind::Block(Block { note, .. }) => {
                 note.update(hovered.is_some())
             }
@@ -741,63 +769,10 @@ impl Row {
         }
     }
 
-    /// A tool result the screen already has in parts — the live path, which
-    /// never holds a `ToolResult`.
-    pub fn result(
-        outcome: crate::render::Outcome,
-        name: impl Into<String>,
-        preview: impl Into<String>,
-    ) -> Self {
-        Self::new(Kind::Result(ToolOut::new(
-            outcome,
-            name.into(),
-            preview.into(),
-        )))
-    }
-
-    /// Where the call behind this result ran, when not the workspace root.
-    pub fn at(mut self, place: Option<String>) -> Self {
-        if let Kind::Result(r) = &mut self.0 {
-            r.place = place;
-        }
-        self
-    }
-
-    /// How long the call behind this result ran.
-    pub fn timed(mut self, took: Option<std::time::Duration>) -> Self {
-        if let Kind::Result(r) = &mut self.0 {
-            r.took = took;
-        }
-        self
-    }
-
-    /// How long the call behind this result ran, if known.
-    pub fn took(&self) -> Option<std::time::Duration> {
-        match &self.0 {
-            Kind::Result(r) => r.took,
-            _ => None,
-        }
-    }
-
-    /// Where the call behind this result ran, if it said and it was not the
-    /// workspace root.
-    pub fn place(&self) -> Option<&str> {
-        match &self.0 {
-            Kind::Result(r) => r.place.as_deref(),
-            _ => None,
-        }
-    }
-
-    /// The row for a stored result: the tool's own sketch if it made one
-    /// (`ToolResult` lacks it), else the content's first line.
-    pub fn stored_result(
-        r: &ToolResult,
-        preview: Option<&str>,
-        outcome: crate::render::Outcome,
-        took: Option<std::time::Duration>,
-    ) -> Self {
-        let preview = tool::preview_of(preview, &r.content);
-        Self::result(outcome, r.name.clone(), preview).timed(took)
+    /// A tool call as its result leaves it: the live path, which never holds
+    /// a `ToolResult`, and the rebuild's, which does.
+    pub fn call(call: Call) -> Self {
+        Self::new(Kind::Result(call))
     }
 
     /// Say `said` beside this row's first line, until `FLASH` has passed.
@@ -823,30 +798,6 @@ impl Row {
         match &self.0 {
             Kind::Code(c) => Some(&c.code),
             Kind::Block(b) => Some(&b.source),
-            _ => None,
-        }
-    }
-
-    /// The tool's name if this row is a tool result.
-    pub fn tool_name(&self) -> Option<&str> {
-        match &self.0 {
-            Kind::Result(r) => Some(&r.name),
-            _ => None,
-        }
-    }
-
-    /// The tool's preview if this row is a tool result.
-    pub fn tool_preview(&self) -> Option<&str> {
-        match &self.0 {
-            Kind::Result(r) => Some(&r.preview),
-            _ => None,
-        }
-    }
-
-    /// How this tool result's call came out.
-    pub fn outcome(&self) -> Option<crate::render::Outcome> {
-        match &self.0 {
-            Kind::Result(r) => Some(r.outcome),
             _ => None,
         }
     }
@@ -934,17 +885,34 @@ impl Row {
             | Kind::Said { .. } => 1,
             Kind::Banner(banner) => banner.len(),
             Kind::Lines(lines) => lines.len(),
-            Kind::Result(r) => r.len(),
+            Kind::Result(call) => call.len(self.budget()),
             Kind::Relayed(r) => r.len(),
             Kind::Steps(g) => g.len(),
         }
+    }
+
+    /// The rows a fold is given: what a call lays its own rows out in, and
+    /// what any other open fold is cut to.
+    fn budget(&self) -> usize {
+        self.1.budget.get()
     }
 
     /// Give each fold the height its frame allows: a budget for an open
     /// fold, a window for a group.
     pub(super) fn prepare_preview(&mut self, paint: &Paint, width: usize, height: usize) {
         let budget = fold_budget(height);
+        let moved = self.budget() != budget;
         self.1.budget.set(budget);
+        // A call lays its own rows out inside the budget: a count row, then
+        // the page. There is no slice for the fold to cut, and nothing in it
+        // moves but the budget — its paint and its measured rows stay for the
+        // next frame, which is what kept redrawing a call's whole text.
+        if self.fold().is_some_and(Fold::lays_out) {
+            if moved {
+                self.1.clear();
+            }
+            return;
+        }
         // A group is a window over its steps: the frame says how tall it
         // may be, and the window keeps the rest for the wheel.
         if let Kind::Steps(group) = &mut self.0 {
@@ -1013,10 +981,7 @@ impl Row {
                     .and_then(|fold| fold.more_border(heading, paint, width))
                     .filter(|border| border.width() < width);
                 let room = width - border.as_ref().map_or(0, Line::width);
-                let line = Line::from(paint.action_hint(
-                    self.1.hovered.get().map(|line| line.get() - 1) == Some(i),
-                    format!("{remaining} more"),
-                ));
+                let line = Line::from(paint.action_hint(self.lit(i), format!("{remaining} more")));
                 (screen::clip_line(&line, room), border)
             }
             Some(PreviewLine::Content {
@@ -1067,7 +1032,8 @@ impl Row {
                 ));
                 (Line::from(spans), None)
             }
-            Kind::Result(r) => r.line(i, paint, width),
+            // Only the line a click answers lights up: what it opens does not.
+            Kind::Result(call) => call.line(i, self.budget(), self.hover(), paint, width),
             Kind::Relayed(r) => r.line(i, paint, width),
             Kind::Steps(g) => g.line(i, paint, width),
         };

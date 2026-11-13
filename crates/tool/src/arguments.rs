@@ -1,6 +1,13 @@
 use serde_json::Value;
 use std::borrow::Cow;
 
+// The text at `key`, when it is there to say anything.
+fn text<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+}
+
 fn leading(args: &Value) -> Option<&str> {
     // A grep's pattern identifies the call more clearly than its path.
     [
@@ -13,13 +20,15 @@ fn leading(args: &Value) -> Option<&str> {
         "name",
     ]
     .into_iter()
-    .find_map(|key| args.get(key).and_then(Value::as_str))
-    .filter(|text| !text.is_empty())
+    .find_map(|key| text(args, key))
 }
 
-/// The call's leading argument, or its full JSON when no leading argument is known.
+/// What a call is opened on: the shell command it ran when it ran one, else
+/// its leading argument. A head says a call's label when it has one, so the
+/// command is what opening the call is for.
 pub fn asked(args: &Value) -> Cow<'_, str> {
-    leading(args)
+    text(args, "command")
+        .or_else(|| leading(args))
         .map(Cow::Borrowed)
         .unwrap_or_else(|| Cow::Owned(args.to_string()))
 }

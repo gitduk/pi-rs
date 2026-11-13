@@ -598,15 +598,6 @@ pub fn folds(rows: usize) -> bool {
     llm::figures::shown(rows, SKETCHED_ROWS) < rows
 }
 
-/// How much of a result its rows show: the sketch, or the whole of it in
-/// place or on a page of its own, where there is nothing to fold back.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Shown {
-    Sketch,
-    Open,
-    Page,
-}
-
 /// The columns a result's lines are cut to at `width`.
 pub fn result_room(width: usize) -> usize {
     width.saturating_sub(2).max(20)
@@ -646,12 +637,11 @@ pub struct Finished<'a> {
 /// and under it whatever a tool sketched — an edit's diff rows.
 pub fn result_rows(
     call: &Finished,
-    shown: Shown,
     hovered: bool,
     p: &Paint,
     width: usize,
 ) -> Vec<ratatui::text::Line<'static>> {
-    result_parts(call, shown, hovered, p, width)
+    result_parts(call, hovered, p, width)
         .into_iter()
         .map(|(line, border)| {
             let mut spans = border.map_or_else(Vec::new, |b| b.spans);
@@ -665,7 +655,6 @@ pub(crate) const RESULT_INDENT: &str = "  ";
 
 pub(crate) fn result_parts(
     call: &Finished,
-    shown: Shown,
     hovered: bool,
     p: &Paint,
     width: usize,
@@ -689,7 +678,7 @@ pub(crate) fn result_parts(
     spans.push(p.span_hovered(hovered, &p.theme.muted, placed));
     let mut out = vec![(Line::from(spans), Some(border))];
     let diff_lines: Vec<&str> = rest.lines().collect();
-    let (rows, footer) = sketched(&diff_lines, shown);
+    let (rows, footer) = sketched(&diff_lines);
     // A page reads the same rows a row does: the change keeps its colours, so
     // what the row showed small is the same thing read whole.
     let sketch = diff::content(rows, p, room, true);
@@ -707,17 +696,24 @@ pub(crate) fn result_parts(
     out
 }
 
-/// What of the lines under a head `shown` lets through, and the footer
-/// that says the rest is folded away or can be folded back.
-pub fn sketched<T>(under: &[T], shown: Shown) -> (&[T], Option<String>) {
-    match shown {
-        Shown::Sketch if folds(1 + under.len()) => (
+/// One row of a change a tool sketched, coloured as its diff rows are.
+pub(crate) fn change(text: &str, p: &Paint, room: usize) -> Line<'static> {
+    diff::content(&[text], p, room, true)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
+
+/// What of the lines under a head the sketch lets through, and the footer
+/// that says the rest is folded away.
+pub fn sketched<T>(under: &[T]) -> (&[T], Option<String>) {
+    if folds(1 + under.len()) {
+        return (
             &under[..SKETCH_LIMIT],
             Some(format!("  {} more", under.len() - SKETCH_LIMIT)),
-        ),
-        Shown::Open if folds(1 + under.len()) => (under, Some("  click for less".into())),
-        _ => (under, None),
+        );
     }
+    (under, None)
 }
 
 /// `at`, in wall-clock seconds, as the local time of day; on a day other
@@ -779,7 +775,7 @@ pub fn describe(
                 place: None,
                 took: Some(*took),
             };
-            return Some(result_rows(&call, Shown::Sketch, false, p, width));
+            return Some(result_rows(&call, false, p, width));
         }
         Event::ToolDenied { name, reason, .. } => Line::from(vec![
             p.span(&p.theme.status.err, icons::FAIL_MARK),
@@ -1089,15 +1085,8 @@ mod tests {
             took: Some(std::time::Duration::from_secs(3)),
         };
         for width in [24, 80, 180] {
-            let plain = super::result_rows(
-                &call,
-                super::Shown::Sketch,
-                false,
-                &Paint::new(false),
-                width,
-            );
-            let painted =
-                super::result_rows(&call, super::Shown::Sketch, false, &Paint::new(true), width);
+            let plain = super::result_rows(&call, false, &Paint::new(false), width);
+            let painted = super::result_rows(&call, false, &Paint::new(true), width);
             assert_eq!(plain.len(), painted.len());
             for (plain, painted) in plain.iter().zip(&painted) {
                 assert_eq!(plain.to_string(), painted.to_string());

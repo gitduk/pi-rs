@@ -8,7 +8,7 @@ use llm::message::{AssistantContent, ReasoningContent};
 use ratatui::text::Line;
 
 use super::call::push_tool_row;
-use super::row::{Row, Step};
+use super::row::{Call, Row, Step};
 use super::screen;
 use crate::render::{self, Paint};
 use pi_core::core;
@@ -166,6 +166,12 @@ impl Folds {
         let asked = (tool::asked(args).to_string(), place.clone());
         self.asked.insert(id.to_string(), asked);
         place
+    }
+
+    // What call `id` asked for, left in place: its result is drawing but its
+    // entry has not landed yet.
+    pub(super) fn peek_asked(&self, id: &str) -> &str {
+        self.asked.get(id).map_or("", |(asked, _)| asked.as_str())
     }
 
     // What call `id` asked for and where, once: its result has landed.
@@ -614,18 +620,24 @@ pub(super) fn scrollback_from(
             }
             // Neither is anything the screen shows.
             LogEntry::Compaction { .. } => {}
+            // A tool's row is the call itself, built where the text it
+            // asked with is still at hand.
+            LogEntry::Tool {
+                result,
+                preview,
+                warned,
+                took,
+                ..
+            } => {
+                if let Some(call) = call_of(folds, result, preview.as_deref(), *warned, *took) {
+                    push_tool_row(&mut out, folds, call);
+                }
+            }
             // Everything else `f_entry` covers, the rebuild and a fresh
             // adoption draw from one place.
             other => {
                 if let Some(rows) = f_entry(other, paint) {
-                    if let LogEntry::Tool { result, .. } = other {
-                        let (asked, place) = folds.take_asked(&result.call);
-                        for r in rows {
-                            push_tool_row(&mut out, folds, r.at(place.clone()), &asked, result);
-                        }
-                    } else {
-                        out.append(rows);
-                    }
+                    out.append(rows);
                 }
             }
         }
@@ -633,7 +645,40 @@ pub(super) fn scrollback_from(
     out
 }
 
-/// One entry's rows, as both the rebuild and a fresh adoption draw them.
+/// The call a committed tool entry leaves: its row from the entry, and what it
+/// asked with and where it ran from what the live path kept for its id —
+/// `ToolResult` lacks both.
+pub(super) fn call_of(
+    folds: &mut Folds,
+    result: &llm::message::ToolResult,
+    preview: Option<&str>,
+    warned: bool,
+    took: Option<std::time::Duration>,
+) -> Option<Call> {
+    // An interrupted call left its start line standing; the rebuild draws none
+    // of its result.
+    if agent::session::is_stopped_call(result) {
+        return None;
+    }
+    let (asked, place) = folds.take_asked(&result.call);
+    let preview = tool::preview_of(preview, &result.content);
+    let output = llm::message::flatten(&result.content);
+    Some(
+        Call::new(
+            agent::Outcome::of(result.is_error, warned),
+            &result.name,
+            &preview,
+            &asked,
+            Some(&output),
+        )
+        .at(place)
+        .timed(took),
+    )
+}
+
+/// One entry's rows, as both the rebuild and a fresh adoption draw them. A
+/// tool's row is not one of these: it is the call itself, built where the
+/// argument it was made with is still held (`call_of`).
 /// Answers don't pass through here — their rows stream directly.
 pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
     let mut rows = match entry {
@@ -654,16 +699,9 @@ pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
         LogEntry::Note { .. } | LogEntry::Tally { .. } => None,
         LogEntry::Plain { text, .. } => Some(Row::notice_lines(text, paint)),
         LogEntry::Notice { text, .. } => Some(Row::report_lines(text, paint)),
-        LogEntry::Tool {
-            result: r,
-            preview,
-            warned,
-            took,
-            ..
-        } => (!agent::session::is_stopped_call(r)).then(|| {
-            let outcome = agent::Outcome::of(r.is_error, *warned);
-            vec![Row::stored_result(r, preview.as_deref(), outcome, *took)]
-        }),
+        // A tool's row is built from what its call asked with, which only
+        // the two who file entries still hold: see `call_of`.
+        LogEntry::Tool { .. } => None,
         _ => None,
     }?;
     if matches!(entry, LogEntry::Ask { .. } | LogEntry::Bash { .. }) {

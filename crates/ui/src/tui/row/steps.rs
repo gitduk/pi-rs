@@ -4,90 +4,12 @@ use std::collections::BTreeMap;
 
 use ratatui::text::{Line, Span};
 
+use super::call::Call;
 use super::{Fold, Opening, page_of};
 use crate::render::{self, Outcome, Paint};
 use crate::tui::browse::PageLine;
 use crate::tui::{THINKING, screen};
 use pi_store::icons;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FoldedTool {
-    pub name: String,
-    pub preview: String,
-    // What the step shows opened, under its line: the argument's lines the
-    // line doesn't read already (`asked` of them), then what came back.
-    body: Vec<String>,
-    asked: usize,
-    open: bool,
-    place: Option<String>,
-    // Done, or warned: a failed call is never a step.
-    outcome: Outcome,
-    took: Option<std::time::Duration>,
-}
-
-impl FoldedTool {
-    /// `asked` is the call's whole leading argument, `output` what it
-    /// printed; both are what opening the step shows.
-    pub fn new(name: &str, preview: &str, asked: &str, output: &str) -> Self {
-        let recovered;
-        let preview = if preview.trim() == name {
-            recovered = serde_json::from_str(asked)
-                .map(|args| tool::summary(&args).into_owned())
-                .unwrap_or_else(|_| asked.to_string());
-            &recovered
-        } else {
-            preview
-        };
-        // Keep an argument line unless the head already shows it.
-        let first = asked.lines().next().unwrap_or_default().trim();
-        let read = preview.lines().next().is_some_and(|h| h.contains(first));
-        let skip = usize::from(read);
-        let mut body: Vec<String> = asked.lines().skip(skip).map(str::to_string).collect();
-        let asked = body.len();
-        body.extend(pi_core::core::tools::shown(name, output).map(str::to_string));
-        // One blank row parts what was asked from what came back, the head
-        // line counting as the command when the rest of it is on it.
-        if body.len() > asked {
-            body.insert(asked, String::new());
-        }
-        Self {
-            name: name.to_string(),
-            preview: preview.to_string(),
-            body,
-            asked,
-            open: false,
-            place: None,
-            outcome: Outcome::Done,
-            took: None,
-        }
-    }
-
-    /// Where the call ran, as `render::place` reads it off its arguments.
-    pub fn at(mut self, place: Option<String>) -> Self {
-        self.place = place;
-        self
-    }
-
-    /// How the call came out: done, or ran to the end but asks for a look.
-    pub fn ended(mut self, outcome: Outcome) -> Self {
-        self.outcome = outcome;
-        self
-    }
-
-    /// How long the call ran, if known.
-    pub fn timed(mut self, took: Option<std::time::Duration>) -> Self {
-        self.took = took;
-        self
-    }
-
-    fn desc(&self) -> String {
-        desc_of(&self.name, &self.preview)
-    }
-
-    fn placed(&self) -> String {
-        render::placed(self.place.as_deref())
-    }
-}
 
 // A call still in flight, as the group that will fold it draws it: the
 // row draws it from the moment it is queued, so nothing jumps when it lands.
@@ -169,7 +91,7 @@ pub fn out_for(progress: Option<&str>, secs: Option<u64>) -> String {
 
 // The tool and its leading argument, named the one way every row that
 // shows a tool does: name alone with nothing under it, dropped if redundant.
-fn desc_of(name: &str, preview: &str) -> String {
+pub(super) fn desc_of(name: &str, preview: &str) -> String {
     let head = preview.lines().next().unwrap_or("").trim();
     if head.is_empty() {
         name.to_string()
@@ -210,7 +132,7 @@ fn folds_middle(n: usize) -> bool {
 /// One step of a group, in the order the run took it: a read-only call that
 /// landed well, or a block of reasoning; each opens on its own.
 pub enum Step {
-    Tool(FoldedTool),
+    Tool(Call),
     Thinking {
         // The stream appends a block's lines to the row holding its id.
         block: u64,
@@ -252,7 +174,7 @@ impl StepMark {
     }
 
     // The mark and the space after it.
-    fn spans(self, hovered: bool, paint: &Paint) -> Vec<Span<'static>> {
+    pub(super) fn spans(self, hovered: bool, paint: &Paint) -> Vec<Span<'static>> {
         let reasoning = paint.reasoning_style();
         let style = match self {
             StepMark::Ended(outcome) => render::outcome_style(outcome, &paint.theme),
@@ -269,6 +191,12 @@ impl StepMark {
 // The columns a mark and the space after it take.
 const MARK_WIDTH: usize = 2;
 
+// The columns a line's text has: the mark and its space, the tail, and a
+// column of air before the terminal edge.
+pub(super) fn text_room(width: usize, tail: &str) -> usize {
+    render::title_room(width, MARK_WIDTH, &format!("{tail} ")).max(8)
+}
+
 // What one line naming a step or a call says, before it is fitted to a width.
 struct Head {
     mark: StepMark,
@@ -282,14 +210,8 @@ struct Head {
 }
 
 impl Head {
-    // The text's columns: the mark and its space, the tail, and a column of
-    // air before the terminal edge.
-    fn room(&self, width: usize) -> usize {
-        render::title_room(width, MARK_WIDTH, &format!("{} ", self.tail)).max(8)
-    }
-
     fn cut(&self, width: usize) -> bool {
-        pi_store::text::width(&self.text) > self.room(width)
+        pi_store::text::width(&self.text) > text_room(width, &self.tail)
     }
 
     // Opened, the text is whole and wraps, and what the tail said is below it.
@@ -297,7 +219,7 @@ impl Head {
         let text = if open {
             self.text.clone()
         } else {
-            pi_store::text::clip_more(&self.text, self.room(width), self.more)
+            pi_store::text::clip_more(&self.text, text_room(width, &self.tail), self.more)
         };
         let mut spans = Vec::new();
         let reasoning = paint.reasoning_style();
@@ -367,21 +289,21 @@ impl Step {
 
     fn is_open(&self) -> bool {
         match self {
-            Step::Tool(t) => t.open,
+            Step::Tool(call) => call.open(),
             Step::Thinking { open, .. } => *open,
         }
     }
 
     fn set_open(&mut self, to: bool) {
         match self {
-            Step::Tool(t) => t.open = to && !t.body.is_empty(),
+            Step::Tool(call) => call.open_to(to),
             Step::Thinking { open, .. } => *open = to,
         }
     }
 
     fn flip(&mut self) {
         match self {
-            Step::Tool(t) => t.open = !t.open,
+            Step::Tool(call) => call.open_to(!call.open()),
             Step::Thinking { open, .. } => *open = !*open,
         }
     }
@@ -390,7 +312,7 @@ impl Step {
     // keeps its head and newest lines around a count, not every line.
     fn opened_len(&self) -> usize {
         match self {
-            Step::Tool(t) => 1 + t.body.len(),
+            Step::Tool(call) => call.row_len(),
             Step::Thinking {
                 lines, live: true, ..
             } if folds_middle(lines.len()) => FOLD_ROWS,
@@ -405,7 +327,6 @@ impl Step {
     // then what it holds; a finished block's lines as markdown.
     fn opened_content(&self, j: usize, hovered: bool, tick: usize, paint: &Paint) -> PageLine {
         let mut page: PageLine = match (self, j) {
-            (Step::Tool(t), 1..) => body_line(t, j - 1, paint).into(),
             (
                 Step::Thinking {
                     lines, live: true, ..
@@ -478,7 +399,8 @@ impl Step {
     }
 
     // Whether opening it fits a window `rows` high, less the row its bar
-    // takes.
+    // takes. A call lays itself out inside the rows it is given, so it
+    // always fits; a block does not.
     fn fits(&self, rows: usize) -> bool {
         self.opened_len() < rows
     }
@@ -493,16 +415,24 @@ impl Step {
     // cut, being more lines than the rows it may take, or a line wider than
     // the row. One window row is one screen row, so nothing wraps there.
     fn opens_on_a_page(&self, rows: usize, width: usize) -> bool {
-        (self.opened_len() > 1 && !self.fits(rows)) || self.head(0).cut(width)
+        (self.opened_len() > 1 && !self.fits(rows)) || self.cut(width)
+    }
+
+    // Whether its line says less than it holds: more of it than the width
+    // shows.
+    fn cut(&self, width: usize) -> bool {
+        match self {
+            Step::Tool(call) => call.cut(width),
+            Step::Thinking { .. } => self.head(0).cut(width),
+        }
     }
 
     // The lines it takes in the list, `rows` being what the window may show:
     // one when it is closed or taller than the window.
     fn len_in(&self, rows: usize) -> usize {
-        if self.shows_open(rows) {
-            self.opened_len()
-        } else {
-            1
+        match self.shows_open(rows) {
+            true => self.opened_len(),
+            false => 1,
         }
     }
 
@@ -513,16 +443,10 @@ impl Step {
             .into()
     }
 
-    // `tick` turns the mark of reasoning still streaming.
+    // The line of a block, its first; a call draws its own line.
     fn head(&self, tick: usize) -> Head {
         match self {
-            Step::Tool(t) => Head {
-                mark: StepMark::Ended(t.outcome),
-                text: t.desc(),
-                tool: Some(t.name.clone()),
-                tail: t.placed() + &render::ran_for(t.took),
-                more: t.asked > 0,
-            },
+            Step::Tool(_) => unreachable!("a call draws its own line"),
             Step::Thinking { lines, live, .. } => Head {
                 tool: None,
                 mark: match live {
@@ -538,9 +462,31 @@ impl Step {
         }
     }
 
+    // Whether line `j` of it reads the rest on a page: the count under what
+    // it holds.
+    fn pages_row(&self, j: usize) -> bool {
+        match self {
+            Step::Tool(call) => call.page_row(j, usize::MAX),
+            Step::Thinking { .. } => false,
+        }
+    }
+
+    // Whether line `j` of it answers a click: its own line opens or closes
+    // it, the count under it reads the rest.
+    fn answers(&self, j: usize, width: usize) -> bool {
+        match self {
+            Step::Tool(call) => call.opens_at(j, usize::MAX, width),
+            Step::Thinking { .. } => j == 0 && self.opens(width),
+        }
+    }
+
     // Whether its line opens: there is more under it, or more of it than
     // the width shows.
     fn opens(&self, width: usize) -> bool {
+        // A call says itself whether a click on its line opens it.
+        if let Step::Tool(call) = self {
+            return call.click_line(0, width).is_some();
+        }
         if matches!(self, Step::Thinking { lines, .. } if lines.is_empty()) {
             return false;
         }
@@ -586,16 +532,6 @@ fn step_index(steps: &[Step], rows: usize, i: usize) -> Option<usize> {
     match walk(steps, rows, i) {
         Ok((k, 0)) => Some(k),
         _ => None,
-    }
-}
-
-// A line of what an opened call shows: the argument's own lines in the
-// group's voice, then what came back in the plain one.
-fn body_line(t: &FoldedTool, j: usize, paint: &Paint) -> Line<'static> {
-    let text = t.body.get(j).cloned().unwrap_or_default();
-    match j < t.asked {
-        true => Line::from(paint.call_line(&t.name, &text)),
-        false => Line::from(text),
     }
 }
 
@@ -665,6 +601,10 @@ pub(super) struct Group {
     window: Window,
     // Every line shows, not the frame's slice of them.
     whole: bool,
+    // The rows the frame's window grew to when the reader opened a step in a
+    // group that fit it: the group shows whole rather than clip a line away
+    // for a bar. Zero until then, and again once the group fits the frame's.
+    grown: usize,
     // The line under the mouse, when it is one a click opens or closes.
     hovered: Option<usize>,
     // The tick the marks of calls still out turn at.
@@ -679,6 +619,7 @@ impl Group {
             pending: Vec::new(),
             window: Window::default(),
             whole: false,
+            grown: 0,
             hovered: None,
             spinner: 0,
         }
@@ -701,6 +642,7 @@ impl Group {
         }
         // Folded is the frame's slice again, however the reader left it.
         self.whole = false;
+        self.grown = 0;
         self.follow_newest();
     }
 
@@ -756,10 +698,15 @@ impl Group {
         width: usize,
         screen: usize,
     ) -> Option<Opening> {
-        let k = self.step_at(i)?;
+        // The count under a call reads the rest of it whole; a step's own
+        // line reads a step the window cannot hold. Anything else under it is
+        // read where it stands, or by the window's bar.
+        let (k, j) = self.row_at(i)?;
         let step = &self.steps[k];
-        // Open and shown whole, a line of it is closed by a click, not paged.
-        if step.shows_open(self.height()) {
+        if step.pages_row(j) {
+            return Some(step_page(step, paint));
+        }
+        if j != 0 || step.shows_open(self.height()) {
             return None;
         }
         if !step.opens_on_a_page(self.page_rows(screen), width) {
@@ -773,12 +720,19 @@ impl Group {
         step_index(&self.steps, self.height(), self.framed().at(i)?)
     }
 
+    // The step window row `i` falls in, and how far into its lines it lies.
+    fn row_at(&self, i: usize) -> Option<(usize, usize)> {
+        walk(&self.steps, self.height(), self.framed().at(i)?).ok()
+    }
+
     // The rows the window may show: opened whole, every line; otherwise what
     // the frame gave, and always one.
     fn height(&self) -> usize {
         match self.whole {
             true => usize::MAX,
-            false => self.window.rows.max(1),
+            // Grown to hold what the reader opened, and no lower than the
+            // slice the frame gave.
+            false => self.window.rows.max(1).max(self.grown),
         }
     }
 
@@ -792,14 +746,31 @@ impl Group {
     }
 
     // The lines every step and call takes, one each unless a step opens
-    // small enough to sit whole in the window.
-    fn content_len(&self) -> usize {
-        let rows = self.height();
+    // small enough to sit whole in a window `rows` high.
+    fn content_len_in(&self, rows: usize) -> usize {
         self.steps
             .iter()
             .map(|step| step.len_in(rows))
             .sum::<usize>()
             + self.pending.len()
+    }
+
+    fn content_len(&self) -> usize {
+        self.content_len_in(self.height())
+    }
+
+    // What the reader opened is closed again: a group grown to hold it keeps
+    // holding what is left of it, and one that was windowed stays windowed —
+    // the frame's slice, its bar the way back to the rest. Growing a windowed
+    // group here took its bar away with nothing left to say it held lines.
+    fn settle(&mut self) {
+        let rows = self.window.rows.max(1);
+        let total = self.content_len_in(rows.max(self.grown));
+        self.grown = match self.grown {
+            0 => 0,
+            _ if total > rows => total,
+            _ => 0,
+        };
     }
 
     // Scroll so step `k` and everything it opens read whole.
@@ -971,6 +942,10 @@ impl Group {
         let tick = self.spinner;
         let hovered = self.hovered == Some(i);
         let (line, border) = match unit_at(&self.steps, &self.pending, rows, at) {
+            // A call draws its own line, open or closed, and the rows under it.
+            Some((Unit::Step(Step::Tool(call)), j)) => {
+                call.line(j, usize::MAX, hovered.then_some(j), paint, width)
+            }
             Some((Unit::Step(s), j)) if s.shows_open(rows) => {
                 return s.drawn(j, hovered, tick, paint);
             }
@@ -1067,8 +1042,8 @@ impl Fold for Group {
         if self.is_bar(i) {
             return Some(i);
         }
-        let k = self.step_at(i)?;
-        self.steps[k].opens(width).then_some(i)
+        let (k, j) = self.row_at(i)?;
+        self.steps[k].answers(j, width).then_some(i)
     }
 
     fn toggle_at(&mut self, i: usize, width: usize, screen: usize) -> bool {
@@ -1076,6 +1051,8 @@ impl Fold for Group {
             self.toggle_whole();
             return true;
         }
+        // Only a step's own line opens or closes it: the count under it is
+        // the page's, which `page_at` answers.
         let Some(k) = self.step_at(i) else {
             return false;
         };
@@ -1084,6 +1061,7 @@ impl Fold for Group {
         }
         if self.steps[k].is_open() {
             self.steps[k].flip();
+            self.settle();
             return true;
         }
         // Taller than it may open here: the page reads it, `page_at` answers.
@@ -1091,7 +1069,15 @@ impl Fold for Group {
         if self.steps[k].opens_on_a_page(rows, width) {
             return false;
         }
+        // A group that fit its window holds no line back for what the reader
+        // opens: the window grows to hold it, the bar's row included. A group
+        // already past its window keeps the slice it had, and the bar says so.
+        let window = self.window.rows.max(1);
+        let whole = self.grown > 0 || self.content_len_in(window) <= window;
         self.steps[k].flip();
+        if whole {
+            self.grown = self.content_len_in(window.max(self.grown));
+        }
         self.reveal(k);
         true
     }
@@ -1103,17 +1089,10 @@ impl Fold for Group {
 }
 
 fn step_page(step: &Step, paint: &Paint) -> Opening {
-    let Step::Thinking { lines, .. } = step else {
-        return page_of(
-            (0..step.opened_len())
-                .map(|j| {
-                    (
-                        step.marked(j, step.opened_content(j, false, 0, paint), 0, paint),
-                        opened_border(j),
-                    )
-                })
-                .collect(),
-        );
+    let lines = match step {
+        // A call reads its own rows whole, the way it drew them.
+        Step::Tool(call) => return call.page(paint),
+        Step::Thinking { lines, .. } => lines,
     };
     // Pages use normal Markdown contrast instead of muted reasoning colours.
     let text = lines
@@ -1134,12 +1113,14 @@ mod tests {
     use super::*;
     use crate::tui::row::Row;
 
-    fn tool(name: &str, preview: &str) -> FoldedTool {
-        FoldedTool::new(name, preview, "", "")
+    use crate::tui::row::test_call as call;
+
+    fn tool(name: &str, preview: &str) -> Call {
+        call(name, preview, "", "")
     }
 
     // A folded group of these calls, in order.
-    fn bundle(tools: Vec<FoldedTool>) -> Row {
+    fn bundle(tools: Vec<Call>) -> Row {
         let mut it = tools.into_iter().map(Step::Tool);
         let mut row = Row::steps(it.next().expect("a group holds a step"), true);
         for step in it {
@@ -1214,7 +1195,7 @@ mod tests {
     fn a_group_answers_folded_from_its_steps() {
         let paint = Paint::new(false);
         // Opened whole, then the only step closes on a click on its own line.
-        let opened = FoldedTool::new("read", "read a.rs", r#"{"path":"a.rs"}"#, "");
+        let opened = call("read", "read a.rs", r#"{"path":"a.rs"}"#, "");
         let mut row = bundle(vec![opened]);
         row.set_folded(false);
         assert_eq!(row.folded(), Some(false), "opened whole");
@@ -1304,7 +1285,7 @@ mod tests {
             "grep -rn banner {}",
             "crates/ui/src/tui/tests/*.rs ".repeat(4)
         );
-        let ran = FoldedTool::new("bash", &long, &long, "one\ntwo\n");
+        let ran = call("bash", &long, &long, "one\ntwo\n");
         let mut listed = bundle(vec![tool("read", "a.rs")]);
         assert!(listed.join(think(1, 3, false)).is_ok());
         assert!(listed.join(Step::Tool(ran)).is_ok());
@@ -1318,7 +1299,7 @@ mod tests {
             "the page holds it"
         );
 
-        let short = FoldedTool::new("bash", "cat a", "cat a", "one\ntwo\n");
+        let short = call("bash", "cat a", "cat a", "one\ntwo\n");
         let mut plain_row = bundle(vec![tool("read", "a.rs")]);
         assert!(plain_row.join(Step::Tool(short)).is_ok());
         plain_row.prepare_preview(&paint, 80, 40);
@@ -1337,7 +1318,7 @@ mod tests {
     #[test]
     fn steps_are_visible_and_each_opens_alone() {
         let paint = Paint::new(false);
-        let ran = FoldedTool::new("bash", "cat <<EOF", "cat <<EOF\nhi\nEOF", "hi\n")
+        let ran = call("bash", "cat <<EOF", "cat <<EOF\nhi\nEOF", "hi\n")
             .timed(Some(std::time::Duration::from_secs(5)));
         let mut row = bundle(vec![tool("read", "a.rs")]);
         assert!(row.join(think(1, 3, false)).is_ok());
@@ -1356,14 +1337,13 @@ mod tests {
             row.toggle_at(4, &paint, 80, usize::MAX),
             "the call past it still answers"
         );
-        assert_eq!(
-            row.len(),
-            9,
-            "its own line, its two asked lines, a blank, and one back"
-        );
+        // Its own line, one line of the argument, a blank, one back, and the
+        // count over the rest of what it asked for.
+        assert_eq!(row.len(), 9, "the count opens the argument whole");
         let lines = shown(&row, 80);
-        assert_eq!(lines[7].trim(), "", "a blank row parts command from output");
-        assert_eq!(lines[8].trim(), "hi", "what it printed, under the blank");
+        assert_eq!(lines[6].trim(), "", "a blank row parts command from output");
+        assert_eq!(lines[7].trim(), "hi", "what it printed, under the blank");
+        assert!(lines[8].contains("more"), "{lines:?}");
         assert_eq!(row.click_line(5, 80), None, "a body line opens nothing");
         assert!(
             row.toggle_at(1, &paint, 80, usize::MAX) && row.toggle_at(2, &paint, 80, usize::MAX)
@@ -1380,12 +1360,7 @@ mod tests {
         assert!(row.toggle_expand());
         assert_eq!(row.len(), 2);
 
-        let mut one = bundle(vec![FoldedTool::new(
-            "read",
-            "a.rs",
-            "a.rs",
-            "fn main() {}",
-        )]);
+        let mut one = bundle(vec![call("read", "a.rs", "a.rs", "fn main() {}")]);
         assert!(one.toggle_at(0, &paint, 80, usize::MAX));
         assert_eq!(one.len(), 3, "its line, a blank, and what it printed");
 
