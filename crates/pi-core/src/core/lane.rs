@@ -1091,13 +1091,14 @@ impl Core {
         let lane = self.lane_mut();
         lane.close_inputs();
         lane.talk = talk;
+        // The old session's views are not the new one's, and binding only adds
+        // the views a session left: drop these before it reads back its own.
+        lane.checkout.ctx.viewed = Default::default();
         lane.checkout.ctx = lane
             .checkout
             .ctx
             .clone()
             .with_session(&lane.talk.id, pi_store::spill_root());
-        // What the old session's model saw, this one never did.
-        lane.checkout.ctx.viewed = Default::default();
         let resolved = self.lane().resolved().clone();
         let archive = self.archive(
             self.lane().root().to_path_buf(),

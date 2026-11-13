@@ -59,6 +59,20 @@ pub fn forget_images(keep: std::time::Duration) {
     }
 }
 
+/// Forget the spills and views of sessions older than `keep`: both sit under
+/// a session's own name in the spill root, and neither outlives the transcript
+/// that named them.
+pub fn forget_spills(keep: std::time::Duration) {
+    let Ok(dirs) = std::fs::read_dir(spill_root()) else {
+        return;
+    };
+    for dir in dirs.flatten() {
+        if older_than(&dir.path(), keep) {
+            let _ = std::fs::remove_dir_all(dir.path());
+        }
+    }
+}
+
 /// Where every session's spills go, a subagent's beside its caller's so a
 /// locator either prints resolves from the other. Without a pi root the
 /// process temp directory stands in.

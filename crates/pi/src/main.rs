@@ -403,13 +403,15 @@ fn take_prior(
 fn sweep(store: &session::Store, keep: Option<std::time::Duration>, spare: Option<String>) {
     let store = store.clone();
     tokio::task::spawn_blocking(move || {
-        // Transcripts by reach and by age, journals by age — a run worth
-        // reading back is a fortnight old at most.
+        // Transcripts by reach and by age, journals and the files a run left
+        // beside them by age — a run worth reading back is a fortnight old at
+        // most.
         journal::prune(store.root());
         store.prune();
         if let Some(keep) = keep {
             store.forget_older_than(keep, spare.as_deref());
             pi_store::forget_images(keep);
+            pi_store::forget_spills(keep);
         }
     });
 }

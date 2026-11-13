@@ -80,7 +80,7 @@ pub(crate) fn allocate(ctx: &Ctx) -> Result<(PathBuf, String), ToolError> {
     // The pid in the name is what keeps a resumed session's fresh counter from
     // overwriting the files the earlier process spilled.
     let name = format!("{}-{n}", std::process::id());
-    let dir = ctx.spill_root.join(ctx.spill_namespace());
+    let dir = ctx.spill_dir();
     let path = dir.join(format!("{name}.log"));
     std::fs::create_dir_all(&dir)
         .map_err(|e| ToolError::Spill(format!("{}: {e}", dir.display())))?;

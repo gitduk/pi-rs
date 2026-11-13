@@ -39,6 +39,7 @@ pub mod row;
 pub mod spill;
 pub mod stamp;
 pub mod state;
+mod views;
 pub mod workspace;
 
 pub use registry::{Registry, Source};
@@ -346,15 +347,63 @@ impl Ctx {
     /// under by that name. Every session shares one root — a subagent's spills
     /// sit under its own name in the same tree, so the parent can read them
     /// back — and a resumed session keeps its id so new spills rejoin the old.
+    /// The views that id left are read back with it: what its model saw in an
+    /// earlier process, this one still knows.
     pub fn with_session(
+        self,
+        id: impl Into<String>,
+        spill_root: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        let this = self.with_spill_namespace(id, spill_root);
+        if let Some(views) = this.views() {
+            let loaded = views.load();
+            let root = this.workspace.root().to_path_buf();
+            let mut viewed = this.viewed.lock().expect("viewed poisoned");
+            // What is already in hand wins: a subagent reads on with the views
+            // its parent had, and gains only the ones its own name left.
+            for (path, content) in loaded {
+                // A view is read back for the workspace it was read in: a
+                // session moved to another root, or a file put under this
+                // name by hand, is no view of anything here.
+                let here = path.starts_with(&root)
+                    || path
+                        .canonicalize()
+                        .is_ok_and(|real| real.starts_with(&root));
+                if here {
+                    viewed.entry(path).or_insert(content);
+                }
+            }
+        }
+        this
+    }
+
+    /// Name the session for the files it spills, and nothing more: a context
+    /// that runs no tool of its own never asks what that name saw, so it does
+    /// not pay to read a session's views back.
+    pub fn with_spill_namespace(
         mut self,
         id: impl Into<String>,
         spill_root: impl Into<std::path::PathBuf>,
     ) -> Self {
-        self.session = Some(state::file_stem(&id.into()));
+        let id = id.into();
+        self.session = Some(state::file_stem(&id));
         self.request = None;
         self.spill_root = spill_root.into();
         self
+    }
+
+    // Where this session's views sit: in its own directory, beside its spills.
+    // None without a session, as in tests and for embedders, which read one
+    // run and end.
+    fn views(&self) -> Option<views::Views> {
+        self.session.as_ref()?;
+        Some(views::Views::new(self.spill_dir().join("views")))
+    }
+
+    /// The directory this session's own files sit in: its spills, and the
+    /// views they carry.
+    pub(crate) fn spill_dir(&self) -> std::path::PathBuf {
+        self.spill_root.join(self.spill_namespace())
     }
 
     /// Bind this invocation to its original semantic request. Passing `None`
@@ -400,12 +449,54 @@ impl Ctx {
     }
 
     /// Record the content a view of `path` was built on. Feeds the staleness
-    /// note beside an edit's report and the read-before-edit rule.
+    /// note beside an edit's report, the read-before-edit rule, and the diff
+    /// of what a command changed.
     pub fn note_view(&self, path: &std::path::Path, content: &str) {
-        self.viewed
-            .lock()
-            .expect("viewed poisoned")
-            .insert(path.to_path_buf(), content.into());
+        {
+            let mut viewed = self.viewed.lock().expect("viewed poisoned");
+            if viewed.get(path).is_some_and(|had| **had == *content) {
+                return;
+            }
+            viewed.insert(path.to_path_buf(), content.into());
+        }
+        // Written with the lock dropped: the file is disk I/O, the map is read
+        // by every tool in the turn.
+        if let Some(views) = self.views() {
+            views.note(path, content);
+        }
+    }
+
+    /// Move the view of `path` on to what is on disk now, telling it only if
+    /// the view told against is still the one in hand — another tool may have
+    /// noted a newer one while the file was read. `None` forgets the view: the
+    /// file is to be read again.
+    pub fn settle_view(
+        &self,
+        path: &std::path::Path,
+        was: &std::sync::Arc<str>,
+        now: Option<std::sync::Arc<str>>,
+    ) -> bool {
+        {
+            let mut viewed = self.viewed.lock().expect("viewed poisoned");
+            if !viewed
+                .get(path)
+                .is_some_and(|current| std::sync::Arc::ptr_eq(current, was))
+            {
+                return false;
+            }
+            match &now {
+                Some(content) => viewed.insert(path.to_path_buf(), content.clone()),
+                None => viewed.remove(path),
+            };
+        }
+        // Kept with the lock dropped, for the same reason `note_view` writes so.
+        if let Some(views) = self.views() {
+            match &now {
+                Some(content) => views.note(path, content),
+                None => views.forget(path),
+            }
+        }
+        true
     }
 
     /// The content of the last view of `path`, when there was one.

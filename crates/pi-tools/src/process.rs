@@ -175,7 +175,7 @@ pub(crate) async fn past(at: Option<tokio::time::Instant>) {
 pub(crate) fn spills_only(ctx: &Ctx) -> Ctx {
     let fresh = Ctx::new(ctx.workspace.clone());
     match ctx.session() {
-        Some(id) => fresh.with_session(id, ctx.spill_root()),
+        Some(id) => fresh.with_spill_namespace(id, ctx.spill_root()),
         None => fresh.with_spill_root(ctx.spill_root()),
     }
 }

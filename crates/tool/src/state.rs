@@ -9,10 +9,16 @@ use std::path::Path;
 /// permissions: a crash between the write and the chmod would leave the
 /// contents world-readable at the name everything else reads.
 pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // The pid keeps a resumed run's fresh counter from landing on the earlier
+    // process's temp file; the count keeps two writers of one path in this
+    // process — a batch of tool calls runs at once — from landing on each
+    // other's.
+    static WRITTEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nth = WRITTEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let pid = std::process::id();
     let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
-        Some(had) => format!("{had}.{pid}.tmp"),
-        None => format!("{pid}.tmp"),
+        Some(had) => format!("{had}.{pid}.{nth}.tmp"),
+        None => format!("{pid}.{nth}.tmp"),
     });
     std::fs::write(&tmp, bytes)?;
     #[cfg(unix)]

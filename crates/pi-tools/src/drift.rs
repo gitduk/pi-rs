@@ -30,7 +30,7 @@ pub fn drift(ctx: &Ctx) -> Option<String> {
             &now,
             CHANGED_RUN,
         ));
-        settle(ctx, &path, &was, now.view());
+        ctx.settle_view(&path, &was, now.view());
     }
     (!told.is_empty()).then(|| {
         let files = llm::figures::count(told.len(), "file");
@@ -69,7 +69,7 @@ pub fn absorb(ctx: &Ctx, before: Before) -> Vec<Moved> {
             continue;
         };
         // Rewritten as it was, or viewed anew by a tool that said so itself.
-        if now.matches(&was) || !settle(ctx, &path, &was, now.view()) {
+        if now.matches(&was) || !ctx.settle_view(&path, &was, now.view()) {
             continue;
         }
         let rel = ctx.workspace.display(&path);
@@ -226,19 +226,6 @@ fn on_disk(path: &Path) -> std::io::Result<Disk> {
         return Ok(Disk::Over(bytes.len() as u64));
     }
     Ok(Disk::Text(String::from_utf8_lossy(&bytes).into()))
-}
-
-// Moves the view only if no tool noted a newer one while the file was read.
-fn settle(ctx: &Ctx, path: &Path, was: &Arc<str>, now: Option<Arc<str>>) -> bool {
-    let mut viewed = ctx.viewed.lock().unwrap_or_else(PoisonError::into_inner);
-    if !viewed.get(path).is_some_and(|cur| Arc::ptr_eq(cur, was)) {
-        return false;
-    }
-    match now {
-        Some(now) => viewed.insert(path.to_path_buf(), now),
-        None => viewed.remove(path),
-    };
-    true
 }
 
 #[cfg(test)]
