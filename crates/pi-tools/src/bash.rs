@@ -61,9 +61,6 @@ const DESCRIPTION: &str = "Each call runs a shell command in a new shell. \
     Use `cwd` to set the working directory instead of a leading `cd`. \
     If you omit `cwd`, the command runs in the workspace root. \
     Directory changes and environment changes do not persist between calls.\n\n\
-    Prefer `read` to `cat`. Prefer `write` to heredocs. \
-    Prefer `edit` to `sed` when line content determines which lines to change. \
-    These tools report failures you can use to correct errors. \
     Use `bash` for substitutions by pattern or position (`sed`, `perl`, `awk`). \
     Use `bash` to move files (`mv`) or delete files (`rm`).";
 
