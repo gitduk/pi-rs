@@ -57,8 +57,7 @@ pub const SHELL: &str = "bash";
 
 const ARGS_HINT: &str = "`bash` requires `command`. Use optional `cwd` for the working directory. Use optional `stdin` for input text.";
 
-const DESCRIPTION: &str = "Each call runs a shell command in a new shell. \
-    When the call passes `cwd`, the command runs in that directory; \
+const DESCRIPTION: &str = "When the call passes `cwd`, the command runs in that directory; \
     otherwise it runs in the workspace root.\n\n\
     Use `bash` for substitutions by pattern or position (`sed`, `perl`, `awk`). \
     Use `bash` to move files (`mv`) or delete files (`rm`).";
@@ -171,21 +170,70 @@ fn first_line(command: &str) -> &str {
     command.split('\n').next().unwrap_or_default()
 }
 
+// The command without an opening `cd` that names the directory the call
+// already runs in, where that `cd` changes nothing. Only the plain
+// `cd <path> &&` form is read; anything else is left to the shell.
+// The target is compared to `cwd` as written, so only `.` or that same path
+// is dropped: a symlink or `..` route to it would still move the shell's own
+// `PWD`, and the rest of the command may read it.
+fn without_redundant_cd<'a>(command: &'a str, cwd: &std::path::Path) -> Option<&'a str> {
+    let rest = command.trim_start().strip_prefix("cd")?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let (target, after) = match rest.chars().next().filter(|c| *c == '"' || *c == '\'') {
+        Some(quote) => {
+            let quoted = &rest[quote.len_utf8()..];
+            let end = quoted.find(quote)?;
+            (&quoted[..end], &quoted[end + quote.len_utf8()..])
+        }
+        None => {
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            (&rest[..end], &rest[end..])
+        }
+    };
+    let rest = after.trim_start().strip_prefix("&&")?.trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+    (target == "." || cwd == std::path::Path::new(target)).then_some(rest)
+}
+
 // The command as it will run, and where. `written` says the model wrote the
 // command: only then does rtk rewrite it, in its own vocabulary, from `cwd`
 // for project filters, racing a stop so it isn't delayed. A command pi built
 // for a caller runs as built — rtk's table answers for what a model types.
 async fn prepare(args: Args, tier: Tier, ctx: &Ctx, written: bool) -> Result<Again, ToolError> {
     let cwd = ctx.workspace.resolve(&args.cwd, tier)?;
+    // Dropped, not run: the transcript keeps what was written, so only the
+    // journal can tell it from what ran.
+    let stripped = if written {
+        without_redundant_cd(&args.command, &cwd)
+    } else {
+        None
+    };
+    if let Some(rest) = stripped {
+        tracing::info!(
+            target: "pi::bash",
+            written = %args.command,
+            ran = %rest,
+            "dropped a cd into the directory the command already runs in"
+        );
+    }
+    let command = match stripped {
+        Some(rest) => rest.to_string(),
+        None => args.command,
+    };
     let rewritten = match written {
         false => None,
         true => tokio::select! {
-            r = crate::rtk::rewrite(&args.command, &cwd) => r,
+            r = crate::rtk::rewrite(&command, &cwd) => r,
             _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
         },
     };
     Ok(Again {
-        command: rewritten.unwrap_or(args.command),
+        command: rewritten.unwrap_or(command),
         cwd,
         stdin: args.stdin,
         environment: Environment::default(),

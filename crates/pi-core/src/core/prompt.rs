@@ -133,12 +133,9 @@ impl Standing {
 
     fn workspace(&self, out: &mut String) {
         out.push_str(&format!(
-            "\n\n<workspace path=\"{}\"/>\n\nWork in this directory. \
-Relative paths resolve from the workspace. Commands start in the workspace. \
-Keep scripts, downloads, state files, and temporary files in the workspace. \
-Run task scripts through bash without registering a tool.\n\n\
-You may read files outside the workspace with absolute paths. \
-You may read sources outside this machine through URLs.",
+            "\n\n<workspace path=\"{}\"/>\n\nRelative paths resolve from the workspace. \
+Commands start in the workspace. \
+Absolute paths reach files outside the workspace.",
             escaped(self.workspace.display())
         ));
         if !tool::Tier::Write.under(self.tier) {
@@ -149,10 +146,7 @@ You may read sources outside this machine through URLs.",
                 "\n\nThe `write` and `edit` tools can change files only inside the workspace. \
 They can also change files in pi's home when a `<pi_home>` block specifies it."
             }
-            false => {
-                "\n\nThe `write` and `edit` tools can change files anywhere. \
-Change a file outside the workspace only when the user requests it."
-            }
+            false => "\n\nThe `write` and `edit` tools can change files anywhere.",
         });
     }
 
