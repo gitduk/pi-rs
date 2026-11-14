@@ -15,17 +15,18 @@ use crate::render::{self, Outcome, Paint};
 use crate::tui::browse::PageLine;
 use pi_store::text;
 
-/// One row under a call's line: what it asked for, or what came back.
+/// One row under a call's line: what it was asked, or what came back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Part {
-    /// A line of what the call asked for — the command, or another argument.
-    Asked(String),
+    /// A line of the argument the call was made with — a command, a path.
+    Argument(String),
     /// The blank row parting one block from the next.
     Gap,
-    /// What a command printed, before what it changed.
-    Printed(String),
-    /// What came back, as the tool wrote it.
-    Said(String),
+    /// A line the tool sketched as output: what the command printed, before
+    /// what it changed.
+    Output(String),
+    /// A line of the result as the tool wrote it, when it sketched nothing.
+    Result(String),
     /// What came back, as a change: the rows a tool sketched for the screen.
     Change(String),
 }
@@ -97,13 +98,13 @@ impl Call {
     /// A call as its result leaves it: `preview` is what the tool said of
     /// itself — its first line the call's line, any rows under it what it
     /// drew for the screen — `asked` the argument it was made with, and
-    /// `output` what it printed, once that is known.
+    /// `answer` what the call answered, once that is known.
     pub fn new(
         outcome: Outcome,
         name: &str,
         preview: &str,
         asked: &str,
-        output: Option<&str>,
+        answer: Option<&str>,
     ) -> Self {
         // A line naming its tool alone says nothing of what was asked: the
         // argument tells it, when that reads as one.
@@ -125,21 +126,21 @@ impl Call {
             .skip(usize::from(read))
             .map(str::to_string)
             .collect();
-        // What the tool sketched is what a screen shows; the output is the
+        // What the tool sketched is what a screen shows; the result is the
         // fallback for a tool that sketched nothing. A command that changed
         // files says three things — what it ran, what it printed, what it
         // changed — and a blank row parts each from the one before it.
-        let mut printed: Vec<String> = Vec::new();
+        let mut output: Vec<String> = Vec::new();
         let mut change: Vec<String> = Vec::new();
         for line in preview.lines().skip(1) {
             match tool::row::kind(line) {
-                tool::row::Kind::Output(_) => printed.push(line.to_string()),
+                tool::row::Kind::Output(_) => output.push(line.to_string()),
                 _ => change.push(line.to_string()),
             }
         }
-        // Nothing sketched: what it said is the body.
-        let said: Vec<String> = if printed.is_empty() && change.is_empty() {
-            output
+        // Nothing sketched: what it answered is the body.
+        let result: Vec<String> = if output.is_empty() && change.is_empty() {
+            answer
                 .map(|out| {
                     pi_core::core::tools::shown(name, out)
                         .map(str::to_string)
@@ -151,8 +152,8 @@ impl Call {
         };
         // The page reads them all: the argument at its line's foot, then a
         // blank, then each block after it in turn.
-        let mut body: Vec<Part> = asked.iter().cloned().map(Part::Asked).collect();
-        let printed_at = block(&mut body, &printed, Part::Printed);
+        let mut body: Vec<Part> = asked.iter().cloned().map(Part::Argument).collect();
+        let output_at = block(&mut body, &output, Part::Output);
         // A command that changed more than one file parts them: a blank row
         // between one file's rows and the next file's head, so the rows under
         // a name stay its own.
@@ -169,14 +170,14 @@ impl Call {
             }
             change_at.end = body.len();
         }
-        let said_at = block(&mut body, &said, Part::Said);
+        let result_at = block(&mut body, &result, Part::Result);
         // The row keeps the argument's first line and what the call found: a
         // command that changed files is read for its change, not for what it
         // printed on the way, and the rest of a script is the page's.
-        let shown = [&change_at, &said_at, &printed_at]
+        let shown = [&change_at, &result_at, &output_at]
             .into_iter()
             .find(|at| !at.is_empty())
-            .unwrap_or(&printed_at);
+            .unwrap_or(&output_at);
         let mut row: Vec<usize> = (0..asked.len().min(1)).collect();
         if !shown.is_empty() {
             row.push(shown.start - 1);
@@ -400,12 +401,12 @@ impl Call {
     /// One row of what the call holds, in the voice its kind asks for.
     fn part(&self, part: &Part, paint: &Paint, room: usize) -> Line<'static> {
         match part {
-            Part::Asked(text) => Line::from(paint.call_line(&self.name, text)),
+            Part::Argument(text) => Line::from(paint.call_line(&self.name, text)),
             Part::Gap => Line::default(),
             // What it printed reads as it came, in the muted voice the change
             // rows keep their headers in.
-            Part::Printed(text) => Line::from(paint.span(&paint.theme.muted, text.clone())),
-            Part::Said(text) => Line::from(text.clone()),
+            Part::Output(text) => Line::from(paint.span(&paint.theme.muted, text.clone())),
+            Part::Result(text) => Line::from(text.clone()),
             Part::Change(text) => render::change(text, paint, room),
         }
     }
@@ -418,8 +419,8 @@ impl Call {
 
 #[cfg(test)]
 // A call that landed well, as the screen holds one.
-pub(crate) fn test_call(name: &str, preview: &str, asked: &str, output: &str) -> Call {
-    Call::new(Outcome::Done, name, preview, asked, Some(output))
+pub(crate) fn test_call(name: &str, preview: &str, asked: &str, answer: &str) -> Call {
+    Call::new(Outcome::Done, name, preview, asked, Some(answer))
 }
 
 impl Fold for Call {
