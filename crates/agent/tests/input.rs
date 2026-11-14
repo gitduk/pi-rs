@@ -74,7 +74,7 @@ impl agent::Compactor for Pausing {
         _: agent::Working<'_>,
         _: usize,
         _: bool,
-        _: &agent::event::Voice,
+        _: &agent::event::Reporter,
     ) -> agent::Fitted {
         if self
             .passes

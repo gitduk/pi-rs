@@ -623,9 +623,9 @@ impl Prepared {
         // Use the loop's event entrance so a failed or cancelled request still
         // leaves the connection diagnostics in the journal.
         child_span.in_scope(|| {
-            let voice = agent::event::Voice::new(tx.clone(), agent.brief.hooks.clone());
+            let reporter = agent::event::Reporter::new(tx.clone(), agent.brief.hooks.clone());
             for note in &model_notes {
-                voice.warn(note.clone());
+                reporter.warn(note.clone());
             }
         });
         // The token ends the run — the budget or a stop — unwinding like a

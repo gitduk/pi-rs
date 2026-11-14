@@ -637,8 +637,10 @@ mod budget {
             retry: None,
             session_id: None,
         };
-        let voice = agent::event::Voice::new(tx, Arc::new(agent::NoHooks));
-        let fitted = compactor.compact(&mut s, run, budget, false, &voice).await;
+        let reporter = agent::event::Reporter::new(tx, Arc::new(agent::NoHooks));
+        let fitted = compactor
+            .compact(&mut s, run, budget, false, &reporter)
+            .await;
 
         assert!(fitted.changed);
         let after = llm::estimate::tokens(&fitted.context, &spec());
@@ -739,10 +741,10 @@ mod budget {
                 retry: policy,
                 session_id: None,
             };
-            let voice = agent::event::Voice::new(tx, Arc::new(agent::NoHooks));
+            let reporter = agent::event::Reporter::new(tx, Arc::new(agent::NoHooks));
             assert!(
                 compactor
-                    .compact(&mut s, run, budget, false, &voice)
+                    .compact(&mut s, run, budget, false, &reporter)
                     .await
                     .changed
             );

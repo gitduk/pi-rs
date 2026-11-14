@@ -6,7 +6,7 @@
 pub use llm::transport::Transport;
 
 use crate::Report;
-use crate::event::Voice;
+use crate::event::Reporter;
 use crate::session::Session;
 use async_trait::async_trait;
 use llm::message::Message;
@@ -134,8 +134,8 @@ pub struct Working<'a> {
 /// since the loop only ever needs the budget met — so [`Untouched`] qualifies.
 #[async_trait]
 pub trait Compactor: Send + Sync {
-    /// Fit `session` into `budget` tokens if it is over, saying on `voice` what
-    /// went. `urgent` is a provider that has already refused the request:
+    /// Fit `session` into `budget` tokens if it is over, reporting on
+    /// `reporter` what went. `urgent` is a provider that has already refused the request:
     /// holding the working tail back is a preference, fitting is not.
     async fn compact(
         &self,
@@ -143,9 +143,9 @@ pub trait Compactor: Send + Sync {
         run: Working<'_>,
         budget: usize,
         urgent: bool,
-        voice: &Voice,
+        reporter: &Reporter,
     ) -> Fitted {
-        let _ = (run, budget, urgent, voice);
+        let _ = (run, budget, urgent, reporter);
         Fitted {
             context: session.context(),
             changed: false,

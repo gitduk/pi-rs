@@ -1,9 +1,9 @@
 //! Project accepted user responses into native history, including cancellation.
 
-use crate::event::Voice;
+use crate::event::Reporter;
 use crate::seams::Input;
 use crate::session::{Drawn, Session};
-use crate::{AgentError, say_committed};
+use crate::{AgentError, report_committed};
 use llm::message::{ToolCall, ToolResult};
 use std::collections::HashMap;
 use tool::{Ctx, ToolOutput};
@@ -69,7 +69,7 @@ pub(crate) fn reconcile(
 pub(crate) fn settle(
     session: &mut Session,
     ctx: &Ctx,
-    voice: &Voice,
+    reporter: &Reporter,
     input: &dyn Input,
     status: message::Status,
 ) -> Result<(), AgentError> {
@@ -96,18 +96,18 @@ pub(crate) fn settle(
     if results.is_empty() {
         return Ok(());
     }
-    commit(session, voice, input, results)
+    commit(session, reporter, input, results)
 }
 
 /// Retain native results before publishing their semantic responses.
 pub(crate) fn commit(
     session: &mut Session,
-    voice: &Voice,
+    reporter: &Reporter,
     input: &dyn Input,
     results: Vec<(ToolResult, Drawn)>,
 ) -> Result<(), AgentError> {
     let ids = session.push_previewed(results);
-    say_committed(session, voice, &ids);
+    report_committed(session, reporter, &ids);
     for entry in session.entries_for(&ids) {
         if let crate::session::Entry::Tool { result, .. } = entry {
             input

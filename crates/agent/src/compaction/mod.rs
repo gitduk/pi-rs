@@ -17,7 +17,7 @@ use llm::stream::Usage;
 use llm::transport::Transport;
 use tracing::Instrument as _;
 
-use crate::event::{Event, Voice};
+use crate::event::{Event, Reporter};
 use crate::seams::{Compactor, Fitted, Working};
 use crate::session;
 use ladder::{Policy, Report};
@@ -153,7 +153,7 @@ impl Compactor for Summarizing {
         run: Working<'_>,
         budget: usize,
         urgent: bool,
-        voice: &Voice,
+        reporter: &Reporter,
     ) -> Fitted {
         let measured = session.context();
         if llm::estimate::tokens(&measured, run.spec) <= budget {
@@ -176,7 +176,7 @@ impl Compactor for Summarizing {
             .await
         {
             Some((report, spent)) => {
-                voice.say(Event::Compacted(report));
+                reporter.report(Event::Compacted(report));
                 Fitted {
                     context: session.context(),
                     changed: true,

@@ -98,15 +98,15 @@ pub enum Event {
     },
 }
 
-/// Where a run says what it is doing: the channel the surface drains, and
+/// Where a run reports what it is doing: the channel the surface drains, and
 /// the hooks that watch it.
 #[derive(Clone)]
-pub struct Voice {
+pub struct Reporter {
     tx: tokio::sync::mpsc::UnboundedSender<Event>,
     hooks: std::sync::Arc<dyn crate::Hooks>,
 }
 
-impl Voice {
+impl Reporter {
     pub fn new(
         tx: tokio::sync::mpsc::UnboundedSender<Event>,
         hooks: std::sync::Arc<dyn crate::Hooks>,
@@ -116,13 +116,13 @@ impl Voice {
 
     /// Report a warning through the same journal and hooks as loop events.
     pub fn warn(&self, warning: String) {
-        self.say(Event::Warning(warning));
+        self.report(Event::Warning(warning));
     }
 
-    /// Journals it, hands it to the hooks, says it to the user, in that order,
-    /// in one call — call this where the fact occurs, not where the event is
-    /// consumed, or order drifts.
-    pub(crate) fn say(&self, event: Event) {
+    /// Journals it, hands it to the hooks, sends it to the surface, in that
+    /// order, in one call — call this where the fact occurs, not where the
+    /// event is consumed, or order drifts.
+    pub(crate) fn report(&self, event: Event) {
         journal(&event);
         self.hooks.saw(&event);
         let _ = self.tx.send(event);

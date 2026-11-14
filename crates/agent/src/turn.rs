@@ -7,7 +7,7 @@ use llm::stream::{Accumulator, StreamEvent};
 use llm::transport::Transport as _;
 use tool::Ctx;
 
-use crate::event::Voice;
+use crate::event::Reporter;
 use crate::{Agent, AgentError, Event, Retry};
 
 impl Agent {
@@ -20,13 +20,13 @@ impl Agent {
         &self,
         req: &Request,
         ctx: &Ctx,
-        voice: &Voice,
+        reporter: &Reporter,
         retry: &Retry,
         generating: &mut Option<std::time::Duration>,
     ) -> Result<llm::stream::Completion, (AgentError, Option<llm::stream::Completion>)> {
         let mut attempt = 0usize;
         loop {
-            let (err, partial) = match self.attempt(req, ctx, voice, retry, generating).await {
+            let (err, partial) = match self.attempt(req, ctx, reporter, retry, generating).await {
                 Ok(done) => return Ok(done),
                 Err(err) => err,
             };
@@ -53,7 +53,7 @@ impl Agent {
 
             attempt += 1;
             let delay = retry.delay(attempt);
-            voice.say(Event::Retrying {
+            reporter.report(Event::Retrying {
                 attempt,
                 delay_ms: delay.as_millis() as u64,
                 reason: e.to_string(),
@@ -78,7 +78,7 @@ impl Agent {
         &self,
         req: &Request,
         ctx: &Ctx,
-        voice: &Voice,
+        reporter: &Reporter,
         retry: &Retry,
         generating: &mut Option<std::time::Duration>,
     ) -> Result<llm::stream::Completion, (AgentError, Option<llm::stream::Completion>)> {
@@ -134,16 +134,16 @@ impl Agent {
             );
             match &ev {
                 StreamEvent::TextDelta { delta, .. } => {
-                    voice.say(Event::TextDelta(delta.clone()));
+                    reporter.report(Event::TextDelta(delta.clone()));
                 }
                 StreamEvent::ReasoningDelta { delta, .. } => {
-                    voice.say(Event::ReasoningDelta(delta.clone()));
+                    reporter.report(Event::ReasoningDelta(delta.clone()));
                 }
                 _ => {}
             }
             acc.push(ev);
             if reports_usage {
-                voice.say(Event::Usage(acc.usage()));
+                reporter.report(Event::Usage(acc.usage()));
             }
         }
         *generating = started.map(|at| at.elapsed());
@@ -151,7 +151,7 @@ impl Agent {
         // What the host owed and did not send, said once per session by the
         // reporter. Said here too, not just the log — else it looks ordinary.
         for gap in wire.gaps() {
-            voice.say(Event::Warning(gap));
+            reporter.report(Event::Warning(gap));
         }
 
         Ok(acc.finish())

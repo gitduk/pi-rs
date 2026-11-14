@@ -27,7 +27,7 @@ pub use transcript as session;
 pub use approval::Ceiling;
 pub use compaction::Summarizing;
 pub use compaction::ladder::{Policy, Report};
-use event::Voice;
+use event::Reporter;
 pub use event::{Event, Outcome, Totals};
 pub use hooks::{GatesOnly, Hooks, NoHooks};
 pub use retry::Retry;
@@ -191,7 +191,7 @@ impl Agent {
         retry: &Retry,
         input: &dyn seams::Input,
     ) -> Result<Usage, AgentError> {
-        let voice = Voice::new(tx.clone(), self.brief.hooks.clone());
+        let reporter = Reporter::new(tx.clone(), self.brief.hooks.clone());
         // Tool sources are live: what they list now, not when the brief was applied.
         tracing::info!(
             target: "pi::loop",
@@ -203,9 +203,9 @@ impl Agent {
             .last_prompt()
             .map_or(String::new(), |p| p.text.clone());
         if let Some(note) = self.brief.hooks.ahead(&prompt, ctx).await {
-            say_note(session, &voice, note);
+            report_note(session, &reporter, note);
         }
-        let mut out = self.turns(session, ctx, &voice, retry, input).await;
+        let mut out = self.turns(session, ctx, &reporter, retry, input).await;
         let closing = match &out {
             Ok(_) => message::Status::Failed(message::Failure {
                 code: "MISSING_TOOL_RESULT".into(),
@@ -217,7 +217,7 @@ impl Agent {
                 message: error.to_string(),
             }),
         };
-        if let Err(error) = replies::settle(session, ctx, &voice, input, closing) {
+        if let Err(error) = replies::settle(session, ctx, &reporter, input, closing) {
             out = Err(error);
         }
         match &out {
@@ -225,7 +225,7 @@ impl Agent {
             Err(AgentError::Cancelled) => session.close_open(session::STOPPED_CALL),
             Err(e) => {
                 session.close_open(session::DIED_CALL);
-                voice.say(Event::Failed {
+                reporter.report(Event::Failed {
                     error: e.to_string(),
                 });
             }
@@ -237,7 +237,7 @@ impl Agent {
         &self,
         session: &mut Session,
         ctx: &Ctx,
-        voice: &Voice,
+        reporter: &Reporter,
         retry: &Retry,
         input: &dyn seams::Input,
     ) -> Result<Usage, AgentError> {
@@ -257,9 +257,9 @@ impl Agent {
         let mut holds = 0usize;
 
         for turn in 1.. {
-            receive(session, ctx, voice, input);
-            heed(session, voice, input);
-            voice.say(Event::TurnStart { turn });
+            receive(session, ctx, reporter, input);
+            heed(session, reporter, input);
+            reporter.report(Event::TurnStart { turn });
             // Entered around each await, not held across it — a guard spanning
             // an await labels whatever else the runtime polls meanwhile.
             let span = tracing::info_span!(
@@ -297,7 +297,7 @@ impl Agent {
                     _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
                     fitted = self
                         .compactor
-                        .compact(session, self.working(Some(retry), ctx.session()), fit_to, squeezes > 0, voice)
+                        .compact(session, self.working(Some(retry), ctx.session()), fit_to, squeezes > 0, reporter)
                         .instrument(span.clone()) => fitted,
                 };
                 totals.add(&fitted.spent);
@@ -305,7 +305,7 @@ impl Agent {
                     compactions += 1;
                     held = None;
                 }
-                if receive(session, ctx, voice, input) {
+                if receive(session, ctx, reporter, input) {
                     continue;
                 }
                 sent = as_sent(fitted.context, &self.model.spec);
@@ -336,7 +336,7 @@ impl Agent {
                 };
 
                 match self
-                    .stream_turn(&req, ctx, voice, retry, &mut generating)
+                    .stream_turn(&req, ctx, reporter, retry, &mut generating)
                     .instrument(span.clone())
                     .await
                 {
@@ -356,7 +356,7 @@ impl Agent {
                                     scale = 1.0;
                                 }
                                 named_window = Some(limit);
-                                voice.say(Event::Refit(format!(
+                                reporter.report(Event::Refit(format!(
                                     "the provider reports a {limit}-token window; refitting to it"
                                 )));
                             }
@@ -364,7 +364,7 @@ impl Agent {
                             // the estimate was off: refitting would resend it.
                             _ => {
                                 scale *= SQUEEZE;
-                                voice.say(Event::Refit(format!(
+                                reporter.report(Event::Refit(format!(
                                     "the request did not fit and named no limit below the \
                                      budget; retrying at {}% of the estimated budget",
                                     (scale * 100.0).round()
@@ -386,7 +386,7 @@ impl Agent {
             };
 
             totals.add(&done.usage);
-            voice.say(Event::TurnEnd {
+            reporter.report(Event::TurnEnd {
                 usage: done.usage,
                 text: done.message.text(),
                 generating,
@@ -400,7 +400,7 @@ impl Agent {
                     bound,
                 });
                 held = Some((prompt, window));
-                voice.say(Event::Context {
+                reporter.report(Event::Context {
                     used: prompt,
                     window,
                 });
@@ -413,7 +413,7 @@ impl Agent {
                 || (done.stop == llm::StopReason::MaxTokens && done.usage.output == 0);
             if silently_truncated && scale > SQUEEZE.powi(MAX_SQUEEZE as i32) {
                 scale *= SQUEEZE;
-                voice.say(Event::Refit(format!(
+                reporter.report(Event::Refit(format!(
                     "the provider took {prompt} input tokens against a {window}-token window \
                      and answered from a truncated prompt; tightening the budget"
                 )));
@@ -451,19 +451,19 @@ impl Agent {
             session.push_assistant(content);
 
             if let Some(reply) = reply {
-                if receive(session, ctx, voice, input) {
+                if receive(session, ctx, reporter, input) {
                     continue;
                 }
                 if holds == MAX_HOLDS {
-                    voice.say(Event::Warning(format!(
+                    reporter.report(Event::Warning(format!(
                         "hooks kept the run going {MAX_HOLDS} times; it stops here"
                     )));
                 } else if let Some(why) = self.brief.hooks.hold(&reply, holds, ctx).await {
                     holds += 1;
-                    say_note(session, voice, why);
+                    report_note(session, reporter, why);
                     continue;
                 }
-                voice.say(Event::Done {
+                reporter.report(Event::Done {
                     turns: turn,
                     usage: totals,
                     ctx: held,
@@ -496,7 +496,7 @@ impl Agent {
                 contexts.push(ctx.clone().with_request(request));
             }
             let (results, stopped) = self
-                .run_calls(&calls, &bad, &contexts, voice, &mut totals)
+                .run_calls(&calls, &bad, &contexts, reporter, &mut totals)
                 .instrument(span.clone())
                 .await;
             let results = replies::reconcile(
@@ -505,7 +505,7 @@ impl Agent {
                 input.completed_calls().map_err(AgentError::Interaction)?,
                 ctx,
             )?;
-            replies::commit(session, voice, input, results)?;
+            replies::commit(session, reporter, input, results)?;
             if stopped {
                 return Err(AgentError::Cancelled);
             }
@@ -537,7 +537,7 @@ impl Agent {
             .compactor
             .compact_now(session, self.working(None, session_id), budget, focus)
             .await;
-        // No voice to say it through, so journal it as the loop's would be.
+        // No reporter to carry it, so journal it as the loop's would be.
         if let Some(r) = report {
             event::journal(&Event::Compacted(r));
         }
@@ -609,26 +609,31 @@ pub(crate) fn as_sent(mut context: Vec<Message>, spec: &ModelSpec) -> Vec<Messag
 }
 
 // Files a note for the model and hands it to whoever draws.
-fn say_note(session: &mut Session, voice: &Voice, note: String) {
+fn report_note(session: &mut Session, reporter: &Reporter, note: String) {
     let id = session.push_note(note);
-    say_committed(session, voice, &[id]);
+    report_committed(session, reporter, &[id]);
 }
 
-fn receive(session: &mut Session, ctx: &Ctx, voice: &Voice, input: &dyn seams::Input) -> bool {
+fn receive(
+    session: &mut Session,
+    ctx: &Ctx,
+    reporter: &Reporter,
+    input: &dyn seams::Input,
+) -> bool {
     let mut ids = Vec::new();
     while !ctx.cancel.is_cancelled() {
         let Some(ask) = input.take() else { break };
         ids.push(session.send(ask));
     }
     if !ids.is_empty() {
-        say_committed(session, voice, &ids);
+        report_committed(session, reporter, &ids);
     }
     !ids.is_empty()
 }
 
 // The notes waiting for this request, after what joined it: a note can say
 // where things stand once those are in.
-fn heed(session: &mut Session, voice: &Voice, input: &dyn seams::Input) {
+fn heed(session: &mut Session, reporter: &Reporter, input: &dyn seams::Input) {
     let mut ids = Vec::new();
     while let Some(note) = input.note() {
         let id = session.push_note(note.text);
@@ -637,14 +642,14 @@ fn heed(session: &mut Session, voice: &Voice, input: &dyn seams::Input) {
         }
     }
     if !ids.is_empty() {
-        say_committed(session, voice, &ids);
+        report_committed(session, reporter, &ids);
     }
 }
 
 // A state update, not a drawing instruction: whoever draws derives the
 // entries' rows from them itself.
-fn say_committed(session: &Session, voice: &Voice, ids: &[session::EntryId]) {
-    voice.say(Event::Committed {
+fn report_committed(session: &Session, reporter: &Reporter, ids: &[session::EntryId]) {
+    reporter.report(Event::Committed {
         entries: session.entries_for(ids).into_iter().cloned().collect(),
     });
 }

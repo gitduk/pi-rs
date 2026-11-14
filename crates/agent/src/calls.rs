@@ -9,7 +9,7 @@ use llm::stream::{InvalidToolArgs, Usage};
 use tool::{Concurrency, Ctx, ToolError, ToolOutput};
 use tracing::Instrument as _;
 
-use crate::event::Voice;
+use crate::event::Reporter;
 use crate::session::Drawn;
 use crate::{Agent, Decision, Event};
 
@@ -32,7 +32,7 @@ impl Agent {
         calls: &[ToolCall],
         bad: &HashMap<String, InvalidToolArgs>,
         contexts: &[Ctx],
-        voice: &Voice,
+        reporter: &Reporter,
         spent: &mut Usage,
     ) -> (Vec<(ToolResult, Drawn)>, bool) {
         let mut actions: Vec<Action> = calls
@@ -91,14 +91,14 @@ impl Agent {
         for (call, action) in calls.iter().zip(&actions) {
             match action {
                 Action::Reject(why) => {
-                    voice.say(Event::ToolDenied {
+                    reporter.report(Event::ToolDenied {
                         id: call.id.clone(),
                         name: call.name.clone(),
                         reason: why.clone(),
                     });
                 }
                 Action::Run(_) => {
-                    voice.say(Event::ToolQueued {
+                    reporter.report(Event::ToolQueued {
                         id: call.id.clone(),
                         name: call.name.clone(),
                         args: call.args.clone(),
@@ -121,11 +121,11 @@ impl Agent {
                         ),
                         Action::Run(t) => {
                             let began = std::time::Instant::now();
-                            voice.say(Event::ToolStart {
+                            reporter.report(Event::ToolStart {
                                 id: call.id.clone(),
                                 at: began,
                             });
-                            let ctx = &with_call_voice(ctx, call, voice);
+                            let ctx = &with_call_reporter(ctx, call, reporter);
                             let mut output =
                                 tool::output::gated(t.as_ref(), call.args.clone(), ctx).await;
                             if let Ok(out) = &mut output
@@ -139,7 +139,7 @@ impl Agent {
                                 let note = tool::output::bound(ToolOutput::text(note), ctx);
                                 out.content.extend(note.content);
                             }
-                            landed(call, output, began.elapsed(), voice)
+                            landed(call, output, began.elapsed(), reporter)
                         }
                     }
                 }
@@ -191,18 +191,18 @@ enum Landed {
 
 // The call's own context: its progress and what it prints said as events
 // under its id.
-fn with_call_voice(ctx: &Ctx, call: &ToolCall, voice: &Voice) -> Ctx {
+fn with_call_reporter(ctx: &Ctx, call: &ToolCall, reporter: &Reporter) -> Ctx {
     let (progress_id, output_id) = (call.id.clone(), call.id.clone());
-    let (progress_voice, output_voice) = (voice.clone(), voice.clone());
+    let (progress_reporter, output_reporter) = (reporter.clone(), reporter.clone());
     ctx.clone()
         .with_progress(Arc::new(move |text| {
-            progress_voice.say(Event::ToolProgress {
+            progress_reporter.report(Event::ToolProgress {
                 id: progress_id.clone(),
                 text,
             })
         }))
         .with_output(Arc::new(move |text| {
-            output_voice.say(Event::ToolPrinted {
+            output_reporter.report(Event::ToolPrinted {
                 id: output_id.clone(),
                 text,
             })
@@ -214,7 +214,7 @@ fn landed(
     call: &ToolCall,
     output: Result<ToolOutput, ToolError>,
     took: std::time::Duration,
-    voice: &Voice,
+    reporter: &Reporter,
 ) -> Landed {
     match output {
         Err(ToolError::Cancelled) => Landed::Stopped,
@@ -227,7 +227,7 @@ fn landed(
             }
             // The pending live line draws from this same text, so a rebuild's
             // equality check sees one source, not a live/rebuilt mismatch.
-            voice.say(Event::ToolEnd {
+            reporter.report(Event::ToolEnd {
                 id: call.id.clone(),
                 name: call.name.clone(),
                 outcome: crate::Outcome::Failed,
@@ -244,7 +244,7 @@ fn landed(
             )
         }
         Ok(out) => {
-            voice.say(Event::ToolEnd {
+            reporter.report(Event::ToolEnd {
                 id: call.id.clone(),
                 name: call.name.clone(),
                 outcome: match out.warned {
