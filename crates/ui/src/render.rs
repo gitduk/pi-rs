@@ -613,12 +613,12 @@ pub fn outcome_glyph(outcome: Outcome) -> &'static str {
     }
 }
 
-/// The style that mark is drawn in.
+/// The style that mark is drawn in. A call that ran and came back wrong — a
+/// command's non-zero exit — wears the error colour: the ✔ only says it ran.
 pub fn outcome_style(outcome: Outcome, theme: &Theme) -> &Style {
     match outcome {
         Outcome::Done => &theme.status.ok,
-        Outcome::Warned => &theme.status.warn,
-        Outcome::Failed => &theme.status.err,
+        Outcome::Warned | Outcome::Failed => &theme.status.err,
     }
 }
 
