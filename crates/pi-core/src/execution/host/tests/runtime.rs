@@ -151,11 +151,7 @@ async fn a_hidden_sessions_result_runs_and_returns_to_core_without_a_frontend() 
         .unwrap()
         .into_session();
     assert!(saved.entries().iter().any(|e| matches!(e,Entry::Plain {text,..} if text == "retained while the run owns the transcript")));
-    let messages = Messages::load(
-        core.lanes[0].messages().session(),
-        &pi_store::session::messages::path(&path),
-    )
-    .unwrap();
+    let messages = Messages::load(core.lanes[0].messages().session(), &path).unwrap();
     assert!(messages.response(&id).unwrap().is_some());
     assert!(core.admit_background_results().is_empty());
     assert!(

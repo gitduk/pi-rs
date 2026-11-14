@@ -110,7 +110,7 @@ impl Messages {
             let path = table
                 .archive
                 .as_ref()
-                .map(|archive| archive.directory().to_path_buf());
+                .map(|archive| archive.location().clone());
             if path.is_some() {
                 table.cancellation_save = true;
             }

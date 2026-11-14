@@ -2,8 +2,8 @@
 
 use super::{Error, LIMITS, Messages, Table};
 use message::{Message, RequestId, WireKind};
+use pi_store::session::Location;
 use pi_store::session::messages::Lookup;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use ::execution::channel::{Cursor, Observed};
@@ -18,7 +18,7 @@ pub struct Observation {
 
 enum Next {
     Memory(Option<Arc<Message>>),
-    Archive { path: PathBuf, before: usize },
+    Archive { path: Location, before: usize },
 }
 
 impl Messages {
@@ -142,14 +142,14 @@ impl Table {
         }
         let archive = self.archive.as_ref().ok_or(Error::ArchiveUnavailable)?;
         Ok(Next::Archive {
-            path: archive.directory().to_path_buf(),
+            path: archive.location().clone(),
             before: self.base,
         })
     }
 }
 
 fn read_committed(
-    path: &std::path::Path,
+    path: &Location,
     session: &message::SessionId,
     at: usize,
     before: usize,
@@ -209,7 +209,13 @@ mod tests {
             let id = messages.submit(wire).unwrap();
             let mut owner = messages.start_next().unwrap();
             owner.complete(Status::Done, Vec::new()).unwrap();
-            messages.snapshot().save(dir.path()).unwrap();
+            messages
+                .snapshot()
+                .save(&Location::new(
+                    dir.path().join("project.db"),
+                    messages.session(),
+                ))
+                .unwrap();
             let mut observer = messages
                 .observe(Some(Cursor {
                     session: messages.session(),

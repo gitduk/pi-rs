@@ -677,7 +677,7 @@ impl Scripts {
             if running >= SCRIPT_RUNS {
                 break;
             }
-            let due = self.answers.get(&key).map_or(true, |a| {
+            let due = self.answers.get(&key).is_none_or(|a| {
                 !a.running
                     && a.ran
                         .is_none_or(|at| at.elapsed().as_secs() >= script.every)

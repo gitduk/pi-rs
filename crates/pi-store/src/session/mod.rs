@@ -1,10 +1,11 @@
-//! Transcripts on disk: where a session's file lives, what a resumed one is
-//! read back as, and the bucket layout that keeps two workspaces apart.
+//! Workspace conversation databases, legacy imports and per-session artifacts.
 
+mod database;
+pub use database::Location;
+pub use rusqlite::Transaction;
 mod log;
 pub mod messages;
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -49,70 +50,6 @@ pub struct Header<'a> {
     /// Here, not with the entries: a rewind takes turns back, never the money
     /// they cost.
     pub spent: llm::Totals,
-}
-
-// An archive read only as far as the listing needs: identity fields
-// required like `Stored`'s, everything else optional and left unbuilt.
-#[derive(Deserialize)]
-struct Peek {
-    id: String,
-    workspace: String,
-    // Unused, and required anyway: it's what separates an archive this
-    // build can resume from an incompatible one.
-    #[allow(dead_code)]
-    model: String,
-    #[serde(default)]
-    created: u64,
-    /// What the user calls this session. Shallow like `created`: a
-    /// listing shows it and never builds the transcript to say it.
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    entries: Vec<PeekEntry>,
-    // The transcript's size on disk, set once it is read.
-    #[serde(skip)]
-    bytes: u64,
-}
-
-#[derive(Deserialize)]
-struct PeekEntry {
-    #[serde(default)]
-    id: u64,
-    #[serde(default)]
-    at: u64,
-    /// The ask, when this entry is one — what names the session.
-    #[serde(default)]
-    ask: Option<PeekAsk>,
-}
-
-#[derive(Deserialize)]
-struct PeekAsk {
-    #[serde(default)]
-    text: String,
-    #[serde(default)]
-    shown: Option<String>,
-}
-
-impl Peek {
-    // When this session was last worked on, which is what a listing sorts by.
-    fn touched(&self) -> u64 {
-        self.entries.last().map_or(self.created, |e| e.at)
-    }
-
-    // How many times the user asked: one round each.
-    fn rounds(&self) -> usize {
-        self.entries.iter().filter(|e| e.ask.is_some()).count()
-    }
-
-    // The first thing the user asked, which is what the list shows in place
-    // of an id. A `!` command's output is not it.
-    fn opening(&self) -> Option<String> {
-        self.entries
-            .iter()
-            .filter_map(|e| e.ask.as_ref())
-            .map(|b| b.shown.clone().unwrap_or_else(|| b.text.clone()))
-            .find(|t| !t.is_empty())
-    }
 }
 
 /// A saved session as the resume list and its completion see it: the id it is
@@ -175,6 +112,7 @@ const UNREACHED_KEEP: std::time::Duration = std::time::Duration::from_secs(30 * 
 // Just enough of an archive to say which tree it belongs to.
 #[derive(Deserialize)]
 struct Belongs {
+    id: String,
     workspace: String,
 }
 
@@ -189,7 +127,7 @@ pub struct Progress {
     /// When it was last worked on.
     pub touched: u64,
     /// Its transcript, for `Store::read`.
-    pub path: PathBuf,
+    pub path: Location,
 }
 
 /// Where transcripts live. Held as a value rather than read from the
@@ -289,7 +227,16 @@ fn claim_dir(dir: PathBuf, id: &str) -> Result<Claim> {
 /// and the directory with it once nothing else is there — the workspace's
 /// too, when this was the last thing in it.
 fn discard_unsaved(dir: &Path) {
-    if !dir.join(TRANSCRIPT).exists() {
+    let database = dir.parent().unwrap_or(dir).join(database::FILE);
+    let saved = database::summaries(&database)
+        .map(|sessions| {
+            sessions.iter().any(|s| {
+                std::ffi::OsStr::new(&tool::state::file_stem(&s.id))
+                    == dir.file_name().unwrap_or_default()
+            })
+        })
+        .unwrap_or(true);
+    if !dir.join(TRANSCRIPT).exists() && !saved {
         let _ = std::fs::remove_file(dir.join(LOCK));
         if std::fs::remove_dir(dir).is_ok()
             && let Some(workspace) = dir.parent()
@@ -319,6 +266,7 @@ pub(crate) fn held(dir: &Path) -> bool {
 
 // Make a rename or unlink in `dir` survive a crash. Where a directory cannot
 // be opened to sync, the rename alone is what there is.
+#[cfg(test)]
 fn sync_dir(dir: &Path) {
     #[cfg(unix)]
     if let Ok(d) = std::fs::File::open(dir) {
@@ -328,7 +276,7 @@ fn sync_dir(dir: &Path) {
     let _ = dir;
 }
 
-// Beside a session's transcript: the subagents its turns called, one file each.
+// Legacy subagent records, imported with their parent.
 const SUBAGENTS: &str = "subagents";
 
 // One transcript per session directory in the bucket; asking for the
@@ -357,13 +305,6 @@ fn belongs(transcript: &Path) -> Option<Belongs> {
     serde_json::from_str(&text).ok()
 }
 
-// Which workspace a bucket belongs to, read off its first transcript.
-fn workspace_of(transcripts: &[PathBuf]) -> Option<String> {
-    transcripts
-        .iter()
-        .find_map(|p| belongs(p).map(|b| b.workspace))
-}
-
 impl Store {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
@@ -377,8 +318,7 @@ impl Store {
         self.root.join(key_of(workspace))
     }
 
-    /// The directory one session's own files sit in, written or not yet: its
-    /// transcript, its messages, and what its statusline kept.
+    /// Session artifacts kept outside the database: its claim and diagnostic files.
     pub fn session_dir(&self, workspace: &Path, id: &str) -> PathBuf {
         self.dir_of(workspace).join(tool::state::file_stem(id))
     }
@@ -441,94 +381,185 @@ impl Store {
             .collect()
     }
 
-    /// Where one session's transcript is, written or not yet. A status names
-    /// it: a transcript nobody can find is one nobody reads back when a run
-    /// goes wrong.
-    pub fn path_of(&self, workspace: &Path, id: &str) -> PathBuf {
-        self.session_dir(workspace, id).join(TRANSCRIPT)
+    /// Address a session in the workspace's shared database.
+    pub fn path_of(&self, workspace: &Path, id: &str) -> Location {
+        Location::new(
+            self.dir_of(workspace).join(database::FILE),
+            message::SessionId::new(id.to_owned()).expect("session identifier"),
+        )
     }
 
-    /// Whether `id` has been filed under `workspace`: a session nothing was
-    /// said in never is.
     pub fn filed(&self, workspace: &Path, id: &str) -> bool {
-        self.path_of(workspace, id).is_file()
+        self.path_of(workspace, id).exists()
+            || self.session_dir(workspace, id).join(TRANSCRIPT).is_file()
     }
 
-    /// Hold the session `id` saved under `workspace` for this process, so no
-    /// other pi saves over it meanwhile; refused while one already holds it.
     pub fn claim(&self, workspace: &Path, id: &str) -> Result<Claim> {
         claim_dir(self.session_dir(workspace, id), id)
     }
 
-    /// Claim `id` under `workspace`, then read it: read after the claim, it is
-    /// the last save, and no other pi makes another while it is held. One
-    /// saved under another workspace moves here first, so it is kept once.
+    /// Import once under the session claim. Legacy files remain readable backups.
+    fn import(&self, workspace: &Path, id: &str) -> Result<()> {
+        let at = self.path_of(workspace, id);
+        if at.recorded()? {
+            return self.archive_legacy(workspace, id);
+        }
+        let legacy = self.session_dir(workspace, id).join(TRANSCRIPT);
+        if !legacy.is_file() {
+            return Ok(());
+        }
+        let stored = Self::read_legacy(&legacy)?;
+        anyhow::ensure!(
+            stored.id == id,
+            "legacy session identifier does not match its address"
+        );
+        let mut c = database::connect(&at.database)?;
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        database::write(
+            &tx,
+            Path::new(&stored.workspace),
+            Header {
+                id: &stored.id,
+                model: &stored.model,
+                name: stored.name.as_deref(),
+                created: stored.created,
+                spent: stored.spent,
+            },
+            &stored.session,
+            None,
+        )?;
+        if let Some(archive) = messages::legacy::read(&legacy.with_file_name("messages"))? {
+            messages::write_in(&tx, &at, &at.session, 0, &archive.entries)?;
+        }
+        let subs = legacy.parent().expect("session directory").join(SUBAGENTS);
+        for entry in std::fs::read_dir(subs).into_iter().flatten().flatten() {
+            if entry.path().extension().is_some_and(|e| e == "json") {
+                let child = Self::read_legacy(&entry.path())?;
+                database::write(
+                    &tx,
+                    Path::new(&stored.workspace),
+                    Header {
+                        id: &child.id,
+                        model: &child.model,
+                        name: child.name.as_deref(),
+                        created: child.created,
+                        spent: child.spent,
+                    },
+                    &child.session,
+                    Some(&stored.id),
+                )?;
+            }
+        }
+        tx.commit()?;
+        self.archive_legacy(workspace, id)?;
+        tracing::info!(target:"pi::session",session=id,"legacy conversation imported");
+        Ok(())
+    }
+
+    fn archive_legacy(&self, workspace: &Path, id: &str) -> Result<()> {
+        let dir = self.session_dir(workspace, id);
+        for name in [TRANSCRIPT, "messages", SUBAGENTS] {
+            let from = dir.join(name);
+            if from.exists() {
+                std::fs::rename(&from, dir.join(format!("{name}.legacy")))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn import_bucket(&self, workspace: &Path) {
+        for path in bucket_transcripts(&self.dir_of(workspace)) {
+            let Some(belongs) = belongs(&path) else {
+                continue;
+            };
+            if belongs.workspace != workspace.to_string_lossy() {
+                continue;
+            }
+            let id = &belongs.id;
+            if let Ok(_claim) = self.claim(workspace, id)
+                && let Err(error) = self.import(workspace, id)
+            {
+                tracing::warn!(target:"pi::session",session=id,%error,"legacy conversation not imported");
+            }
+        }
+    }
+
     pub fn take(&self, workspace: &Path, id: &str) -> Result<(Stored, Claim)> {
         let claim = self.relocate(workspace, id)?;
-        Ok((Self::read(&claim.dir.join(TRANSCRIPT))?, claim))
+        Ok((Self::read(&self.path_of(workspace, id))?, claim))
     }
 
-    /// `take` without the read: `id` claimed under `workspace`, its files
-    /// moved there first when they are filed elsewhere.
     pub fn relocate(&self, workspace: &Path, id: &str) -> Result<Claim> {
-        let claim = self.claim(workspace, id)?;
-        if claim.dir.join(TRANSCRIPT).is_file() {
-            return Ok(claim);
+        let here = self.claim(workspace, id)?;
+        self.import(workspace, id)?;
+        if self.path_of(workspace, id).exists() {
+            return Ok(here);
         }
-        self.bring(claim, id)
-    }
-
-    // Move the newest copy of `id` filed elsewhere to where `here` holds,
-    // whole, once nothing else holds it; the claim now covers it there.
-    fn bring(&self, here: Claim, id: &str) -> Result<Claim> {
-        let dir = here.dir.clone();
-        let stem = tool::state::file_stem(id);
-        let modified = |d: &PathBuf| {
-            std::fs::metadata(d.join(TRANSCRIPT))
-                .and_then(|m| m.modified())
-                .ok()
-        };
-        let from = std::fs::read_dir(&self.root)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path().join(&stem))
-            .filter(|d| *d != dir && d.join(TRANSCRIPT).is_file())
-            .max_by_key(modified)
-            .with_context(|| format!("no session `{id}` in {}", self.root.display()))?;
-        let mut held = claim_dir(from.clone(), id)?;
-        // Nothing saved there yet, so letting go of it frees the name — and
-        // may take the workspace's directory with it, made again here; one
-        // rename then moves all of it or none.
-        drop(here);
-        if let Some(workspace) = dir.parent() {
-            std::fs::create_dir_all(workspace)?;
+        for (bucket, transcripts) in self.buckets() {
+            for transcript in transcripts {
+                if let Some(b) = belongs(&transcript)
+                    && b.id == id
+                {
+                    let _source = self.claim(Path::new(&b.workspace), id)?;
+                    self.import(Path::new(&b.workspace), id)?;
+                }
+            }
+            let database = bucket.join(database::FILE);
+            for summary in database::summaries(&database)? {
+                if summary.id != id || summary.parent.is_some() {
+                    continue;
+                }
+                let source = Location::new(database.clone(), message::SessionId::new(id.into())?);
+                let _source = self.claim(Path::new(&summary.workspace), id)?;
+                database::relocate(&source, &self.path_of(workspace, id), workspace)?;
+                let old = source.artifacts();
+                for entry in std::fs::read_dir(&old).into_iter().flatten().flatten() {
+                    if entry.file_name() != LOCK
+                        && entry.file_name() != TRANSCRIPT
+                        && entry.file_name() != "messages"
+                        && entry.file_name() != SUBAGENTS
+                    {
+                        std::fs::rename(entry.path(), here.dir.join(entry.file_name()))?;
+                    }
+                }
+                self.changed();
+                return Ok(here);
+            }
         }
-        std::fs::rename(&from, &dir)
-            .with_context(|| format!("cannot move session `{id}` here from {}", from.display()))?;
-        held.dir = dir;
+        anyhow::bail!("no session `{id}` in {}", self.root.display())
+    }
+
+    pub fn save(
+        &self,
+        workspace: &Path,
+        header: Header<'_>,
+        session: &Session,
+    ) -> Result<Location> {
+        self.save_with(workspace, header, session, |_, _| Ok(()))
+    }
+
+    /// The entire persisted state of one execution lands in one transaction.
+    pub fn save_with(
+        &self,
+        workspace: &Path,
+        header: Header<'_>,
+        session: &Session,
+        extra: impl FnOnce(&rusqlite::Transaction<'_>, &Location) -> Result<()>,
+    ) -> Result<Location> {
+        let at = self.path_of(workspace, header.id);
+        let mut c = database::connect(&at.database)?;
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        database::write(&tx, workspace, header, session, None)?;
+        extra(&tx, &at)?;
+        tx.commit()?;
         self.changed();
-        Ok(held)
+        Ok(at)
     }
 
-    /// `created` is the caller's because it is set once and never changes.
-    /// Reading it back off disk here meant parsing the whole transcript to
-    /// recover one integer — on every turn, growing with the session it saved.
-    pub fn save(&self, workspace: &Path, header: Header<'_>, session: &Session) -> Result<PathBuf> {
-        let path = self.path_of(workspace, header.id);
-        self.changed();
-        log::write(&path, workspace, header, session)
+    pub fn subagent_path(&self, workspace: &Path, _parent: &str, id: &str) -> Location {
+        self.path_of(workspace, id)
     }
 
-    /// Where a subagent's transcript is: inside its parent's session, so
-    /// listing sessions never offers it and dropping the parent drops it too.
-    pub fn subagent_path(&self, workspace: &Path, parent: &str, id: &str) -> PathBuf {
-        self.session_dir(workspace, parent)
-            .join(SUBAGENTS)
-            .join(format!("{}.json", tool::state::file_stem(id)))
-    }
-
-    /// File a subagent's transcript under the session that called it.
     pub fn save_subagent(
         &self,
         parent: &str,
@@ -537,42 +568,56 @@ impl Store {
         model: &str,
         created: u64,
         session: &Session,
-    ) -> Result<PathBuf> {
-        let path = self.subagent_path(workspace, parent, id);
-        // Nothing spent: the parent's meter counted the child's calls already.
-        let header = Header {
-            id,
-            model,
-            name: Some("subagent"),
-            created,
-            spent: llm::Totals::default(),
-        };
-        log::write(&path, workspace, header, session)
+    ) -> Result<Location> {
+        let at = self.path_of(workspace, id);
+        let mut c = database::connect(&at.database)?;
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        database::write(
+            &tx,
+            workspace,
+            Header {
+                id,
+                model,
+                name: Some("subagent"),
+                created,
+                spent: Default::default(),
+            },
+            session,
+            Some(parent),
+        )?;
+        tx.commit()?;
+        Ok(at)
     }
 
-    /// How far every saved session has got, across all workspaces, read
-    /// without building a single transcript.
     pub fn progress(&self) -> Vec<Progress> {
         self.buckets()
             .into_iter()
-            .flat_map(|(_, t)| t)
-            .filter_map(|path| {
-                // Read the same way a listing reads: a log or an older
-                // single-object file, each without building the transcript.
-                let (ledger, replayed, _) = log::shallow(&path)?;
-                Some(Progress {
-                    last: replayed.entries.last()?.id,
-                    touched: replayed.entries.last().map_or(ledger.created, |e| e.at),
-                    created: ledger.created,
-                    id: ledger.id,
-                    path,
-                })
+            .flat_map(|(bucket, _)| {
+                let database = bucket.join(database::FILE);
+                database::summaries(&database)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|s| s.parent.is_none())
+                    .map(move |s| Progress {
+                        id: s.id.clone(),
+                        last: s.last,
+                        created: s.created,
+                        touched: s.touched,
+                        path: Location::new(
+                            database.clone(),
+                            message::SessionId::new(s.id).expect("stored session identifier"),
+                        ),
+                    })
             })
             .collect()
     }
 
+    pub fn read(at: &Location) -> Result<Stored> {
+        database::read(at)
+    }
+
     /// Read the transcript at `path`, as `progress` names it.
-    pub fn read(path: &Path) -> Result<Stored> {
+    pub fn read_legacy(path: &Path) -> Result<Stored> {
         let body = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read {}", path.display()))?;
         if !log::is_log(&body) {
@@ -593,192 +638,111 @@ impl Store {
         })
     }
 
-    // A transcript by id, from whichever bucket has it: what a test asks
-    // after moving things around. A run reads its own through `take`.
     #[cfg(test)]
     pub(crate) fn load(&self, id: &str) -> Result<Stored> {
-        let stem = tool::state::file_stem(id);
-        let mut match_: Option<PathBuf> = None;
-        if let Ok(entries) = std::fs::read_dir(&self.root) {
-            for entry in entries.flatten() {
-                let candidate = entry.path().join(&stem).join(TRANSCRIPT);
-                if candidate.is_file() {
-                    match_ = Some(candidate);
-                    break;
-                }
+        for (bucket, _) in self.buckets() {
+            let at = Location::new(
+                bucket.join(database::FILE),
+                message::SessionId::new(id.into())?,
+            );
+            if at.exists() {
+                return Self::read(&at);
             }
         }
-        let Some(path) = match_ else {
-            return Err(anyhow::anyhow!(
-                "no session `{id}` in {}",
-                self.root.display()
-            ));
-        };
-        Self::read(&path).with_context(|| format!("no session `{id}` at {}", path.display()))
+        anyhow::bail!("no session `{id}` in {}", self.root.display())
     }
 
-    // Every session recorded for this workspace, newest first, read as
-    // shallowly as the answer allows.
-    fn peek(&self, workspace: &Path) -> Vec<Peek> {
-        let want = workspace.display().to_string();
-        let mut found: Vec<Peek> = bucket_transcripts(&self.dir_of(workspace))
-            .into_iter()
-            .filter_map(|path| {
-                // Read shallowly: a listing names a session and sizes it, and
-                // never builds the transcript to say either.
-                let (ledger, replayed, bytes) = log::shallow(&path)?;
-                (ledger.workspace == want).then_some(Peek {
-                    id: ledger.id,
-                    workspace: ledger.workspace,
-                    model: replayed.model.unwrap_or(ledger.model),
-                    created: ledger.created,
-                    name: replayed.name,
-                    entries: replayed.entries,
-                    bytes,
-                })
-            })
-            .collect();
-        let mut seen = HashSet::new();
-        found.retain(|p| seen.insert(p.id.clone()));
-        // Newest by last activity, not creation — resuming wants where you
-        // left off. Ties break by id, since a stamp is only seconds.
-        found.sort_by(|a, b| b.touched().cmp(&a.touched()).then_with(|| b.id.cmp(&a.id)));
-        found
-    }
-
-    /// Sweeps buckets whose workspace is gone — a removed worktree, a
-    /// deleted checkout — since resuming has no other way back to them.
-    ///
-    /// Reachability alone isn't safe: an unmounted disk looks gone too. Age
-    /// is what tells the two apart.
-    pub fn prune(&self) {
+    pub fn remove(&self, workspace: &Path, id: &str) -> Result<()> {
+        let at = self.path_of(workspace, id);
+        if at.database.is_file() {
+            database::delete(&at)?;
+        }
+        let dir = self.session_dir(workspace, id);
+        if dir.is_dir() {
+            std::fs::remove_dir_all(dir)?;
+        }
         self.changed();
+        Ok(())
+    }
+
+    pub fn prune(&self) {
         self.prune_older_than(UNREACHED_KEEP);
     }
 
-    /// Deletes every session not worked on for `keep` but `spare`, the one
-    /// about to be resumed.
     pub fn forget_older_than(&self, keep: std::time::Duration, spare: Option<&str>) {
-        let spare = spare.map(tool::state::file_stem);
+        self.sweep(keep, |s| spare != Some(s.id.as_str()));
+    }
+
+    fn prune_older_than(&self, keep: std::time::Duration) {
+        self.sweep(keep, |s| !Path::new(&s.workspace).is_dir());
+    }
+
+    fn sweep(&self, keep: std::time::Duration, eligible: impl Fn(&database::Summary) -> bool) {
         self.changed();
         for (bucket, transcripts) in self.buckets() {
-            for transcript in &transcripts {
-                let Some(dir) = transcript.parent() else {
-                    continue;
-                };
-                let spared = spare.as_deref().is_some_and(|s| dir.ends_with(s));
-                if !spared && !held(dir) && crate::older_than(transcript, keep) {
-                    let _ = std::fs::remove_dir_all(dir);
+            for transcript in transcripts {
+                if let Some(b) = belongs(&transcript) {
+                    self.import_bucket(Path::new(&b.workspace));
                 }
             }
-            // Only an empty one goes; one still holding anything stays.
-            let _ = std::fs::remove_dir(&bucket);
+            let database = bucket.join(database::FILE);
+            for s in database::summaries(&database).unwrap_or_default() {
+                if s.parent.is_some()
+                    || !eligible(&s)
+                    || held(&self.session_dir(Path::new(&s.workspace), &s.id))
+                {
+                    continue;
+                }
+                if now().saturating_sub(s.touched) >= keep.as_secs() {
+                    let _ = self.remove(Path::new(&s.workspace), &s.id);
+                }
+            }
         }
     }
 
-    // The same, against a stated age rather than the constant — a test that
-    // waits a month is not a test.
-    fn prune_older_than(&self, keep: std::time::Duration) {
-        for (bucket, transcripts) in self.buckets() {
-            // No transcripts here means nothing says whether the tree is
-            // gone; `remove_dir` only takes a genuinely empty bucket.
-            if transcripts.is_empty() {
-                let _ = std::fs::remove_dir(&bucket);
-                continue;
-            }
-            let recent = transcripts.iter().any(|p| !crate::older_than(p, keep));
-            if recent {
-                continue;
-            }
-            // Per transcript, not per bucket: two trees can fold to one
-            // bucket, so one going away must not take the other's sessions.
-            let mut all_gone = !transcripts.is_empty();
-            for transcript in &transcripts {
-                match workspace_of(std::slice::from_ref(transcript)) {
-                    Some(ws) if !Path::new(&ws).is_dir() => match transcript.parent() {
-                        Some(dir) if held(dir) => all_gone = false,
-                        Some(dir) => {
-                            let _ = std::fs::remove_dir_all(dir);
-                        }
-                        None => {}
-                    },
-                    _ => all_gone = false,
-                }
-            }
-            if all_gone {
-                let _ = std::fs::remove_dir_all(&bucket);
-            }
-        }
-    }
-    /// Removes the records under `root` immediately, rather than waiting
-    /// for the sweep's month of grace. Returns how many transcripts went.
-    ///
-    /// One session at a time: a bucket goes whole only when every
-    /// transcript in it was recorded under `root`.
     pub fn drop_under(&self, root: &Path) -> usize {
         self.changed();
         let mut dropped = 0;
         for (bucket, transcripts) in self.buckets() {
-            // Each transcript names the workspace it was saved under; split
-            // the bucket's sessions into ours and someone else's.
-            let mut owed: Vec<&Path> = Vec::new();
-            let mut shared = false;
-            for transcript in &transcripts {
-                // Unread is someone else's: nothing is deleted on a guess.
-                let Some(belongs) = belongs(transcript) else {
-                    shared = true;
-                    continue;
-                };
-                if Path::new(&belongs.workspace).starts_with(root) {
-                    owed.push(transcript.parent().expect("a transcript has a session dir"));
-                } else {
-                    shared = true;
+            for transcript in transcripts {
+                if let Some(b) = belongs(&transcript) {
+                    self.import_bucket(Path::new(&b.workspace));
                 }
             }
-            if owed.is_empty() {
-                continue;
-            }
-            if shared {
-                // The bucket holds another tree's sessions too, and its
-                // recall cannot be told apart; only ours go.
-                for session_dir in owed {
-                    if std::fs::remove_dir_all(session_dir).is_ok() {
-                        dropped += 1;
-                    }
+            for s in database::summaries(&bucket.join(database::FILE)).unwrap_or_default() {
+                if s.parent.is_none()
+                    && Path::new(&s.workspace).starts_with(root)
+                    && self.remove(Path::new(&s.workspace), &s.id).is_ok()
+                {
+                    dropped += 1;
                 }
-            } else {
-                // Every session here belongs to `root`: the whole bucket —
-                // recall beside the transcripts — goes.
-                dropped += transcripts.len();
-                let _ = std::fs::remove_dir_all(&bucket);
             }
         }
         dropped
     }
 
-    /// Every session a resume can name for this workspace, newest first,
-    /// reduced to what the list and its completion show: the id it is named
-    /// by, the name the user gave it, and its first prompt.
     pub fn choices(&self, workspace: &Path) -> Vec<ResumeChoice> {
-        self.peek(workspace)
+        self.import_bucket(workspace);
+        let mut choices: Vec<_> = database::summaries(&self.dir_of(workspace).join(database::FILE))
+            .unwrap_or_default()
             .into_iter()
-            .map(|p| ResumeChoice {
-                prompt: p.opening().unwrap_or_default(),
-                rounds: p.rounds(),
-                touched: p.touched(),
-                bytes: p.bytes,
-                id: p.id,
-                name: p.name,
+            .filter(|s| s.parent.is_none() && s.workspace == workspace.to_string_lossy())
+            .map(|s| ResumeChoice {
+                id: s.id,
+                prompt: s.prompt,
+                name: s.name,
+                touched: s.touched,
+                rounds: s.rounds,
+                bytes: s.bytes,
             })
-            .collect()
+            .collect();
+        choices.sort_by(|a, b| b.touched.cmp(&a.touched).then_with(|| b.id.cmp(&a.id)));
+        choices
     }
 
-    /// Most recent session recorded for this workspace, taken as `take` does
-    /// and read in full — it is about to be resumed, which is the one time
-    /// the whole transcript is wanted.
     pub fn take_latest(&self, workspace: &Path) -> Result<(Stored, Claim)> {
         let newest = self
-            .peek(workspace)
+            .choices(workspace)
             .into_iter()
             .next()
             .with_context(|| format!("no session recorded for {}", workspace.display()))?;
@@ -800,7 +764,7 @@ mod tests {
         let err = store.claim(ws, "a").err().unwrap().to_string();
         assert!(err.contains("already open"), "{err}");
         drop(held);
-        let dir = store.path_of(ws, "a").parent().unwrap().to_path_buf();
+        let dir = store.session_dir(ws, "a");
         assert!(!dir.exists());
 
         // A sweep leaves a held lock alone and takes an abandoned one.
@@ -896,36 +860,13 @@ mod tests {
     // entry's stamp is the session's to set, not a caller's.
     fn touched_at(store: &Store, workspace: &Path, id: &str, at: u64) {
         let path = store.path_of(workspace, id);
-        let text = std::fs::read_to_string(&path).unwrap();
-        let stamped = rewrite_records(&text, |record| {
-            record["entries"].as_array_mut()?.last_mut()?["at"] = json!(at);
-            Some(())
-        });
-        std::fs::write(&path, stamped).unwrap();
-    }
-
-    // A save's own record, rewritten: what a test changes in a transcript
-    // without writing the whole thing again. `edit` sees the last record
-    // holding entries first, then the ones before it.
-    fn rewrite_records(
-        text: &str,
-        mut edit: impl FnMut(&mut serde_json::Value) -> Option<()>,
-    ) -> String {
-        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-        for line in lines.iter_mut().skip(1).rev() {
-            let Ok(mut record) = serde_json::from_str::<serde_json::Value>(line) else {
-                continue;
-            };
-            // An index line is not a record: it says where the log stands.
-            if record.get("index").is_some() {
-                continue;
-            }
-            if edit(&mut record).is_some() {
-                *line = serde_json::to_string(&record).unwrap();
-                break;
-            }
-        }
-        lines.join("\n") + "\n"
+        database::connect(&path.database)
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET touched=?1 WHERE id=?2",
+                rusqlite::params![at, id],
+            )
+            .unwrap();
     }
 
     fn call(name: &str) -> Message {
@@ -1083,7 +1024,7 @@ mod tests {
                 &log_with(vec![Message::user("hi")]),
             )
             .unwrap();
-        let unread = store.path_of(tree.path(), "unread");
+        let unread = store.session_dir(tree.path(), "unread").join(TRANSCRIPT);
         std::fs::create_dir_all(unread.parent().unwrap()).unwrap();
         std::fs::write(&unread, b"not json").unwrap();
 
@@ -1130,35 +1071,28 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            let mode = std::fs::metadata(&path.database)
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(
                 mode & 0o777,
                 0o600,
                 "a transcript holds prompts and file contents"
             );
         }
-        // Each record flattens the session's entries to its own top level; the
-        // marker saying what the file is rides the ledger alone.
-        let body = std::fs::read_to_string(&path).unwrap();
-        let mut lines = body.lines();
-        let ledger: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
-        assert_eq!(ledger["log"], 1, "the first line names the file");
-        let record: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
         assert!(
-            record.as_object().unwrap().contains_key("entries"),
-            "a record flattens the session to its top level"
-        );
-        assert!(
-            !record.as_object().unwrap().contains_key("log"),
-            "the marker is the ledger's, not a record's"
+            !store
+                .session_dir(Path::new("/w"), "t1")
+                .join(TRANSCRIPT)
+                .exists()
         );
         let back = store.load("t1").unwrap();
         assert_eq!(back.model, "test-model");
         assert_eq!(back.name.as_deref(), Some("the flaky test"));
         assert_eq!(back.into_session(), log);
 
-        // The listing reads the name without opening the transcript: a field
-        // `Peek` does not name is a field the row would not have.
+        // Listing reads session metadata without rebuilding the conversation.
         let listed = store.choices(std::path::Path::new("/w"));
         assert_eq!(listed[0].name.as_deref(), Some("the flaky test"));
     }
@@ -1296,13 +1230,13 @@ mod tests {
             .unwrap();
         assert_eq!(store.take(w, "s").unwrap().0.spent, spent);
 
-        // A record from before `spent` existed: read with nothing spent.
-        let text = std::fs::read_to_string(&path).unwrap();
-        let stripped = rewrite_records(&text, |record| {
-            record.as_object_mut()?.remove("spent");
-            Some(())
-        });
-        std::fs::write(&path, stripped).unwrap();
+        let connection = database::connect(&path.database).unwrap();
+        connection
+            .execute(
+                "UPDATE sessions SET spent=?1 WHERE id='s'",
+                [serde_json::to_string(&llm::Totals::default()).unwrap()],
+            )
+            .unwrap();
         assert_eq!(store.load("s").unwrap().spent, llm::Totals::default());
     }
 
@@ -1320,14 +1254,14 @@ mod tests {
         let held = store.claim(a, "s").unwrap();
         let err = store.take(b, "s").err().unwrap().to_string();
         assert!(err.contains("already open"), "{err}");
-        assert!(store.path_of(a, "s").is_file(), "refused, nothing moved");
+        assert!(store.filed(a, "s"), "refused, nothing moved");
         drop(held);
 
         let (stored, _claim) = store.take(b, "s").unwrap();
         assert_eq!(stored.id, "s");
-        assert!(store.path_of(b, "s").is_file());
-        assert!(store.subagent_path(b, "s", "s-sub").is_file());
-        assert!(!store.path_of(a, "s").parent().unwrap().exists());
+        assert!(store.filed(b, "s"));
+        assert!(store.subagent_path(b, "s", "s-sub").exists());
+        assert!(!store.session_dir(a, "s").exists());
     }
 
     // A cached resume list is dropped by this number alone: a
@@ -1369,7 +1303,7 @@ mod tests {
             .save_subagent("p", "p-subagent-0", w, "m", 2, &log)
             .unwrap();
 
-        assert!(at.starts_with(store.path_of(w, "p").parent().unwrap()));
+        assert_eq!(at.database, store.path_of(w, "p").database);
         let ids: Vec<String> = store.choices(w).into_iter().map(|c| c.id).collect();
         assert_eq!(ids, ["p"]);
         assert_eq!(store.take_latest(w).unwrap().0.id, "p");
@@ -1459,9 +1393,8 @@ mod tests {
             .save(std::path::Path::new("/w"), header("t", "m", None, 1), &log)
             .unwrap();
 
-        // A session is a directory in the bucket, holding the transcript and
-        // the journal that recorded it.
-        let bucket = tmp.path().join("-w").join("t").join("session.json");
+        // Conversations share the workspace database.
+        let bucket = tmp.path().join("-w").join("project.db");
         assert!(
             bucket.is_file(),
             "session must be filed under its workspace bucket"
@@ -1473,5 +1406,176 @@ mod tests {
 
         // And it loads from the bucket by id alone.
         assert_eq!(store.load("t").unwrap().id, "t");
+    }
+}
+
+#[cfg(test)]
+mod database_tests {
+    use super::*;
+    use llm::message::{AssistantContent, Message, ToolCall, ToolResult};
+    use serde_json::json;
+
+    fn header(id: &str) -> Header<'_> {
+        Header {
+            id,
+            model: "m",
+            name: None,
+            created: 1,
+            spent: Default::default(),
+        }
+    }
+
+    #[test]
+    fn shared_database_isolates_sessions_and_rewind_keeps_original_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::new(temp.path().join("state"));
+        let workspace = temp.path().join("work");
+        let mut threads = Vec::new();
+        for id in ["a", "b"] {
+            let store = store.clone();
+            let workspace = workspace.clone();
+            threads.push(std::thread::spawn(move || {
+                let mut session = Session::new();
+                for n in 0..5 {
+                    session.prompt(format!("{id}-{n}"));
+                    store.save(&workspace, header(id), &session).unwrap();
+                }
+                session
+            }));
+        }
+        let mut first = threads.remove(0).join().unwrap();
+        let second = threads.remove(0).join().unwrap();
+        let a = store.path_of(&workspace, "a");
+        let b = store.path_of(&workspace, "b");
+        assert_eq!(a.database, b.database);
+        assert_eq!(Store::read(&a).unwrap().session, first);
+        assert_eq!(Store::read(&b).unwrap().session, second);
+        let before = first.entries().len();
+        first.rollback_before(first.entries()[2].id());
+        first.prompt("replacement");
+        store.save(&workspace, header("a"), &first).unwrap();
+        assert_eq!(Store::read(&a).unwrap().session, first);
+        let c = database::connect(&a.database).unwrap();
+        let retained: usize = c
+            .query_row("SELECT COUNT(*) FROM messages WHERE session='a'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            retained,
+            before + 1,
+            "rewinding only changes context membership"
+        );
+        drop(c);
+        store.remove(&workspace, "a").unwrap();
+        assert_eq!(Store::read(&b).unwrap().session, second);
+        assert!(!a.exists());
+    }
+
+    #[test]
+    fn conversation_and_request_state_roll_back_together() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::new(temp.path().join("state"));
+        let workspace = temp.path().join("work");
+        let mut session = Session::new();
+        session.prompt("original");
+        let at = store.save(&workspace, header("s"), &session).unwrap();
+        let original = session.clone();
+        session.prompt("uncommitted");
+        let request = json!({"message":{"id":"input","session":"s","by":null,"at":1,
+            "kind":{"type":"request","value":{"direction":"to_model","request":"user"}},
+            "body":[{"type":"text","value":"uncommitted"}]},"parent":null,"native_call":null});
+        let result = store.save_with(&workspace, header("s"), &session, |tx, at| {
+            messages::write_in(tx, at, &at.session, 0, &[request])?;
+            anyhow::bail!("interrupted before commit")
+        });
+        assert!(result.is_err());
+        assert_eq!(Store::read(&at).unwrap().session, original);
+        assert!(messages::read(&at).unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_import_preserves_reply_order_reasoning_compaction_and_request_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::new(temp.path().join("state"));
+        let workspace = temp.path().join("work");
+        let session = Session::from_messages(vec![
+            Message::user("inspect"),
+            Message::Assistant {
+                content: vec![
+                    AssistantContent::Reasoning(message::Reasoning {
+                        id: Some("r".into()),
+                        by: Some("m".into()),
+                        content: vec![message::ReasoningContent::Text {
+                            text: "reason".into(),
+                            signature: Some("signature".into()),
+                        }],
+                    }),
+                    AssistantContent::Text(message::Text {
+                        text: "reading".into(),
+                    }),
+                    AssistantContent::ToolCall(ToolCall {
+                        id: "c".into(),
+                        name: "read".into(),
+                        args: json!({"path":"a.rs"}),
+                    }),
+                ],
+            },
+            Message::tool_results(vec![ToolResult::text("c", "read", "body")]),
+        ]);
+        let mut session = session;
+        session.record(transcript::Compaction {
+            omissions: vec![transcript::Omission {
+                entry: session.entries().last().unwrap().id(),
+                block: None,
+                notice: "omitted".into(),
+            }],
+            ..Default::default()
+        });
+        let dir = store.session_dir(&workspace, "s");
+        let legacy = dir.join(TRANSCRIPT);
+        log::write(&legacy, &workspace, header("s"), &session).unwrap();
+        let requests = dir.join("messages");
+        std::fs::create_dir_all(&requests).unwrap();
+        let input = json!({"message":{"id":"original-input","session":"s","by":null,"at":1,
+            "kind":{"type":"request","value":{"direction":"to_model","request":"user"}},
+            "body":[{"type":"text","value":"inspect"}]},"parent":null,"native_call":null});
+        std::fs::write(
+            requests.join("0-1.json"),
+            serde_json::to_vec(&vec![input]).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            requests.join("index.json"),
+            r#"{"format":1,"session":"s","segments":[{"from":0,"to":1}]}"#,
+        )
+        .unwrap();
+        let (stored, claim) = store.take(&workspace, "s").unwrap();
+        assert_eq!(stored.session, session);
+        let at = store.path_of(&workspace, "s");
+        assert_eq!(
+            messages::read(&at).unwrap().unwrap().entries[0]
+                .message
+                .id
+                .as_str(),
+            "original-input"
+        );
+        assert!(!legacy.exists());
+        assert!(dir.join("session.json.legacy").exists());
+        drop(claim);
+        let (again, _claim) = store.take(&workspace, "s").unwrap();
+        assert_eq!(again.session, session, "migration is idempotent");
+        let c = database::connect(&at.database).unwrap();
+        let inspect: usize = c
+            .query_row(
+                "SELECT COUNT(*) FROM contents WHERE body=?1",
+                [r#"{"type":"text","value":"inspect"}"#],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            inspect, 1,
+            "protocol and conversation reference the same body block"
+        );
     }
 }

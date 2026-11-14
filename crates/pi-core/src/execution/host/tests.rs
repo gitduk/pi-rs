@@ -129,11 +129,7 @@ async fn a_model_run_saves_without_a_frontend_receiving_its_completion() {
             .iter()
             .any(|entry| matches!(entry, Entry::Answer { .. }))
     );
-    let restored = Messages::load(
-        lane.messages().session(),
-        &pi_store::session::messages::path(&path),
-    )
-    .unwrap();
+    let restored = Messages::load(lane.messages().session(), &path).unwrap();
     let response = restored.response(&request_id).unwrap().unwrap();
     assert_eq!(
         response.body(),
@@ -168,11 +164,7 @@ async fn cancellation_is_saved_before_the_model_run_returns() {
     let done = task.await.unwrap();
     assert!(matches!(done.ended(), Ended::Stopped));
     let path = store.path_of(lane.root(), lane.id());
-    let restored = Messages::load(
-        lane.messages().session(),
-        &pi_store::session::messages::path(&path),
-    )
-    .unwrap();
+    let restored = Messages::load(lane.messages().session(), &path).unwrap();
     assert!(matches!(
         restored.response(&id).unwrap().unwrap().kind(),
         message::Kind::Response {
@@ -272,7 +264,7 @@ async fn a_crashed_model_keeps_the_native_archive_and_saves_its_terminal_message
             &original,
         )
         .unwrap();
-    let before = std::fs::read(&path).unwrap();
+    let before = pi_store::session::Store::read(&path).unwrap().session;
     let input = lane.messages().admit(Origin::Typed, prompt()).unwrap();
     let id = input.message().request_id().unwrap();
     let request = Request::new(Origin::Typed, lane.token());
@@ -290,12 +282,10 @@ async fn a_crashed_model_keeps_the_native_archive_and_saves_its_terminal_message
     wire.release.notify_one();
     let done = task.await.unwrap();
     assert!(done.ran.is_none());
-    assert_eq!(std::fs::read(&path).unwrap(), before);
-    let restored = Messages::load(
-        lane.messages().session(),
-        &pi_store::session::messages::path(&path),
-    )
-    .unwrap();
+    let saved = pi_store::session::Store::read(&path).unwrap().session;
+    assert!(before.entries().is_empty());
+    assert_eq!(saved.last_prompt().unwrap().text, prompt().text);
+    let restored = Messages::load(lane.messages().session(), &path).unwrap();
     assert!(matches!(
         restored.response(&id).unwrap().unwrap().kind(),
         message::Kind::Response {

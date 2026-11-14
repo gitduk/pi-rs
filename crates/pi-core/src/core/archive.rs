@@ -1,8 +1,6 @@
-//! Where a subagent's transcript is filed: pi's side of `agent::Archive`.
+//! Child conversation checkpoints and final saves in the workspace database.
 //!
-//! A subagent has no lane and nothing on screen, so this is the
-//! whole of what it leaves behind. What it spent no longer lands here: the
-//! tool result carries it back, and the run that called it reports it.
+//! Child usage returns through the tool result to its parent's meter.
 
 use std::sync::Arc;
 
@@ -41,6 +39,32 @@ impl Archive for Nowhere {
 }
 
 impl Archive for Filed {
+    fn checkpoint<'a>(
+        &'a self,
+        parent: &'a str,
+        id: &'a str,
+        model: &'a str,
+        session: &Session,
+    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
+        let (store, root, parent, id, model, session) = (
+            self.store.clone(),
+            self.root.clone(),
+            parent.to_owned(),
+            id.to_owned(),
+            model.to_owned(),
+            session.clone(),
+        );
+        Box::pin(async move {
+            super::saves::wait(move || {
+                store.save_subagent(&parent, &id, &root, &model, now(), &session)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("child checkpoint failed: {e:#}"))?;
+            Ok(())
+        })
+    }
+
     // On the saver thread: several subagents saving must not each serialize
     // megabytes on the tool path, and `flush` joins whatever is queued.
     fn keep(&self, parent: &str, id: &str, session: Session) {

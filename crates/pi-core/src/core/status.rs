@@ -144,7 +144,11 @@ impl Core {
 
         let session = Row::new([
             "session".into(),
-            short(&self.store.path_of(root, lane.id()), root),
+            format!(
+                "{} · {}",
+                lane.id(),
+                short(&self.store.path_of(root, lane.id()).database, root)
+            ),
         ]);
         rows.push(match lane.unsaved() {
             Some(why) => session.noting(format!("not saved: {why}")),

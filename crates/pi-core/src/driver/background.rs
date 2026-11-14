@@ -583,6 +583,9 @@ pub fn hand_over(path: &Path, executions: &[Carried]) -> anyhow::Result<()> {
             _ => Ok(()),
         };
     }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let mut file = std::fs::OpenOptions::new();
     file.write(true).create(true).truncate(true);
     // Command lines can carry secrets, as transcripts can.

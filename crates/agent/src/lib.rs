@@ -322,6 +322,10 @@ impl Agent {
                     effort = ?self.brief.effort,
                     "sending"
                 );
+                input
+                    .checkpoint(session)
+                    .await
+                    .map_err(AgentError::Interaction)?;
                 let req = Request {
                     system: Some(self.brief.system.clone()),
                     messages: sent,
@@ -495,6 +499,10 @@ impl Agent {
                     .map_err(AgentError::Interaction)?;
                 contexts.push(ctx.clone().with_request(request));
             }
+            input
+                .checkpoint(session)
+                .await
+                .map_err(AgentError::Interaction)?;
             let (results, stopped) = self
                 .run_calls(&calls, &bad, &contexts, reporter, &mut totals)
                 .instrument(span.clone())
@@ -506,6 +514,10 @@ impl Agent {
                 ctx,
             )?;
             replies::commit(session, reporter, input, results)?;
+            input
+                .checkpoint(session)
+                .await
+                .map_err(AgentError::Interaction)?;
             if stopped {
                 return Err(AgentError::Cancelled);
             }

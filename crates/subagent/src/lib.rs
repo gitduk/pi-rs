@@ -630,10 +630,16 @@ impl Prepared {
         });
         // The token ends the run — the budget or a stop — unwinding like a
         // stop; one ignoring it is dropped after STOP_GRACE.
+        let checkpoint = Checkpoint {
+            archive,
+            parent: ctx.spill_namespace(),
+            id: &id,
+            model: &agent.model.spec.model,
+        };
         let ran = {
             let mut run = std::pin::pin!(
                 agent
-                    .run(&mut session, &child, &tx, retry)
+                    .run_with_input(&mut session, &child, &tx, retry, &checkpoint)
                     .instrument(child_span)
             );
             let grace_stop = stop.clone();
@@ -900,6 +906,26 @@ fn check_line(check: &Checked) -> String {
             format!("[verify `{command}`: no verdict — killed after {took}, having run that long]")
         }
         Outcome::NoVerdict(why) => format!("[verify `{command}`: no verdict — {why}]"),
+    }
+}
+
+struct Checkpoint<'a> {
+    archive: &'a dyn Archive,
+    parent: &'a str,
+    id: &'a str,
+    model: &'a str,
+}
+
+impl agent::seams::Input for Checkpoint<'_> {
+    fn take(&self) -> Option<agent::session::Prompt> {
+        None
+    }
+    fn checkpoint(
+        &self,
+        session: &Session,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        self.archive
+            .checkpoint(self.parent, self.id, self.model, session)
     }
 }
 

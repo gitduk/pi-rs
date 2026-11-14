@@ -1,5 +1,9 @@
 //! Shared semantic messages. Transport progress and runtime controls live elsewhere.
 
+pub mod conversation;
+mod tool;
+pub use tool::{Text, ToolCall, ToolResult, ToolResultContent, flatten};
+
 mod content;
 pub use content::{Image, Reasoning, ReasoningContent};
 

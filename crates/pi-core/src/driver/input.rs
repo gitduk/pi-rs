@@ -20,6 +20,7 @@ pub struct Input {
     queue: Option<Queue>,
     messages: Option<Calls>,
     joined: std::sync::Mutex<Vec<Joined>>,
+    checkpoint: Option<(crate::core::lane::Save, Arc<llm::meter::Meter>)>,
 }
 
 /// An input this run took, with the operation waiting to hear how it went.
@@ -77,7 +78,17 @@ impl Input {
             queue: None,
             messages: None,
             joined: Default::default(),
+            checkpoint: None,
         }
+    }
+
+    pub(crate) fn with_checkpoint(
+        mut self,
+        save: crate::core::lane::Save,
+        meter: Arc<llm::meter::Meter>,
+    ) -> Self {
+        self.checkpoint = Some((save, meter));
+        self
     }
 
     /// The lane's queue: what the frontend submitted while this run holds it.
@@ -232,6 +243,33 @@ impl Drop for Input {
 }
 
 impl agent::seams::Input for Input {
+    fn checkpoint(
+        &self,
+        session: &agent::session::Session,
+    ) -> futures::future::BoxFuture<'_, Result<(), String>> {
+        let snapshot =
+            self.checkpoint
+                .as_ref()
+                .zip(self.messages.as_ref())
+                .map(|((save, meter), calls)| {
+                    (
+                        save.clone(),
+                        meter.clone(),
+                        calls.messages.snapshot(),
+                        session.clone(),
+                    )
+                });
+        Box::pin(async move {
+            if let Some((save, meter, messages, session)) = snapshot {
+                crate::core::saves::wait(move || save.write(&session, &messages, meter.read()))
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| format!("conversation checkpoint failed: {e:#}"))?;
+            }
+            Ok(())
+        })
+    }
+
     fn take(&self) -> Option<Prompt> {
         let calls = self.messages.as_ref()?;
         let queue = self.queue.as_ref()?;

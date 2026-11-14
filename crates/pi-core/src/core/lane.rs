@@ -220,6 +220,7 @@ struct Written {
 }
 
 /// Captured destination for an execution's writes; never follows another session.
+#[derive(Clone)]
 pub(crate) struct Save {
     _claim: Option<Arc<session::Claim>>,
     store: Store,
@@ -265,11 +266,10 @@ impl Save {
         };
         let saved = self
             .store
-            .save(&self.root, header, session)
-            .and_then(|path| {
-                messages.save(&session::messages::path(&path))?;
-                Ok(())
-            });
+            .save_with(&self.root, header, session, |tx, at| {
+                messages.write_in(tx, at)
+            })
+            .and_then(|at| messages.committed(&at));
         self.record(saved)
     }
 
@@ -277,9 +277,7 @@ impl Save {
         &self,
         messages: &crate::execution::messages::Snapshot,
     ) -> anyhow::Result<()> {
-        self.record(messages.save(&session::messages::path(
-            &self.store.path_of(&self.root, &self.id),
-        )))
+        self.record(messages.save(&self.store.path_of(&self.root, &self.id)))
     }
 
     fn record(&self, saved: anyhow::Result<()>) -> anyhow::Result<()> {
@@ -990,7 +988,7 @@ impl Core {
             let path = self.store.path_of(lane.root(), lane.id());
             lane.talk.messages = crate::execution::messages::Messages::load(
                 message::SessionId::new(lane.id().to_owned())?,
-                &session::messages::path(&path),
+                &path,
             )?;
         }
         Ok(())
@@ -1004,9 +1002,7 @@ impl Core {
     /// somebody else's lane. `None` for the lane in front, and for one gone.
     pub fn remove_lane(&mut self, token: u64) -> Option<Lane> {
         let lane = self.lanes.take(token)?;
-        if let Some(dir) = self.store.path_of(lane.root(), lane.id()).parent() {
-            let _ = std::fs::remove_dir_all(dir);
-        }
+        let _ = self.store.remove(lane.root(), lane.id());
         Some(lane)
     }
     /// Save the transcript, on disk before this returns: what a move, a rewind
@@ -1165,7 +1161,7 @@ impl Core {
         let (id, name, created) = (stored.id.clone(), stored.name.clone(), stored.created);
         let messages = crate::execution::messages::Messages::load(
             message::SessionId::new(id.clone()).map_err(|e| refused("resume", e.into()))?,
-            &session::messages::path(&self.store.path_of(self.lane().root(), &id)),
+            &self.store.path_of(self.lane().root(), &id),
         )
         .map_err(|e| refused("resume", e))?;
         let spent = stored.spent;
@@ -1260,12 +1256,8 @@ impl Core {
         };
         self.lane_mut().talk.reclaim(claim);
         if let Some(previous) = previous_archive {
-            let moved = session::messages::path(&self.store.path_of(&to, &id));
-            let path = if moved.join("index.json").exists() {
-                &moved
-            } else {
-                &previous
-            };
+            let moved = self.store.path_of(&to, &id);
+            let path = if moved.exists() { &moved } else { &previous };
             messages.attach_archive(path).map_err(failed)?;
         }
         journal::switched(&self.store.journal_path(&to, &id), &id);
@@ -1917,7 +1909,7 @@ mod tests {
         let step = core.move_to("new_project").unwrap();
         assert!(matches!(step, crate::input::Step::Moved(_)));
         assert_eq!(core.lane().root(), to);
-        assert!(core.store.path_of(&to, "s1").is_file(), "record moved");
+        assert!(core.store.filed(&to, "s1"), "record moved");
         assert!(!core.store.path_of(&from, "s1").exists(), "kept once");
         let session = core.lane().session().unwrap();
         let text = serde_json::to_string(session.entries()).unwrap();

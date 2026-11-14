@@ -210,7 +210,7 @@ impl Ui {
                 // what the entry derives to.
                 let asked = view.surface.folds.peek_asked(id);
                 if let Some(t) = view.state.tools.iter_mut().find(|t| t.id == *id) {
-                    let call = Call::new(*outcome, name, preview, &asked, None)
+                    let call = Call::new(*outcome, name, preview, asked, None)
                         .at(t.place.clone())
                         .timed(Some(*took));
                     t.run = Run::Landed(call);

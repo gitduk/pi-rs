@@ -1,3 +1,5 @@
+pub mod archive;
+
 use std::collections::{HashMap, HashSet};
 
 use llm::message::{
@@ -185,7 +187,7 @@ mod millis {
 /// What the screen drew for a result, kept beside it so a rebuild draws the
 /// same row: its preview line, whether the result asked for a look, and how
 /// long the call ran.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Drawn {
     pub preview: Option<String>,
     pub warned: bool,

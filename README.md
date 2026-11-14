@@ -105,7 +105,12 @@ You do not need to restart pi after a settings change.
 If the file does not parse, pi reports it once and keeps the old configuration.
 
 `PI_HOME` moves `~/.pi`. Sessions, tools, skills, memory and pasted images all
-live under it; `~/.pi/statusline.json` is the layout of the row above and
+live under it. Each workspace keeps its sessions in one SQLite database at
+`~/.pi/sessions/<project>/project.db`; session directories hold journals and
+other artifacts. Existing JSON sessions are imported on first use and retained
+with a `.legacy` suffix.
+
+`~/.pi/statusline.json` is the layout of the row above and
 under the input line, and `/status` prints the session's paths and spend.
 
 ## Develop

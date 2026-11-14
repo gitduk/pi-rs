@@ -1,32 +1,19 @@
-//! How one transcript is laid out on disk.
-//!
-//! A session is written after every turn, and a compiler-written snapshot made
-//! every save cost what the whole session weighs — a long one took a hundred
-//! milliseconds to save, and the file was replaced whole each time, so a run's
-//! total write cost grew with the square of what it had said.
-//!
-//! So the file is an ordered log instead: a ledger line naming the session, then
-//! one record per save holding only the entries added since the record before,
-//! each followed by a small index line saying how far the log has got. Appending
-//! costs what the new entries weigh — the index line is what a save reads to
-//! know where it stands, so it never reads the log it is appending to.
-//!
-//! Reading replays the records in order, which is the work a snapshot parse was.
-//!
-//! Compacting — writing every entry again as one record — happens when the log
-//! holds many records, or when the transcript shrank (a rewind leaves records
-//! for entries that no longer exist). A file written before this layout is one
-//! JSON object; it is read as it was, and rewritten in this shape the next time
-//! the session is saved.
+//! Legacy transcript replay. The old writer remains only as a migration fixture.
 
+#[cfg(test)]
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(test)]
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 use anyhow::Result;
+#[cfg(test)]
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+#[cfg(test)]
 use transcript::Session;
 
+#[cfg(test)]
 use super::{Header, sync_dir};
 
 /// What the first line says the file is. Anything else is not a log of saves.
@@ -34,10 +21,12 @@ const LOG: u8 = 1;
 
 /// Records before the file is rewritten whole: enough that the rewrite is
 /// rare, few enough that reading one stays a single file's worth of work.
+#[cfg(test)]
 const COMPACT_AFTER: u64 = 64;
 
 /// The first line: whose transcript this is. What does not change as a
 /// session grows, so a listing reads one line to name it.
+#[cfg(test)]
 #[derive(Serialize)]
 struct Ledger<'a> {
     log: u8,
@@ -59,6 +48,7 @@ pub(crate) struct LedgerRead {
 
 /// One save: the entries added since the record before, and what the session
 /// was as a whole at that point.
+#[cfg(test)]
 #[derive(Serialize)]
 struct Record<'a, T> {
     /// Which record this is, from 0.
@@ -98,18 +88,19 @@ struct RecordRead<T> {
 /// What follows each record: how far the log has got, in its own short line so
 /// a save can read the end of a log without reading a record that spans
 /// megabytes.
-#[derive(Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct IndexLine {
     index: Index,
 }
 
-#[derive(Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Index {
     n: u64,
     to: usize,
 }
 
 /// Where the log had got to: the entries it holds, and how many records.
+#[cfg(test)]
 struct Tail {
     entries: usize,
     records: u64,
@@ -128,6 +119,7 @@ pub(crate) struct Replayed<T> {
 }
 
 /// Save `session` under `path`, appending when that is safe.
+#[cfg(test)]
 pub(crate) fn write(
     path: &Path,
     workspace: &Path,
@@ -154,6 +146,7 @@ pub(crate) fn write(
 }
 
 // Add one record, and its index, to the end of the log.
+#[cfg(test)]
 fn append(
     path: &Path,
     tail: &Tail,
@@ -191,6 +184,7 @@ fn append(
 
 // The whole transcript as one record, under a fresh ledger. The sync then
 // rename means a crash mid-write cannot leave a truncated one.
+#[cfg(test)]
 fn compact(
     path: &Path,
     workspace: &Path,
@@ -249,6 +243,7 @@ fn compact(
 
 // Where the log had got to, read from its last line — its index — rather than
 // from its records: a save's own cost stays off the transcript's size.
+#[cfg(test)]
 fn tail(path: &Path) -> Option<Tail> {
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
@@ -340,38 +335,6 @@ pub(crate) fn replay<T: DeserializeOwned>(text: &str) -> (Replayed<T>, LedgerRea
         out.spent = record.spent;
     }
     (out, ledger)
-}
-
-/// A transcript as the resume list reads it, and the fields a listing needs
-/// without building one: what the ledger says plus what the records add.
-pub(crate) fn shallow(path: &Path) -> Option<(LedgerRead, Replayed<super::PeekEntry>, u64)> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let bytes = text.len() as u64;
-    // A file from before the log: one object holding the whole transcript.
-    if !is_log(&text) {
-        let old: super::Peek = serde_json::from_str(&text).ok()?;
-        let ledger = LedgerRead {
-            log: 0,
-            id: old.id,
-            workspace: old.workspace,
-            model: old.model.clone(),
-            created: old.created,
-        };
-        return Some((
-            ledger,
-            Replayed {
-                entries: old.entries,
-                next: 0,
-                interrupted: None,
-                name: old.name,
-                model: Some(old.model),
-                spent: llm::Totals::default(),
-            },
-            bytes,
-        ));
-    }
-    let (replayed, ledger) = replay(&text);
-    Some((ledger, replayed, bytes))
 }
 
 #[cfg(test)]
@@ -487,7 +450,7 @@ mod tests {
         });
         std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
 
-        let stored = crate::session::Store::read(&path).unwrap();
+        let stored = crate::session::Store::read_legacy(&path).unwrap();
         assert_eq!(stored.session.entries().len(), 1, "read as it was");
 
         write(&path, dir.path(), header("s"), &stored.session).unwrap();
@@ -513,7 +476,7 @@ mod tests {
             text.lines().count() < COMPACT_AFTER as usize * 2,
             "the log grew past one rewrite"
         );
-        let stored = crate::session::Store::read(&path).unwrap();
+        let stored = crate::session::Store::read_legacy(&path).unwrap();
         assert_eq!(stored.session.entries(), session.entries());
         assert_eq!(stored.session.next_id(), session.next_id());
     }

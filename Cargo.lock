@@ -3490,6 +3490,7 @@ name = "transcript"
 version = "2.9.11"
 dependencies = [
  "llm",
+ "message",
  "serde",
  "serde_json",
 ]

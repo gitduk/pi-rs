@@ -454,7 +454,10 @@ async fn concurrent_channels_commit_one_answer_and_retries_survive_reload() {
     assert_eq!(response.id(), &winner.id);
     setup.input.close_calls(message::Status::Stopped).unwrap();
     setup.owner.complete(message::Status::Done, vec![]).unwrap();
-    let archive = setup.dir.path().join("messages");
+    let archive = pi_store::session::Location::new(
+        setup.dir.path().join("project.db"),
+        setup.messages.session(),
+    );
     setup.messages.snapshot().save(&archive).unwrap();
     let restored = Messages::load(setup.messages.session(), &archive).unwrap();
     let table = Arc::new(Table::default());

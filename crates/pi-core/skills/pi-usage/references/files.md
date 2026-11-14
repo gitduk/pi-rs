@@ -19,7 +19,8 @@
 | `~/.pi/statusline.json`                  | the layout of the statusline rows          |
 | `~/.pi/statusline.d/`                    | named scripts the layout may draw a value from |
 | `~/.pi/sessions/…/<id>/statusline.json`  | that session's last run's numbers, so a resume opens with them |
-| `~/.pi/sessions/<project>/<session>/`    | the transcript and `journal.jsonl`         |
+| `~/.pi/sessions/<project>/project.db`    | every session's conversation and context state |
+| `~/.pi/sessions/<project>/<session>/`    | `journal.jsonl`, claims and diagnostic artifacts |
 
 At startup, pi deletes sessions with no activity for 90 days.
 It also deletes pasted images with no repeated paste for 90 days.

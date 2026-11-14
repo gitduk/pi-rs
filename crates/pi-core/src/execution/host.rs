@@ -61,6 +61,7 @@ pub fn prepare(
     let entry = session.send(prompt);
     let entries = session.entries()[previous..].to_vec();
     let cancel = lane.ctx().cancel.child_token();
+    let save = Save::of(lane, store);
     let turn = Turn {
         responder,
         request,
@@ -73,10 +74,10 @@ pub fn prepare(
             executions,
             lane.notes(),
         )
-        .with_queue(lane.queue().clone()),
+        .with_queue(lane.queue().clone())
+        .with_checkpoint(save.clone(), lane.agent().meter.clone()),
         retry,
     };
-    let save = Save::of(lane, store);
     lane.seed_meter();
     lane.begin_for(request, cancel);
     tracing::info!(target: "pi::session", request = request.id, lane = request.lane, message_id = turn.responder.request().id().as_str(), session = lane.id(), "model execution started");

@@ -20,6 +20,11 @@ use tool::Tier;
 pub trait Input: Send + Sync {
     fn take(&self) -> Option<crate::session::Prompt>;
 
+    /// Retain a complete boundary before execution proceeds to external effects.
+    fn checkpoint(&self, _session: &Session) -> futures::future::BoxFuture<'_, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// Register a model call before its executor can run.
     fn tool_request(
         &self,
@@ -90,6 +95,17 @@ pub trait Approver: Send + Sync {
 /// This layer says what it needs and the surface provides it; what a child
 /// spent travels back on the tool result instead.
 pub trait Archive: Send + Sync {
+    /// Retain an intermediate child boundary before tools execute.
+    fn checkpoint<'a>(
+        &'a self,
+        _parent: &'a str,
+        _id: &'a str,
+        _model: &'a str,
+        _session: &Session,
+    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+
     // No screen, so the transcript is the only record. Called once with the
     // whole transcript, finished or cut short; `parent` is the calling session.
     fn keep(&self, parent: &str, id: &str, session: Session);

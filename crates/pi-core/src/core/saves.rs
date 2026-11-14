@@ -1,17 +1,7 @@
-//! Transcript writes, off the thread that draws.
+//! Ordered conversation transactions on a dedicated writer thread.
 //!
-//! A session is megabytes by the end of a long run, and writing one whole —
-//! pretty JSON, a sync, then another for the rename — takes tens of
-//! milliseconds. Done inline after every turn that is a visible hitch, so the
-//! write goes to one worker thread instead.
-//!
-//! One thread and not a pool: writes then land in the order they were asked
-//! for, and a save that follows a rename or a rewind cannot be overwritten by
-//! an earlier one still in flight.
-//!
-//! A save whose result the caller must act on — one a move or a rewind depends
-//! on — waits for its turn here too, through `now`: still one writer, still one
-//! order, and only ever on a path that had to be synchronous anyway.
+//! Model checkpoints await durability without blocking the runtime. A move or
+//! rewind uses the same writer, so an older save cannot overwrite its result.
 
 use std::sync::OnceLock;
 use std::sync::mpsc::{Receiver, Sender, channel};
