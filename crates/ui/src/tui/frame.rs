@@ -431,12 +431,12 @@ impl Ui {
             }
             frame.render_widget(Rows(&executions), regions.executions);
             // The row over the input line and the one under it wear the same
-            // paint; only the place they are drawn at differs.
-            let strip = |frame: &mut ratatui::Frame,
+            // paint; the lines always, then the parts over them. A part clears
+            // its cells before painting them, so over a selection it is left
+            // out: the row's own line already carries its text.
+            let parts = |frame: &mut ratatui::Frame,
                          area: Rect,
-                         rows: &[super::statusline::StatuslineRow],
-                         lines: &[Line<'static>]| {
-                frame.render_widget(Rows(lines), area);
+                         rows: &[super::statusline::StatuslineRow]| {
                 for (row_area, row) in area.rows().zip(rows) {
                     for (part, line) in &row.parts {
                         let part = Rect {
@@ -450,11 +450,12 @@ impl Ui {
                 }
             };
             if !over_rows.is_empty() {
-                strip(frame, regions.statusline_top, &over_rows, &over_lines);
+                frame.render_widget(Rows(&over_lines), regions.statusline_top);
+                parts(frame, regions.statusline_top, &over_rows);
             }
-            // A selection paints these rows itself.
+            frame.render_widget(Rows(&bar), regions.statusline);
             if self.selection.is_none() {
-                strip(frame, regions.statusline, &bar_rows, &bar);
+                parts(frame, regions.statusline, &bar_rows);
             }
             // Drawn last of the pinned rows: the list may cover the gap
             // row and the row over the input line.
