@@ -246,7 +246,7 @@ async fn drive(
     ctx: &Ctx,
     prompt: &str,
 ) -> (Session, Result<llm::stream::Usage, agent::AgentError>) {
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _rx) = agent::event::channel();
     let mut session = Session::with_prompt(prompt);
     let out = agent.run(&mut session, ctx, &tx, &Retry::default()).await;
     (session, out)

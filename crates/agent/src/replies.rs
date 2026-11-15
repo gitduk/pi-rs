@@ -1,9 +1,9 @@
 //! Project accepted user responses into native history, including cancellation.
 
+use crate::AgentError;
 use crate::event::Reporter;
 use crate::seams::Input;
 use crate::session::{Drawn, Session};
-use crate::{AgentError, report_committed};
 use llm::message::{ToolCall, ToolResult};
 use std::collections::HashMap;
 use tool::{Ctx, ToolOutput};
@@ -66,7 +66,7 @@ pub(crate) fn reconcile(
         .collect())
 }
 
-pub(crate) fn settle(
+pub(crate) async fn settle(
     session: &mut Session,
     ctx: &Ctx,
     reporter: &Reporter,
@@ -96,18 +96,32 @@ pub(crate) fn settle(
     if results.is_empty() {
         return Ok(());
     }
-    commit(session, reporter, input, results)
+    commit(session, reporter, input, results).await
 }
 
-/// Retain native results before publishing their semantic responses.
-pub(crate) fn commit(
+/// Persist history and responses together before reporting completed results.
+pub(crate) async fn commit(
     session: &mut Session,
     reporter: &Reporter,
     input: &dyn Input,
     results: Vec<(ToolResult, Drawn)>,
 ) -> Result<(), AgentError> {
+    for event in retain(session, input, results).await? {
+        reporter.report(event).await;
+    }
+    Ok(())
+}
+
+pub(crate) async fn retain(
+    session: &mut Session,
+    input: &dyn Input,
+    results: Vec<(ToolResult, Drawn)>,
+) -> Result<Vec<crate::Event>, AgentError> {
+    if results.is_empty() {
+        return Ok(Vec::new());
+    }
     let ids = session.push_previewed(results);
-    report_committed(session, reporter, &ids);
+    let mut events = Vec::new();
     for entry in session.entries_for(&ids) {
         if let crate::session::Entry::Tool { result, .. } = entry {
             input
@@ -115,5 +129,30 @@ pub(crate) fn commit(
                 .map_err(AgentError::Interaction)?;
         }
     }
-    Ok(())
+    input
+        .checkpoint(session)
+        .await
+        .map_err(AgentError::Interaction)?;
+    for entry in session.entries_for(&ids) {
+        if let crate::session::Entry::Tool {
+            result,
+            preview,
+            warned,
+            took: Some(took),
+            ..
+        } = entry
+        {
+            events.push(crate::Event::ToolEnd {
+                id: result.call.clone(),
+                name: result.name.clone(),
+                outcome: crate::Outcome::of(result.is_error, *warned),
+                preview: tool::preview_of(preview.as_deref(), &result.content),
+                took: *took,
+            });
+        }
+    }
+    events.push(crate::Event::Committed {
+        entries: session.entries_for(&ids).into_iter().cloned().collect(),
+    });
+    Ok(events)
 }

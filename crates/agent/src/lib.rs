@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use event::Sender;
 use llm::message::{AssistantContent, Message, ToolCall};
 use llm::meter::{Meter, Metered};
 use llm::model::ModelSpec;
 use llm::request::{Effort, Request};
 use llm::stream::Usage;
 use llm::transport::Transport;
-use tokio::sync::mpsc::UnboundedSender;
 use tool::{Ctx, Registry};
 use tracing::Instrument as _;
 
@@ -175,7 +175,7 @@ impl Agent {
         &self,
         session: &mut Session,
         ctx: &Ctx,
-        tx: &UnboundedSender<Event>,
+        tx: &Sender,
         retry: &Retry,
     ) -> Result<Usage, AgentError> {
         self.run_with_input(session, ctx, tx, retry, &|| None).await
@@ -187,11 +187,12 @@ impl Agent {
         &self,
         session: &mut Session,
         ctx: &Ctx,
-        tx: &UnboundedSender<Event>,
+        tx: &Sender,
         retry: &Retry,
         input: &dyn seams::Input,
     ) -> Result<Usage, AgentError> {
-        let reporter = Reporter::new(tx.clone(), self.brief.hooks.clone());
+        let reporter =
+            Reporter::new(tx.clone(), self.brief.hooks.clone()).with_cancel(ctx.cancel.clone());
         // Tool sources are live: what they list now, not when the brief was applied.
         tracing::info!(
             target: "pi::loop",
@@ -203,7 +204,7 @@ impl Agent {
             .last_prompt()
             .map_or(String::new(), |p| p.text.clone());
         if let Some(note) = self.brief.hooks.ahead(&prompt, ctx).await {
-            report_note(session, &reporter, note);
+            report_note(session, &reporter, note).await;
         }
         let mut out = self.turns(session, ctx, &reporter, retry, input).await;
         let closing = match &out {
@@ -217,7 +218,7 @@ impl Agent {
                 message: error.to_string(),
             }),
         };
-        if let Err(error) = replies::settle(session, ctx, &reporter, input, closing) {
+        if let Err(error) = replies::settle(session, ctx, &reporter, input, closing).await {
             out = Err(error);
         }
         match &out {
@@ -225,9 +226,11 @@ impl Agent {
             Err(AgentError::Cancelled) => session.close_open(session::STOPPED_CALL),
             Err(e) => {
                 session.close_open(session::DIED_CALL);
-                reporter.report(Event::Failed {
-                    error: e.to_string(),
-                });
+                reporter
+                    .report(Event::Failed {
+                        error: e.to_string(),
+                    })
+                    .await;
             }
         }
         out
@@ -257,9 +260,9 @@ impl Agent {
         let mut holds = 0usize;
 
         for turn in 1.. {
-            receive(session, ctx, reporter, input);
-            heed(session, reporter, input);
-            reporter.report(Event::TurnStart { turn });
+            receive(session, ctx, reporter, input).await;
+            heed(session, reporter, input).await;
+            reporter.report(Event::TurnStart { turn }).await;
             // Entered around each await, not held across it — a guard spanning
             // an await labels whatever else the runtime polls meanwhile.
             let span = tracing::info_span!(
@@ -305,7 +308,7 @@ impl Agent {
                     compactions += 1;
                     held = None;
                 }
-                if receive(session, ctx, reporter, input) {
+                if receive(session, ctx, reporter, input).await {
                     continue;
                 }
                 sent = as_sent(fitted.context, &self.model.spec);
@@ -340,7 +343,17 @@ impl Agent {
                 };
 
                 match self
-                    .stream_turn(&req, ctx, reporter, retry, &mut generating)
+                    .stream_turn(
+                        &req,
+                        ctx,
+                        reporter,
+                        retry,
+                        turn::Streaming {
+                            input,
+                            entry: session::EntryId(session.next_id()),
+                            generating: &mut generating,
+                        },
+                    )
                     .instrument(span.clone())
                     .await
                 {
@@ -362,17 +375,19 @@ impl Agent {
                                 named_window = Some(limit);
                                 reporter.report(Event::Refit(format!(
                                     "the provider reports a {limit}-token window; refitting to it"
-                                )));
+                                ))).await;
                             }
                             // A window the request was already fitted to means
                             // the estimate was off: refitting would resend it.
                             _ => {
                                 scale *= SQUEEZE;
-                                reporter.report(Event::Refit(format!(
-                                    "the request did not fit and named no limit below the \
+                                reporter
+                                    .report(Event::Refit(format!(
+                                        "the request did not fit and named no limit below the \
                                      budget; retrying at {}% of the estimated budget",
-                                    (scale * 100.0).round()
-                                )));
+                                        (scale * 100.0).round()
+                                    )))
+                                    .await;
                             }
                         }
                     }
@@ -390,11 +405,13 @@ impl Agent {
             };
 
             totals.add(&done.usage);
-            reporter.report(Event::TurnEnd {
-                usage: done.usage,
-                text: done.message.text(),
-                generating,
-            });
+            reporter
+                .report(Event::TurnEnd {
+                    usage: done.usage,
+                    text: done.message.text(),
+                    generating,
+                })
+                .await;
             let prompt = done.usage.prompt() as usize;
             // A provider that counted nothing leaves the last count standing.
             if prompt > 0 {
@@ -404,10 +421,12 @@ impl Agent {
                     bound,
                 });
                 held = Some((prompt, window));
-                reporter.report(Event::Context {
-                    used: prompt,
-                    window,
-                });
+                reporter
+                    .report(Event::Context {
+                        used: prompt,
+                        window,
+                    })
+                    .await;
             }
 
             // Two providers accept an oversized request instead of refusing:
@@ -417,10 +436,12 @@ impl Agent {
                 || (done.stop == llm::StopReason::MaxTokens && done.usage.output == 0);
             if silently_truncated && scale > SQUEEZE.powi(MAX_SQUEEZE as i32) {
                 scale *= SQUEEZE;
-                reporter.report(Event::Refit(format!(
-                    "the provider took {prompt} input tokens against a {window}-token window \
+                reporter
+                    .report(Event::Refit(format!(
+                        "the provider took {prompt} input tokens against a {window}-token window \
                      and answered from a truncated prompt; tightening the budget"
-                )));
+                    )))
+                    .await;
             }
 
             // Sizes beside the stop: a reply that ends after two words reads
@@ -455,24 +476,28 @@ impl Agent {
             session.push_assistant(content);
 
             if let Some(reply) = reply {
-                if receive(session, ctx, reporter, input) {
+                if receive(session, ctx, reporter, input).await {
                     continue;
                 }
                 if holds == MAX_HOLDS {
-                    reporter.report(Event::Warning(format!(
-                        "hooks kept the run going {MAX_HOLDS} times; it stops here"
-                    )));
+                    reporter
+                        .report(Event::Warning(format!(
+                            "hooks kept the run going {MAX_HOLDS} times; it stops here"
+                        )))
+                        .await;
                 } else if let Some(why) = self.brief.hooks.hold(&reply, holds, ctx).await {
                     holds += 1;
-                    report_note(session, reporter, why);
+                    report_note(session, reporter, why).await;
                     continue;
                 }
-                reporter.report(Event::Done {
-                    turns: turn,
-                    usage: totals,
-                    ctx: held,
-                    compactions,
-                });
+                reporter
+                    .report(Event::Done {
+                        turns: turn,
+                        usage: totals,
+                        ctx: held,
+                        compactions,
+                    })
+                    .await;
                 return Ok(totals);
             }
 
@@ -503,21 +528,31 @@ impl Agent {
                 .checkpoint(session)
                 .await
                 .map_err(AgentError::Interaction)?;
-            let (results, stopped) = self
-                .run_calls(&calls, &bad, &contexts, reporter, &mut totals)
+            let stopped = self
+                .run_calls(
+                    &calls,
+                    &bad,
+                    &contexts,
+                    reporter,
+                    &mut calls::Batch {
+                        session,
+                        input,
+                        ctx,
+                        reporter,
+                        spent: &mut totals,
+                        stopped: false,
+                        pending: Default::default(),
+                    },
+                )
                 .instrument(span.clone())
-                .await;
+                .await?;
             let results = replies::reconcile(
                 &calls,
-                results,
+                Vec::new(),
                 input.completed_calls().map_err(AgentError::Interaction)?,
                 ctx,
             )?;
-            replies::commit(session, reporter, input, results)?;
-            input
-                .checkpoint(session)
-                .await
-                .map_err(AgentError::Interaction)?;
+            replies::commit(session, reporter, input, results).await?;
             if stopped {
                 return Err(AgentError::Cancelled);
             }
@@ -621,12 +656,12 @@ pub(crate) fn as_sent(mut context: Vec<Message>, spec: &ModelSpec) -> Vec<Messag
 }
 
 // Files a note for the model and hands it to whoever draws.
-fn report_note(session: &mut Session, reporter: &Reporter, note: String) {
+async fn report_note(session: &mut Session, reporter: &Reporter, note: String) {
     let id = session.push_note(note);
-    report_committed(session, reporter, &[id]);
+    report_committed(session, reporter, &[id]).await;
 }
 
-fn receive(
+async fn receive(
     session: &mut Session,
     ctx: &Ctx,
     reporter: &Reporter,
@@ -638,14 +673,14 @@ fn receive(
         ids.push(session.send(ask));
     }
     if !ids.is_empty() {
-        report_committed(session, reporter, &ids);
+        report_committed(session, reporter, &ids).await;
     }
     !ids.is_empty()
 }
 
 // The notes waiting for this request, after what joined it: a note can say
 // where things stand once those are in.
-fn heed(session: &mut Session, reporter: &Reporter, input: &dyn seams::Input) {
+async fn heed(session: &mut Session, reporter: &Reporter, input: &dyn seams::Input) {
     let mut ids = Vec::new();
     while let Some(note) = input.note() {
         let id = session.push_note(note.text);
@@ -654,16 +689,18 @@ fn heed(session: &mut Session, reporter: &Reporter, input: &dyn seams::Input) {
         }
     }
     if !ids.is_empty() {
-        report_committed(session, reporter, &ids);
+        report_committed(session, reporter, &ids).await;
     }
 }
 
 // A state update, not a drawing instruction: whoever draws derives the
 // entries' rows from them itself.
-fn report_committed(session: &Session, reporter: &Reporter, ids: &[session::EntryId]) {
-    reporter.report(Event::Committed {
-        entries: session.entries_for(ids).into_iter().cloned().collect(),
-    });
+async fn report_committed(session: &Session, reporter: &Reporter, ids: &[session::EntryId]) {
+    reporter
+        .report(Event::Committed {
+            entries: session.entries_for(ids).into_iter().cloned().collect(),
+        })
+        .await;
 }
 
 #[cfg(test)]

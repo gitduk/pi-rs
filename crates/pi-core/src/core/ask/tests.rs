@@ -288,7 +288,7 @@ async fn accepted_answer_survives_cancellation_and_native_history_keeps_images()
             tool::Registry::new().with(AskUser(Arc::new(Commands::new(setup.table.clone()))));
         let mut session = agent::session::Session::with_prompt("work");
         let ctx = setup.ctx();
-        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (events, _) = agent::event::channel();
         let retry = agent::Retry::default();
         let mut run =
             Box::pin(agent.run_with_input(&mut session, &ctx, &events, &retry, &setup.input));
@@ -607,7 +607,7 @@ async fn native_projection_preserves_hook_context_and_failure_does_not_cancel_th
         }
         let mut session = agent::session::Session::with_prompt("work");
         let ctx = setup.ctx();
-        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (events, _) = agent::event::channel();
         let retry = agent::Retry::default();
         let mut run =
             Box::pin(agent.run_with_input(&mut session, &ctx, &events, &retry, &setup.input));

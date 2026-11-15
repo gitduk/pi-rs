@@ -176,7 +176,7 @@ impl Compactor for Summarizing {
             .await
         {
             Some((report, spent)) => {
-                reporter.report(Event::Compacted(report));
+                reporter.report(Event::Compacted(report)).await;
                 Fitted {
                     context: session.context(),
                     changed: true,

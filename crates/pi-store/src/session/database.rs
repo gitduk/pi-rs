@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use transcript::{Session, archive::Record};
 
 pub const FILE: &str = "project.db";
-const VERSION: i64 = 2;
+const VERSION: i64 = 3;
 
 /// An explicit session address; the database is shared by the workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +110,15 @@ pub fn connect(path: &Path) -> Result<Connection> {
     tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS context_entries_by_entry ON context_entries(session,entry_id);
          CREATE INDEX IF NOT EXISTS sessions_by_parent ON sessions(parent);",
+    )?;
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS drafts(
+        session TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+        id TEXT NOT NULL, entry INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS draft_parts(
+        session TEXT NOT NULL REFERENCES drafts(session) ON DELETE CASCADE,
+        seq INTEGER NOT NULL, body TEXT NOT NULL,
+        PRIMARY KEY(session,seq));",
     )?;
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
@@ -232,7 +241,7 @@ pub fn write(
         serde_json::to_string(&header.spent)?, session.next_id(), serde_json::to_string(&session.stopped())?, parent,last,rounds,prompt])?;
     let from = common_prefix(c, header.id, entries)?;
     let mut added_bytes = 0usize;
-    c.execute(
+    let removed = c.execute(
         "DELETE FROM context_entries WHERE session=?1 AND seq>=?2",
         params![header.id, from],
     )?;
@@ -266,7 +275,92 @@ pub fn write(
         "UPDATE sessions SET bytes=bytes+?2 WHERE id=?1",
         params![header.id, added_bytes],
     )?;
+    let completed = entries.iter().rev().find_map(|entry| match entry {
+        transcript::Entry::Ask { id, .. } | transcript::Entry::Answer { id, .. } => Some(id.0),
+        _ => None,
+    });
+    c.execute(
+        "DELETE FROM drafts WHERE session=?1 AND (?2 OR entry<=?3)",
+        params![header.id, removed > 0, completed],
+    )?;
     Ok(())
+}
+
+pub fn append_draft(at: &Location, draft: &transcript::Draft) -> Result<()> {
+    let mut c = connect(&at.database)?;
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    start_draft(&tx, at, draft)?;
+    let next: usize = tx.query_row(
+        "SELECT COALESCE(MAX(seq)+1,0) FROM draft_parts WHERE session=?1",
+        [at.session.as_str()],
+        |r| r.get(0),
+    )?;
+    ensure!(draft.from <= next, "draft is missing earlier fragments");
+    for (offset, block) in draft.blocks.iter().enumerate() {
+        let seq = draft.from + offset;
+        let body = serde_json::to_string(block)?;
+        let retained: String = tx.query_row(
+            "INSERT INTO draft_parts VALUES(?1,?2,?3)
+             ON CONFLICT(session,seq) DO UPDATE SET body=draft_parts.body RETURNING body",
+            params![at.session.as_str(), seq, body],
+            |r| r.get(0),
+        )?;
+        ensure!(
+            retained == body,
+            "draft fragment conflicts with retained content"
+        );
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn start_draft(tx: &Transaction<'_>, at: &Location, draft: &transcript::Draft) -> Result<()> {
+    let next: u64 = tx.query_row(
+        "SELECT next FROM sessions WHERE id=?1",
+        [at.session.as_str()],
+        |r| r.get(0),
+    )?;
+    ensure!(draft.entry.0 == next, "draft belongs to a superseded reply");
+    let previous: Option<String> = tx
+        .query_row(
+            "SELECT id FROM drafts WHERE session=?1",
+            [at.session.as_str()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if previous.as_deref() != Some(&draft.id) {
+        ensure!(draft.from == 0, "draft is missing its first fragments");
+        tx.execute("DELETE FROM drafts WHERE session=?1", [at.session.as_str()])?;
+        tx.execute(
+            "INSERT INTO drafts VALUES(?1,?2,?3)",
+            params![at.session.as_str(), draft.id, draft.entry.0],
+        )?;
+    }
+    Ok(())
+}
+
+fn read_draft(c: &Connection, session: &str) -> Result<Option<transcript::Draft>> {
+    let Some((id, entry)) = c
+        .query_row(
+            "SELECT id,entry FROM drafts WHERE session=?1",
+            [session],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?)),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let mut statement = c.prepare("SELECT body FROM draft_parts WHERE session=?1 ORDER BY seq")?;
+    let mut blocks = Vec::new();
+    for body in statement.query_map([session], |r| r.get::<_, String>(0))? {
+        blocks.push(serde_json::from_str::<message::Block>(&body?)?);
+    }
+    Ok(Some(transcript::Draft {
+        id,
+        entry: transcript::EntryId(entry),
+        from: 0,
+        blocks,
+    }))
 }
 
 pub fn read(at: &Location) -> Result<Stored> {
@@ -296,6 +390,10 @@ pub fn read(at: &Location) -> Result<Stored> {
         .optional()?
         .context("session is not recorded")?;
     let entries = read_entries(&tx, at.session.as_str())?;
+    let mut session = Session::from_parts(entries, header.5, serde_json::from_str(&header.6)?);
+    if let Some(draft) = read_draft(&tx, at.session.as_str())? {
+        session.keep_draft(draft);
+    }
     Ok(Stored {
         id: at.session.as_str().into(),
         workspace: header.0,
@@ -303,7 +401,7 @@ pub fn read(at: &Location) -> Result<Stored> {
         name: header.2,
         created: header.3,
         spent: serde_json::from_str(&header.4)?,
-        session: Session::from_parts(entries, header.5, serde_json::from_str(&header.6)?),
+        session,
     })
 }
 
@@ -468,6 +566,7 @@ pub fn relocate(from: &Location, to: &Location, workspace: &Path) -> Result<()> 
         )?;
         return Ok(());
     }
+    drop(connect(&from.database)?);
     let mut c = connect(&to.database)?;
     c.execute(
         "ATTACH DATABASE ?1 AS previous",
@@ -499,6 +598,8 @@ pub fn relocate(from: &Location, to: &Location, workspace: &Path) -> Result<()> 
     tx.execute("INSERT INTO context_entries SELECT * FROM previous.context_entries WHERE session IN (SELECT id FROM sessions WHERE id=?1 OR parent=?1)",[id])?;
     tx.execute("INSERT INTO messages SELECT m.session,m.entry_id,m.part,m.kind,m.metadata,b.new FROM previous.messages m JOIN body_map b ON b.old=m.body WHERE m.session IN (SELECT id FROM sessions WHERE id=?1 OR parent=?1)",[id])?;
     tx.execute("INSERT INTO requests SELECT r.session,r.position,r.id,r.request_id,r.source,r.event,r.metadata,b.new FROM previous.requests r JOIN body_map b ON b.old=r.body WHERE r.session IN (SELECT id FROM sessions WHERE id=?1 OR parent=?1)",[id])?;
+    tx.execute("INSERT INTO drafts SELECT * FROM previous.drafts WHERE session IN (SELECT id FROM sessions WHERE id=?1 OR parent=?1)", [id])?;
+    tx.execute("INSERT INTO draft_parts SELECT * FROM previous.draft_parts WHERE session IN (SELECT id FROM sessions WHERE id=?1 OR parent=?1)", [id])?;
     tx.commit()?;
     c.execute_batch("DETACH DATABASE previous")?;
     delete(from)

@@ -627,7 +627,7 @@ mod budget {
             Some((Arc::new(Empty), spec())),
             agent::Retry::default().idle,
         );
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = agent::event::channel();
         let mut s = s;
         let meter = Arc::default();
         let run = agent::Working {
@@ -732,7 +732,7 @@ mod budget {
             );
             let mut s = prose_session();
             let budget = llm::estimate::tokens(&s.context(), &spec()) / 2;
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, mut rx) = agent::event::channel();
             let meter = Arc::default();
             let run = agent::Working {
                 wire: llm::meter::Metered::new(&Never, &meter),
@@ -808,7 +808,7 @@ mod budget {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             stop.cancel();
         });
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = agent::event::channel();
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             a.run(&mut s, &ctx, &tx, &agent::Retry::default()),

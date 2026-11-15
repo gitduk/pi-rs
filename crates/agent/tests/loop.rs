@@ -9,7 +9,6 @@ use llm::request::Request;
 use llm::stream::{BlockKind, StopReason, StreamEvent, Usage};
 use llm::transport::Transport;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
 
 mod common;
 use common::spec;
@@ -132,7 +131,7 @@ async fn drive_retrying(
     prompt: &str,
     retry: &Retry,
 ) -> (Session, Result<llm::stream::Usage, AgentError>, Vec<Event>) {
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = agent::event::channel();
     let mut session = Session::with_prompt(prompt);
     let out = agent.run(&mut session, ctx, &tx, retry).await;
     drop(tx);
@@ -420,6 +419,28 @@ async fn parallel_results_follow_call_order_not_completion_order() {
 // is: the screen marks each call by its own end.
 #[tokio::test]
 async fn each_call_says_its_end_as_it_lands() {
+    #[derive(Default)]
+    struct Checkpoints(std::sync::Mutex<Vec<Vec<String>>>);
+    impl agent::seams::Input for Checkpoints {
+        fn take(&self) -> Option<agent::session::Prompt> {
+            None
+        }
+        fn checkpoint(
+            &self,
+            session: &Session,
+        ) -> futures::future::BoxFuture<'_, Result<(), String>> {
+            let calls = session
+                .entries()
+                .iter()
+                .filter_map(|entry| match entry {
+                    agent::session::Entry::Tool { result, .. } => Some(result.call.clone()),
+                    _ => None,
+                })
+                .collect();
+            self.0.lock().unwrap().push(calls);
+            Box::pin(async { Ok(()) })
+        }
+    }
     let (_d, mut a, ctx) = harness(vec![
         call_turn(&[("t1", "slow", "{}"), ("t2", "fast", "{}")]),
         text_turn("ok"),
@@ -436,8 +457,29 @@ async fn each_call_says_its_end_as_it_lands() {
             exclusive: false,
         });
 
-    let (session, out, events) = drive(&a, &ctx, "go").await;
+    let (tx, mut rx) = agent::event::channel();
+    let mut session = Session::with_prompt("go");
+    let saved = Checkpoints::default();
+    let out = a
+        .run_with_input(&mut session, &ctx, &tx, &Retry::default(), &saved)
+        .await;
     out.unwrap();
+    drop(tx);
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    assert_eq!(
+        saved
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|calls| !calls.is_empty())
+            .unwrap(),
+        &["t2"],
+        "the fast result is checkpointed before its slow sibling finishes"
+    );
 
     let ended: Vec<&str> = events
         .iter()
@@ -1163,7 +1205,7 @@ async fn reported_usage_reaches_the_consumer_before_the_stream_closes() {
             ])),
             spec(),
         );
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = agent::event::channel();
         let mut session = Session::with_prompt("go");
         let retry = Retry::default();
         let run = a.run(&mut session, &ctx, &tx, &retry);
@@ -1332,7 +1374,7 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
         let retry = fast_retry();
         std::sync::Arc::make_mut(&mut a.model).spec.context_window = window;
         let mut session = Session::from_messages(fat_history());
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = agent::event::channel();
         let out = a.run(&mut session, &ctx, &tx, &retry).await;
         drop(tx);
         let mut events = Vec::new();
@@ -1413,7 +1455,7 @@ async fn input_and_output_cap_fit_the_window_together() {
         )]));
     }
     let mut session = Session::from_messages(history);
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = agent::event::channel();
     a.run(&mut session, &ctx, &tx, &fast_retry()).await.unwrap();
 
     let sizes = sizes.0.lock().unwrap();
@@ -1473,7 +1515,7 @@ async fn a_named_window_supersedes_the_guesswork_that_preceded_it() {
     );
     let retry = fast_retry();
     let mut session = Session::from_messages(vec![Message::user("the task")]);
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = agent::event::channel();
     let out = a.run(&mut session, &ctx, &tx, &retry).await;
     drop(tx);
     let mut events = Vec::new();
@@ -1652,7 +1694,7 @@ async fn call_context_keeps_the_registered_request_through_hooks_and_execution()
     )
     .unwrap();
     let ctx = ctx.with_request(inherited);
-    let (tx, _) = mpsc::unbounded_channel();
+    let (tx, _) = agent::event::channel();
     let retry = Retry::default();
     let mut session = Session::with_prompt("first");
     tokio::time::timeout(

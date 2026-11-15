@@ -26,6 +26,7 @@ dependencies = [
  "tool",
  "tracing",
  "transcript",
+ "uuid",
 ]
 
 [[package]]

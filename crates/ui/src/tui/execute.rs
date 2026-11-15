@@ -307,12 +307,7 @@ impl Tui {
                 self.ui.say_note(lane, view, &text);
             }
             Output::Compacted(report) => {
-                let _ = self
-                    .core
-                    .lanes
-                    .at(at)
-                    .sender()
-                    .send(agent::Event::Compacted(report));
+                self.draw_agent(request.lane, agent::Event::Compacted(report));
             }
         }
     }

@@ -15,10 +15,10 @@ fn next_token() -> u64 {
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use agent::event::{Receiver, Sender};
 use agent::session::{EntryId, Session};
 use agent::{Agent, Archive, Event, Totals};
 use subagent::Subagent;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
 
 use tool::Ctx;
@@ -280,6 +280,13 @@ impl Save {
         self.record(messages.save(&self.store.path_of(&self.root, &self.id)))
     }
 
+    pub(crate) fn draft(&self, draft: &agent::session::Draft) -> anyhow::Result<()> {
+        self.record(session::append_draft(
+            &self.store.path_of(&self.root, &self.id),
+            draft,
+        ))
+    }
+
     fn record(&self, saved: anyhow::Result<()>) -> anyhow::Result<()> {
         *self
             .unsaved
@@ -314,10 +321,10 @@ struct Runner {
     run: Run,
     // Where this lane's runs post what they are doing. One channel per lane,
     // so an event needs no label to say which screen it belongs on.
-    events: UnboundedSender<Event>,
+    events: Sender,
     // The other end, drained by the surface into this lane's view whether or
     // not it is in front.
-    inbox: UnboundedReceiver<Event>,
+    inbox: Receiver,
 }
 
 /// Arm an agent for one checkout: hang the subagent tool on the brief, put
@@ -551,8 +558,8 @@ impl Lane {
 
     /// A lane is born with its own channel: nothing else can post to it, and
     /// nothing it posts can land on another screen.
-    fn channel() -> (UnboundedSender<Event>, UnboundedReceiver<Event>) {
-        unbounded_channel()
+    fn channel() -> (Sender, Receiver) {
+        agent::event::channel()
     }
 
     /// The screen is on this lane again: drop the mark of a run that ended out
@@ -832,12 +839,12 @@ impl Lane {
     }
 
     /// What runs of this lane report as they go.
-    pub fn sender(&self) -> &UnboundedSender<Event> {
+    pub fn sender(&self) -> &Sender {
         &self.runner.events
     }
 
     /// What this lane has been told and not yet heard.
-    pub fn inbox(&mut self) -> &mut UnboundedReceiver<Event> {
+    pub fn inbox(&mut self) -> &mut Receiver {
         &mut self.runner.inbox
     }
 

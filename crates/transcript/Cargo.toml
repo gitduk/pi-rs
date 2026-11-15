@@ -9,5 +9,5 @@ description = "Context projection and compaction annotations over conversation m
 [dependencies]
 message.workspace = true
 llm.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true

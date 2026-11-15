@@ -121,7 +121,8 @@ pub struct Stream {
     pub(super) kind: StreamKind,
     // Model output with no trailing newline yet, kept live while still
     // being written; a completed line goes straight to scrollback.
-    pub(super) text: String,
+    text: String,
+    revision: u64,
     // The answer as last drawn: a frame with nothing new to draw, a spinner
     // tick, draws it again from here rather than from the markdown.
     drawn: std::cell::RefCell<Option<Drawn>>,
@@ -129,14 +130,43 @@ pub struct Stream {
 
 // The lines an answer drew, and what they were drawn from.
 struct Drawn {
-    text: String,
+    revision: u64,
     width: usize,
     color: bool,
     theme: std::sync::Arc<pi_store::theme::Theme>,
-    lines: Vec<ratatui::text::Line<'static>>,
+    lines: std::sync::Arc<[ratatui::text::Line<'static>]>,
 }
 
 impl Stream {
+    pub(super) fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(super) fn push(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        self.revision = self.revision.wrapping_add(1);
+        self.text.push_str(delta);
+    }
+
+    pub(super) fn take(&mut self) -> String {
+        self.revision = self.revision.wrapping_add(1);
+        std::mem::take(&mut self.text)
+    }
+
+    pub(super) fn take_line(&mut self) -> Option<String> {
+        let at = self.text.find('\n')?;
+        self.revision = self.revision.wrapping_add(1);
+        Some(self.text.drain(..=at).collect())
+    }
+
+    #[cfg(test)]
+    pub(super) fn replace(&mut self, text: String) {
+        self.revision = self.revision.wrapping_add(1);
+        self.text = text;
+    }
+
     // The answer's lines `draw` makes of the text at this width and paint,
     // drawn again only once one of them has changed.
     pub(super) fn answer_lines(
@@ -144,21 +174,21 @@ impl Stream {
         width: usize,
         paint: &Paint,
         draw: impl FnOnce(&str) -> Vec<ratatui::text::Line<'static>>,
-    ) -> Vec<ratatui::text::Line<'static>> {
+    ) -> std::sync::Arc<[ratatui::text::Line<'static>]> {
         let mut drawn = self.drawn.borrow_mut();
         let fresh = drawn.as_ref().is_some_and(|d| {
             d.width == width
                 && d.color == paint.color
                 && std::sync::Arc::ptr_eq(&d.theme, &paint.theme)
-                && d.text == self.text
+                && d.revision == self.revision
         });
         if !fresh {
             *drawn = Some(Drawn {
-                text: self.text.clone(),
+                revision: self.revision,
                 width,
                 color: paint.color,
                 theme: paint.theme.clone(),
-                lines: draw(&self.text),
+                lines: draw(&self.text).into(),
             });
         }
         drawn.as_ref().expect("drawn above").lines.clone()

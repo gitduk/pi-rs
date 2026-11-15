@@ -404,7 +404,7 @@ pub struct Turn {
     pub session: agent::session::Session,
     pub agent: agent::Agent,
     pub ctx: tool::Ctx,
-    pub events: tokio::sync::mpsc::UnboundedSender<agent::Event>,
+    pub events: agent::event::Sender,
     pub retry: agent::Retry,
     pub input: crate::driver::input::Input,
 }

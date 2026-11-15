@@ -177,11 +177,11 @@ fn a_streaming_answer_is_drawn_again_only_once_it_changed() {
             vec![Line::from(format!("{width} {text}"))]
         })
     };
-    stream.text.push_str("an answer");
+    stream.push("an answer");
     let first = draw(&stream, 20, &paint);
     assert_eq!(draw(&stream, 20, &paint), first);
     assert_eq!(draws.get(), 1, "nothing changed");
-    stream.text.push_str(" grows");
+    stream.push(" grows");
     assert_eq!(
         draw(&stream, 20, &paint)[0].to_string(),
         "20 an answer grows"
@@ -192,7 +192,7 @@ fn a_streaming_answer_is_drawn_again_only_once_it_changed() {
     draw(&stream, 30, &plain);
     assert_eq!(draws.get(), 4, "text, width, then paint");
     // The same length again, from a later answer, is not the old one.
-    stream.text = "an answer grOws".into();
+    stream.replace("an answer grOws".into());
     assert_eq!(
         draw(&stream, 30, &plain)[0].to_string(),
         "30 an answer grOws"
@@ -290,13 +290,15 @@ fn a_stream_after_tools_keeps_its_scrolled_position_when_it_lands() {
         Step::Tool(call("read", "a.rs", "", "contents")),
         true,
     ));
-    view.surface.stream.text = (1..=20).map(|i| format!("paragraph {i}\n\n")).collect();
+    view.surface
+        .stream
+        .replace((1..=20).map(|i| format!("paragraph {i}\n\n")).collect());
     ui.flush(&lane, &mut view);
     ui.scroll_view(&mut view, true, 6);
     ui.flush(&lane, &mut view);
     let top = ui.drawn[0].clone();
     assert!(top.contains("paragraph"));
-    view.surface.stream.text.push_str("paragraph 21\n\n");
+    view.surface.stream.push("paragraph 21\n\n");
     ui.flush(&lane, &mut view);
     assert_eq!(ui.drawn[0], top, "while the stream grows");
     ui.close(&mut view);
@@ -1076,13 +1078,15 @@ fn a_top_row_in_the_stream_holds_as_it_grows_and_lands() {
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     view.surface.scrollback = (1..=5).map(|n| Row::notice(format!("row {n}"))).collect();
-    view.surface.stream.text = (1..=20).map(|n| format!("said {n}\n\n")).collect();
+    view.surface
+        .stream
+        .replace((1..=20).map(|n| format!("said {n}\n\n")).collect());
     ui.flush(&lane, &mut view);
     ui.scroll_view(&mut view, true, 6);
     ui.flush(&lane, &mut view);
     let top = ui.drawn[0].clone();
     assert!(top.contains("said"), "the top row is the stream's: {top:?}");
-    view.surface.stream.text.push_str("said 21\n\nsaid 22\n\n");
+    view.surface.stream.push("said 21\n\nsaid 22\n\n");
     ui.flush(&lane, &mut view);
     assert_eq!(ui.drawn[0], top, "as it grew");
     ui.close(&mut view);
@@ -1099,7 +1103,9 @@ fn a_search_hit_in_the_stream_holds_as_it_grows() {
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     view.surface.scrollback = (1..=5).map(|n| Row::notice(format!("row {n}"))).collect();
-    view.surface.stream.text = (1..=20).map(|n| format!("said {n}\n\n")).collect();
+    view.surface
+        .stream
+        .replace((1..=20).map(|n| format!("said {n}\n\n")).collect());
     ui.flush(&lane, &mut view);
     ui.key(&lane, &mut view, ctrl('s'), false);
     for c in "said 3".chars() {
@@ -1109,7 +1115,7 @@ fn a_search_hit_in_the_stream_holds_as_it_grows() {
     let came = current_hit(&ui).expect("the hit came up");
     assert_eq!(came.1, "said 3");
     assert!(came.0 > 0, "midway, not on top");
-    view.surface.stream.text.push_str("said 21\n\nsaid 22\n\n");
+    view.surface.stream.push("said 21\n\nsaid 22\n\n");
     ui.flush(&lane, &mut view);
     assert_eq!(current_hit(&ui), Some(came), "and stayed as it grew");
     // `/` found the view on the newest rows: esc goes back to them, grown.
@@ -1133,7 +1139,9 @@ fn a_search_hit_on_the_newest_rows_holds_as_the_stream_grows() {
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     view.surface.scrollback = (1..=5).map(|n| Row::notice(format!("row {n}"))).collect();
-    view.surface.stream.text = (1..=3).map(|n| format!("said {n}\n\n")).collect();
+    view.surface
+        .stream
+        .replace((1..=3).map(|n| format!("said {n}\n\n")).collect());
     ui.flush(&lane, &mut view);
     ui.key(&lane, &mut view, ctrl('s'), false);
     for c in "said 2".chars() {
@@ -1143,9 +1151,11 @@ fn a_search_hit_on_the_newest_rows_holds_as_the_stream_grows() {
     let at = |ui: &crate::tui::Ui| ui.drawn.iter().position(|r| r.trim() == "said 2");
     let found = at(&ui);
     assert!(found.is_some(), "on screen");
-    view.surface.stream.text += &(4..=20)
-        .map(|n| format!("said {n}\n\n"))
-        .collect::<String>();
+    view.surface.stream.push(
+        &(4..=20)
+            .map(|n| format!("said {n}\n\n"))
+            .collect::<String>(),
+    );
     ui.flush(&lane, &mut view);
     assert_eq!(at(&ui), found, "where it was found");
 }

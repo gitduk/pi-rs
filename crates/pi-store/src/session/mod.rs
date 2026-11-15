@@ -2,6 +2,7 @@
 
 mod database;
 pub use database::Location;
+pub use database::append_draft;
 pub use rusqlite::Transaction;
 mod log;
 pub mod messages;
@@ -1440,6 +1441,77 @@ mod database_tests {
     }
 
     #[test]
+    fn unfinished_output_survives_retries_and_moves_without_entering_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::new(temp.path().join("state"));
+        let workspace = temp.path().join("work");
+        let mut session = Session::with_prompt("inspect");
+        let at = store.save(&workspace, header("s"), &session).unwrap();
+        let mut draft = transcript::Draft {
+            id: "first-attempt".into(),
+            entry: transcript::EntryId(session.next_id()),
+            from: 0,
+            blocks: vec![message::Block::Text("first ".into())],
+        };
+        append_draft(&at, &draft).unwrap();
+        append_draft(&at, &draft).unwrap();
+        draft.from = 1;
+        draft.blocks = vec![message::Block::Text("tail".into())];
+        append_draft(&at, &draft).unwrap();
+        let recovered = Store::read(&at).unwrap().session;
+        assert_eq!(
+            recovered.context(),
+            session.context(),
+            "drafts cannot become model input"
+        );
+        assert_eq!(
+            recovered.draft().unwrap().blocks.len(),
+            2,
+            "a replayed batch is not duplicated"
+        );
+        draft.blocks = vec![message::Block::Text("different".into())];
+        assert!(append_draft(&at, &draft).is_err());
+        draft.id = "retry".into();
+        draft.from = 0;
+        draft.blocks = vec![message::Block::Text("new attempt".into())];
+        append_draft(&at, &draft).unwrap();
+        session.push_notice("inspected the interrupted run");
+        store.save(&workspace, header("s"), &session).unwrap();
+        assert_eq!(
+            Store::read(&at).unwrap().session.draft(),
+            Some(&draft),
+            "an unrelated notice cannot discard unfinished output"
+        );
+        let target_workspace = temp.path().join("other");
+        let target = store.path_of(&target_workspace, "s");
+        database::relocate(&at, &target, &target_workspace).unwrap();
+        assert_eq!(Store::read(&target).unwrap().session.draft(), Some(&draft));
+        session.push_assistant(vec![AssistantContent::Text(llm::message::Text {
+            text: "complete".into(),
+        })]);
+        store
+            .save(&target_workspace, header("s"), &session)
+            .unwrap();
+        assert!(Store::read(&target).unwrap().session.draft().is_none());
+        assert!(
+            append_draft(&target, &draft).is_err(),
+            "a stale batch cannot resurrect a completed reply"
+        );
+        let prompt = session.prompt("another task");
+        store
+            .save(&target_workspace, header("s"), &session)
+            .unwrap();
+        draft.id = "another-attempt".into();
+        draft.entry = transcript::EntryId(session.next_id());
+        append_draft(&target, &draft).unwrap();
+        session.rollback_before(prompt);
+        store
+            .save(&target_workspace, header("s"), &session)
+            .unwrap();
+        assert!(Store::read(&target).unwrap().session.draft().is_none());
+    }
+
+    #[test]
     fn shared_database_isolates_sessions_and_rewind_keeps_original_content() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::new(temp.path().join("state"));
@@ -1608,7 +1680,9 @@ mod database_tests {
                     .execute_batch(&format!("DROP INDEX \"{index}\";"))
                     .unwrap();
             }
-            connection.execute_batch("PRAGMA user_version=1;").unwrap();
+            connection
+                .execute_batch("DROP TABLE draft_parts; DROP TABLE drafts; PRAGMA user_version=1;")
+                .unwrap();
         }
         assert_eq!(Store::read(&at).unwrap().session, session);
         let connection = database::connect(&at.database).unwrap();

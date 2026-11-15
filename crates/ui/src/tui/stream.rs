@@ -58,8 +58,8 @@ impl Ui {
 
     pub(super) fn close(&mut self, view: &mut View) {
         let reasoning = view.surface.stream.kind == StreamKind::Reasoning;
-        if !view.surface.stream.text.is_empty() {
-            let text = std::mem::take(&mut view.surface.stream.text);
+        if !view.surface.stream.text().is_empty() {
+            let text = view.surface.stream.take();
             if reasoning {
                 let painted = Row::reasoning_line(&text, &self.paint);
                 self.land(view, painted, reasoning);
@@ -95,12 +95,11 @@ impl Ui {
             }
         }
 
-        view.surface.stream.text.push_str(delta);
+        view.surface.stream.push(delta);
         if reasoning {
             // A finished reasoning line belongs in the streaming block's
             // group as soon as it ends.
-            while let Some(i) = view.surface.stream.text.find('\n') {
-                let line: String = view.surface.stream.text.drain(..=i).collect();
+            while let Some(line) = view.surface.stream.take_line() {
                 let line = line.trim_end_matches('\n').to_string();
                 let painted = Row::reasoning_line(&line, &self.paint);
                 self.land(view, painted, reasoning);

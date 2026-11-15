@@ -752,6 +752,7 @@ async fn a_stream_drain_does_not_overtake_queued_execution_starts() {
     core.lanes[1]
         .sender()
         .send(agent::Event::TextDelta("already generated".into()))
+        .await
         .unwrap();
     assert!(
         core.try_agent_event().is_none(),
@@ -833,7 +834,7 @@ async fn a_background_subagent_survives_its_turn_and_wakes_its_own_session() {
             .is_none()
     );
     // The parent can make a model request while the child provider is blocked.
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _rx) = agent::event::channel();
     let mut main = Session::with_prompt("continue independent work");
     parent_wire.release.notify_one();
     tokio::time::timeout(

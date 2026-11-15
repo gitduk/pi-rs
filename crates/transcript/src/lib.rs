@@ -1,6 +1,7 @@
 pub mod archive;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use llm::message::{
     AssistantContent, Image, Message, Text, ToolCall, ToolResult, ToolResultContent, UserContent,
@@ -441,7 +442,8 @@ impl<'a> Seen<'a> {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Session {
     #[serde(default)]
-    entries: Vec<Entry>,
+    // Checkpoints share history; an append copies only if a snapshot still owns it.
+    entries: Arc<Vec<Entry>>,
     #[serde(default)]
     next: u64,
     // Why the last run ended unanswered. Cleared by the next prompt, or by
@@ -451,6 +453,37 @@ pub struct Session {
     // Not saved: a resumed transcript is measured afresh by its first request.
     #[serde(skip)]
     measured: Option<Measured>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    draft: Option<Draft>,
+}
+
+/// Unfinished assistant output, retained for inspection and excluded from context.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Draft {
+    pub id: String,
+    pub entry: EntryId,
+    /// Position of the first fragment in this batch.
+    pub from: usize,
+    pub blocks: Vec<message::Block>,
+}
+
+impl Draft {
+    pub fn text(&self) -> String {
+        self.blocks
+            .iter()
+            .filter_map(|block| match block {
+                message::Block::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn reasoning(&self) -> impl Iterator<Item = &llm::message::Reasoning> {
+        self.blocks.iter().filter_map(|block| match block {
+            message::Block::Reasoning(reasoning) => Some(reasoning),
+            _ => None,
+        })
+    }
 }
 
 /// The provider's count of a transcript's last request, beside our bound on
@@ -531,6 +564,13 @@ fn stopped_note(err: Option<&str>) -> String {
 }
 
 impl Session {
+    pub fn draft(&self) -> Option<&Draft> {
+        self.draft.as_ref()
+    }
+
+    pub fn keep_draft(&mut self, draft: Draft) {
+        self.draft = Some(draft);
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -620,15 +660,16 @@ impl Session {
     }
 
     fn push_ask(&mut self, ask: Prompt) -> EntryId {
+        self.draft = None;
         let (id, at) = self.mint();
-        self.entries.push(Entry::Ask { id, at, ask });
+        Arc::make_mut(&mut self.entries).push(Entry::Ask { id, at, ask });
         id
     }
 
     /// A shell command the user ran and its output, filed by whoever ran it.
     pub fn push_bash(&mut self, run: Prompt) -> EntryId {
         let (id, at) = self.mint();
-        self.entries.push(Entry::Bash { id, at, run });
+        Arc::make_mut(&mut self.entries).push(Entry::Bash { id, at, run });
         id
     }
 
@@ -638,7 +679,7 @@ impl Session {
     /// as a notice.
     pub fn push_note(&mut self, text: impl Into<String>) -> EntryId {
         let (id, at) = self.mint();
-        self.entries.push(Entry::Note {
+        Arc::make_mut(&mut self.entries).push(Entry::Note {
             id,
             at,
             note: text.into(),
@@ -649,7 +690,7 @@ impl Session {
     /// Plain text retained for the user and excluded from model input.
     pub fn push_plain(&mut self, text: impl Into<String>) -> EntryId {
         let (id, at) = self.mint();
-        self.entries.push(Entry::Plain {
+        Arc::make_mut(&mut self.entries).push(Entry::Plain {
             id,
             at,
             text: text.into(),
@@ -660,7 +701,7 @@ impl Session {
     /// An agent report for the user, kept as unformatted text.
     pub fn push_notice(&mut self, text: impl Into<String>) -> EntryId {
         let (id, at) = self.mint();
-        self.entries.push(Entry::Notice {
+        Arc::make_mut(&mut self.entries).push(Entry::Notice {
             id,
             at,
             text: text.into(),
@@ -671,7 +712,7 @@ impl Session {
     /// A run's figures, recorded separately from plain text and agent reports.
     pub fn push_tally(&mut self, text: impl Into<String>) -> EntryId {
         let (id, at) = self.mint();
-        self.entries.push(Entry::Tally {
+        Arc::make_mut(&mut self.entries).push(Entry::Tally {
             id,
             at,
             text: text.into(),
@@ -694,7 +735,7 @@ impl Session {
             .into_iter()
             .map(|(result, drawn)| {
                 let (id, at) = self.mint();
-                self.entries.push(Entry::Tool {
+                Arc::make_mut(&mut self.entries).push(Entry::Tool {
                     id,
                     at,
                     result,
@@ -708,14 +749,15 @@ impl Session {
     }
 
     pub fn push_assistant(&mut self, blocks: Vec<AssistantContent>) -> EntryId {
+        self.draft = None;
         let (id, at) = self.mint();
-        self.entries.push(Entry::Answer { id, at, blocks });
+        Arc::make_mut(&mut self.entries).push(Entry::Answer { id, at, blocks });
         id
     }
 
     pub fn record(&mut self, record: Compaction) -> EntryId {
         let (id, at) = self.mint();
-        self.entries.push(Entry::Compaction { id, at, record });
+        Arc::make_mut(&mut self.entries).push(Entry::Compaction { id, at, record });
         id
     }
 
@@ -915,7 +957,8 @@ impl Session {
         };
         let keep = at + usize::from(keep);
         let removed = self.entries.len() - keep;
-        self.entries.truncate(keep);
+        Arc::make_mut(&mut self.entries).truncate(keep);
+        self.draft = None;
         // The marker described the round the cut just removed; keeping it
         // would name a death the transcript no longer shows.
         self.interrupted = None;
@@ -942,10 +985,11 @@ impl Session {
     /// measured: a resumed transcript is measured afresh by its first request.
     pub fn from_parts(entries: Vec<Entry>, next: u64, interrupted: Option<StopCause>) -> Self {
         Self {
-            entries,
+            entries: Arc::new(entries),
             next,
             interrupted,
             measured: None,
+            draft: None,
         }
     }
 
@@ -980,7 +1024,7 @@ impl Session {
             .map(Entry::id)
             .collect();
         let mut out = HashMap::new();
-        for e in &self.entries {
+        for e in self.entries.iter() {
             if let Entry::Compaction { record, .. } = e {
                 for el in record.omissions.iter().filter(|o| o.block.is_none()) {
                     if !answers.contains(&el.entry) {
@@ -995,7 +1039,7 @@ impl Session {
     /// Arguments the model no longer sees, by the block that held them.
     pub fn block_omissions(&self) -> HashMap<(EntryId, usize), &str> {
         let mut out = HashMap::new();
-        for e in &self.entries {
+        for e in self.entries.iter() {
             if let Entry::Compaction { record, .. } = e {
                 for el in &record.omissions {
                     if let Some(n) = el.block {
@@ -1140,11 +1184,40 @@ impl Session {
             }
             out.push(Message::User { content });
         }
+        order_results(&mut out);
         debug_assert!(
             paired(&out),
             "a tool result is split from its call: {out:?}"
         );
         out
+    }
+}
+
+// Retained results follow completion order; the model sees call order.
+fn order_results(messages: &mut [Message]) {
+    for at in 0..messages.len() {
+        let (before, after) = messages.split_at_mut(at + 1);
+        let Message::Assistant { .. } = &before[at] else {
+            continue;
+        };
+        let order: HashMap<_, _> = before[at]
+            .tool_calls()
+            .enumerate()
+            .map(|(i, call)| (call.id.as_str(), i))
+            .collect();
+        let count = after.iter().take_while(|m| matches!(m,
+            Message::User { content } if matches!(content.as_slice(), [UserContent::ToolResult(_)])
+        )).count();
+        after[..count].sort_by_key(|m| match m {
+            Message::User { content } => match &content[0] {
+                UserContent::ToolResult(result) => order
+                    .get(result.call.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX),
+                _ => unreachable!("result range"),
+            },
+            _ => unreachable!("result range"),
+        });
     }
 }
 

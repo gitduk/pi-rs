@@ -61,6 +61,71 @@ fn prompt(text: &str) -> Prompt {
     }
 }
 
+#[tokio::test]
+async fn unfinished_output_is_checkpointed_while_the_provider_is_silent() {
+    #[derive(Default)]
+    struct Drafts {
+        saved: Mutex<Vec<agent::session::Draft>>,
+        ready: tokio::sync::Notify,
+    }
+    impl agent::seams::Input for Drafts {
+        fn take(&self) -> Option<Prompt> {
+            None
+        }
+        fn draft(
+            &self,
+            draft: agent::session::Draft,
+        ) -> futures::future::BoxFuture<'_, Result<(), String>> {
+            if !draft.blocks.is_empty() {
+                self.ready.notify_one();
+            }
+            self.saved.lock().unwrap().push(draft);
+            Box::pin(async { Ok(()) })
+        }
+    }
+    let (stream_tx, stream_rx) = mpsc::unbounded_channel();
+    let stream = futures::stream::unfold(stream_rx, |mut rx| async {
+        rx.recv().await.map(|event| (Ok(event), rx))
+    })
+    .boxed();
+    let (requests, _received) = mpsc::unbounded_channel();
+    let agent = Agent::new(
+        Arc::new(Controlled {
+            replies: Mutex::new(VecDeque::from([stream])),
+            requests,
+        }),
+        common::spec(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let mut session = Session::with_prompt("inspect");
+    let input = Drafts::default();
+    let (tx, _events) = agent::event::channel();
+    let retry = Retry::default();
+    let mut run = Box::pin(agent.run_with_input(&mut session, &ctx, &tx, &retry, &input));
+    stream_tx
+        .send(StreamEvent::TextDelta {
+            index: 0,
+            delta: "unfinished".into(),
+        })
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::select! {
+            _ = &mut run => panic!("the provider has not finished"),
+            _ = input.ready.notified() => {},
+        }
+    })
+    .await
+    .unwrap();
+    {
+        let saved = input.saved.lock().unwrap();
+        assert_eq!(saved.last().unwrap().text(), "unfinished");
+        assert_eq!(saved.last().unwrap().from, 0);
+    }
+    ctx.cancel.cancel();
+    assert!(matches!(run.await, Err(AgentError::Cancelled)));
+}
+
 struct Pausing {
     release: tokio::sync::Notify,
     passes: std::sync::atomic::AtomicUsize,
@@ -115,7 +180,7 @@ async fn input_arriving_during_compaction_is_fitted_into_the_immediate_request()
     let mut session = Session::with_prompt("original");
     let pending = Mutex::new(VecDeque::new());
     let input = || pending.lock().unwrap().pop_front();
-    let (tx, _) = mpsc::unbounded_channel();
+    let (tx, _) = agent::event::channel();
     let retry = Retry::default();
     let mut run = Box::pin(agent.run_with_input(&mut session, &ctx, &tx, &retry, &input));
     assert!(futures::poll!(run.as_mut()).is_pending());
@@ -165,7 +230,7 @@ async fn new_input_waits_for_the_whole_reply_then_continues_without_a_tool_call(
     let mut session = Session::with_prompt("original");
     let pending = Mutex::new(VecDeque::new());
     let input = || pending.lock().unwrap().pop_front();
-    let (tx, mut events) = mpsc::unbounded_channel();
+    let (tx, mut events) = agent::event::channel();
     let retry = Retry::default();
     let mut run = Box::pin(agent.run_with_input(&mut session, &ctx, &tx, &retry, &input));
     assert!(futures::poll!(run.as_mut()).is_pending());
@@ -273,7 +338,7 @@ async fn input_after_a_tool_call_follows_its_result_before_the_next_request() {
         ctx.viewed(&dir.path().join("data"))?;
         pending.lock().unwrap().take()
     };
-    let (tx, _) = mpsc::unbounded_channel();
+    let (tx, _) = agent::event::channel();
     agent
         .run_with_input(&mut session, &ctx, &tx, &Retry::default(), &input)
         .await
@@ -366,7 +431,7 @@ async fn notes_go_with_the_next_request_and_only_unshown_ones_are_said() {
             },
         ])),
     };
-    let (tx, mut events) = mpsc::unbounded_channel();
+    let (tx, mut events) = agent::event::channel();
     agent
         .run_with_input(&mut session, &ctx, &tx, &Retry::default(), &input)
         .await
@@ -421,7 +486,7 @@ async fn cancelling_a_run_keeps_unconsumed_input() {
     let mut session = Session::with_prompt("go");
     let pending = Mutex::new(VecDeque::from([prompt("keep this")]));
     let input = || pending.lock().unwrap().pop_front();
-    let (tx, _) = mpsc::unbounded_channel();
+    let (tx, _) = agent::event::channel();
     assert!(matches!(
         agent
             .run_with_input(&mut session, &ctx, &tx, &Retry::default(), &input)

@@ -170,6 +170,7 @@ async fn what_a_lane_out_of_front_posted_is_in_its_view_already() {
     tui.core.lanes.push(lane);
 
     sent.send(Event::Warning("said behind you".into()))
+        .await
         .expect("the lane is listening");
     tui.serve_lanes().await;
     assert!(

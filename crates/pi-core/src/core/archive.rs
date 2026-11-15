@@ -56,6 +56,21 @@ impl Archive for Nowhere {
 }
 
 impl Archive for Filed {
+    fn draft<'a>(
+        &'a self,
+        _parent: &'a str,
+        id: &'a str,
+        draft: agent::session::Draft,
+    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
+        let at = self.store.path_of(&self.root, id);
+        Box::pin(async move {
+            super::saves::wait(move || pi_store::session::append_draft(&at, &draft))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| format!("child draft save failed: {e:#}"))
+        })
+    }
+
     fn checkpoint<'a>(
         &'a self,
         parent: &'a str,

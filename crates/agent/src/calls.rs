@@ -1,8 +1,10 @@
 //! One batch of tool calls: gated, hooked, run at the concurrency each
-//! tool allows, and landed as results in call order.
+//! tool allows, and retained as each call finishes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+
+use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 
 use llm::message::{ToolCall, ToolResult};
 use llm::stream::{InvalidToolArgs, Usage};
@@ -10,8 +12,8 @@ use tool::{Concurrency, Ctx, ToolError, ToolOutput};
 use tracing::Instrument as _;
 
 use crate::event::Reporter;
-use crate::session::Drawn;
-use crate::{Agent, Decision, Event};
+use crate::session::{Drawn, Session};
+use crate::{Agent, AgentError, Decision, Event, replies, seams::Input};
 
 // How much of a failed argument blob rides back to the model and log; past
 // it, show a window around serde's column rather than the head.
@@ -25,16 +27,16 @@ enum Action {
 }
 
 impl Agent {
-    // One result per call, in call order, except a cancelled one, left
-    // unanswered for the run's end to close; `spent` carries nested costs up.
+    // Completed calls are retained independently; cancelled calls are left
+    // unanswered for the run's end to close.
     pub(crate) async fn run_calls(
         &self,
         calls: &[ToolCall],
         bad: &HashMap<String, InvalidToolArgs>,
         contexts: &[Ctx],
         reporter: &Reporter,
-        spent: &mut Usage,
-    ) -> (Vec<(ToolResult, Drawn)>, bool) {
+        batch: &mut Batch<'_>,
+    ) -> Result<bool, AgentError> {
         let mut actions: Vec<Action> = calls
             .iter()
             .map(|c| {
@@ -91,23 +93,27 @@ impl Agent {
         for (call, action) in calls.iter().zip(&actions) {
             match action {
                 Action::Reject(why) => {
-                    reporter.report(Event::ToolDenied {
-                        id: call.id.clone(),
-                        name: call.name.clone(),
-                        reason: why.clone(),
-                    });
+                    reporter
+                        .report(Event::ToolDenied {
+                            id: call.id.clone(),
+                            name: call.name.clone(),
+                            reason: why.clone(),
+                        })
+                        .await;
                 }
                 Action::Run(_) => {
-                    reporter.report(Event::ToolQueued {
-                        id: call.id.clone(),
-                        name: call.name.clone(),
-                        args: call.args.clone(),
-                    });
+                    reporter
+                        .report(Event::ToolQueued {
+                            id: call.id.clone(),
+                            name: call.name.clone(),
+                            args: call.args.clone(),
+                        })
+                        .await;
                 }
             }
         }
 
-        // Awaited positionally, so results stay aligned with the calls.
+        // Each future carries its call identity, independent of completion order.
         let futures: Vec<_> = calls
             .iter()
             .zip(&actions)
@@ -121,10 +127,12 @@ impl Agent {
                         ),
                         Action::Run(t) => {
                             let began = std::time::Instant::now();
-                            reporter.report(Event::ToolStart {
-                                id: call.id.clone(),
-                                at: began,
-                            });
+                            reporter
+                                .report(Event::ToolStart {
+                                    id: call.id.clone(),
+                                    at: began,
+                                })
+                                .await;
                             let ctx = &with_call_reporter(ctx, call, reporter);
                             let mut output =
                                 tool::output::gated(t.as_ref(), call.args.clone(), ctx).await;
@@ -139,7 +147,7 @@ impl Agent {
                                 let note = tool::output::bound(ToolOutput::text(note), ctx);
                                 out.content.extend(note.content);
                             }
-                            landed(call, output, began.elapsed(), reporter)
+                            landed(call, output, began.elapsed())
                         }
                     }
                 }
@@ -148,36 +156,85 @@ impl Agent {
             .collect();
         // Neighbouring Shared calls join; an Exclusive one waits for those
         // ahead of it and holds back those behind.
-        let mut outcomes: Vec<Landed> = Vec::with_capacity(calls.len());
-        let mut shared = Vec::new();
+        let mut shared = FuturesUnordered::new();
         for (f, action) in futures.into_iter().zip(&actions) {
             if matches!(action, Action::Run(t) if t.concurrency() == Concurrency::Exclusive) {
-                outcomes.extend(futures::future::join_all(std::mem::take(&mut shared)).await);
-                outcomes.push(f.await);
+                while let Some(outcome) = shared.next().await {
+                    batch.retain(outcome).await?;
+                }
+                batch.flush().await;
+                batch.retain(f.await).await?;
             } else {
                 shared.push(f);
             }
         }
-        outcomes.extend(futures::future::join_all(shared).await);
-
-        let mut results = Vec::with_capacity(calls.len());
-        let mut stopped = false;
-        for outcome in outcomes {
-            match outcome {
-                // Left unanswered: its siblings may have acted, so theirs are
-                // kept, and the run's end closes this one as stopped.
-                Landed::Stopped => stopped = true,
-                Landed::Answered(result, drawn) => results.push((result, drawn)),
-                Landed::Ran(result, drawn, used) => {
-                    // A nested run's spend belongs to the run that called it:
-                    // folded in here, it reaches `Event::Done` and the return.
-                    spent.add(&used);
-                    results.push((result, drawn));
-                }
-            }
+        while let Some(outcome) = shared.next().await {
+            batch.retain(outcome).await?;
         }
+        batch.flush().await;
+        Ok(batch.stopped)
+    }
+}
 
-        (results, stopped)
+/// Retain each finished result while its siblings continue to run.
+pub(crate) struct Batch<'a> {
+    pub session: &'a mut Session,
+    pub input: &'a dyn Input,
+    pub ctx: &'a Ctx,
+    pub reporter: &'a Reporter,
+    pub spent: &'a mut Usage,
+    pub stopped: bool,
+    pub pending: VecDeque<BoxFuture<'a, ()>>,
+}
+
+impl<'a> Batch<'a> {
+    async fn retain(&mut self, outcome: Landed) -> Result<(), AgentError> {
+        let (result, drawn) = match outcome {
+            Landed::Stopped => {
+                self.stopped = true;
+                return Ok(());
+            }
+            Landed::Answered(result, drawn) => (result, drawn),
+            Landed::Ran(result, drawn, used) => {
+                self.spent.add(&used);
+                (result, drawn)
+            }
+        };
+        let resolved = self
+            .input
+            .completed_calls()
+            .map_err(AgentError::Interaction)?
+            .into_iter()
+            .filter(|r| r.call == result.call)
+            .collect();
+        let call = ToolCall {
+            id: result.call.clone(),
+            name: result.name.clone(),
+            args: serde_json::Value::Null,
+        };
+        let results = replies::reconcile(&[call], vec![(result, drawn)], resolved, self.ctx)?;
+        for event in replies::retain(self.session, self.input, results).await? {
+            self.pending.push_back(self.reporter.report(event).boxed());
+        }
+        self.publish_ready();
+        Ok(())
+    }
+
+    fn publish_ready(&mut self) {
+        // Keep draining completed tools even if observation is backpressured.
+        // The deferred notifications are bounded by this finite call batch.
+        while let Some(front) = self.pending.front_mut() {
+            if front.as_mut().now_or_never().is_none() {
+                break;
+            }
+            self.pending.pop_front();
+        }
+    }
+
+    async fn flush(&mut self) {
+        while let Some(reporting) = self.pending.pop_front() {
+            reporting.await;
+        }
     }
 }
 
@@ -196,13 +253,13 @@ fn with_call_reporter(ctx: &Ctx, call: &ToolCall, reporter: &Reporter) -> Ctx {
     let (progress_reporter, output_reporter) = (reporter.clone(), reporter.clone());
     ctx.clone()
         .with_progress(Arc::new(move |text| {
-            progress_reporter.report(Event::ToolProgress {
+            progress_reporter.latest(Event::ToolProgress {
                 id: progress_id.clone(),
                 text,
             })
         }))
         .with_output(Arc::new(move |text| {
-            output_reporter.report(Event::ToolPrinted {
+            output_reporter.latest(Event::ToolPrinted {
                 id: output_id.clone(),
                 text,
             })
@@ -214,7 +271,6 @@ fn landed(
     call: &ToolCall,
     output: Result<ToolOutput, ToolError>,
     took: std::time::Duration,
-    reporter: &Reporter,
 ) -> Landed {
     match output {
         Err(ToolError::Cancelled) => Landed::Stopped,
@@ -225,15 +281,6 @@ fn landed(
                 // instead of parsing the prose; the prose still leads.
                 body = format!("Error: {body} [code: {code}]");
             }
-            // The pending live line draws from this same text, so a rebuild's
-            // equality check sees one source, not a live/rebuilt mismatch.
-            reporter.report(Event::ToolEnd {
-                id: call.id.clone(),
-                name: call.name.clone(),
-                outcome: crate::Outcome::Failed,
-                preview: body.clone(),
-                took,
-            });
             Landed::Answered(
                 ToolResult::error(call.id.clone(), &call.name, body.clone()),
                 Drawn {
@@ -244,16 +291,6 @@ fn landed(
             )
         }
         Ok(out) => {
-            reporter.report(Event::ToolEnd {
-                id: call.id.clone(),
-                name: call.name.clone(),
-                outcome: match out.warned {
-                    true => crate::Outcome::Warned,
-                    false => crate::Outcome::Done,
-                },
-                preview: out.preview(),
-                took,
-            });
             let result = ToolResult {
                 call: call.id.clone(),
                 name: call.name.clone(),

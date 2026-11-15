@@ -402,7 +402,7 @@ impl Ui {
     // stream still writing is left alone: it would be thrown away with the
     // rows it has not finished. The scroll stays — a recolour moves nothing.
     pub(super) fn repaint(&mut self, view: &mut View, lane: &Lane) {
-        if view.painted == self.painted || !view.surface.stream.text.is_empty() {
+        if view.painted == self.painted || !view.surface.stream.text().is_empty() {
             return;
         }
         view.painted = self.painted;

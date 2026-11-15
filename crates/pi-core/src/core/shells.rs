@@ -192,7 +192,7 @@ mod tests {
                 let patch = Arc::make_mut(&mut agent.brief);
                 patch.registry = foreground(std::mem::take(&mut patch.registry));
                 let mut session = agent::session::Session::with_prompt("run it");
-                let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+                let (tx, _rx) = agent::event::channel();
                 agent
                     .run(&mut session, &ctx, &tx, &agent::Retry::default())
                     .await

@@ -7,7 +7,6 @@ use ::execution::background::{Invocation, Outcome as ExecutionOutcome, Report, R
 use async_trait::async_trait;
 use pi_tools::bash;
 use serde_json::{Value, json};
-use tokio::sync::mpsc::unbounded_channel;
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
 use agent::session::Session;
@@ -537,7 +536,7 @@ impl Prepared {
         let stop = child.cancel.clone();
         let _stop = stop.clone().drop_guard();
         let expires = tokio::time::Instant::now() + timeout;
-        let (tx, mut rx) = unbounded_channel();
+        let (tx, mut rx) = agent::event::channel();
         let caller = ctx.clone();
         let heard = tokio::spawn(async move {
             let mut heard = Heard::default();
@@ -618,12 +617,14 @@ impl Prepared {
         );
         // Use the loop's event entrance so a failed or cancelled request still
         // leaves the connection diagnostics in the journal.
-        child_span.in_scope(|| {
+        async {
             let reporter = agent::event::Reporter::new(tx.clone(), agent.brief.hooks.clone());
             for note in &model_notes {
-                reporter.warn(note.clone());
+                reporter.warn(note.clone()).await;
             }
-        });
+        }
+        .instrument(child_span.clone())
+        .await;
         // The token ends the run — the budget or a stop — unwinding like a
         // stop; one ignoring it is dropped after STOP_GRACE.
         let checkpoint = Checkpoint {
@@ -913,6 +914,12 @@ struct Checkpoint<'a> {
 }
 
 impl agent::seams::Input for Checkpoint<'_> {
+    fn draft(
+        &self,
+        draft: agent::session::Draft,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        self.archive.draft(self.parent, self.id, draft)
+    }
     fn take(&self) -> Option<agent::session::Prompt> {
         None
     }

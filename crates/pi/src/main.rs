@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use tokio::sync::mpsc;
 
 use pi_core::args::Args;
 use pi_core::core::dial::{dial, summary_writer};
@@ -90,10 +89,10 @@ fn updated(from: Option<&str>) -> Option<String> {
     })
 }
 
-// Renders a one-shot run's events by printing them. Its own task so a slow
-// write never holds the run up.
+// Prints a one-shot run's events on its own task. Delivery backpressures the
+// run once output falls behind the bounded channel.
 fn paint(
-    mut rx: mpsc::UnboundedReceiver<agent::Event>,
+    mut rx: agent::event::Receiver,
     quiet: bool,
     theme: std::sync::Arc<pi_store::theme::Theme>,
     status: Vec<pi_store::statusline::Field>,
@@ -533,7 +532,7 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
     };
 
     // Only the one-shot path prints what a run emits.
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = agent::event::channel();
     let painter = paint(
         rx,
         args.quiet,
@@ -615,7 +614,7 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         use pi_core::execution::host::{Event, Settlement};
         match core.next_runtime_event().await {
             Event::Agent { event, .. } => {
-                let _ = tx.send(event);
+                let _ = tx.send(event).await;
             }
             Event::Settled(Settlement::Returned(settled)) => break settled.result,
             Event::Settled(Settlement::Removed(_)) => {

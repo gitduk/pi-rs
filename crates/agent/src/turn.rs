@@ -10,6 +10,84 @@ use tool::Ctx;
 use crate::event::Reporter;
 use crate::{Agent, AgentError, Event, Retry};
 
+const DRAFT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+const DRAFT_BYTES: usize = 64 * 1024;
+
+pub(crate) struct Streaming<'a> {
+    pub input: &'a dyn crate::seams::Input,
+    pub entry: crate::session::EntryId,
+    pub generating: &'a mut Option<std::time::Duration>,
+}
+
+struct Draft {
+    batch: crate::session::Draft,
+    bytes: usize,
+    due: tokio::time::Instant,
+    started: bool,
+}
+
+impl Draft {
+    fn new(entry: crate::session::EntryId) -> Self {
+        Self {
+            batch: crate::session::Draft {
+                id: uuid::Uuid::new_v4().simple().to_string(),
+                entry,
+                from: 0,
+                blocks: Vec::new(),
+            },
+            bytes: 0,
+            due: tokio::time::Instant::now() + DRAFT_INTERVAL,
+            started: false,
+        }
+    }
+
+    fn push(&mut self, event: &StreamEvent) {
+        use message::{Block, Reasoning, ReasoningContent};
+        let (delta, reasoning) = match event {
+            StreamEvent::TextDelta { delta, .. } => (delta, false),
+            StreamEvent::ReasoningDelta { delta, .. } => (delta, true),
+            _ => return,
+        };
+        self.bytes += delta.len();
+        match (self.batch.blocks.last_mut(), reasoning) {
+            (Some(Block::Text(text)), false) => text.push_str(delta),
+            (Some(Block::Reasoning(reasoning)), true) => {
+                let Some(ReasoningContent::Text { text, .. }) = reasoning.content.last_mut() else {
+                    unreachable!("draft reasoning contains one text fragment")
+                };
+                text.push_str(delta);
+            }
+            (_, false) => self.batch.blocks.push(Block::Text(delta.clone())),
+            (_, true) => self.batch.blocks.push(Block::Reasoning(Reasoning {
+                id: None,
+                by: None,
+                content: vec![ReasoningContent::Text {
+                    text: delta.clone(),
+                    signature: None,
+                }],
+            })),
+        }
+    }
+
+    async fn flush(&mut self, input: &dyn crate::seams::Input) -> Result<(), String> {
+        if self.started && self.batch.blocks.is_empty() {
+            return Ok(());
+        }
+        let count = self.batch.blocks.len();
+        input.draft(self.batch.clone()).await?;
+        self.batch.from += count;
+        self.batch.blocks.clear();
+        self.started = true;
+        self.bytes = 0;
+        self.due = tokio::time::Instant::now() + DRAFT_INTERVAL;
+        Ok(())
+    }
+}
+
+fn draft_error(error: String) -> (AgentError, Option<llm::stream::Completion>) {
+    (AgentError::Interaction(error), None)
+}
+
 impl Agent {
     // Run one request, retrying while the provider says it is a passing problem.
     #[allow(
@@ -22,11 +100,11 @@ impl Agent {
         ctx: &Ctx,
         reporter: &Reporter,
         retry: &Retry,
-        generating: &mut Option<std::time::Duration>,
+        mut state: Streaming<'_>,
     ) -> Result<llm::stream::Completion, (AgentError, Option<llm::stream::Completion>)> {
         let mut attempt = 0usize;
         loop {
-            let (err, partial) = match self.attempt(req, ctx, reporter, retry, generating).await {
+            let (err, partial) = match self.attempt(req, ctx, reporter, retry, &mut state).await {
                 Ok(done) => return Ok(done),
                 Err(err) => err,
             };
@@ -53,11 +131,13 @@ impl Agent {
 
             attempt += 1;
             let delay = retry.delay(attempt);
-            reporter.report(Event::Retrying {
-                attempt,
-                delay_ms: delay.as_millis() as u64,
-                reason: e.to_string(),
-            });
+            reporter
+                .report(Event::Retrying {
+                    attempt,
+                    delay_ms: delay.as_millis() as u64,
+                    reason: e.to_string(),
+                })
+                .await;
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
                 _ = ctx.cancel.cancelled() => return Err((AgentError::Cancelled, None)),
@@ -80,12 +160,14 @@ impl Agent {
         ctx: &Ctx,
         reporter: &Reporter,
         retry: &Retry,
-        generating: &mut Option<std::time::Duration>,
+        state: &mut Streaming<'_>,
     ) -> Result<llm::stream::Completion, (AgentError, Option<llm::stream::Completion>)> {
         let mut started: Option<std::time::Instant> = None;
         // A fresh accumulator per attempt: half a stream must not bleed into
         // the message the retry produces.
         let mut acc = Accumulator::new(self.model.spec.model.clone());
+        let mut draft = Draft::new(state.entry);
+        draft.flush(state.input).await.map_err(draft_error)?;
         let idle = retry.idle;
 
         let wire = self.wire();
@@ -104,20 +186,35 @@ impl Agent {
             let next = tokio::select! {
                 biased;
                 _ = ctx.cancel.cancelled() => {
+                    draft.flush(state.input).await.map_err(draft_error)?;
                     return Err((AgentError::Cancelled, Some(acc.cut_short())));
+                }
+                _ = tokio::time::sleep_until(draft.due), if !draft.batch.blocks.is_empty() => {
+                    draft.flush(state.input).await.map_err(draft_error)?;
+                    continue;
                 }
                 n = leashed(idle, stream.next()) => match n {
                     Ok(n) => n,
                     // A provider that stops sending mid-stream would otherwise
                     // hold the turn open until the user gives up.
-                    Err(e) => return Err((AgentError::Llm(e), None)),
+                    Err(e) => {
+                        draft.flush(state.input).await.map_err(draft_error)?;
+                        return Err((AgentError::Llm(e), None));
+                    }
                 },
             };
             let Some(ev) = next else { break };
             let ev = match ev {
                 Ok(ev) => ev,
-                Err(e) => return Err((AgentError::from(e), None)),
+                Err(e) => {
+                    draft.flush(state.input).await.map_err(draft_error)?;
+                    return Err((AgentError::from(e), None));
+                }
             };
+            draft.push(&ev);
+            if draft.bytes >= DRAFT_BYTES {
+                draft.flush(state.input).await.map_err(draft_error)?;
+            }
             if started.is_none()
                 && !matches!(
                     ev,
@@ -134,24 +231,25 @@ impl Agent {
             );
             match &ev {
                 StreamEvent::TextDelta { delta, .. } => {
-                    reporter.report(Event::TextDelta(delta.clone()));
+                    reporter.report(Event::TextDelta(delta.clone())).await;
                 }
                 StreamEvent::ReasoningDelta { delta, .. } => {
-                    reporter.report(Event::ReasoningDelta(delta.clone()));
+                    reporter.report(Event::ReasoningDelta(delta.clone())).await;
                 }
                 _ => {}
             }
             acc.push(ev);
             if reports_usage {
-                reporter.report(Event::Usage(acc.usage()));
+                reporter.latest(Event::Usage(acc.usage()));
             }
         }
-        *generating = started.map(|at| at.elapsed());
+        draft.flush(state.input).await.map_err(draft_error)?;
+        *state.generating = started.map(|at| at.elapsed());
 
         // What the host owed and did not send, said once per session by the
         // reporter. Said here too, not just the log — else it looks ordinary.
         for gap in wire.gaps() {
-            reporter.report(Event::Warning(gap));
+            reporter.report(Event::Warning(gap)).await;
         }
 
         Ok(acc.finish())

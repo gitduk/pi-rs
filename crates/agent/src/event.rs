@@ -3,6 +3,9 @@ pub use llm::totals::Totals;
 
 pub use transcript::Outcome;
 
+mod channel;
+pub use channel::{Receiver, Sender, channel};
+
 /// What the loop reports as it runs. A renderer consumes these; the loop never
 /// writes to a terminal itself.
 #[derive(Debug, Clone, PartialEq)]
@@ -98,34 +101,108 @@ pub enum Event {
     },
 }
 
+impl Event {
+    fn is_progress(&self) -> bool {
+        matches!(
+            self,
+            Self::Usage(_) | Self::ToolProgress { .. } | Self::ToolPrinted { .. }
+        )
+    }
+
+    fn retained_bytes(&self) -> usize {
+        let payload = match self {
+            Self::TextDelta(text)
+            | Self::ReasoningDelta(text)
+            | Self::Warning(text)
+            | Self::Refit(text)
+            | Self::Failed { error: text }
+            | Self::TurnEnd { text, .. } => text.len(),
+            Self::ToolQueued { id, name, args } => id.len() + name.len() + args.to_string().len(),
+            Self::ToolStart { id, .. } => id.len(),
+            Self::ToolProgress { id, text } | Self::ToolPrinted { id, text } => {
+                id.len() + text.len()
+            }
+            Self::ToolEnd {
+                id,
+                name,
+                preview: text,
+                ..
+            }
+            | Self::ToolDenied {
+                id,
+                name,
+                reason: text,
+            } => id.len() + name.len() + text.len(),
+            Self::Committed { entries } => serde_json::to_vec(entries)
+                .expect("serializable entries")
+                .len(),
+            Self::Compacted(_)
+            | Self::Context { .. }
+            | Self::Usage(_)
+            | Self::TurnStart { .. }
+            | Self::Done { .. } => 0,
+            Self::Retrying { reason, .. } => reason.len(),
+        };
+        std::mem::size_of::<Self>() + payload
+    }
+
+    fn replaces(&self, previous: &Self) -> bool {
+        match (self, previous) {
+            (Self::Usage(_), Self::Usage(_)) => true,
+            (Self::ToolProgress { id, .. }, Self::ToolProgress { id: old, .. })
+            | (Self::ToolPrinted { id, .. }, Self::ToolPrinted { id: old, .. }) => id == old,
+            _ => false,
+        }
+    }
+}
+
 /// Where a run reports what it is doing: the channel the surface drains, and
 /// the hooks that watch it.
 #[derive(Clone)]
 pub struct Reporter {
-    tx: tokio::sync::mpsc::UnboundedSender<Event>,
+    tx: Sender,
     hooks: std::sync::Arc<dyn crate::Hooks>,
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 impl Reporter {
-    pub fn new(
-        tx: tokio::sync::mpsc::UnboundedSender<Event>,
-        hooks: std::sync::Arc<dyn crate::Hooks>,
-    ) -> Self {
-        Self { tx, hooks }
+    pub fn new(tx: Sender, hooks: std::sync::Arc<dyn crate::Hooks>) -> Self {
+        Self {
+            tx,
+            hooks,
+            cancel: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    pub(crate) fn with_cancel(mut self, cancel: tokio_util::sync::CancellationToken) -> Self {
+        self.cancel = cancel;
+        self
     }
 
     /// Report a warning through the same journal and hooks as loop events.
-    pub fn warn(&self, warning: String) {
-        self.report(Event::Warning(warning));
+    pub async fn warn(&self, warning: String) {
+        self.report(Event::Warning(warning)).await;
     }
 
     /// Journals it, hands it to the hooks, sends it to the surface, in that
     /// order, in one call — call this where the fact occurs, not where the
     /// event is consumed, or order drifts.
-    pub(crate) fn report(&self, event: Event) {
+    pub(crate) fn report(&self, event: Event) -> impl std::future::Future<Output = ()> + Send + '_ {
         journal(&event);
         self.hooks.saw(&event);
-        let _ = self.tx.send(event);
+        async move {
+            tokio::select! {
+                biased;
+                _ = self.cancel.cancelled() => {},
+                _ = self.tx.send(event) => {},
+            }
+        }
+    }
+
+    pub(crate) fn latest(&self, event: Event) {
+        journal(&event);
+        self.hooks.saw(&event);
+        self.tx.latest(event);
     }
 }
 

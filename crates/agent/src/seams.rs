@@ -25,6 +25,13 @@ pub trait Input: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
+    fn draft(
+        &self,
+        _draft: crate::session::Draft,
+    ) -> futures::future::BoxFuture<'_, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// Register a model call before its executor can run.
     fn tool_request(
         &self,
@@ -95,6 +102,14 @@ pub trait Approver: Send + Sync {
 /// This layer says what it needs and the surface provides it; what a child
 /// spent travels back on the tool result instead.
 pub trait Archive: Send + Sync {
+    fn draft<'a>(
+        &'a self,
+        _parent: &'a str,
+        _id: &'a str,
+        _draft: crate::session::Draft,
+    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
     /// Retain an intermediate child boundary before tools execute.
     fn checkpoint<'a>(
         &'a self,

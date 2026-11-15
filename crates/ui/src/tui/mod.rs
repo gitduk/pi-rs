@@ -470,7 +470,14 @@ impl Tui {
     // Take what every lane's run has posted since the last look into its own
     // view, drawn or not: its meter, filed rows and end happen when they do.
     async fn serve_lanes(&mut self) {
-        while let Some(event) = self.core.try_agent_event() {
+        let started = std::time::Instant::now();
+        for _ in 0..128 {
+            if started.elapsed() >= std::time::Duration::from_millis(4) {
+                break;
+            }
+            let Some(event) = self.core.try_agent_event() else {
+                break;
+            };
             let pi_core::execution::host::Event::Agent { lane, event } = event else {
                 unreachable!("agent event drain")
             };

@@ -810,7 +810,7 @@ impl Ui {
         // Reasoning streams only its unfinished line; an answer streams
         // whole until it closes, too long to draw anew every frame.
         let content = if thinking {
-            body(&view.surface.stream.text)
+            body(view.surface.stream.text()).into()
         } else {
             (view.surface.stream).answer_lines(width, &self.paint, body)
         };
@@ -820,8 +820,8 @@ impl Ui {
         {
             out.push(Line::default(), None);
         }
-        for row in content {
-            out.push(row, None);
+        for row in content.iter() {
+            out.push(row.clone(), None);
         }
 
         // Typed lines precede execution results to match delivery priority.
