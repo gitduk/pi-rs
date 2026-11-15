@@ -1,6 +1,7 @@
 use crate::Image;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fmt::Write as _;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Text {
@@ -63,13 +64,18 @@ impl ToolResult {
 
 /// A result's content as one text: JSON as written, an image as `[image]`.
 pub fn flatten(content: &[ToolResultContent]) -> String {
-    content
-        .iter()
-        .map(|c| match c {
-            ToolResultContent::Text(t) => t.text.clone(),
-            ToolResultContent::Json { value } => value.to_string(),
-            ToolResultContent::Image(_) => "[image]".to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut text = String::new();
+    for (index, block) in content.iter().enumerate() {
+        if index > 0 {
+            text.push('\n');
+        }
+        match block {
+            ToolResultContent::Text(block) => text.push_str(&block.text),
+            ToolResultContent::Json { value } => {
+                write!(&mut text, "{value}").expect("writing to a string cannot fail");
+            }
+            ToolResultContent::Image(_) => text.push_str("[image]"),
+        }
+    }
+    text
 }

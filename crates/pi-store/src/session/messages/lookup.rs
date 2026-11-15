@@ -82,20 +82,43 @@ impl Lookup {
 
     fn find(&self, column: &str, id: &MessageId, before: usize) -> Result<Option<Entry>> {
         let sql = format!(
-            "SELECT position FROM requests WHERE session=?1 AND {column}=?2 AND position<?3"
+            "SELECT r.metadata,c.body FROM requests r JOIN body_values c ON c.id=r.body
+             WHERE r.session=?1 AND r.{column}=?2 AND r.position<?3"
         );
-        let position: Option<usize> = self
+        let row: Option<(String, String)> = self
             .connection
             .query_row(
                 &sql,
                 params![self.session().as_str(), id.as_str(), before.min(self.count)],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        position
-            .map(|p| self.at(p, before))
+        row.map(|(metadata, body)| super::decode(metadata, body))
             .transpose()
-            .map(Option::flatten)
+    }
+
+    /// Read one committed prefix in order, validating positions and indexed identities.
+    pub(super) fn visit(&self, mut visit: impl FnMut(usize, Entry) -> Result<()>) -> Result<()> {
+        let mut statement = self.connection.prepare(
+            "SELECT r.position,r.id,r.metadata,c.body FROM requests r JOIN body_values c ON c.id=r.body
+             WHERE r.session=?1 AND r.position<?2 ORDER BY r.position"
+        )?;
+        let mut rows = statement.query(params![self.session().as_str(), self.count])?;
+        let mut next = 0;
+        while let Some(row) = rows.next()? {
+            let position: usize = row.get(0)?;
+            ensure!(position == next, "missing request position");
+            let id: String = row.get(1)?;
+            let entry = super::decode(row.get(2)?, row.get(3)?)?;
+            ensure!(
+                entry.message.id.as_str() == id,
+                "message archive identifier index mismatch"
+            );
+            visit(position, entry)?;
+            next += 1;
+        }
+        ensure!(next == self.count, "missing request position");
+        Ok(())
     }
 
     pub fn at(&self, position: usize, before: usize) -> Result<Option<Entry>> {

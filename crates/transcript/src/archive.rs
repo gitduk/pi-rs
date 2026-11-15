@@ -188,29 +188,11 @@ impl Record {
                 at,
                 run: read_prompt(messages, shown, relayed)?,
             },
-            Annotation::Answer { id, at } => {
-                let mut blocks = Vec::new();
-                for message in messages {
-                    match message {
-                        Content::Assistant(body) => {
-                            for block in body {
-                                blocks.push(match block {
-                                    Block::Text(text) => AssistantContent::Text(Text { text }),
-                                    Block::Reasoning(r) => AssistantContent::Reasoning(r),
-                                    Block::Image(_) | Block::Data(_) => {
-                                        return Err(invalid("invalid assistant block"));
-                                    }
-                                });
-                            }
-                        }
-                        Content::ToolCall(call) => blocks.push(AssistantContent::ToolCall(call)),
-                        Content::User(_) | Content::ToolResult(_) => {
-                            return Err(invalid("invalid model reply"));
-                        }
-                    }
-                }
-                Entry::Answer { id, at, blocks }
-            }
+            Annotation::Answer { id, at } => Entry::Answer {
+                id,
+                at,
+                blocks: read_answer(messages)?,
+            },
             Annotation::Tool { id, at, drawn } => {
                 let mut messages = messages.into_iter();
                 let Some(Content::ToolResult(result)) = messages.next() else {
@@ -257,6 +239,30 @@ impl Record {
             }
         })
     }
+}
+
+fn read_answer(messages: Vec<Content>) -> Result<Vec<AssistantContent>, serde_json::Error> {
+    let mut blocks = Vec::new();
+    for message in messages {
+        match message {
+            Content::Assistant(body) => {
+                for block in body {
+                    blocks.push(match block {
+                        Block::Text(text) => AssistantContent::Text(Text { text }),
+                        Block::Reasoning(r) => AssistantContent::Reasoning(r),
+                        Block::Image(_) | Block::Data(_) => {
+                            return Err(invalid("invalid assistant block"));
+                        }
+                    });
+                }
+            }
+            Content::ToolCall(call) => blocks.push(AssistantContent::ToolCall(call)),
+            Content::User(_) | Content::ToolResult(_) => {
+                return Err(invalid("invalid model reply"));
+            }
+        }
+    }
+    Ok(blocks)
 }
 
 fn read_prompt(

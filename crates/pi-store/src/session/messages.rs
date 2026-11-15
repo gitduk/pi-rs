@@ -6,12 +6,26 @@ pub use lookup::Lookup;
 
 use super::{Location, database};
 use anyhow::{Context, Result, ensure};
-use message::{SessionId, WireKind};
+use message::{MessageId, SessionId, WireKind, WireMessage};
 use rusqlite::{OptionalExtension, Transaction, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const FORMAT: u8 = 1;
-pub use legacy::{Archive, Entry};
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Archive {
+    pub format: u8,
+    pub session: SessionId,
+    pub entries: Vec<Entry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Entry {
+    pub message: WireMessage,
+    pub parent: Option<MessageId>,
+    pub native_call: Option<String>,
+}
 
 /// Request records are append-only even when the conversation is rewound.
 pub fn write_from<T: Serialize>(
@@ -86,30 +100,20 @@ pub fn write_in<T: Serialize>(
 }
 
 pub fn visit(at: &Location, mut visit: impl FnMut(usize, Entry) -> Result<()>) -> Result<()> {
-    let lookup = Lookup::open(at)?.context("request archive has no records")?;
-    for position in 0..lookup.count() {
-        visit(
-            position,
-            lookup
-                .at(position, lookup.count())?
-                .context("missing request position")?,
-        )?;
-    }
-    Ok(())
+    Lookup::open(at)?
+        .context("request archive has no records")?
+        .visit(&mut visit)
 }
 
 pub fn read(at: &Location) -> Result<Option<Archive>> {
     let Some(lookup) = Lookup::open(at)? else {
         return Ok(None);
     };
-    let mut entries = Vec::new();
-    for position in 0..lookup.count() {
-        entries.push(
-            lookup
-                .at(position, lookup.count())?
-                .context("missing request position")?,
-        );
-    }
+    let mut entries = Vec::with_capacity(lookup.count());
+    lookup.visit(|_, entry| {
+        entries.push(entry);
+        Ok(())
+    })?;
     Ok(Some(Archive {
         format: FORMAT,
         session: at.session.clone(),

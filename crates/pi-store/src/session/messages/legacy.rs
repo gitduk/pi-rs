@@ -3,28 +3,12 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use message::{MessageId, SessionId, WireMessage};
-use serde::{Deserialize, Serialize};
+use message::SessionId;
+use serde::Deserialize;
 
-pub const FORMAT: u8 = 1;
+use super::{Archive, Entry, FORMAT};
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Archive {
-    pub format: u8,
-    pub session: SessionId,
-    pub entries: Vec<Entry>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Entry {
-    pub message: WireMessage,
-    pub parent: Option<MessageId>,
-    pub native_call: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Index {
     format: u8,
@@ -32,7 +16,7 @@ struct Index {
     segments: Vec<Segment>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Segment {
     from: usize,

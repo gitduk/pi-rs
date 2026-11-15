@@ -108,22 +108,19 @@ pub fn connect(path: &Path) -> Result<Connection> {
 }
 
 pub fn intern(c: &Connection, body: &serde_json::Value) -> Result<i64> {
+    let mut insert = c.prepare_cached("INSERT OR IGNORE INTO contents(body) VALUES(?1)")?;
+    let mut lookup = c.prepare_cached("SELECT id FROM contents WHERE body=?1")?;
     let mut parts = Vec::new();
     for block in body.as_array().context("message body must be an array")? {
         let block = serde_json::to_string(block)?;
-        c.execute("INSERT OR IGNORE INTO contents(body) VALUES(?1)", [&block])?;
-        let id: i64 = c.query_row("SELECT id FROM contents WHERE body=?1", [block], |r| {
-            r.get(0)
-        })?;
-        parts.push(id);
+        insert.execute([&block])?;
+        parts.push(lookup.query_row([block], |r| r.get::<_, i64>(0))?);
     }
     let parts = serde_json::to_string(&parts)?;
-    c.execute("INSERT OR IGNORE INTO bodies(parts) VALUES(?1)", [&parts])?;
-    Ok(
-        c.query_row("SELECT id FROM bodies WHERE parts=?1", [parts], |r| {
-            r.get(0)
-        })?,
-    )
+    c.prepare_cached("INSERT OR IGNORE INTO bodies(parts) VALUES(?1)")?
+        .execute([&parts])?;
+    Ok(c.prepare_cached("SELECT id FROM bodies WHERE parts=?1")?
+        .query_row([parts], |r| r.get(0))?)
 }
 
 /// Split bodies from metadata, so protocol references never duplicate content.
@@ -132,28 +129,34 @@ pub fn split(
 ) -> Result<(String, serde_json::Value, serde_json::Value)> {
     use message::{Block, ToolResultContent, conversation::Content};
     let (kind, metadata, body) = match content {
-        Content::User(body) => ("user", serde_json::Value::Null, body.clone()),
-        Content::Assistant(body) => ("assistant", serde_json::Value::Null, body.clone()),
+        Content::User(body) => ("user", serde_json::Value::Null, serde_json::to_value(body)?),
+        Content::Assistant(body) => (
+            "assistant",
+            serde_json::Value::Null,
+            serde_json::to_value(body)?,
+        ),
         Content::ToolCall(call) => (
             "tool_call",
             serde_json::json!({"id":call.id,"name":call.name}),
-            vec![Block::Data(call.args.clone())],
+            serde_json::to_value([Block::Data(call.args.clone())])?,
         ),
         Content::ToolResult(result) => (
             "tool_result",
             serde_json::json!({"call":result.call,"name":result.name,"is_error":result.is_error}),
-            result
-                .content
-                .iter()
-                .map(|b| match b {
-                    ToolResultContent::Text(t) => Block::Text(t.text.clone()),
-                    ToolResultContent::Image(i) => Block::Image(i.clone()),
-                    ToolResultContent::Json { value } => Block::Data(value.clone()),
-                })
-                .collect(),
+            serde_json::to_value(
+                result
+                    .content
+                    .iter()
+                    .map(|b| match b {
+                        ToolResultContent::Text(t) => Block::Text(t.text.clone()),
+                        ToolResultContent::Image(i) => Block::Image(i.clone()),
+                        ToolResultContent::Json { value } => Block::Data(value.clone()),
+                    })
+                    .collect::<Vec<_>>(),
+            )?,
         ),
     };
-    Ok((kind.into(), metadata, serde_json::to_value(body)?))
+    Ok((kind.into(), metadata, body))
 }
 
 pub fn join(kind: &str, metadata: &str, body: &str) -> Result<message::conversation::Content> {
@@ -166,8 +169,8 @@ pub fn join(kind: &str, metadata: &str, body: &str) -> Result<message::conversat
         "tool_call" => Content::ToolCall(ToolCall {
             id: meta["id"].as_str().context("missing call identity")?.into(),
             name: meta["name"].as_str().context("missing tool name")?.into(),
-            args: match body.as_slice() {
-                [Block::Data(v)] => v.clone(),
+            args: match <[Block; 1]>::try_from(body) {
+                Ok([Block::Data(value)]) => value,
                 _ => anyhow::bail!("invalid stored tool arguments"),
             },
         }),
@@ -376,29 +379,48 @@ pub struct Summary {
     pub parent: Option<String>,
 }
 
+const SUMMARY_QUERY: &str =
+    "SELECT id,workspace,created,touched,last,name,rounds,prompt,bytes,parent FROM sessions";
+
+impl Summary {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            workspace: row.get(1)?,
+            created: row.get(2)?,
+            touched: row.get(3)?,
+            last: row.get(4)?,
+            name: row.get(5)?,
+            rounds: row.get(6)?,
+            prompt: row.get(7)?,
+            bytes: row.get(8)?,
+            parent: row.get(9)?,
+        })
+    }
+}
+
+pub fn summary(path: &Path, id: &str) -> Result<Option<Summary>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let c = connect(path)?;
+    Ok(c.query_row(
+        &format!("{SUMMARY_QUERY} WHERE id=?1"),
+        [id],
+        Summary::from_row,
+    )
+    .optional()?)
+}
+
 pub fn summaries(path: &Path) -> Result<Vec<Summary>> {
     if !path.is_file() {
         return Ok(Vec::new());
     }
     let c = connect(path)?;
-    let mut s = c.prepare(
-        "SELECT id,workspace,created,touched,last,name,rounds,prompt,bytes,parent FROM sessions",
-    )?;
-    let rows = s.query_map([], |r| {
-        Ok(Summary {
-            id: r.get(0)?,
-            workspace: r.get(1)?,
-            created: r.get(2)?,
-            touched: r.get(3)?,
-            last: r.get(4)?,
-            name: r.get(5)?,
-            rounds: r.get(6)?,
-            prompt: r.get(7)?,
-            bytes: r.get(8)?,
-            parent: r.get(9)?,
-        })
-    })?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    let mut statement = c.prepare(SUMMARY_QUERY)?;
+    Ok(statement
+        .query_map([], Summary::from_row)?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 pub fn delete(at: &Location) -> Result<()> {

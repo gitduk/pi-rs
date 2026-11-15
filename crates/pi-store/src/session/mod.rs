@@ -6,6 +6,7 @@ pub use rusqlite::Transaction;
 mod log;
 pub mod messages;
 
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -96,6 +97,16 @@ impl ResumeChoice {
 }
 
 impl Stored {
+    fn header(&self) -> Header<'_> {
+        Header {
+            id: &self.id,
+            model: &self.model,
+            name: self.name.as_deref(),
+            created: self.created,
+            spent: self.spent,
+        }
+    }
+
     /// The transcript, with any call a crash left open closed: every
     /// loader comes through here, so no run starts on a dangling `tool_use`.
     pub fn into_session(self) -> Session {
@@ -295,12 +306,11 @@ fn bucket_transcripts(bucket: &Path) -> Vec<PathBuf> {
 // The workspace a transcript says it was saved under: the record inside
 // is authoritative, since the bucket name only encodes the path lossily.
 fn belongs(transcript: &Path) -> Option<Belongs> {
-    let text = std::fs::read_to_string(transcript).ok()?;
-    // A log names itself on its first line; a file from before the log is one
-    // object, and the whole of it is that line.
-    let first = text.lines().next().unwrap_or_default();
-    if log::is_log(&text) {
-        return serde_json::from_str::<Belongs>(first).ok();
+    let mut reader = std::io::BufReader::new(std::fs::File::open(transcript).ok()?);
+    let mut text = String::new();
+    reader.read_line(&mut text).ok()?;
+    if !log::is_log(&text) {
+        reader.read_to_string(&mut text).ok()?;
     }
     serde_json::from_str(&text).ok()
 }
@@ -365,19 +375,13 @@ impl Store {
         &self.root
     }
 
-    // Every bucket with its transcripts; the sweep and the removal walk
-    // the same tree and differ only in what they do with each bucket.
-    fn buckets(&self) -> Vec<(PathBuf, Vec<PathBuf>)> {
-        let Ok(dirs) = std::fs::read_dir(&self.root) else {
-            return Vec::new();
-        };
-        dirs.flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_dir())
-            .map(|bucket| {
-                let transcripts = bucket_transcripts(&bucket);
-                (bucket, transcripts)
-            })
+    fn buckets(&self) -> Vec<PathBuf> {
+        std::fs::read_dir(&self.root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
             .collect()
     }
 
@@ -418,13 +422,7 @@ impl Store {
         database::write(
             &tx,
             Path::new(&stored.workspace),
-            Header {
-                id: &stored.id,
-                model: &stored.model,
-                name: stored.name.as_deref(),
-                created: stored.created,
-                spent: stored.spent,
-            },
+            stored.header(),
             &stored.session,
             None,
         )?;
@@ -438,13 +436,7 @@ impl Store {
                 database::write(
                     &tx,
                     Path::new(&stored.workspace),
-                    Header {
-                        id: &child.id,
-                        model: &child.model,
-                        name: child.name.as_deref(),
-                        created: child.created,
-                        spent: child.spent,
-                    },
+                    child.header(),
                     &child.session,
                     Some(&stored.id),
                 )?;
@@ -475,12 +467,17 @@ impl Store {
             if belongs.workspace != workspace.to_string_lossy() {
                 continue;
             }
-            let id = &belongs.id;
-            if let Ok(_claim) = self.claim(workspace, id)
-                && let Err(error) = self.import(workspace, id)
-            {
-                tracing::warn!(target:"pi::session",session=id,%error,"legacy conversation not imported");
-            }
+            self.import_available(&belongs);
+        }
+    }
+
+    fn import_available(&self, belongs: &Belongs) {
+        let workspace = Path::new(&belongs.workspace);
+        let id = &belongs.id;
+        if let Ok(_claim) = self.claim(workspace, id)
+            && let Err(error) = self.import(workspace, id)
+        {
+            tracing::warn!(target:"pi::session",session=id,%error,"legacy conversation not imported");
         }
     }
 
@@ -491,11 +488,13 @@ impl Store {
 
     pub fn relocate(&self, workspace: &Path, id: &str) -> Result<Claim> {
         let here = self.claim(workspace, id)?;
+        let destination = self.path_of(workspace, id);
         self.import(workspace, id)?;
-        if self.path_of(workspace, id).exists() {
+        if destination.exists() {
             return Ok(here);
         }
-        for (bucket, transcripts) in self.buckets() {
+        for bucket in self.buckets() {
+            let transcripts = bucket_transcripts(&bucket);
             for transcript in transcripts {
                 if let Some(b) = belongs(&transcript)
                     && b.id == id
@@ -505,13 +504,12 @@ impl Store {
                 }
             }
             let database = bucket.join(database::FILE);
-            for summary in database::summaries(&database)? {
-                if summary.id != id || summary.parent.is_some() {
-                    continue;
-                }
-                let source = Location::new(database.clone(), message::SessionId::new(id.into())?);
+            if let Some(summary) = database::summary(&database, id)?
+                && summary.parent.is_none()
+            {
+                let source = Location::new(database, destination.session.clone());
                 let _source = self.claim(Path::new(&summary.workspace), id)?;
-                database::relocate(&source, &self.path_of(workspace, id), workspace)?;
+                database::relocate(&source, &destination, workspace)?;
                 let old = source.artifacts();
                 for entry in std::fs::read_dir(&old).into_iter().flatten().flatten() {
                     if entry.file_name() != LOCK
@@ -556,10 +554,6 @@ impl Store {
         Ok(at)
     }
 
-    pub fn subagent_path(&self, workspace: &Path, _parent: &str, id: &str) -> Location {
-        self.path_of(workspace, id)
-    }
-
     pub fn save_subagent(
         &self,
         parent: &str,
@@ -592,7 +586,7 @@ impl Store {
     pub fn progress(&self) -> Vec<Progress> {
         self.buckets()
             .into_iter()
-            .flat_map(|(bucket, _)| {
+            .flat_map(|bucket| {
                 let database = bucket.join(database::FILE);
                 database::summaries(&database)
                     .unwrap_or_default()
@@ -616,8 +610,8 @@ impl Store {
         database::read(at)
     }
 
-    /// Read the transcript at `path`, as `progress` names it.
-    pub fn read_legacy(path: &Path) -> Result<Stored> {
+    /// Decode a legacy transcript for migration.
+    fn read_legacy(path: &Path) -> Result<Stored> {
         let body = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read {}", path.display()))?;
         if !log::is_log(&body) {
@@ -640,7 +634,7 @@ impl Store {
 
     #[cfg(test)]
     pub(crate) fn load(&self, id: &str) -> Result<Stored> {
-        for (bucket, _) in self.buckets() {
+        for bucket in self.buckets() {
             let at = Location::new(
                 bucket.join(database::FILE),
                 message::SessionId::new(id.into())?,
@@ -679,10 +673,11 @@ impl Store {
 
     fn sweep(&self, keep: std::time::Duration, eligible: impl Fn(&database::Summary) -> bool) {
         self.changed();
-        for (bucket, transcripts) in self.buckets() {
+        for bucket in self.buckets() {
+            let transcripts = bucket_transcripts(&bucket);
             for transcript in transcripts {
                 if let Some(b) = belongs(&transcript) {
-                    self.import_bucket(Path::new(&b.workspace));
+                    self.import_available(&b);
                 }
             }
             let database = bucket.join(database::FILE);
@@ -703,10 +698,11 @@ impl Store {
     pub fn drop_under(&self, root: &Path) -> usize {
         self.changed();
         let mut dropped = 0;
-        for (bucket, transcripts) in self.buckets() {
+        for bucket in self.buckets() {
+            let transcripts = bucket_transcripts(&bucket);
             for transcript in transcripts {
                 if let Some(b) = belongs(&transcript) {
-                    self.import_bucket(Path::new(&b.workspace));
+                    self.import_available(&b);
                 }
             }
             for s in database::summaries(&bucket.join(database::FILE)).unwrap_or_default() {
@@ -1260,7 +1256,7 @@ mod tests {
         let (stored, _claim) = store.take(b, "s").unwrap();
         assert_eq!(stored.id, "s");
         assert!(store.filed(b, "s"));
-        assert!(store.subagent_path(b, "s", "s-sub").exists());
+        assert!(store.path_of(b, "s-sub").exists());
         assert!(!store.session_dir(a, "s").exists());
     }
 

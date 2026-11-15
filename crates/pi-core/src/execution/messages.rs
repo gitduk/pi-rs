@@ -87,12 +87,9 @@ pub enum Error {
     ObservationClosed,
 }
 
-#[derive(serde::Serialize)]
 pub struct Snapshot {
-    #[serde(skip)]
     owner: std::sync::Weak<Mutex<Table>>,
     base: usize,
-    format: u8,
     session: SessionId,
     entries: Vec<Saved>,
 }
@@ -196,7 +193,6 @@ impl Messages {
         Snapshot {
             owner: Arc::downgrade(&self.0),
             base: table.base,
-            format: pi_store::session::messages::FORMAT,
             session: table.session.clone(),
             entries,
         }
@@ -210,21 +206,11 @@ impl Messages {
             archive.session() == &session,
             "message archive belongs to another session"
         );
-        let count = archive.count();
         let messages = Self::new(session);
         let interrupted = {
             let mut table = messages.lock();
             table.archive = Some(archive);
             pi_store::session::messages::visit(path, |position, entry| {
-                anyhow::ensure!(
-                    table
-                        .archive
-                        .as_ref()
-                        .expect("restoring archive")
-                        .position(&entry.message.id, count)?
-                        == Some(position),
-                    "message archive identifier index mismatch"
-                );
                 table.restore_entry(entry)?;
                 table.base = position + 1;
                 table.order.clear();
@@ -849,6 +835,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = SessionId::new("observe-archive".into()).unwrap();
         let messages = Messages::new(session.clone());
+        let archive =
+            pi_store::session::Location::new(dir.path().join("project.db"), messages.session());
         let start = messages.cursor();
         let mut slow = messages.observe(Some(start.clone())).unwrap();
         let mut ids = Vec::new();
@@ -858,23 +846,13 @@ mod tests {
             ids.push(id.message().clone());
             ids.push(owner.complete(Status::Done, vec![]).unwrap().id().clone());
         }
-        messages
-            .snapshot()
-            .save(&pi_store::session::Location::new(
-                dir.path().join("project.db"),
-                messages.session(),
-            ))
-            .unwrap();
+        messages.snapshot().save(&archive).unwrap();
         assert!(!messages.lock().requests.contains_key(&ids[0]));
         assert!(messages.lock().requests.len() <= COMPLETED_CACHE);
         assert_eq!(slow.next().await.unwrap().message.id(), &ids[0]);
         let cursor = slow.cursor().clone();
         drop(slow);
-        let restored = Messages::load(
-            session,
-            &pi_store::session::Location::new(dir.path().join("project.db"), messages.session()),
-        )
-        .unwrap();
+        let restored = Messages::load(session, &archive).unwrap();
         let mut resumed = restored.observe(Some(cursor)).unwrap();
         for id in &ids[1..] {
             assert_eq!(resumed.next().await.unwrap().message.id(), id);
@@ -974,43 +952,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = SessionId::new("persisted".into()).unwrap();
         let messages = Messages::new(session.clone());
+        let archive =
+            pi_store::session::Location::new(dir.path().join("project.db"), messages.session());
         let wire = input(&messages);
         let id = messages.submit(wire.clone()).unwrap();
         let mut owner = messages.start_next().unwrap();
         let response = owner
             .complete(Status::Done, vec![Block::Text("result".into())])
             .unwrap();
-        messages
-            .snapshot()
-            .save(&pi_store::session::Location::new(
-                dir.path().join("project.db"),
-                messages.session(),
-            ))
-            .unwrap();
-        let restored = Messages::load(
-            session,
-            &pi_store::session::Location::new(dir.path().join("project.db"), messages.session()),
-        )
-        .unwrap();
+        messages.snapshot().save(&archive).unwrap();
+        let restored = Messages::load(session, &archive).unwrap();
         assert_eq!(restored.response(&id).unwrap().unwrap(), response);
         assert_eq!(restored.submit(wire).unwrap(), id);
         assert!(restored.start_next().is_none());
-        restored
-            .snapshot()
-            .save(&pi_store::session::Location::new(
-                dir.path().join("project.db"),
-                messages.session(),
-            ))
-            .unwrap();
+        restored.snapshot().save(&archive).unwrap();
         assert_eq!(
-            pi_store::session::messages::read(&pi_store::session::Location::new(
-                dir.path().join("project.db"),
-                messages.session()
-            ))
-            .unwrap()
-            .unwrap()
-            .entries
-            .len(),
+            pi_store::session::messages::read(&archive)
+                .unwrap()
+                .unwrap()
+                .entries
+                .len(),
             2
         );
     }
@@ -1020,6 +981,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = SessionId::new("interrupted".into()).unwrap();
         let messages = Messages::new(session.clone());
+        let archive =
+            pi_store::session::Location::new(dir.path().join("project.db"), messages.session());
         let parent = messages.submit(input(&messages)).unwrap();
         let _owner = messages.start_next().unwrap();
         let child = messages
@@ -1039,20 +1002,10 @@ mod tests {
             )
             .unwrap();
         let child_id = child.request().request_id().unwrap();
-        messages
-            .snapshot()
-            .save(&pi_store::session::Location::new(
-                dir.path().join("project.db"),
-                messages.session(),
-            ))
-            .unwrap();
+        messages.snapshot().save(&archive).unwrap();
         // This segment was never committed to the index and must not be replayed.
         std::fs::write(dir.path().join("999-1000.json"), "incomplete").unwrap();
-        let restored = Messages::load(
-            session.clone(),
-            &pi_store::session::Location::new(dir.path().join("project.db"), messages.session()),
-        )
-        .unwrap();
+        let restored = Messages::load(session.clone(), &archive).unwrap();
         assert!(restored.start_next().is_none());
         for id in [&parent, &child_id] {
             assert!(matches!(
@@ -1067,11 +1020,7 @@ mod tests {
             restored.native_call(&child_id).unwrap().as_deref(),
             Some("native-1")
         );
-        let repeated = Messages::load(
-            session,
-            &pi_store::session::Location::new(dir.path().join("project.db"), messages.session()),
-        )
-        .unwrap();
+        let repeated = Messages::load(session, &archive).unwrap();
         assert_eq!(
             restored.response(&parent).unwrap(),
             repeated.response(&parent).unwrap()
@@ -1086,6 +1035,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = SessionId::new("long-session".into()).unwrap();
         let messages = Messages::new(session.clone());
+        let archive =
+            pi_store::session::Location::new(dir.path().join("project.db"), messages.session());
         let first = input(&messages);
         let first_id = messages.submit(first.clone()).unwrap();
         messages
@@ -1101,22 +1052,10 @@ mod tests {
                 .complete(Status::Done, vec![])
                 .unwrap();
             if at % 64 == 0 {
-                messages
-                    .snapshot()
-                    .save(&pi_store::session::Location::new(
-                        dir.path().join("project.db"),
-                        messages.session(),
-                    ))
-                    .unwrap();
+                messages.snapshot().save(&archive).unwrap();
             }
         }
-        messages
-            .snapshot()
-            .save(&pi_store::session::Location::new(
-                dir.path().join("project.db"),
-                messages.session(),
-            ))
-            .unwrap();
+        messages.snapshot().save(&archive).unwrap();
         assert!(messages.lock().requests.len() <= COMPLETED_CACHE);
         assert!(messages.lock().completed_bytes <= CACHE_BYTES);
         assert!(messages.lock().order.is_empty());
@@ -1124,11 +1063,7 @@ mod tests {
         assert_eq!(messages.submit(first.clone()).unwrap(), first_id);
         assert!(messages.response(&first_id).unwrap().is_some());
         assert!(messages.start_next().is_none());
-        let restored = Messages::load(
-            session,
-            &pi_store::session::Location::new(dir.path().join("project.db"), messages.session()),
-        )
-        .unwrap();
+        let restored = Messages::load(session, &archive).unwrap();
         assert!(restored.lock().requests.len() <= COMPLETED_CACHE);
         assert_eq!(restored.submit(first).unwrap(), first_id);
         assert!(restored.start_next().is_none());
@@ -1138,13 +1073,7 @@ mod tests {
             .unwrap()
             .complete(Status::Done, vec![])
             .unwrap();
-        restored
-            .snapshot()
-            .save(&pi_store::session::Location::new(
-                dir.path().join("project.db"),
-                messages.session(),
-            ))
-            .unwrap();
+        restored.snapshot().save(&archive).unwrap();
     }
 
     #[test]
@@ -1309,6 +1238,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = SessionId::new("events".into()).unwrap();
         let messages = Messages::new(session.clone());
+        let archive =
+            pi_store::session::Location::new(dir.path().join("project.db"), messages.session());
         let mut wire = input(&messages);
         wire.kind = WireKind::Request(Request::ToModel(message::InputKind::Automatic));
         wire.body = vec![Block::Data(
@@ -1328,18 +1259,8 @@ mod tests {
                 .complete(Status::Done, vec![])
                 .unwrap();
         }
-        messages
-            .snapshot()
-            .save(&pi_store::session::Location::new(
-                dir.path().join("project.db"),
-                messages.session(),
-            ))
-            .unwrap();
-        let restored = Messages::load(
-            session,
-            &pi_store::session::Location::new(dir.path().join("project.db"), messages.session()),
-        )
-        .unwrap();
+        messages.snapshot().save(&archive).unwrap();
+        let restored = Messages::load(session, &archive).unwrap();
         wire.id = new_id();
         wire.at += 1;
         let Admission::Existing {

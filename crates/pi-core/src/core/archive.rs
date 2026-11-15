@@ -24,6 +24,23 @@ impl Filed {
     pub fn armed(store: Store, root: std::path::PathBuf, model: String) -> Arc<dyn Archive> {
         Arc::new(Self { store, root, model })
     }
+
+    fn write_job(
+        &self,
+        parent: &str,
+        id: &str,
+        model: &str,
+        session: Session,
+    ) -> impl FnOnce() -> anyhow::Result<pi_store::session::Location> + Send + 'static {
+        let (store, root, parent, id, model) = (
+            self.store.clone(),
+            self.root.clone(),
+            parent.to_owned(),
+            id.to_owned(),
+            model.to_owned(),
+        );
+        move || store.save_subagent(&parent, &id, &root, &model, now(), &session)
+    }
 }
 
 /// A run with nowhere to file: a one-shot keeps no transcript, so the subagents
@@ -46,21 +63,12 @@ impl Archive for Filed {
         model: &'a str,
         session: &Session,
     ) -> futures::future::BoxFuture<'a, Result<(), String>> {
-        let (store, root, parent, id, model, session) = (
-            self.store.clone(),
-            self.root.clone(),
-            parent.to_owned(),
-            id.to_owned(),
-            model.to_owned(),
-            session.clone(),
-        );
+        let write = self.write_job(parent, id, model, session.clone());
         Box::pin(async move {
-            super::saves::wait(move || {
-                store.save_subagent(&parent, &id, &root, &model, now(), &session)
-            })
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| format!("child checkpoint failed: {e:#}"))?;
+            super::saves::wait(write)
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| format!("child checkpoint failed: {e:#}"))?;
             Ok(())
         })
     }
@@ -72,16 +80,10 @@ impl Archive for Filed {
     }
 
     fn keep_model(&self, parent: &str, id: &str, model: &str, session: Session) {
-        let (store, root, model, parent, id) = (
-            self.store.clone(),
-            self.root.clone(),
-            model.to_string(),
-            parent.to_string(),
-            id.to_string(),
-        );
+        let write = self.write_job(parent, id, model, session);
+        let id = id.to_owned();
         super::saves::behind(move || {
-            let saved = store.save_subagent(&parent, &id, &root, &model, now(), &session);
-            if let Err(e) = saved {
+            if let Err(e) = write() {
                 tracing::warn!(
                     target: "pi::session",
                     id,
