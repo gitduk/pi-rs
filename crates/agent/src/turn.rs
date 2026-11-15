@@ -23,22 +23,25 @@ struct Draft {
     batch: crate::session::Draft,
     bytes: usize,
     due: tokio::time::Instant,
-    started: bool,
 }
 
 impl Draft {
-    fn new(entry: crate::session::EntryId) -> Self {
-        Self {
-            batch: crate::session::Draft {
-                id: uuid::Uuid::new_v4().simple().to_string(),
-                entry,
-                from: 0,
-                blocks: Vec::new(),
-            },
+    async fn start(
+        entry: crate::session::EntryId,
+        input: &dyn crate::seams::Input,
+    ) -> Result<Self, String> {
+        let batch = crate::session::Draft {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            entry,
+            from: 0,
+            blocks: Vec::new(),
+        };
+        input.draft(batch.clone()).await?;
+        Ok(Self {
+            batch,
             bytes: 0,
             due: tokio::time::Instant::now() + DRAFT_INTERVAL,
-            started: false,
-        }
+        })
     }
 
     fn push(&mut self, event: &StreamEvent) {
@@ -70,14 +73,19 @@ impl Draft {
     }
 
     async fn flush(&mut self, input: &dyn crate::seams::Input) -> Result<(), String> {
-        if self.started && self.batch.blocks.is_empty() {
+        if self.batch.blocks.is_empty() {
             return Ok(());
         }
         let count = self.batch.blocks.len();
-        input.draft(self.batch.clone()).await?;
+        input
+            .draft(crate::session::Draft {
+                id: self.batch.id.clone(),
+                entry: self.batch.entry,
+                from: self.batch.from,
+                blocks: std::mem::take(&mut self.batch.blocks),
+            })
+            .await?;
         self.batch.from += count;
-        self.batch.blocks.clear();
-        self.started = true;
         self.bytes = 0;
         self.due = tokio::time::Instant::now() + DRAFT_INTERVAL;
         Ok(())
@@ -166,8 +174,9 @@ impl Agent {
         // A fresh accumulator per attempt: half a stream must not bleed into
         // the message the retry produces.
         let mut acc = Accumulator::new(self.model.spec.model.clone());
-        let mut draft = Draft::new(state.entry);
-        draft.flush(state.input).await.map_err(draft_error)?;
+        let mut draft = Draft::start(state.entry, state.input)
+            .await
+            .map_err(draft_error)?;
         let idle = retry.idle;
 
         let wire = self.wire();

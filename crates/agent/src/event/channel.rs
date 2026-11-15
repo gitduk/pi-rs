@@ -26,6 +26,36 @@ struct State {
     closed: bool,
 }
 
+impl State {
+    fn full(&self, bytes: usize) -> bool {
+        self.queue.len() >= CAPACITY || self.bytes.saturating_add(bytes) > BYTES
+    }
+
+    fn enqueue(&mut self, event: Event, bytes: usize) -> Result<(), TrySendError<Event>> {
+        if self.closed {
+            return Err(TrySendError::Closed(event));
+        }
+        if self.full(bytes) {
+            self.queue.retain(|(event, bytes)| {
+                if event.is_progress() {
+                    self.bytes -= bytes;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        // A single complete fact may exceed the byte budget. It enters alone,
+        // so a large atomic result neither deadlocks nor loses its content.
+        if !self.queue.is_empty() && self.full(bytes) {
+            return Err(TrySendError::Full(event));
+        }
+        self.bytes += bytes;
+        self.queue.push_back((event, bytes));
+        Ok(())
+    }
+}
+
 pub struct Sender(Arc<Shared>);
 pub struct Receiver(Arc<Shared>);
 
@@ -79,41 +109,31 @@ impl Sender {
     }
 
     fn enqueue(&self, event: Event, bytes: usize) -> Result<(), TrySendError<Event>> {
-        let mut state = self.0.state.lock().expect("event channel poisoned");
-        if state.closed {
-            return Err(TrySendError::Closed(event));
+        let result = self
+            .0
+            .state
+            .lock()
+            .expect("event channel poisoned")
+            .enqueue(event, bytes);
+        if result.is_ok() {
+            self.0.readable.wake();
         }
-        if state.queue.len() >= CAPACITY || state.bytes.saturating_add(bytes) > BYTES {
-            state.queue.retain(|(event, _)| !event.is_progress());
-            state.bytes = state.queue.iter().map(|(_, bytes)| bytes).sum();
-        }
-        // A single complete fact may exceed the byte budget. It enters alone,
-        // so a large atomic result neither deadlocks nor loses its content.
-        if !state.queue.is_empty()
-            && (state.queue.len() >= CAPACITY || state.bytes.saturating_add(bytes) > BYTES)
-        {
-            return Err(TrySendError::Full(event));
-        }
-        state.bytes += bytes;
-        state.queue.push_back((event, bytes));
-        drop(state);
-        self.0.readable.wake();
-        Ok(())
+        result
     }
 
     pub(super) fn latest(&self, event: Event) {
         let bytes = event.retained_bytes();
         let mut state = self.0.state.lock().expect("event channel poisoned");
-        if state.closed {
-            return;
-        }
         if let Some(at) = state.queue.iter().position(|(old, _)| event.replaces(old)) {
             let (_, old_bytes) = state.queue.remove(at).expect("located progress");
             state.bytes -= old_bytes;
         }
-        drop(state);
         // Progress is optional; completion remains reliable even under pressure.
-        let _ = self.enqueue(event, bytes);
+        let result = state.enqueue(event, bytes);
+        drop(state);
+        if result.is_ok() {
+            self.0.readable.wake();
+        }
     }
 }
 

@@ -122,7 +122,6 @@ pub struct Stream {
     // Model output with no trailing newline yet, kept live while still
     // being written; a completed line goes straight to scrollback.
     text: String,
-    revision: u64,
     // The answer as last drawn: a frame with nothing new to draw, a spinner
     // tick, draws it again from here rather than from the markdown.
     drawn: std::cell::RefCell<Option<Drawn>>,
@@ -130,7 +129,6 @@ pub struct Stream {
 
 // The lines an answer drew, and what they were drawn from.
 struct Drawn {
-    revision: u64,
     width: usize,
     color: bool,
     theme: std::sync::Arc<pi_store::theme::Theme>,
@@ -146,24 +144,24 @@ impl Stream {
         if delta.is_empty() {
             return;
         }
-        self.revision = self.revision.wrapping_add(1);
+        *self.drawn.get_mut() = None;
         self.text.push_str(delta);
     }
 
     pub(super) fn take(&mut self) -> String {
-        self.revision = self.revision.wrapping_add(1);
+        *self.drawn.get_mut() = None;
         std::mem::take(&mut self.text)
     }
 
     pub(super) fn take_line(&mut self) -> Option<String> {
         let at = self.text.find('\n')?;
-        self.revision = self.revision.wrapping_add(1);
+        *self.drawn.get_mut() = None;
         Some(self.text.drain(..=at).collect())
     }
 
     #[cfg(test)]
     pub(super) fn replace(&mut self, text: String) {
-        self.revision = self.revision.wrapping_add(1);
+        *self.drawn.get_mut() = None;
         self.text = text;
     }
 
@@ -180,11 +178,9 @@ impl Stream {
             d.width == width
                 && d.color == paint.color
                 && std::sync::Arc::ptr_eq(&d.theme, &paint.theme)
-                && d.revision == self.revision
         });
         if !fresh {
             *drawn = Some(Drawn {
-                revision: self.revision,
                 width,
                 color: paint.color,
                 theme: paint.theme.clone(),

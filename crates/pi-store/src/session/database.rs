@@ -299,12 +299,12 @@ pub fn append_draft(at: &Location, draft: &transcript::Draft) -> Result<()> {
     for (offset, block) in draft.blocks.iter().enumerate() {
         let seq = draft.from + offset;
         let body = serde_json::to_string(block)?;
-        let retained: String = tx.query_row(
-            "INSERT INTO draft_parts VALUES(?1,?2,?3)
-             ON CONFLICT(session,seq) DO UPDATE SET body=draft_parts.body RETURNING body",
-            params![at.session.as_str(), seq, body],
-            |r| r.get(0),
-        )?;
+        let retained: String = tx
+            .prepare_cached(
+                "INSERT INTO draft_parts VALUES(?1,?2,?3)
+                 ON CONFLICT(session,seq) DO UPDATE SET body=draft_parts.body RETURNING body",
+            )?
+            .query_row(params![at.session.as_str(), seq, body], |r| r.get(0))?;
         ensure!(
             retained == body,
             "draft fragment conflicts with retained content"
@@ -315,19 +315,12 @@ pub fn append_draft(at: &Location, draft: &transcript::Draft) -> Result<()> {
 }
 
 fn start_draft(tx: &Transaction<'_>, at: &Location, draft: &transcript::Draft) -> Result<()> {
-    let next: u64 = tx.query_row(
-        "SELECT next FROM sessions WHERE id=?1",
+    let (next, previous): (u64, Option<String>) = tx.query_row(
+        "SELECT s.next,d.id FROM sessions s LEFT JOIN drafts d ON d.session=s.id WHERE s.id=?1",
         [at.session.as_str()],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     ensure!(draft.entry.0 == next, "draft belongs to a superseded reply");
-    let previous: Option<String> = tx
-        .query_row(
-            "SELECT id FROM drafts WHERE session=?1",
-            [at.session.as_str()],
-            |r| r.get(0),
-        )
-        .optional()?;
     if previous.as_deref() != Some(&draft.id) {
         ensure!(draft.from == 0, "draft is missing its first fragments");
         tx.execute("DELETE FROM drafts WHERE session=?1", [at.session.as_str()])?;

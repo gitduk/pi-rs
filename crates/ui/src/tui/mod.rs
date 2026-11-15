@@ -469,7 +469,7 @@ impl Tui {
 
     // Take what every lane's run has posted since the last look into its own
     // view, drawn or not: its meter, filed rows and end happen when they do.
-    async fn serve_lanes(&mut self) {
+    fn serve_lanes(&mut self) {
         let started = std::time::Instant::now();
         for _ in 0..128 {
             if started.elapsed() >= std::time::Duration::from_millis(4) {
@@ -769,7 +769,7 @@ impl Tui {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let update = core::update::changed();
         let leaving = loop {
-            self.serve_lanes().await;
+            self.serve_lanes();
             // Before the bar rebuilds, so a vanished tab goes with its lane.
             self.drop_vanished_lanes();
             for request in prune_views(&self.core, &mut self.views) {

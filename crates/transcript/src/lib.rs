@@ -454,7 +454,7 @@ pub struct Session {
     #[serde(skip)]
     measured: Option<Measured>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    draft: Option<Draft>,
+    draft: Option<Arc<Draft>>,
 }
 
 /// Unfinished assistant output, retained for inspection and excluded from context.
@@ -565,11 +565,11 @@ fn stopped_note(err: Option<&str>) -> String {
 
 impl Session {
     pub fn draft(&self) -> Option<&Draft> {
-        self.draft.as_ref()
+        self.draft.as_deref()
     }
 
     pub fn keep_draft(&mut self, draft: Draft) {
-        self.draft = Some(draft);
+        self.draft = Some(Arc::new(draft));
     }
     pub fn new() -> Self {
         Self::default()
@@ -1200,14 +1200,17 @@ fn order_results(messages: &mut [Message]) {
         let Message::Assistant { .. } = &before[at] else {
             continue;
         };
+        let count = after.iter().take_while(|m| matches!(m,
+            Message::User { content } if matches!(content.as_slice(), [UserContent::ToolResult(_)])
+        )).count();
+        if count < 2 {
+            continue;
+        }
         let order: HashMap<_, _> = before[at]
             .tool_calls()
             .enumerate()
             .map(|(i, call)| (call.id.as_str(), i))
             .collect();
-        let count = after.iter().take_while(|m| matches!(m,
-            Message::User { content } if matches!(content.as_slice(), [UserContent::ToolResult(_)])
-        )).count();
         after[..count].sort_by_key(|m| match m {
             Message::User { content } => match &content[0] {
                 UserContent::ToolResult(result) => order

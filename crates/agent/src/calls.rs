@@ -114,7 +114,7 @@ impl Agent {
         }
 
         // Each future carries its call identity, independent of completion order.
-        let futures: Vec<_> = calls
+        let futures = calls
             .iter()
             .zip(&actions)
             .zip(contexts)
@@ -152,24 +152,23 @@ impl Agent {
                     }
                 }
                 .instrument(ran(call))
-            })
-            .collect();
+            });
         // Neighbouring Shared calls join; an Exclusive one waits for those
         // ahead of it and holds back those behind.
         let mut shared = FuturesUnordered::new();
-        for (f, action) in futures.into_iter().zip(&actions) {
+        for (f, action) in futures.zip(&actions) {
             if matches!(action, Action::Run(t) if t.concurrency() == Concurrency::Exclusive) {
                 while let Some(outcome) = shared.next().await {
-                    batch.retain(outcome).await?;
+                    batch.retain(calls, outcome).await?;
                 }
                 batch.flush().await;
-                batch.retain(f.await).await?;
+                batch.retain(calls, f.await).await?;
             } else {
                 shared.push(f);
             }
         }
         while let Some(outcome) = shared.next().await {
-            batch.retain(outcome).await?;
+            batch.retain(calls, outcome).await?;
         }
         batch.flush().await;
         Ok(batch.stopped)
@@ -188,7 +187,7 @@ pub(crate) struct Batch<'a> {
 }
 
 impl<'a> Batch<'a> {
-    async fn retain(&mut self, outcome: Landed) -> Result<(), AgentError> {
+    async fn retain(&mut self, calls: &[ToolCall], outcome: Landed) -> Result<(), AgentError> {
         let (result, drawn) = match outcome {
             Landed::Stopped => {
                 self.stopped = true;
@@ -207,12 +206,7 @@ impl<'a> Batch<'a> {
             .into_iter()
             .filter(|r| r.call == result.call)
             .collect();
-        let call = ToolCall {
-            id: result.call.clone(),
-            name: result.name.clone(),
-            args: serde_json::Value::Null,
-        };
-        let results = replies::reconcile(&[call], vec![(result, drawn)], resolved, self.ctx)?;
+        let results = replies::reconcile(calls, vec![(result, drawn)], resolved, self.ctx)?;
         for event in replies::retain(self.session, self.input, results).await? {
             self.pending.push_back(self.reporter.report(event).boxed());
         }

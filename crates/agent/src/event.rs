@@ -117,7 +117,7 @@ impl Event {
             | Self::Refit(text)
             | Self::Failed { error: text }
             | Self::TurnEnd { text, .. } => text.len(),
-            Self::ToolQueued { id, name, args } => id.len() + name.len() + args.to_string().len(),
+            Self::ToolQueued { id, name, args } => id.len() + name.len() + json_bytes(args),
             Self::ToolStart { id, .. } => id.len(),
             Self::ToolProgress { id, text } | Self::ToolPrinted { id, text } => {
                 id.len() + text.len()
@@ -133,9 +133,7 @@ impl Event {
                 name,
                 reason: text,
             } => id.len() + name.len() + text.len(),
-            Self::Committed { entries } => serde_json::to_vec(entries)
-                .expect("serializable entries")
-                .len(),
+            Self::Committed { entries } => json_bytes(entries),
             Self::Compacted(_)
             | Self::Context { .. }
             | Self::Usage(_)
@@ -154,6 +152,25 @@ impl Event {
             _ => false,
         }
     }
+}
+
+fn json_bytes(value: &impl serde::Serialize) -> usize {
+    struct Count(usize);
+
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value).expect("serializable event payload");
+    count.0
 }
 
 /// Where a run reports what it is doing: the channel the surface drains, and

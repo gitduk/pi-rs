@@ -93,9 +93,6 @@ pub(crate) async fn settle(
             results.push((bound(result, ctx), Drawn::default()));
         }
     }
-    if results.is_empty() {
-        return Ok(());
-    }
     commit(session, reporter, input, results).await
 }
 
@@ -121,8 +118,8 @@ pub(crate) async fn retain(
         return Ok(Vec::new());
     }
     let ids = session.push_previewed(results);
-    let mut events = Vec::new();
-    for entry in session.entries_for(&ids) {
+    let entries = session.entries_for(&ids);
+    for &entry in &entries {
         if let crate::session::Entry::Tool { result, .. } = entry {
             input
                 .tool_response(result)
@@ -133,7 +130,8 @@ pub(crate) async fn retain(
         .checkpoint(session)
         .await
         .map_err(AgentError::Interaction)?;
-    for entry in session.entries_for(&ids) {
+    let mut events = Vec::new();
+    for &entry in &entries {
         if let crate::session::Entry::Tool {
             result,
             preview,
@@ -152,7 +150,7 @@ pub(crate) async fn retain(
         }
     }
     events.push(crate::Event::Committed {
-        entries: session.entries_for(&ids).into_iter().cloned().collect(),
+        entries: entries.into_iter().cloned().collect(),
     });
     Ok(events)
 }

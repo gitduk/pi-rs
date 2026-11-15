@@ -580,7 +580,7 @@ impl Tui {
     pub(super) async fn settle(&mut self, done: Done) {
         // Events arrive before the end that follows them, so both race;
         // take what's waiting first, or a tool row freezes mid-abandon.
-        self.serve_lanes().await;
+        self.serve_lanes();
         let settled = self.core.settle_execution(done);
         self.present_settlement(settled);
     }

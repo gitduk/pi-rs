@@ -100,8 +100,7 @@ impl Ui {
             // A finished reasoning line belongs in the streaming block's
             // group as soon as it ends.
             while let Some(line) = view.surface.stream.take_line() {
-                let line = line.trim_end_matches('\n').to_string();
-                let painted = Row::reasoning_line(&line, &self.paint);
+                let painted = Row::reasoning_line(line.trim_end_matches('\n'), &self.paint);
                 self.land(view, painted, reasoning);
             }
         }
