@@ -651,12 +651,29 @@ impl Store {
         if at.database.is_file() {
             database::delete(&at)?;
         }
+        self.remove_artifacts(workspace, id)?;
+        self.changed();
+        Ok(())
+    }
+
+    fn remove_artifacts(&self, workspace: &Path, id: &str) -> Result<()> {
         let dir = self.session_dir(workspace, id);
         if dir.is_dir() {
             std::fs::remove_dir_all(dir)?;
         }
-        self.changed();
         Ok(())
+    }
+
+    fn remove_selected(&self, path: &Path, sessions: &[database::Summary]) -> Result<usize> {
+        let ids: Vec<_> = sessions.iter().map(|s| s.id.as_str()).collect();
+        database::delete_many(path, &ids)?;
+        Ok(sessions
+            .iter()
+            .filter(|s| {
+                self.remove_artifacts(Path::new(&s.workspace), &s.id)
+                    .is_ok()
+            })
+            .count())
     }
 
     pub fn prune(&self) {
@@ -681,17 +698,17 @@ impl Store {
                 }
             }
             let database = bucket.join(database::FILE);
-            for s in database::summaries(&database).unwrap_or_default() {
-                if s.parent.is_some()
-                    || !eligible(&s)
-                    || held(&self.session_dir(Path::new(&s.workspace), &s.id))
-                {
-                    continue;
-                }
-                if now().saturating_sub(s.touched) >= keep.as_secs() {
-                    let _ = self.remove(Path::new(&s.workspace), &s.id);
-                }
-            }
+            let selected: Vec<_> = database::summaries(&database)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|s| {
+                    s.parent.is_none()
+                        && eligible(s)
+                        && !held(&self.session_dir(Path::new(&s.workspace), &s.id))
+                        && now().saturating_sub(s.touched) >= keep.as_secs()
+                })
+                .collect();
+            let _ = self.remove_selected(&database, &selected);
         }
     }
 
@@ -705,14 +722,15 @@ impl Store {
                     self.import_available(&b);
                 }
             }
-            for s in database::summaries(&bucket.join(database::FILE)).unwrap_or_default() {
-                if s.parent.is_none()
-                    && Path::new(&s.workspace).starts_with(root)
-                    && self.remove(Path::new(&s.workspace), &s.id).is_ok()
-                {
-                    dropped += 1;
-                }
-            }
+            let database = bucket.join(database::FILE);
+            let selected: Vec<_> = database::summaries(&database)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|s| s.parent.is_none() && Path::new(&s.workspace).starts_with(root))
+                .collect();
+            dropped += self
+                .remove_selected(&database, &selected)
+                .unwrap_or_default();
         }
         dropped
     }
@@ -1572,6 +1590,92 @@ mod database_tests {
         assert_eq!(
             inspect, 1,
             "protocol and conversation reference the same body block"
+        );
+    }
+    #[test]
+    fn a_version_one_database_gains_an_index_for_cascading_entry_deletions() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::new(temp.path().join("state"));
+        let workspace = temp.path().join("work");
+        let session = Session::with_prompt("retained conversation");
+        let at = store.save(&workspace, header("old"), &session).unwrap();
+        {
+            let connection = database::connect(&at.database).unwrap();
+            let indexes: Vec<String> = connection.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name IN ('context_entries','sessions') AND sql IS NOT NULL").unwrap()
+                .query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+            for index in indexes {
+                connection
+                    .execute_batch(&format!("DROP INDEX \"{index}\";"))
+                    .unwrap();
+            }
+            connection.execute_batch("PRAGMA user_version=1;").unwrap();
+        }
+        assert_eq!(Store::read(&at).unwrap().session, session);
+        let connection = database::connect(&at.database).unwrap();
+        let plan: String = connection.query_row("EXPLAIN QUERY PLAN SELECT rowid FROM context_entries WHERE session=?1 AND entry_id=?2", rusqlite::params!["old", 0], |row| row.get(3)).unwrap();
+        assert!(
+            plan.contains("entry_id=?"),
+            "entry deletion must use both key columns: {plan}"
+        );
+        let family_plan: String = connection
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT id FROM sessions WHERE parent=?1",
+                ["old"],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(
+            family_plan.contains("parent=?"),
+            "child lookup must use the parent index: {family_plan}"
+        );
+        drop(connection);
+        store.remove(&workspace, "old").unwrap();
+        assert!(!at.exists());
+    }
+
+    #[test]
+    fn pruning_multiple_sessions_retains_shared_content_and_active_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::new(temp.path().join("state"));
+        let workspace = temp.path().join("work");
+        let mut expected = None;
+        for id in ["old-a", "old-b", "active"] {
+            let session = Session::from_messages(vec![
+                Message::user("shared input"),
+                Message::assistant_text(id),
+            ]);
+            store.save(&workspace, header(id), &session).unwrap();
+            if id == "active" {
+                expected = Some(session);
+            }
+        }
+        store
+            .save_subagent(
+                "old-a",
+                "child",
+                &workspace,
+                "m",
+                1,
+                &Session::with_prompt("child input"),
+            )
+            .unwrap();
+        let _claim = store.claim(&workspace, "active").unwrap();
+        store.forget_older_than(std::time::Duration::ZERO, None);
+        for removed in ["old-a", "old-b", "child"] {
+            assert!(
+                !store.path_of(&workspace, removed).exists(),
+                "{removed} must be removed"
+            );
+        }
+        let at = store.path_of(&workspace, "active");
+        assert_eq!(Store::read(&at).unwrap().session, expected.unwrap());
+        let connection = database::connect(&at.database).unwrap();
+        let remaining: usize = connection
+            .query_row("SELECT COUNT(*) FROM contents", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            remaining, 2,
+            "only the active conversation's shared input and answer remain"
         );
     }
 }

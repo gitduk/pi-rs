@@ -747,3 +747,50 @@ async fn a_subagent_has_no_independent_background_mode() {
         .unwrap_err();
     assert!(error.to_string().contains("background"));
 }
+
+#[tokio::test]
+async fn a_resumed_parent_keeps_child_sessions_distinct_across_processes() {
+    const PROBE: &str = "PI_SUBAGENT_ID_PROBE";
+    if let Some(output) = std::env::var_os(PROBE) {
+        let (_dir, parent, ctx, _seen, kept) = harness(vec![text_turn("child answer")]);
+        let spills = ctx.spill_root().to_path_buf();
+        let ctx = ctx.with_session("resumed-parent", spills);
+        parent
+            .brief
+            .registry
+            .get(Subagent::NAME)
+            .unwrap()
+            .execute(
+                json!({"description":"inspect code","prompt":"inspect code","background":false}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        std::fs::write(output, &kept.sessions.lock().unwrap()[0].0).unwrap();
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut ids = Vec::new();
+    for name in ["first", "resumed"] {
+        let path = dir.path().join(name);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "a_resumed_parent_keeps_child_sessions_distinct_across_processes",
+                "--nocapture",
+            ])
+            .env(PROBE, &path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        ids.push(std::fs::read_to_string(path).unwrap());
+    }
+    assert_ne!(
+        ids[0], ids[1],
+        "resuming the parent must not reuse a child's conversation"
+    );
+}

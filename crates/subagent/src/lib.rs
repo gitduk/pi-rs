@@ -1,6 +1,6 @@
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use ::execution::background::{Invocation, Outcome as ExecutionOutcome, Report, RunSink};
@@ -21,10 +21,6 @@ pub const PROMPT: &str = include_str!("../prompts/subagent.md");
 pub fn default_prompt() -> String {
     format!("{PROMPT}\n\n{}", agent::EXECUTION)
 }
-
-// Ids only have to be distinct inside one process; the parent's own namespace
-// makes them distinct across runs.
-static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -454,7 +450,7 @@ impl Subagent {
         let id = format!(
             "{}-subagent-{}",
             ctx.spill_namespace(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
+            uuid::Uuid::new_v4().simple()
         );
         // Tree, locks and renumbering are shared with the parent (same files);
         // transcript, spill name and token are the child's own.

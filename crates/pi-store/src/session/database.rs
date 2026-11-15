@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use transcript::{Session, archive::Record};
 
 pub const FILE: &str = "project.db";
+const VERSION: i64 = 2;
 
 /// An explicit session address; the database is shared by the workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,18 +59,19 @@ pub fn connect(path: &Path) -> Result<Connection> {
     }
     let initialization = options.open(path)?;
     initialization.lock()?;
-    let c = Connection::open(path)?;
+    let mut c = Connection::open(path)?;
     c.busy_timeout(std::time::Duration::from_secs(5))?;
     let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     ensure!(
-        version <= 1,
+        version <= VERSION,
         "unsupported workspace database version {version}"
     );
     c.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")?;
-    if version == 1 {
+    if version == VERSION {
         return Ok(c);
     }
-    c.execute_batch(
+    if version == 0 {
+        c.execute_batch(
         "PRAGMA journal_mode=WAL;
         CREATE TABLE IF NOT EXISTS sessions(
             id TEXT PRIMARY KEY, workspace TEXT NOT NULL, model TEXT NOT NULL,
@@ -101,9 +103,16 @@ pub fn connect(path: &Path) -> Result<Connection> {
             request_id TEXT, source TEXT, event TEXT, metadata TEXT NOT NULL,
             body INTEGER NOT NULL REFERENCES bodies(id),
             PRIMARY KEY(session,position), UNIQUE(session,id), UNIQUE(session,request_id));
-        CREATE INDEX IF NOT EXISTS automatic_inputs ON requests(session,source,event,position);
-        PRAGMA user_version=1;",
+        CREATE INDEX IF NOT EXISTS automatic_inputs ON requests(session,source,event,position);",
+        )?;
+    }
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS context_entries_by_entry ON context_entries(session,entry_id);
+         CREATE INDEX IF NOT EXISTS sessions_by_parent ON sessions(parent);",
     )?;
+    tx.pragma_update(None, "user_version", VERSION)?;
+    tx.commit()?;
     Ok(c)
 }
 
@@ -424,14 +433,22 @@ pub fn summaries(path: &Path) -> Result<Vec<Summary>> {
 }
 
 pub fn delete(at: &Location) -> Result<()> {
-    let mut c = connect(&at.database)?;
+    delete_many(&at.database, &[at.session.as_str()])
+}
+
+/// Remove selected conversations atomically and collect shared content once.
+pub fn delete_many(path: &Path, sessions: &[&str]) -> Result<()> {
+    if sessions.is_empty() {
+        return Ok(());
+    }
+    let mut c = connect(path)?;
     let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    tx.execute("DELETE FROM requests WHERE session=?1 OR session IN (SELECT id FROM sessions WHERE parent=?1)", [at.session.as_str()])?;
-    tx.execute("DELETE FROM request_commits WHERE session=?1 OR session IN (SELECT id FROM sessions WHERE parent=?1)",[at.session.as_str()])?;
-    tx.execute(
-        "DELETE FROM sessions WHERE id=?1 OR parent=?1",
-        [at.session.as_str()],
-    )?;
+    for id in sessions {
+        tx.prepare_cached("DELETE FROM requests WHERE session=?1 OR session IN (SELECT id FROM sessions WHERE parent=?1)")?.execute([id])?;
+        tx.prepare_cached("DELETE FROM request_commits WHERE session=?1 OR session IN (SELECT id FROM sessions WHERE parent=?1)")?.execute([id])?;
+        tx.prepare_cached("DELETE FROM sessions WHERE id=?1 OR parent=?1")?
+            .execute([id])?;
+    }
     tx.execute("DELETE FROM bodies WHERE id NOT IN (SELECT body FROM messages UNION SELECT body FROM requests)", [])?;
     tx.execute(
         "DELETE FROM contents WHERE id NOT IN (SELECT p.value FROM bodies b,json_each(b.parts) p)",
