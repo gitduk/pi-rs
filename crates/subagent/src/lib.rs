@@ -267,34 +267,18 @@ impl Tool for Subagent {
     }
 
     fn description(&self) -> &str {
-        "Assign a self-contained task to a subagent. \
-         When background execution is available, tasks run in the background by default: the tool returns a task ID immediately and delivers the conclusion automatically. \
-         Dispatch independent tasks, then continue other work or end your turn; do not wait or poll for them. \
-         Set `background: false` only when the next action requires the conclusion immediately or the user explicitly requests synchronous execution. \
-         Without background support, the tool waits and returns the conclusion. \
-         The subagent uses the same checkout, with a separate context. \
-         It inherits your model and tools unless you supply `model` or `tools`. \
-         Supply `skills` to preload applicable instructions by name before the task starts. \
-         Skills already loaded in your conversation are not inherited. \
-         `tools` restricts callable tools to the listed names. \
-         It cannot add tools you lack. \
-         Select only the tools the task needs. \
-         For read-only exploration, include only read tools and exclude shells and other tools that can change state. \
-         You receive only its final message, not the files it reads or commands it runs.\n\n\
-         Several calls can run in parallel.\n\n\
-         Do not assign work that requires answers from you while it runs. \
-         The subagent cannot ask you questions. \
-         It will guess missing details. \
-         Provide the complete task, necessary context, and required result format. \
-         The subagent cannot call this tool or delegate further. \
-         Assign work it can finish itself.\n\n\
-         The result ends with paths changed through `write` or `edit`. \
-         This list excludes changes made through shell commands.\n\n\
-         Supply `verify` whenever the task has a check, such as tests, a build, or a linter. \
-         The verification command's exit status accompanies the result. \
-         This command can check changes made through shell commands. \
-         The subagent's own report has no independent check. \
-         You cannot ask the subagent further questions."
+        "Delegate a self-contained task in the same checkout with a separate context. \
+         Supply the necessary context, tool limits, skills, and required result. \
+         The subagent cannot ask questions or receive follow-up instructions. \
+         It inherits your model and tools unless you override them. \
+         Skills require explicit preloading.\n\n\
+         With background support, the call returns a task ID and delivers the result automatically. \
+         Continue other work or end the turn instead of polling. \
+         Set `background: false` when the next action needs the result. \
+         Without background support, the call waits for the result.\n\n\
+         You receive only the final response. \
+         Use `verify` to run a check after the task and receive its exit status. \
+         Changed-path tracking covers `write` and `edit` calls only."
     }
 
     fn schema(&self) -> Value {

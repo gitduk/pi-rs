@@ -1,6 +1,6 @@
 ---
 name: statusline
-description: Set what pi's statusline shows — the row under the input line — with fields, texts, groups, colours, and values an outside script prints.
+description: Configure pi's statusline layout, fields, colours, and script values.
 ---
 
 # Set the statusline

@@ -134,8 +134,7 @@ impl Standing {
     fn workspace(&self, out: &mut String) {
         out.push_str(&format!(
             "\n\n<workspace path=\"{}\"/>\n\nRelative paths resolve from the workspace. \
-Commands start in the workspace. \
-Absolute paths reach files outside the workspace.",
+Commands start in the workspace.",
             escaped(self.workspace.display())
         ));
         if !tool::Tier::Write.under(self.tier) {
@@ -155,12 +154,8 @@ They can also change files in pi's home when a `<pi_home>` block specifies it."
             return;
         };
         out.push_str(&format!(
-            "\n\n<project_tools path=\"{}\">\nUse this directory for project tools by default. \
-This includes tools that depend on this project's code, data, paths, or configuration. \
-Create the directory if it does not exist. \
-The run's write boundary still applies. \
-If that boundary blocks this directory, report the limit. \
-Do not use pi's home instead.\n</project_tools>",
+            "\n\n<project_tools path=\"{}\">\nDefault directory for project-specific tools. \
+Write boundaries still apply.\n</project_tools>",
             escaped(dir.display())
         ));
     }
@@ -170,17 +165,10 @@ Do not use pi's home instead.\n</project_tools>",
             return;
         };
         out.push_str(&format!(
-            "\n\n<pi_home path=\"{}\">\nThis is pi's home. \
-Tools here are available across projects. \
-Add a tool here only when the user requests a tool shared across projects. \
-A tool that depends on this project belongs with the project, not here.\n\n\
-Tools and skills added here become available on your next turn. \
-You do not need to restart pi. \
-pi registers tools from scripts in `tools/`. \
-Do not store the current task's scripts or files here.\n\n\
-- Read `tool-creator` to create tools.\n\
-- Read `pi-usage` (`references/tools.md`) to create skills.\n\
-- Read `pi-setup` to add or repair a model connection or an MCP server.\n</pi_home>",
+            "\n\n<pi_home path=\"{}\">\nUse this directory for tools and skills shared across projects only when requested. \
+Do not store task files here. \
+New tools and skills become available on the next turn.\n\n\
+Read `tool-creator` for tools, `pi-usage` for skills, or `pi-setup` for model and MCP configuration.\n</pi_home>",
             escaped(home.display())
         ));
     }
@@ -192,12 +180,9 @@ Do not store the current task's scripts or files here.\n\n\
             return;
         }
         out.push_str(
-            "\n\nThe `<instructions>` blocks below contain the user's standing instructions for this machine and project. \
-The most general instructions appear first. \
-Follow these instructions. \
-If two instructions conflict, follow the later instruction from the path nearer the workspace. \
-These instructions specify how to work here. \
-The user's message specifies the current task.",
+            "\n\nFollow the standing instructions below. \
+If they conflict, the instruction file nearest the workspace takes precedence. \
+The user's current request takes precedence over standing instructions.",
         );
         for (path, body) in &self.instructions {
             out.push_str(&format!(
@@ -215,11 +200,8 @@ The user's message specifies the current task.",
             return;
         }
         out.push_str(&format!(
-            "\n\n<memory>\nThese facts come from earlier sessions. \
-Use them without announcing that you remember them. \
-State their source only if the user asks. \
-Memory may be outdated. \
-The user's current instructions take precedence.\n{}\n</memory>",
+            "\n\n<memory>\nNotes from earlier sessions may be outdated. \
+Current user instructions take precedence.\n{}\n</memory>",
             files(&self.memory)
         ));
     }

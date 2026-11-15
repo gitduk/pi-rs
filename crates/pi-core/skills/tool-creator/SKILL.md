@@ -1,6 +1,6 @@
 ---
 name: tool-creator
-description: Create or fix reusable tools for pi, including their script interfaces and background events. Use when the model needs a named interface for direct calls. Ordinary task scripts do not need this skill.
+description: Create or repair registered pi tools and their script interfaces. Ordinary task scripts do not require registration.
 ---
 
 # Create or fix a tool

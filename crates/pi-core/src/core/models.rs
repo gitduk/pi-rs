@@ -125,17 +125,10 @@ impl Tool for Models {
     }
 
     fn description(&self) -> &str {
-        "List locally known model IDs, reported limits, capabilities, and prices. \
-         This tool reads the current catalog without network requests or connection secrets. \
-         It briefly waits for discovery already in progress. \
-         If discovery remains pending, query again instead of reading connection files. \
-         Subagents inherit your model when you omit their model argument. \
-         Query this tool when you need to select another model. \
-         Reuse results unless they are outdated or a model choice fails. \
-         Use the returned IDs directly. \
-         Treat null fields as unknown and compare only known facts. \
-         Do not infer speed or task suitability from model names. \
-         If no suitable alternative is known, keep the inherited model."
+        "List locally known model IDs, limits, capabilities, and prices without network requests or connection secrets. \
+         Use the returned IDs when selecting a model. \
+         Null fields are unknown. Model names do not establish task suitability. \
+         If discovery remains pending, query again later."
     }
 
     fn schema(&self) -> Value {

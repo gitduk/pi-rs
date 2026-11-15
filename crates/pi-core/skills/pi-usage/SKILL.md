@@ -1,6 +1,6 @@
 ---
 name: pi-usage
-description: Answer how to drive pi — the commands and keys a session takes, how background commands, MCP servers, scripts, hooks and skills behave, what reaches the model, and where its files and memory live. Use when asked what a command or key does, why a tool or a run behaved as it did, or where pi keeps something.
+description: Explain pi commands, keys, sessions, tools, context, and files.
 ---
 
 # Driving pi

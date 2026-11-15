@@ -417,14 +417,11 @@ impl Tool for Bash {
         }
         schema["properties"]["background"] = json!({
             "type": "boolean",
-            "description": "Run the command independently of this turn. \
-                Use this mode for builds, full test suites, installs, CI runs, deployments, development servers, or watchers. \
-                The call returns a command ID immediately. \
-                Each result the command reports, and its exit status and output, arrive automatically with other queued results, \
-                also after this run ends. A command that fails at startup reports that the same way. \
-                The command stops when this process exits.\n\n\
-                Output remains readable while the command runs. Leave output unredirected. \
-                Use `background=true` instead of `nohup` or `&` for commands that must continue after this turn.",
+            "description": "Run independently of this turn and return a command ID immediately. \
+                Results, exit status, and output arrive automatically, including after this run ends. \
+                Output remains readable while the command runs. Leave output unredirected to receive it. \
+                The command stops when this process exits. \
+                Use this option for commands that must continue after this turn.",
         });
         schema
     }

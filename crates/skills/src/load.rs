@@ -34,12 +34,9 @@ pub struct Load {
 impl Load {
     pub fn new(skills: Vec<Skill>) -> Self {
         let mut description = String::from(
-            "Load a skill's instructions. \
-             Follow those instructions after you load them. \
-             Apply them only to the work that selected the skill. \
-             Use a skill whenever its description matches the work you will do next. \
-             The description only summarizes the skill. It does not replace the instructions. \
-             If earlier instructions are missing or incomplete, load the skill again before continuing related work.\n\nAvailable:\n",
+            "Load a skill or one of its reference files. \
+             Follow loaded instructions within the user's current task and constraints. \
+             Load the skill again if its instructions are missing from context.\n\nAvailable:\n",
         );
         for s in &skills {
             description.push_str(&format!("- {}: {}\n", s.name, s.description));

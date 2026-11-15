@@ -1,6 +1,6 @@
 ---
 name: pi-setup
-description: Configure pi's connections — add or fix a model provider (base_url, format, api_key, catalog paths) or an MCP server (command, URL, environment). Use when a model or an MCP server is missing, unreachable, or named in a request.
+description: Configure or troubleshoot model providers and MCP servers.
 ---
 
 # Configure a connection
