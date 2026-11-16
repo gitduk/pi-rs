@@ -1,16 +1,12 @@
-//! The journal: what pi did, as opposed to what the model saw — decisions,
-//! wire traffic and timings the transcript beside it doesn't carry.
+//! Optional process diagnostics. Session recovery never depends on these logs.
 //!
-//! One JSON object per line, meant for `jq`; no line depends on another.
-//! One file per session, followed across every run that resumes into it.
-//!
-//! Records are filed under a `pi::` target, or absent one, the module path.
+//! PI_LOG enables one JSONL file for the lifetime of the process.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime};
 
 use serde_json::{Map, Value};
 use tracing::field::{Field, Visit};
@@ -25,17 +21,9 @@ use tracing_subscriber::registry::LookupSpan;
 const FIELD_CAP_INFO: usize = 1_024;
 const FIELD_CAP_DEBUG: usize = 64 * 1_024;
 
-// A wedged run can produce records without bound. Past this the journal says
+// A wedged run can produce records without bound. Past this the log says
 // so and stops, rather than filling the disk of the machine it is diagnosing.
 const FILE_CAP: u64 = 64 * 1024 * 1024;
-
-// Journals outlive the sessions they describe by two weeks. Long enough for
-// "it did something odd on Monday", short enough not to accumulate.
-const KEEP: Duration = Duration::from_secs(14 * 24 * 60 * 60);
-
-/// The journal inside each session's directory, named once for the store that
-/// writes it and the sweep that looks for it by name.
-pub const JOURNAL_FILE: &str = "journal.jsonl";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 #[clap(rename_all = "lowercase")]
@@ -84,7 +72,7 @@ const SECRET: [&str; 7] = [
     "bearer",
 ];
 
-pub(crate) fn secret(name: &str) -> bool {
+fn secret(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     SECRET.contains(&lower.as_str())
         || lower.ends_with("_key")
@@ -101,118 +89,62 @@ fn clip(s: &str, cap: usize) -> Value {
     Value::String(llm::slice::clip_bytes(s, cap))
 }
 
-// RFC 3339, UTC, milliseconds. Hand-rolled: a calendar is thirty lines and a
-// date crate is a dependency the rest of the binary has no use for.
-pub fn rfc3339(t: SystemTime) -> String {
-    let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let secs = d.as_secs() as i64;
-    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    let (y, m, dd) = civil(days);
-    format!(
-        "{y:04}-{m:02}-{dd:02}T{:02}:{:02}:{:02}.{:03}Z",
-        rem / 3600,
-        (rem % 3600) / 60,
-        rem % 60,
-        d.subsec_millis()
-    )
-}
-
-// Days since the epoch to a civil date (Howard Hinnant's `civil_from_days`).
-fn civil(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
 struct Sink {
     out: BufWriter<File>,
     written: u64,
     state: Writes,
-    // Which file `out` writes to now; `retarget` moves it. Kept under the
-    // sink's lock so [`path`] reads it back rather than a copy that could drift.
-    path: PathBuf,
 }
 
-// Whether a sink still writes. Both stops are for good, until `retarget`
-// hands it a fresh file.
+// Both stops are permanent for this process.
 enum Writes {
     Open,
     // Past `FILE_CAP`: the file holds what it can.
     Capped,
-    // A failed flush means the file can no longer be trusted to hold what we
-    // send it. Why, for whoever shows the run's state: a raw-mode screen
-    // cannot take a stray stderr line.
+    // The caller decides how and when to report a diagnostic output failure.
     Failed(String),
 }
 
-// The open journal: one per run, held only by the layer.
-struct Journal {
+// One output shared by the subscriber and diagnostic status queries.
+struct Diagnostics {
     // Wall clock is what pairs a record with everything else on the machine;
     // the monotonic one is what measures. Neither substitutes for the other.
     start: Instant,
     field_cap: usize,
     sink: Mutex<Sink>,
+    path: PathBuf,
 }
 
-// A fresh sink on `file`, counting what is already in it.
-fn sink_for(file: File, path: &Path) -> Sink {
-    let written = file.metadata().map(|m| m.len()).unwrap_or(0);
-    Sink {
-        out: BufWriter::new(file),
-        written,
-        state: Writes::Open,
-        path: path.to_path_buf(),
-    }
-}
-
-// Open for appending, 0600, the same as the transcript beside it.
+// Private from creation: diagnostic fields can contain sensitive context.
 fn open_file(path: &Path) -> std::io::Result<File> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    Ok(file)
+    options.open(path)
 }
 
-impl Journal {
+impl Diagnostics {
     fn open(path: &Path, field_cap: usize) -> std::io::Result<Self> {
         let file = open_file(path)?;
         Ok(Self {
             start: Instant::now(),
             field_cap,
-            sink: Mutex::new(sink_for(file, path)),
+            sink: Mutex::new(Sink {
+                out: BufWriter::new(file),
+                written: 0,
+                state: Writes::Open,
+            }),
+            path: path.to_path_buf(),
         })
     }
 
-    // Points the same journal at another session's file
-    // without reinstalling the subscriber; the cap applies to the new file fresh.
-    fn retarget(&self, path: &Path) -> std::io::Result<()> {
-        let file = open_file(path)?;
-        let Ok(mut sink) = self.sink.lock() else {
-            // A poisoned lock is a run to be rescued, not one to kill.
-            return Ok(());
-        };
-        *sink = sink_for(file, path);
-        Ok(())
-    }
-
-    // Every failure here is swallowed except a failed flush, which stops
-    // writing for good — a run must not die of its own logging.
+    // Output failures stop logging permanently without changing execution.
     fn write(&self, record: Map<String, Value>) {
         let Ok(mut sink) = self.sink.lock() else {
             return;
@@ -224,14 +156,19 @@ impl Journal {
             return;
         };
         line.push(b'\n');
-        sink.written += line.len() as u64;
-        let _ = sink.out.write_all(&line);
-        if sink.written >= FILE_CAP {
+        const CAPPED: &[u8] = b"{\"lvl\":\"WARN\",\"ev\":\"pi::diagnostics\",\"msg\":\"diagnostic log reached its size limit\"}\n";
+        if sink
+            .written
+            .saturating_add(line.len() as u64 + CAPPED.len() as u64)
+            > FILE_CAP
+        {
             sink.state = Writes::Capped;
-            let _ = writeln!(
-                sink.out,
-                r#"{{"lvl":"WARN","ev":"pi::journal","msg":"journal capped at {FILE_CAP} bytes; nothing further is recorded"}}"#
-            );
+            line = CAPPED.to_vec();
+        }
+        sink.written += line.len() as u64;
+        if let Err(error) = sink.out.write_all(&line) {
+            sink.state = Writes::Failed(error.to_string());
+            return;
         }
         // Flushed per record: the records worth having are the ones written just
         // before whatever killed the process. A failed flush stops it for good.
@@ -309,7 +246,7 @@ impl Visit for Fields<'_> {
     }
 
     // The whole chain, not just the outermost line: the cause is usually
-    // what a journal is read for, not the least-specific wrapper message.
+    // what diagnostics need, not only the outermost wrapper message.
     fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
         let mut text = value.to_string();
         let mut source = value.source();
@@ -328,23 +265,14 @@ struct Scope {
     opened: Instant,
 }
 
-struct JournalLayer {
-    journal: std::sync::Arc<Journal>,
+struct DiagnosticsLayer {
+    diagnostics: std::sync::Arc<Diagnostics>,
 }
 
-// Ours, at the chosen level; a dependency's, only at `trace` — else the
-// journal is mostly hyper's pool. "Ours" means where the source lives.
+// Dependency traces can include raw request content and headers.
 fn ours(level: LevelFilter) -> FilterFn<impl Fn(&Metadata<'_>) -> bool> {
-    let theirs = if level == LevelFilter::TRACE {
-        level
-    } else {
-        LevelFilter::OFF
-    };
     filter_fn(move |meta| {
-        // The `pi::` convention still holds where a build has remapped paths.
-        let mine = from_workspace(meta.file()) || meta.target().starts_with("pi::");
-        let cap = if mine { level } else { theirs };
-        cap >= *meta.level()
+        (from_workspace(meta.file()) || meta.target().starts_with("pi::")) && level >= *meta.level()
     })
 }
 
@@ -354,14 +282,17 @@ fn from_workspace(file: Option<&str>) -> bool {
     file.is_some_and(|f| Path::new(f).is_relative())
 }
 
-impl JournalLayer {
+impl DiagnosticsLayer {
     // The skeleton every record shares.
     fn head(&self, meta: &Metadata, ev: &str, ctx_names: String) -> Map<String, Value> {
         let mut rec = Map::new();
-        rec.insert("ts".into(), Value::String(rfc3339(SystemTime::now())));
+        rec.insert(
+            "ts".into(),
+            Value::String(crate::text::rfc3339(SystemTime::now())),
+        );
         rec.insert(
             "ms".into(),
-            Value::from(self.journal.start.elapsed().as_millis() as u64),
+            Value::from(self.diagnostics.start.elapsed().as_millis() as u64),
         );
         rec.insert("lvl".into(), Value::String(meta.level().to_string()));
         rec.insert("ev".into(), Value::String(ev.to_string()));
@@ -396,7 +327,7 @@ where
         .join(">")
 }
 
-impl<S> Layer<S> for JournalLayer
+impl<S> Layer<S> for DiagnosticsLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
@@ -410,7 +341,7 @@ where
         let mut fields = Map::new();
         attrs.record(&mut Fields {
             into: &mut fields,
-            cap: self.journal.field_cap,
+            cap: self.diagnostics.field_cap,
         });
         span.extensions_mut().insert(Scope {
             fields,
@@ -426,7 +357,7 @@ where
         };
         values.record(&mut Fields {
             into: &mut scope.fields,
-            cap: self.journal.field_cap,
+            cap: self.diagnostics.field_cap,
         });
     }
 
@@ -455,9 +386,9 @@ where
         }
         event.record(&mut Fields {
             into: &mut rec,
-            cap: self.journal.field_cap,
+            cap: self.diagnostics.field_cap,
         });
-        self.journal.write(rec);
+        self.diagnostics.write(rec);
     }
 
     // A span's close is where its duration is known, which is most of why the
@@ -490,99 +421,76 @@ where
             Value::from(opened.elapsed().as_millis() as u64),
         );
         rec.insert("msg".into(), Value::String(format!("{} done", span.name())));
-        self.journal.write(rec);
+        self.diagnostics.write(rec);
     }
 }
 
-// One journal per run, retargeted in place on session switch, so any
-// surface can reach it without the path threaded through the terminal loop.
-static JOURNAL: std::sync::OnceLock<std::sync::Arc<Journal>> = std::sync::OnceLock::new();
+// One immutable destination, independent of session creation and switching.
+static DIAGNOSTICS: std::sync::OnceLock<std::sync::Arc<Diagnostics>> = std::sync::OnceLock::new();
 
-/// Where the journal is writing right now, for a status and the failure line.
-/// Read back from the journal itself — the sink holds its own path — so there
-/// is no second copy to keep in step.
 pub fn path() -> Option<PathBuf> {
-    JOURNAL.get()?.sink.lock().ok().map(|s| s.path.clone())
+    Some(DIAGNOSTICS.get()?.path.clone())
 }
 
-/// Why the journal stopped recording, while it is stopped. A file it moves
-/// to is tried afresh.
+/// A diagnostic output failure or limit never changes execution or persistence.
 pub fn failure() -> Option<String> {
-    match &JOURNAL.get()?.sink.lock().ok()?.state {
+    match &DIAGNOSTICS.get()?.sink.lock().ok()?.state {
         Writes::Failed(why) => Some(why.clone()),
-        Writes::Open | Writes::Capped => None,
+        Writes::Capped => Some(format!("diagnostic log reached {FILE_CAP} bytes")),
+        Writes::Open => None,
     }
 }
 
-/// Whether the journal has stopped recording: `failure` without the text,
-/// for what asks every frame.
 pub fn failed() -> bool {
-    JOURNAL
+    DIAGNOSTICS
         .get()
-        .and_then(|j| (j.sink.lock().ok()).map(|s| matches!(s.state, Writes::Failed(_))))
+        .and_then(|log| {
+            log.sink
+                .lock()
+                .ok()
+                .map(|sink| matches!(sink.state, Writes::Failed(_) | Writes::Capped))
+        })
         .unwrap_or(false)
 }
 
-/// Drops journals nothing will be read back from, kept a fortnight — shorter
-/// than the transcript beside it. Failures just mean logging less, never stopping.
-pub fn prune(sessions: &Path) {
-    let Ok(buckets) = std::fs::read_dir(sessions) else {
-        return;
-    };
-    for bucket in buckets.flatten() {
-        let Ok(entries) = std::fs::read_dir(bucket.path()) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path().join(JOURNAL_FILE);
-            // A session some pi still holds keeps its journal however old.
-            if crate::older_than(&path, KEEP) && !crate::session::held(&entry.path()) {
-                let _ = std::fs::remove_file(&path);
-                // And the directory, if the journal was the last thing in it — a run
-                // that never got as far as a transcript, since a bucket needs to be empty.
-                crate::session::discard_abandoned(&entry.path());
-            }
-        }
-    }
-}
-
-/// The `LogLevel` the `PI_LOG` environment variable names.
-///
-/// `Info` when it is unset or unreadable. A typo falls back rather than
-/// failing: not recording is not worth failing a run over, and neither is
-/// misspelling how much to record.
+/// Missing or invalid PI_LOG values leave diagnostics disabled.
 pub fn level_from_env() -> LogLevel {
-    let Ok(name) = std::env::var("PI_LOG") else {
-        return LogLevel::Info;
-    };
-    <LogLevel as clap::ValueEnum>::from_str(&name, true).unwrap_or(LogLevel::Info)
+    std::env::var("PI_LOG")
+        .ok()
+        .and_then(|name| <LogLevel as clap::ValueEnum>::from_str(&name, true).ok())
+        .unwrap_or(LogLevel::Off)
 }
 
-pub fn install(path: &Path, level: LogLevel) {
+/// Install an optional process log before any execution starts.
+pub fn install(level: LogLevel) -> std::io::Result<Option<PathBuf>> {
     if level == LogLevel::Off {
-        return;
+        return Ok(None);
     }
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    if let Some(path) = path() {
+        return Ok(Some(path));
     }
-    let journal = match Journal::open(path, level.field_cap()) {
-        Ok(j) => std::sync::Arc::new(j),
-        Err(e) => {
-            eprintln!("no journal ({e}); PI_LOG=off silences this");
-            return;
-        }
-    };
-    let layer = JournalLayer {
-        journal: journal.clone(),
+    let root = crate::dir().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no directory for process diagnostics",
+        )
+    })?;
+    let stamp = crate::text::rfc3339(SystemTime::now()).replace(':', "-");
+    let path = root
+        .join("logs")
+        .join(format!("{stamp}-{}.jsonl", std::process::id()));
+    let diagnostics = std::sync::Arc::new(Diagnostics::open(&path, level.field_cap())?);
+    let layer = DiagnosticsLayer {
+        diagnostics: diagnostics.clone(),
     }
     .with_filter(ours(level.filter()));
-    if tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer)).is_ok() {
-        let _ = JOURNAL.set(journal);
-    }
+    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer))
+        .map_err(std::io::Error::other)?;
+    let _ = DIAGNOSTICS.set(diagnostics);
+    Ok(Some(path))
 }
 
-/// The state the run started from, recorded once: config, workspace and prior
-/// session, all settled before the journal opened and stated rather than observed.
+/// Record resolved startup context without copying prompt or request content.
 pub fn opening(
     id: &str,
     // The `--config` the run was given, if any.
@@ -592,109 +500,42 @@ pub fn opening(
     root: &Path,
     prior: Option<&crate::session::Stored>,
 ) {
-    let config_path = config_path
-        .map(std::path::PathBuf::from)
-        .or_else(crate::config::global_path);
-    tracing::info!(
-        target: "pi::session",
-        version = env!("CARGO_PKG_VERSION"),
-        argv = %std::env::args().skip(1).collect::<Vec<_>>().join(" "),
-        workspace = %root.display(),
-        config = %config_path.map_or_else(|| "-".into(), |p| p.display().to_string()),
-        models = config.names().len(),
-        discovered_models = config.discovered.len(),
-        rebound_keys = config.keys.len(),
-        model = config.model.as_deref().unwrap_or("-"),
-        project = %project.map_or("-".into(), |p| p.display().to_string()),
-        resumed = prior.map(|p| p.session.entries().len()).unwrap_or(0),
-        session = id,
-        "start"
-    );
-    // A silently-ignored rebind looks exactly like one that worked, and the
-    // terminal can't be asked after the fact. Debug, not info: it's a table.
-    for (action, binds) in &config.keys {
-        // Written out rather than debug-printed: the point is to compare it
-        // against what the user meant to write, not against the enum.
-        let keys = match binds {
-            crate::config::Binds::One(k) => k.clone(),
-            crate::config::Binds::Many(k) => k.join(", "),
-        };
-        tracing::debug!(target: "pi::keys", action, keys, "rebound");
+    if tracing::enabled!(target: "pi::session", tracing::Level::INFO) {
+        let config_path = config_path
+            .map(std::path::PathBuf::from)
+            .or_else(crate::config::global_path);
+        tracing::info!(
+            target: "pi::session",
+            version = env!("CARGO_PKG_VERSION"),
+            workspace = %root.display(),
+            config = %config_path.map_or_else(|| "-".into(), |p| p.display().to_string()),
+            models = config.names().len(),
+            discovered_models = config.discovered.len(),
+            rebound_keys = config.keys.len(),
+            model = config.model.as_deref().unwrap_or("-"),
+            project = %project.map_or("-".into(), |p| p.display().to_string()),
+            resumed = prior.map(|p| p.session.entries().len()).unwrap_or(0),
+            session = id,
+            "start"
+        );
     }
-}
-
-/// The run has moved to a different session, so point the journal at that
-/// session's file, and mark the seam in it. Each session keeps one journal
-/// across every run that touched it, so whoever names the file follows it.
-pub fn switched(path: &Path, id: &str) {
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    if tracing::enabled!(target: "pi::keys", tracing::Level::DEBUG) {
+        // Key bindings help diagnose configuration that was accepted but had no effect.
+        for (action, binds) in &config.keys {
+            // Written out rather than debug-printed: the point is to compare it
+            // against what the user meant to write, not against the enum.
+            let keys = match binds {
+                crate::config::Binds::One(k) => k.clone(),
+                crate::config::Binds::Many(k) => k.join(", "),
+            };
+            tracing::debug!(target: "pi::keys", action, keys, "rebound");
+        }
     }
-    if let Some(journal) = JOURNAL.get()
-        && let Err(e) = journal.retarget(path)
-    {
-        tracing::warn!(target: "pi::session", session = id, error = %e, "could not move the journal to this session");
-    }
-    tracing::info!(target: "pi::session", session = id, "transcript");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // The transcript sweep only removes an empty bucket, and a bucket holding
-    // a directory never is — so an old journal takes its directory with it.
-    #[test]
-    fn an_old_journal_takes_its_directory_with_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let sessions = dir.path();
-        let empty = sessions.join("-w").join("said-nothing");
-        let lived = sessions.join("-w").join("had-a-transcript");
-        for d in [&empty, &lived] {
-            std::fs::create_dir_all(d).unwrap();
-            let journal = d.join(JOURNAL_FILE);
-            std::fs::write(&journal, b"{}\n").unwrap();
-            std::fs::File::options()
-                .write(true)
-                .open(&journal)
-                .unwrap()
-                .set_modified(SystemTime::now() - Duration::from_secs(15 * 24 * 60 * 60))
-                .unwrap();
-        }
-        std::fs::write(lived.join("session.json"), b"{}").unwrap();
-
-        prune(sessions);
-
-        assert!(
-            !empty.exists(),
-            "a session with nothing but an old journal goes whole"
-        );
-        assert!(
-            lived.exists(),
-            "and one with a transcript keeps its directory"
-        );
-        assert!(!lived.join(JOURNAL_FILE).exists());
-    }
-
-    #[test]
-    fn a_held_session_keeps_its_old_journal() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::session::Store::new(dir.path());
-        let ws = std::path::Path::new("/w");
-        let _held = store.claim(ws, "held").unwrap();
-        let journal = store.journal_path(ws, "held");
-        std::fs::write(&journal, b"{}\n").unwrap();
-        std::fs::File::options()
-            .write(true)
-            .open(&journal)
-            .unwrap()
-            .set_modified(SystemTime::now() - Duration::from_secs(15 * 24 * 60 * 60))
-            .unwrap();
-
-        prune(dir.path());
-
-        assert!(journal.exists());
-    }
 
     #[test]
     fn secrets_go_and_the_names_of_secrets_stay() {
@@ -726,24 +567,12 @@ mod tests {
         assert_eq!(clip("short", 33), Value::String("short".into()));
     }
 
-    #[test]
-    fn timestamps_are_rfc3339_utc() {
-        let t = UNIX_EPOCH + Duration::from_millis(1_755_000_000_123);
-        assert_eq!(rfc3339(t), "2025-08-12T12:00:00.123Z");
-        assert_eq!(rfc3339(UNIX_EPOCH), "1970-01-01T00:00:00.000Z");
-        // A leap day, which is where a hand-rolled calendar goes wrong.
-        assert_eq!(
-            rfc3339(UNIX_EPOCH + Duration::from_secs(1_709_164_800)),
-            "2024-02-29T00:00:00.000Z"
-        );
-    }
-
     // Run `f` against a real layer and read back what it wrote.
     fn recorded(level: LogLevel, f: impl FnOnce()) -> Vec<Value> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
-        let journal = std::sync::Arc::new(Journal::open(&path, level.field_cap()).unwrap());
-        let layer = JournalLayer { journal }.with_filter(ours(level.filter()));
+        let diagnostics = std::sync::Arc::new(Diagnostics::open(&path, level.field_cap()).unwrap());
+        let layer = DiagnosticsLayer { diagnostics }.with_filter(ours(level.filter()));
         tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), f);
         std::fs::read_to_string(&path)
             .unwrap()
@@ -770,7 +599,7 @@ mod tests {
     // on the paths it decides by.
     #[test]
     fn a_dependencys_records_are_told_apart_by_path() {
-        assert!(from_workspace(Some("crates/pi/src/store/journal.rs")));
+        assert!(from_workspace(Some("crates/pi/src/store/diagnostics.rs")));
         assert!(!from_workspace(Some(
             "/home/u/.cargo/registry/src/index/hyper-1.0.0/src/pool.rs"
         )));
@@ -907,7 +736,7 @@ mod tests {
     fn every_record_is_one_line_of_valid_json() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
-        let j = Journal::open(&path, 64).unwrap();
+        let j = Diagnostics::open(&path, 64).unwrap();
         let mut rec = Map::new();
         rec.insert("msg".into(), Value::String("with\na newline".into()));
         j.write(rec);
@@ -920,24 +749,19 @@ mod tests {
     }
 
     #[test]
-    fn reopening_appends_rather_than_truncating() {
+    fn process_logs_are_private_and_cannot_replace_existing_files() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.jsonl");
-        Journal::open(&path, 64).unwrap().write(Map::new());
-        Journal::open(&path, 64).unwrap().write(Map::new());
-        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
-    }
-
-    #[test]
-    fn retarget_moves_the_records_to_another_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = dir.path().join("a.jsonl");
-        let second = dir.path().join("b.jsonl");
-        let j = Journal::open(&first, 64).unwrap();
-        j.write(Map::new());
-        j.retarget(&second).unwrap();
-        j.write(Map::new());
-        assert_eq!(std::fs::read_to_string(&first).unwrap().lines().count(), 1);
-        assert_eq!(std::fs::read_to_string(&second).unwrap().lines().count(), 1);
+        let path = dir.path().join("process.jsonl");
+        Diagnostics::open(&path, 64).unwrap().write(Map::new());
+        assert!(Diagnostics::open(&path, 64).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 }

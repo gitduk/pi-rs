@@ -143,25 +143,6 @@ impl Deed {
             | Deed::Answer { .. } => Fate::Now,
         }
     }
-
-    // Whether the journal keeps it. Clearing the screen is a press made in
-    // passing — the same key clears the line — and explains nothing later.
-    fn journaled(&self) -> bool {
-        match self {
-            // Answers and queue withdrawals are journaled where they take effect.
-            Deed::Nothing | Deed::Tidy | Deed::Answer { .. } | Deed::RecallQueued(_) => false,
-            Deed::External
-            | Deed::Rewind
-            | Deed::Interrupt
-            | Deed::Background
-            | Deed::Unsend
-            | Deed::ReadCommand(_)
-            | Deed::ToggleCommand(_)
-            | Deed::BackgroundResults(_)
-            | Deed::StopCommands(_)
-            | Deed::RestartCommands(_) => true,
-        }
-    }
 }
 
 // What a key asked for: `Intent` is what the core answers regardless of
@@ -592,9 +573,6 @@ impl Tui {
     // Deeds the screen keeps for itself: only the surface can move the
     // screen, keyboard, and process, and knows which lane is in front.
     async fn carry(&mut self, deed: Deed) {
-        if deed.journaled() {
-            tracing::info!(target: "pi::session", deed = ?deed, "deed");
-        }
         match deed {
             Deed::Nothing => {}
             Deed::Interrupt => self.stop_current(false),
@@ -711,7 +689,7 @@ impl Tui {
             Fate::Refused(why) => {
                 let request = pi_core::execution::Request::new(origin, self.core.lane().token());
                 tracing::info!(target: "pi::session", request = request.id, ?origin,
-                    lane = request.lane, ?intent, why, "dispatch refused");
+                    lane = request.lane, session = self.core.lane().id(), why, "dispatch refused");
                 self.drivers.started(request, false);
                 self.complete(
                     request,

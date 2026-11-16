@@ -25,13 +25,6 @@ pub trait Input: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
-    fn draft(
-        &self,
-        _draft: crate::session::Draft,
-    ) -> futures::future::BoxFuture<'_, Result<(), String>> {
-        Box::pin(async { Ok(()) })
-    }
-
     /// Register a model call before its executor can run.
     fn tool_request(
         &self,
@@ -102,33 +95,18 @@ pub trait Approver: Send + Sync {
 /// This layer says what it needs and the surface provides it; what a child
 /// spent travels back on the tool result instead.
 pub trait Archive: Send + Sync {
-    fn draft<'a>(
-        &'a self,
-        _parent: &'a str,
-        _id: &'a str,
-        _draft: crate::session::Draft,
-    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
-        Box::pin(async { Ok(()) })
-    }
+    /// One writer owns the archive state for the lifetime of a child run.
+    fn open(&self, parent: &str, id: &str, model: &str) -> Box<dyn ArchiveWriter + '_>;
+}
+
+pub trait ArchiveWriter: Send + Sync {
     /// Retain an intermediate child boundary before tools execute.
-    fn checkpoint<'a>(
-        &'a self,
-        _parent: &'a str,
-        _id: &'a str,
-        _model: &'a str,
-        _session: &Session,
-    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
+    fn checkpoint(&self, _session: &Session) -> futures::future::BoxFuture<'_, Result<(), String>> {
         Box::pin(async { Ok(()) })
     }
 
-    // No screen, so the transcript is the only record. Called once with the
-    // whole transcript, finished or cut short; `parent` is the calling session.
-    fn keep(&self, parent: &str, id: &str, session: Session);
-
-    /// File a child transcript with the model that actually ran it.
-    fn keep_model(&self, parent: &str, id: &str, _model: &str, session: Session) {
-        self.keep(parent, id, session);
-    }
+    /// Await the final save, including interrupted runs, and report any failure.
+    fn finish(&self, session: Session) -> futures::future::BoxFuture<'_, Result<(), String>>;
 }
 
 /// What a pass of the compactor left: what to send next, whether the transcript

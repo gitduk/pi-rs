@@ -206,23 +206,22 @@ fn without_redundant_cd<'a>(command: &'a str, cwd: &std::path::Path) -> Option<&
 // for a caller runs as built — rtk's table answers for what a model types.
 async fn prepare(args: Args, tier: Tier, ctx: &Ctx, written: bool) -> Result<Again, ToolError> {
     let cwd = ctx.workspace.resolve(&args.cwd, tier)?;
-    // Dropped, not run: the transcript keeps what was written, so only the
-    // journal can tell it from what ran.
+    // Strip only a model-written prefix that leaves the working directory unchanged.
     let stripped = if written {
         without_redundant_cd(&args.command, &cwd)
     } else {
         None
     };
-    if let Some(rest) = stripped {
-        tracing::info!(
-            target: "pi::bash",
-            written = %args.command,
-            ran = %rest,
-            "dropped a cd into the directory the command already runs in"
-        );
-    }
     let command = match stripped {
-        Some(rest) => rest.to_string(),
+        Some(rest) => {
+            tracing::info!(
+                target: "pi::bash",
+                written_bytes = args.command.len(),
+                ran_bytes = rest.len(),
+                "dropped a cd into the directory the command already runs in"
+            );
+            rest.to_string()
+        }
         None => args.command,
     };
     let rewritten = match written {
@@ -678,7 +677,7 @@ fn command(again: &Again) -> Command {
 fn launch(again: &Again, ctx: &Ctx) -> Result<Launched, ToolError> {
     let stdin = again.stdin.as_ref().map(|s| s.as_bytes().to_vec());
     let launched = crate::process::launch(command(again), stdin, ctx)?;
-    tracing::info!(target: "pi::bash", command = %again.command, cwd = %again.cwd.display(), group = ?launched.group, "spawned");
+    tracing::info!(target: "pi::bash", command_bytes = again.command.len(), cwd = %again.cwd.display(), group = ?launched.group, "spawned");
     Ok(launched)
 }
 
@@ -779,17 +778,16 @@ pub async fn run(
         .await
         .inspect_err(|e| {
             if let ToolError::Timeout { ms, .. } = e {
-                tracing::warn!(target: "pi::bash", command = %command, timeout_ms = ms, "timed out");
+                tracing::warn!(target: "pi::bash", command_bytes = command.len(), timeout_ms = ms, "timed out");
             }
         })?;
     let code = exited.status.code().unwrap_or(-1);
     let (stdout, stderr) = (exited.stdout, exited.stderr);
 
-    // The exit code and the command, always. What the command printed is
-    // in the transcript; what it was run against — the directory — is not.
+    // Keep execution context and output sizes without copying command content.
     tracing::info!(
         target: "pi::bash",
-        command = %command,
+        command_bytes = command.len(),
         cwd = %cwd.display(),
         code,
         stdout_bytes = stdout.total,

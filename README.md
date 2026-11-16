@@ -105,10 +105,14 @@ You do not need to restart pi after a settings change.
 If the file does not parse, pi reports it once and keeps the old configuration.
 
 `PI_HOME` moves `~/.pi`. Sessions, tools, skills, memory and pasted images all
-live under it. Each workspace keeps its sessions in one SQLite database at
-`~/.pi/sessions/<project>/project.db`; session directories hold journals and
-other artifacts. Existing JSON sessions are imported on first use and retained
-with a `.legacy` suffix.
+live under it. Each session keeps its conversation and request state
+in `~/.pi/sessions/<project>/<session>/session.jsonl`. Saves append new
+facts without repeating message bodies or state snapshots. Related facts share
+one JSONL line; an incomplete final line is discarded on the next save.
+The same directory holds its claims and other artifacts.
+Diagnostic logging is off by default. `PI_LOG=debug pi` writes one process log
+under `~/.pi/logs/` and prints its path; `PI_LOG=trace pi` adds more detail.
+Diagnostic logs are independent of session recovery and retention.
 
 `~/.pi/statusline.json` is the layout of the row above and
 under the input line. `/status` shows runtime configuration, spending and session paths.

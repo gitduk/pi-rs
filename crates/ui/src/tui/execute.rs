@@ -31,7 +31,7 @@ impl Tui {
     ) -> bool {
         let origin = request.origin;
         tracing::info!(target: "pi::session", request = request.id, ?origin,
-            lane = request.lane, ?intent, "dispatch");
+            lane = request.lane, session = self.core.lane().id(), "dispatch");
         let was = self.core.lanes.front();
         let models = matches!(&intent, Intent::Builtin(Builtin::Model(name)) if name.is_empty());
         let action = execution::dispatch(&mut self.core, intent);
@@ -157,9 +157,9 @@ impl Tui {
             pending => pending,
         };
         match &queued.input {
-            Pending::Intent(intent) => {
+            Pending::Intent(_) => {
                 tracing::info!(target: "pi::session", request = request.id,
-                    lane = request.lane, origin = ?request.origin, ?intent, "dispatch queued");
+                    lane = request.lane, origin = ?request.origin, session = self.core.lane().id(), "dispatch queued");
             }
             Pending::Prompt(_) => {
                 tracing::info!(target: "pi::session", request = request.id,

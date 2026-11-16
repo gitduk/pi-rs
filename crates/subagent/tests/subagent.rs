@@ -186,15 +186,46 @@ struct Kept {
     // what it was allowed to do.
     sessions: std::sync::Mutex<Vec<(String, String)>>,
     parents: std::sync::Mutex<Vec<String>>,
+    fail_save: std::sync::atomic::AtomicBool,
+}
+
+struct Keeping<'a> {
+    archive: &'a Kept,
+    parent: String,
+    id: String,
 }
 
 impl Archive for Kept {
-    fn keep(&self, parent: &str, id: &str, session: Session) {
-        self.parents.lock().unwrap().push(parent.to_string());
-        self.sessions
+    fn open(&self, parent: &str, id: &str, _: &str) -> Box<dyn agent::ArchiveWriter + '_> {
+        Box::new(Keeping {
+            archive: self,
+            parent: parent.into(),
+            id: id.into(),
+        })
+    }
+}
+
+impl agent::ArchiveWriter for Keeping<'_> {
+    fn finish(
+        &self,
+        session: Session,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        if self.archive.fail_save.load(Ordering::Relaxed) {
+            return Box::pin(async {
+                Err("child transcript not saved: injected disk error".into())
+            });
+        }
+        self.archive
+            .parents
             .lock()
             .unwrap()
-            .push((id.to_string(), format!("{:?}", session.entries())));
+            .push(self.parent.clone());
+        self.archive
+            .sessions
+            .lock()
+            .unwrap()
+            .push((self.id.clone(), format!("{:?}", session.entries())));
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -292,6 +323,30 @@ async fn the_child_answers_into_the_parents_transcript() {
     // Filed with the session that called it, so the surface can keep the
     // transcript inside that one.
     assert_eq!(*kept.parents.lock().unwrap(), [ctx.spill_namespace()]);
+}
+
+#[tokio::test]
+async fn a_final_archive_failure_reaches_the_parent_and_keeps_the_usage() {
+    let (_dir, agent, ctx, _seen, kept) = harness(vec![
+        call_turn(
+            "c1",
+            "subagent",
+            r#"{"description":"look","prompt":"look"}"#,
+        ),
+        text_turn("completed child work"),
+        text_turn("the save failed"),
+    ]);
+    kept.fail_save.store(true, Ordering::Relaxed);
+    let (session, out) = drive(&agent, &ctx, "go").await;
+    let usage = out.unwrap();
+    assert_eq!((usage.input, usage.output), (2_500, 17));
+    let transcript = format!("{:?}", session.entries());
+    assert!(
+        transcript.contains("child transcript not saved: injected disk error"),
+        "{transcript}"
+    );
+    assert!(transcript.contains("completed child work"), "{transcript}");
+    assert!(transcript.contains("warned: true"), "{transcript}");
 }
 
 #[tokio::test]

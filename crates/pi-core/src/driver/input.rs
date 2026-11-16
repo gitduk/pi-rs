@@ -243,22 +243,6 @@ impl Drop for Input {
 }
 
 impl agent::seams::Input for Input {
-    fn draft(
-        &self,
-        draft: agent::session::Draft,
-    ) -> futures::future::BoxFuture<'_, Result<(), String>> {
-        let save = self.checkpoint.as_ref().map(|(save, _)| save.clone());
-        Box::pin(async move {
-            if let Some(save) = save {
-                crate::core::saves::wait(move || save.draft(&draft))
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .map_err(|e| format!("draft save failed: {e:#}"))?;
-            }
-            Ok(())
-        })
-    }
-
     fn checkpoint(
         &self,
         session: &agent::session::Session,

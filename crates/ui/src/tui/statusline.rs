@@ -122,7 +122,7 @@ impl Facts {
             spent: lane.spent().cost,
             alerts: [
                 lane.unsaved().map(|_| "unsaved"),
-                pi_store::journal::failed().then_some("journal off"),
+                pi_store::diagnostics::failed().then_some("diagnostics stopped"),
             ]
             .into_iter()
             .flatten()

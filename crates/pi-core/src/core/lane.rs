@@ -27,7 +27,6 @@ use super::Core;
 use crate::core::meter::{Snapshot, Tally};
 use crate::core::resolve::Resolved;
 use crate::input::{Rewound, Step, refused};
-use pi_store::journal;
 use pi_store::session::{self, Store, Stored};
 use pi_store::settings::Settings;
 
@@ -277,14 +276,13 @@ impl Save {
         &self,
         messages: &crate::execution::messages::Snapshot,
     ) -> anyhow::Result<()> {
-        self.record(messages.save(&self.store.path_of(&self.root, &self.id)))
-    }
-
-    pub(crate) fn draft(&self, draft: &agent::session::Draft) -> anyhow::Result<()> {
-        self.record(session::append_draft(
-            &self.store.path_of(&self.root, &self.id),
-            draft,
-        ))
+        let at = self.store.path_of(&self.root, &self.id);
+        let saved = match at.recorded() {
+            Ok(true) => messages.save(&at),
+            Ok(false) => return self.write(&Session::new(), messages, Totals::default()),
+            Err(error) => Err(error),
+        };
+        self.record(saved)
     }
 
     fn record(&self, saved: anyhow::Result<()>) -> anyhow::Result<()> {
@@ -1088,8 +1086,7 @@ impl Core {
         };
         (outcome, saved)
     }
-    // Become the session `talk` holds: the journal and spill namespace
-    // follow it, replaced whole — nothing of the old session carries over.
+    // Replace the conversation and spill namespace together.
     fn becomes(&mut self, talk: Conversation) {
         let lane = self.lane_mut();
         lane.close_inputs();
@@ -1103,10 +1100,7 @@ impl Core {
             .clone()
             .with_session(&lane.talk.id, pi_store::spill_root());
         let resolved = self.lane().resolved().clone();
-        let archive = self.archive(
-            self.lane().root().to_path_buf(),
-            self.lane().agent().spec().model.clone(),
-        );
+        let archive = self.archive(self.lane().root().to_path_buf());
         let retry = resolved.retry;
         let executions = self.executions.clone();
         self.lane_mut()
@@ -1114,10 +1108,7 @@ impl Core {
                 // Detached children retain the meter belonging to their original session.
                 agent.meter = Arc::default();
             });
-        let path = self
-            .store
-            .journal_path(self.lane().root(), &self.lane().talk.id);
-        journal::switched(&path, &self.lane().talk.id);
+        tracing::debug!(target: "pi::session", session = self.lane().id(), "session selected");
     }
     // The session being left has to survive the switch, or it is thrown
     // away: saved first, and the switch refused when that fails. An empty
@@ -1244,8 +1235,7 @@ impl Core {
         *self.lane_mut().ctx_mut() = Ctx::new(ws).with_session(&id, pi_store::spill_root());
         self.lane_mut().checkout.worktree = worktree;
 
-        // The record follows under the same id: one rename takes the
-        // transcript, its journal and its subagents along.
+        // The record follows under the same id, with its artifacts and children.
         let messages = self.lane().messages();
         let previous_archive = messages.detach_archive();
         self.lane_mut().talk.reclaim(None);
@@ -1267,7 +1257,7 @@ impl Core {
             let path = if moved.exists() { &moved } else { &previous };
             messages.attach_archive(path).map_err(failed)?;
         }
-        journal::switched(&self.store.journal_path(&to, &id), &id);
+        tracing::debug!(target: "pi::session", session = %id, workspace = %to.display(), "session moved");
         if let Some(executions) = self.executions.clone() {
             executions.rehome(&from, &to);
             self.lane_mut().bind_inputs(&executions);
@@ -1317,7 +1307,7 @@ impl Core {
         // The model travels; what the root decides does not. A switch changes
         // trees, and which model is answering was a decision made elsewhere.
         let agent = &self.lanes[like].checkout.agent;
-        let archive = self.archive(root.clone(), agent.spec().model.clone());
+        let archive = self.archive(root.clone());
         let mut ag = (**agent).clone();
         // Before `arm`, which hands the meter on to the subagent it builds.
         ag.meter = Arc::default();

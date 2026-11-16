@@ -17,7 +17,7 @@ lists the flags.
   `skill(name: "pi-usage", file: "references/events.md")`.
 - What reaches the model: images, web access, repeated output, compaction:
   `skill(name: "pi-usage", file: "references/context.md")`.
-- Files: what each path holds, retention, memory, the journal:
+- Files: what each path holds, retention, memory, optional diagnostics:
   `skill(name: "pi-usage", file: "references/files.md")`.
 
 The README says what pi is and what it may reach; these pages say what it does

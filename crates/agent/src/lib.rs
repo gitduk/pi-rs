@@ -31,7 +31,9 @@ use event::Reporter;
 pub use event::{Event, Outcome, Totals};
 pub use hooks::{GatesOnly, Hooks, NoHooks};
 pub use retry::Retry;
-pub use seams::{Approver, Archive, Compactor, Decision, Fitted, Untouched, Working};
+pub use seams::{
+    Approver, Archive, ArchiveWriter, Compactor, Decision, Fitted, Untouched, Working,
+};
 
 /// The execution policy shared by default agent roles. Custom prompts opt in explicitly.
 pub const EXECUTION: &str = include_str!("../prompts/execution.md");
@@ -343,17 +345,7 @@ impl Agent {
                 };
 
                 match self
-                    .stream_turn(
-                        &req,
-                        ctx,
-                        reporter,
-                        retry,
-                        turn::Streaming {
-                            input,
-                            entry: session::EntryId(session.next_id()),
-                            generating: &mut generating,
-                        },
-                    )
+                    .stream_turn(&req, ctx, reporter, retry, &mut generating)
                     .instrument(span.clone())
                     .await
                 {
@@ -580,15 +572,9 @@ impl Agent {
         session_id: Option<&str>,
     ) -> Option<Report> {
         let budget = self.budget_within(self.window(), self.count_of(session));
-        let report = self
-            .compactor
+        self.compactor
             .compact_now(session, self.working(None, session_id), budget, focus)
-            .await;
-        // No reporter to carry it, so journal it as the loop's would be.
-        if let Some(r) = report {
-            event::journal(&Event::Compacted(r));
-        }
-        report
+            .await
     }
 
     /// The model and wire for whatever needs both — the compactor writes

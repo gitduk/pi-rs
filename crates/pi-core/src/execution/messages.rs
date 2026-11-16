@@ -117,19 +117,26 @@ impl Snapshot {
 
     pub fn write_in(
         &self,
-        tx: &pi_store::session::Transaction<'_>,
+        tx: &mut pi_store::session::Transaction,
         path: &pi_store::session::Location,
     ) -> anyhow::Result<()> {
         pi_store::session::messages::write_in(tx, path, &self.session, self.base, &self.entries)
     }
 
     pub fn committed(&self, path: &pi_store::session::Location) -> anyhow::Result<()> {
-        let archive = pi_store::session::messages::Lookup::open(path)?
-            .ok_or_else(|| anyhow::anyhow!("message archive was not committed"))?;
         if let Some(owner) = self.owner.upgrade() {
             let mut table = owner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &mut table.archive {
+                Some(archive) if archive.location() == path => archive.refresh()?,
+                _ => {
+                    table.archive = Some(
+                        pi_store::session::messages::Lookup::open(path)?
+                            .ok_or_else(|| anyhow::anyhow!("message archive was not committed"))?,
+                    );
+                }
+            }
             let end = self.base + self.entries.len();
             if end > table.base {
                 let count = end - table.base;
@@ -140,7 +147,6 @@ impl Snapshot {
                 table.order.drain(..count);
                 table.base = end;
             }
-            table.archive = Some(archive);
             table.evict();
         }
         Ok(())
@@ -836,7 +842,7 @@ mod tests {
         let session = SessionId::new("observe-archive".into()).unwrap();
         let messages = Messages::new(session.clone());
         let archive =
-            pi_store::session::Location::new(dir.path().join("project.db"), messages.session());
+            pi_store::session::Location::new(dir.path().join("session.jsonl"), messages.session());
         let start = messages.cursor();
         let mut slow = messages.observe(Some(start.clone())).unwrap();
         let mut ids = Vec::new();
@@ -953,7 +959,7 @@ mod tests {
         let session = SessionId::new("persisted".into()).unwrap();
         let messages = Messages::new(session.clone());
         let archive =
-            pi_store::session::Location::new(dir.path().join("project.db"), messages.session());
+            pi_store::session::Location::new(dir.path().join("session.jsonl"), messages.session());
         let wire = input(&messages);
         let id = messages.submit(wire.clone()).unwrap();
         let mut owner = messages.start_next().unwrap();
@@ -982,7 +988,7 @@ mod tests {
         let session = SessionId::new("interrupted".into()).unwrap();
         let messages = Messages::new(session.clone());
         let archive =
-            pi_store::session::Location::new(dir.path().join("project.db"), messages.session());
+            pi_store::session::Location::new(dir.path().join("session.jsonl"), messages.session());
         let parent = messages.submit(input(&messages)).unwrap();
         let _owner = messages.start_next().unwrap();
         let child = messages
@@ -1036,7 +1042,7 @@ mod tests {
         let session = SessionId::new("long-session".into()).unwrap();
         let messages = Messages::new(session.clone());
         let archive =
-            pi_store::session::Location::new(dir.path().join("project.db"), messages.session());
+            pi_store::session::Location::new(dir.path().join("session.jsonl"), messages.session());
         let first = input(&messages);
         let first_id = messages.submit(first.clone()).unwrap();
         messages
@@ -1099,7 +1105,7 @@ mod tests {
         assert!(
             first
                 .save(&pi_store::session::Location::new(
-                    blocked.join("project.db"),
+                    blocked.join("session.jsonl"),
                     messages.session()
                 ))
                 .is_err()
@@ -1107,7 +1113,7 @@ mod tests {
         assert_eq!(messages.lock().base, 0);
         assert_eq!(messages.lock().order.len(), 4);
         let archive = pi_store::session::Location::new(
-            dir.path().join("archive/project.db"),
+            dir.path().join("archive/session.jsonl"),
             messages.session(),
         );
         first.save(&archive).unwrap();
@@ -1128,11 +1134,11 @@ mod tests {
     fn moving_the_archive_reopens_cold_queries_at_the_new_directory() {
         let dir = tempfile::tempdir().unwrap();
         let old = pi_store::session::Location::new(
-            dir.path().join("old/project.db"),
+            dir.path().join("old/session.jsonl"),
             SessionId::new("moved".into()).unwrap(),
         );
         let new = pi_store::session::Location::new(
-            dir.path().join("new/project.db"),
+            dir.path().join("new/session.jsonl"),
             old.session.clone(),
         );
         let messages = Messages::new(SessionId::new("moved".into()).unwrap());
@@ -1154,11 +1160,7 @@ mod tests {
         messages.snapshot().save(&old).unwrap();
         assert!(!messages.lock().requests.contains_key(id.message()));
         assert_eq!(messages.detach_archive().unwrap(), old);
-        std::fs::rename(
-            old.database.parent().unwrap(),
-            new.database.parent().unwrap(),
-        )
-        .unwrap();
+        std::fs::rename(old.path.parent().unwrap(), new.path.parent().unwrap()).unwrap();
         messages.attach_archive(&new).unwrap();
         assert_eq!(messages.submit(first).unwrap(), id);
         assert!(messages.response(&id).unwrap().is_some());
@@ -1239,7 +1241,7 @@ mod tests {
         let session = SessionId::new("events".into()).unwrap();
         let messages = Messages::new(session.clone());
         let archive =
-            pi_store::session::Location::new(dir.path().join("project.db"), messages.session());
+            pi_store::session::Location::new(dir.path().join("session.jsonl"), messages.session());
         let mut wire = input(&messages);
         wire.kind = WireKind::Request(Request::ToModel(message::InputKind::Automatic));
         wire.body = vec![Block::Data(

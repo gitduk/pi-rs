@@ -12,7 +12,7 @@ use pi_core::core::{self, Core, archive, lane, saves, worktree};
 use pi_core::input::expand;
 use pi_store::icons;
 use pi_store::settings::Settings;
-use pi_store::{journal, session};
+use pi_store::{diagnostics, session};
 use ui::{render, tui};
 
 // The prompt, or None when the run should ask for one.
@@ -144,6 +144,11 @@ async fn run(updated_from: Option<String>) -> Result<Ended> {
         print!("{}", pi_store::config::EXAMPLE_SETTINGS);
         return Ok(Ended::Exit(ExitCode::SUCCESS));
     }
+    match diagnostics::install(diagnostics::level_from_env()) {
+        Ok(Some(path)) => eprintln!("diagnostics: {}", path.display()),
+        Ok(None) => {}
+        Err(error) => eprintln!("diagnostics unavailable: {error}"),
+    }
     let prompt = read_prompt(&args)?;
     let start = start(args, prompt.is_none()).await?;
     match prompt {
@@ -163,7 +168,7 @@ struct Start {
     workspace: tool::Workspace,
     worktree: Option<String>,
     // What this run keeps: an interactive session, or one the user named with
-    // `-c`/`--resume`. A one-shot prompt leaves nothing behind, not even a log.
+    // `-c`/`--resume`. A one-shot prompt keeps no session archive.
     keeps: bool,
     id: String,
     claim: Option<session::Claim>,
@@ -178,9 +183,7 @@ struct Start {
     mcp: core::mcp::Live,
 }
 
-// Everything up to the first turn. Each step that can refuse to start comes
-// before the journal and the session directory are made, so a refused start
-// leaves neither.
+// Prepare the execution context and claim any session kept by this process.
 async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
     let (workspace, settings, config) = open_workspace(&args)?;
 
@@ -289,7 +292,6 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
     // Asked once: it shells out to git, and three startups of that was the
     // pause `Lists` exists to avoid.
     let worktree = worktree::current(&root);
-    let model_id = dialled.spec.model.clone();
 
     let mut ag = agent::Agent::new(dialled.transport, dialled.spec);
     if let Some(prior) = &prior {
@@ -298,31 +300,23 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
     // Resolved here rather than lazily: a name that does not exist should be a
     // startup error, not a surprise once compaction first needs it.
     let writer = summary_writer(&pinned, &config)?;
-    // A resumed session shares its journal file across runs. Installed after
-    // every step that can refuse to start: a refused start leaves no directory.
-    if keeps {
-        journal::install(
-            &store.journal_path(workspace.root(), &id),
-            journal::level_from_env(),
-        );
-        journal::opening(
-            &id,
-            args.config.as_deref(),
-            &config,
-            settings.project(),
-            workspace.root(),
-            prior.as_ref(),
-        );
-        for note in &discovery_notes {
-            tracing::warn!(target: "pi::session", reason = %note, "model discovery failed");
-        }
+    diagnostics::opening(
+        &id,
+        args.config.as_deref(),
+        &config,
+        settings.project(),
+        workspace.root(),
+        prior.as_ref(),
+    );
+    for note in &discovery_notes {
+        tracing::warn!(target: "pi::session", session = %id, reason = %note, "model discovery failed");
     }
     let retry = core::retry(&config);
     // Installed last: the compactor watches its stream by the idle timeout
     // `Config::retry` just settled. Without one the transcript is never shrunk.
     ag.compactor = Arc::new(agent::Summarizing::new(writer, retry.idle));
     let archive = if keeps {
-        archive::Filed::armed(store.clone(), root.clone(), model_id.clone())
+        archive::Filed::armed(store.clone(), root.clone())
     } else {
         archive::nowhere()
     };
@@ -402,10 +396,7 @@ fn take_prior(
 fn sweep(store: &session::Store, keep: Option<std::time::Duration>, spare: Option<String>) {
     let store = store.clone();
     tokio::task::spawn_blocking(move || {
-        // Transcripts by reach and by age, journals and the files a run left
-        // beside them by age — a run worth reading back is a fortnight old at
-        // most.
-        journal::prune(store.root());
+        // Session archives and their artifacts share the configured lifetime.
         store.prune();
         if let Some(keep) = keep {
             store.forget_older_than(keep, spare.as_deref());
@@ -568,7 +559,7 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         created,
         name: name.clone(),
         claim,
-        worktree: worktree.clone(),
+        worktree,
         ..lane::Opening::new(
             Arc::new(ag),
             resolved.clone(),
@@ -665,24 +656,17 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         return Ok(Ended::Exit(ExitCode::from(INTERRUPTED)));
     }
 
-    // Said only when there is something to diagnose. A successful run that
-    // announced its journal would train everyone to stop reading the line.
-    if let (Err(e), Some(path)) = (&outcome, journal::path()) {
-        tracing::error!(target: "pi::loop", error = %e, "run failed");
-        eprintln!(
-            "\x1b[{}mjournal: {}\x1b[0m",
-            config.theme.muted.codes(),
-            path.display()
-        );
+    if let Err(error) = &outcome {
+        tracing::error!(target: "pi::loop", session = %id, %error, "run failed");
     }
     outcome?;
     Ok(Ended::Exit(ExitCode::SUCCESS))
 }
 
 // How a one-shot's save went, and how to pick the session up again.
-fn say_saved<T>(saved: Result<T>, id: &str, name: Option<&str>, resumed: usize, quiet: bool) {
+fn say_saved(saved: Result<()>, id: &str, name: Option<&str>, resumed: usize, quiet: bool) {
     match saved {
-        Ok(_) if !quiet => {
+        Ok(()) if !quiet => {
             let called = name.map_or(String::new(), |n| format!(" “{n}”"));
             let carried = if resumed > 0 {
                 format!("{}resumed {resumed} messages", icons::PART_SEP)
@@ -698,12 +682,11 @@ fn say_saved<T>(saved: Result<T>, id: &str, name: Option<&str>, resumed: usize, 
     }
 }
 
-// Before the runtime goes: what is still settling, and whether the journal
-// kept up.
+// Settle durable work before reporting optional diagnostic output failures.
 async fn leave() {
     settle().await;
-    if let Some(why) = journal::failure() {
-        eprintln!("journal stopped recording: {why}");
+    if let Some(why) = diagnostics::failure() {
+        eprintln!("diagnostics stopped recording: {why}");
     }
 }
 

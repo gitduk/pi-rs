@@ -597,10 +597,9 @@ impl Prepared {
             target: "pi::subagent",
             "subagent",
             session = %child.spill_namespace(),
-            description = %args.description,
+            description_bytes = args.description.len(),
         );
-        // Use the loop's event entrance so a failed or cancelled request still
-        // leaves the connection diagnostics in the journal.
+        // Connection warnings use the same reporter as the child run.
         async {
             let reporter = agent::event::Reporter::new(tx.clone(), agent.brief.hooks.clone());
             for note in &model_notes {
@@ -611,11 +610,9 @@ impl Prepared {
         .await;
         // The token ends the run — the budget or a stop — unwinding like a
         // stop; one ignoring it is dropped after STOP_GRACE.
+        let writer = archive.open(ctx.spill_namespace(), &id, &agent.model.spec.model);
         let checkpoint = Checkpoint {
-            archive,
-            parent: ctx.spill_namespace(),
-            id: &id,
-            model: &agent.model.spec.model,
+            writer: writer.as_ref(),
         };
         let ran = {
             let mut run = std::pin::pin!(
@@ -661,7 +658,27 @@ impl Prepared {
 
         // A child dropped past its grace never reached its own close.
         session.close_dangling();
-        archive.keep_model(ctx.spill_namespace(), &id, &agent.model.spec.model, session);
+        let saved = writer.finish(session).await;
+        let changed = child.writes();
+        for path in &changed {
+            ctx.note_write(path);
+        }
+        let wrote: Vec<String> = changed
+            .iter()
+            .map(|path| ctx.workspace.display(path))
+            .collect();
+        if let Err(error) = saved {
+            return Ok(Report {
+                outcome: ExecutionOutcome::Failed,
+                output: ToolOutput::text(with_model_notes(
+                    answer(&heard, Some(&error), lost, &wrote, None),
+                    &model_notes,
+                ))
+                .with_preview(format!("{}: {error}", args.description.replace('\n', " ")))
+                .with_spent(heard.spent)
+                .warned(),
+            });
+        }
 
         let mut outcome = ExecutionOutcome::Succeeded;
         let cut = match ran {
@@ -707,17 +724,6 @@ impl Prepared {
                 Some(format!("subagent: {why}"))
             }
         };
-
-        let changed = child.writes();
-        // Into the caller's record as well as the child's: these are changes
-        // this run caused, and what reads that record asks exactly that.
-        for path in &changed {
-            ctx.note_write(path);
-        }
-        let wrote: Vec<String> = changed
-            .iter()
-            .map(|path| ctx.workspace.display(path))
-            .collect();
 
         let check = match args
             .verify
@@ -891,19 +897,10 @@ fn check_line(check: &Checked) -> String {
 }
 
 struct Checkpoint<'a> {
-    archive: &'a dyn Archive,
-    parent: &'a str,
-    id: &'a str,
-    model: &'a str,
+    writer: &'a dyn agent::ArchiveWriter,
 }
 
 impl agent::seams::Input for Checkpoint<'_> {
-    fn draft(
-        &self,
-        draft: agent::session::Draft,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
-        self.archive.draft(self.parent, self.id, draft)
-    }
     fn take(&self) -> Option<agent::session::Prompt> {
         None
     }
@@ -911,8 +908,7 @@ impl agent::seams::Input for Checkpoint<'_> {
         &self,
         session: &Session,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
-        self.archive
-            .checkpoint(self.parent, self.id, self.model, session)
+        self.writer.checkpoint(session)
     }
 }
 

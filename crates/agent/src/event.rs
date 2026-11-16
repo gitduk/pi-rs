@@ -196,16 +196,13 @@ impl Reporter {
         self
     }
 
-    /// Report a warning through the same journal and hooks as loop events.
+    /// Report a warning through the same hooks and outlet as loop events.
     pub async fn warn(&self, warning: String) {
         self.report(Event::Warning(warning)).await;
     }
 
-    /// Journals it, hands it to the hooks, sends it to the surface, in that
-    /// order, in one call — call this where the fact occurs, not where the
-    /// event is consumed, or order drifts.
+    /// Notify hooks and forward an event from the place where it occurs.
     pub(crate) fn report(&self, event: Event) -> impl std::future::Future<Output = ()> + Send + '_ {
-        journal(&event);
         self.hooks.saw(&event);
         async move {
             tokio::select! {
@@ -217,94 +214,7 @@ impl Reporter {
     }
 
     pub(crate) fn latest(&self, event: Event) {
-        journal(&event);
         self.hooks.saw(&event);
         self.tx.latest(event);
-    }
-}
-
-// Deltas are the exception: they are the transcript, they arrive thousands at
-// a time, and the transcript is saved beside the log already.
-pub(crate) fn journal(event: &Event) {
-    match event {
-        Event::TextDelta(_)
-        | Event::ReasoningDelta(_)
-        | Event::Usage(_)
-        | Event::Committed { .. } => {}
-        // Whoever ran the run journals how it ended.
-        Event::Failed { .. } => {}
-        // `TurnEnd`'s count is the size; the loop's "replied" record has the
-        // bound it was converted against.
-        Event::Context { .. } => {}
-        // What it sums up is journaled where it happened.
-        Event::ToolProgress { .. } => {}
-        Event::ToolPrinted { .. } => {}
-        Event::TurnStart { turn } => tracing::info!(target: "pi::loop", turn, "turn start"),
-        Event::ToolQueued { id, name, args } => {
-            tracing::info!(target: "pi::tool", call = %id, tool = %name, args = %clipped(args), "call");
-            // Whole at debug: args can be a file's worth, which `call` clips.
-            tracing::debug!(target: "pi::tool", call = %id, args = %args, "arguments");
-        }
-        Event::ToolStart { id, .. } => tracing::info!(target: "pi::tool", call = %id, "running"),
-        Event::ToolEnd {
-            id,
-            name,
-            outcome,
-            preview,
-            // The transcript keeps it beside the result.
-            took: _,
-        } => match outcome {
-            Outcome::Failed => {
-                tracing::warn!(target: "pi::tool", call = %id, tool = %name, detail = %preview, "failed")
-            }
-            Outcome::Done | Outcome::Warned => {
-                let warned = *outcome == Outcome::Warned;
-                tracing::info!(target: "pi::tool", call = %id, tool = %name, preview = %preview, warned, "ok")
-            }
-        },
-        Event::ToolDenied { id, name, reason } => {
-            tracing::warn!(target: "pi::tool", call = %id, tool = %name, reason = %reason, "denied")
-        }
-        Event::Compacted(r) => tracing::info!(
-            target: "pi::compact",
-            summarized = r.summarized,
-            "compacted"
-        ),
-        Event::Retrying {
-            attempt,
-            delay_ms,
-            reason,
-        } => tracing::warn!(target: "pi::wire", attempt, delay_ms, reason = %reason, "retrying"),
-        Event::Warning(w) | Event::Refit(w) => tracing::warn!(target: "pi::loop", "{w}"),
-        // Named for what it carries: the loop sends this before the turn's
-        // tool calls run, so "end" would put the record in the wrong place.
-        Event::TurnEnd { usage, .. } => tracing::info!(
-            target: "pi::loop",
-            input = usage.input,
-            output = usage.output,
-            cache_read = usage.cache_read,
-            cache_write = usage.cache_write,
-            "counted"
-        ),
-        Event::Done { turns, .. } => tracing::info!(target: "pi::loop", turns, "done"),
-    }
-}
-
-// Every key a call passed, each long string cut to its head: which file and
-// which command survive, a written file's body does not.
-fn clipped(args: &serde_json::Value) -> serde_json::Value {
-    const HEAD: usize = 160;
-    use serde_json::Value;
-    match args {
-        Value::String(s) if s.chars().count() > HEAD => {
-            let head: String = s.chars().take(HEAD).collect();
-            let more = s.chars().count() - HEAD;
-            Value::String(format!("{head}… {more} more chars"))
-        }
-        Value::Array(items) => Value::Array(items.iter().map(clipped).collect()),
-        Value::Object(map) => {
-            Value::Object(map.iter().map(|(k, v)| (k.clone(), clipped(v))).collect())
-        }
-        other => other.clone(),
     }
 }

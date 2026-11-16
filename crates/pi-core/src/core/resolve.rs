@@ -15,7 +15,7 @@ use crate::core::instructions;
 use crate::input::commands::{Command, commands};
 use pi_store::args::EffortArg;
 use pi_store::settings::Settings;
-use pi_store::{config, journal};
+use pi_store::{config, text};
 
 /// Everything the config and the workspace decide, as opposed to what the
 /// command line fixed for the whole run. A reload recomputes exactly this.
@@ -130,7 +130,7 @@ impl PromptFiles {
                 crate::core::memory::kept(&pi_store::memory::Memory::default(), root),
             )
         };
-        let stamp = journal::rfc3339(std::time::SystemTime::now());
+        let stamp = text::rfc3339(std::time::SystemTime::now());
         let day = stamp.split_once('T').map_or(&*stamp, |(day, _)| day);
         Ok(Self {
             system_file,

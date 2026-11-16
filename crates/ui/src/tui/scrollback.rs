@@ -642,17 +642,7 @@ pub(super) fn scrollback_from(
             }
         }
     }
-    if let Some(draft) = session.draft().filter(|draft| !draft.blocks.is_empty()) {
-        out.push(Row::notice(
-            "Interrupted assistant output; excluded from model context",
-        ));
-        for reasoning in draft.reasoning() {
-            for line in reasoning.text().lines() {
-                out.push(Row::notice(Row::reasoning_line(line, paint)));
-            }
-        }
-        out.extend(Row::answer(&draft.text(), paint));
-    }
+
     out
 }
 

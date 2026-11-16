@@ -468,37 +468,6 @@ pub struct Session {
     // Not saved: a resumed transcript is measured afresh by its first request.
     #[serde(skip)]
     measured: Option<Measured>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    draft: Option<Arc<Draft>>,
-}
-
-/// Unfinished assistant output, retained for inspection and excluded from context.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Draft {
-    pub id: String,
-    pub entry: EntryId,
-    /// Position of the first fragment in this batch.
-    pub from: usize,
-    pub blocks: Vec<message::Block>,
-}
-
-impl Draft {
-    pub fn text(&self) -> String {
-        self.blocks
-            .iter()
-            .filter_map(|block| match block {
-                message::Block::Text(text) => Some(text.as_str()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    pub fn reasoning(&self) -> impl Iterator<Item = &llm::message::Reasoning> {
-        self.blocks.iter().filter_map(|block| match block {
-            message::Block::Reasoning(reasoning) => Some(reasoning),
-            _ => None,
-        })
-    }
 }
 
 /// The provider's count of a transcript's last request, beside our bound on
@@ -579,13 +548,6 @@ fn stopped_note(err: Option<&str>) -> String {
 }
 
 impl Session {
-    pub fn draft(&self) -> Option<&Draft> {
-        self.draft.as_deref()
-    }
-
-    pub fn keep_draft(&mut self, draft: Draft) {
-        self.draft = Some(Arc::new(draft));
-    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -675,7 +637,6 @@ impl Session {
     }
 
     fn push_ask(&mut self, ask: Prompt) -> EntryId {
-        self.draft = None;
         let (id, at) = self.mint();
         Arc::make_mut(&mut self.entries).push(Entry::Ask { id, at, ask });
         id
@@ -764,7 +725,6 @@ impl Session {
     }
 
     pub fn push_assistant(&mut self, blocks: Vec<AssistantContent>) -> EntryId {
-        self.draft = None;
         let (id, at) = self.mint();
         Arc::make_mut(&mut self.entries).push(Entry::Answer { id, at, blocks });
         id
@@ -973,7 +933,6 @@ impl Session {
         let keep = at + usize::from(keep);
         let removed = self.entries.len() - keep;
         Arc::make_mut(&mut self.entries).truncate(keep);
-        self.draft = None;
         // The marker described the round the cut just removed; keeping it
         // would name a death the transcript no longer shows.
         self.interrupted = None;
@@ -1004,7 +963,6 @@ impl Session {
             next,
             interrupted,
             measured: None,
-            draft: None,
         }
     }
 

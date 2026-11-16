@@ -19,16 +19,18 @@
 | `~/.pi/statusline.json`                  | the layout of the statusline rows          |
 | `~/.pi/statusline.d/`                    | named scripts the layout may draw a value from |
 | `~/.pi/sessions/…/<id>/statusline.json`  | that session's last run's numbers, so a resume opens with them |
-| `~/.pi/sessions/<project>/project.db`    | every session's conversation and context state |
-| `~/.pi/sessions/<project>/<session>/`    | `journal.jsonl`, claims and diagnostic artifacts |
+| `~/.pi/sessions/<project>/<session>/session.jsonl`    | one session's conversation and request state |
+| `~/.pi/sessions/<project>/<session>/`    | claims and session artifacts |
 
 At startup, pi deletes sessions with no activity for 90 days.
 It also deletes pasted images with no repeated paste for 90 days.
 `keep_days` in `settings.toml` changes this interval. `0` keeps everything.
 
-The journal records what the transcript does not: requests, timings, refusals,
-retries. One JSON object per line, `0600`, kept two weeks. `PI_LOG` takes
-`debug`, `trace` or `off`.
+Diagnostics are off by default. `PI_LOG=debug pi` writes one process log to
+`~/.pi/logs/<start-time>-<pid>.jsonl` and prints its path. `PI_LOG=trace pi`
+adds detail. Files use mode `0600` and stop recording at 64 MiB. They stay
+independent of session switching and retention. Clear diagnostic files manually.
+Complete conversations and tool content stay in session archives.
 
 ## Memory
 

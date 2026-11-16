@@ -21,7 +21,7 @@ use tool::{Ctx, ToolOutput};
 const WAIT: Duration = Duration::from_secs(30);
 
 // Events waiting on watching hooks. Past this a hook is not keeping up, and
-// what it misses is journaled rather than held without bound.
+// what it misses is traced rather than held without bound.
 const QUEUE: usize = 256;
 
 // How long leaving waits on watching hooks still queued or running.
@@ -340,7 +340,7 @@ fn line(input: &Value) -> Vec<u8> {
 }
 
 // What each hook printed, as notes for the model; output from an exit
-// `kept` refuses is journaled instead.
+// `kept` refuses is traced instead.
 async fn notes(
     hooks: Vec<&Hook>,
     input: &[u8],
@@ -363,7 +363,7 @@ async fn notes(
     (!notes.is_empty()).then(|| notes.join("\n"))
 }
 
-// `run`, with a hook that could not be run journaled and passed over.
+// `run`, with a hook that could not be run traced and passed over.
 async fn ran(hook: &Hook, input: &[u8], ctx: &Ctx, ask: &dyn Ask) -> Option<(i32, String)> {
     run(hook, input, ctx, ask)
         .await

@@ -1,47 +1,47 @@
-//! Indexed request reads from the authoritative workspace database.
+//! Request views over the session's own offset index.
 
-use super::{Entry, Location, database};
 use anyhow::{Result, ensure};
 use message::{MessageId, SessionId};
-use rusqlite::{Connection, OptionalExtension, params};
+
+use super::{Entry, Location, file};
 
 pub struct Lookup {
     location: Location,
-    connection: Connection,
     count: usize,
 }
 
-impl Lookup {
-    pub fn committed(at: &Location, session: &SessionId, count: usize) -> Result<Self> {
-        ensure!(
-            &at.session == session,
-            "request archive belongs to another session"
-        );
-        let mut lookup =
-            Self::open(at)?.ok_or_else(|| anyhow::anyhow!("request archive is unavailable"))?;
-        ensure!(
-            lookup.count >= count,
-            "request archive does not contain this commit"
-        );
-        lookup.count = count;
-        Ok(lookup)
-    }
+/// A committed address can be read after releasing the live request table.
+pub struct Record {
+    location: Location,
+    address: file::RequestAddress,
+}
 
+impl Record {
+    pub fn read(&self) -> Result<Entry> {
+        let entry = file::request(&self.location, self.address)?;
+        ensure!(
+            entry.message.session == self.location.session,
+            "interaction belongs to another session"
+        );
+        Ok(entry)
+    }
+}
+
+impl Lookup {
     pub fn open(at: &Location) -> Result<Option<Self>> {
-        if !at.database.is_file() {
-            return Ok(None);
-        }
-        let connection = database::connect(&at.database)?;
-        let Some(count) = super::count(&connection, at)? else {
+        let index = at.refresh()?;
+        let Some(count) = index.state.requests else {
             return Ok(None);
         };
         Ok(Some(Self {
             location: at.clone(),
-            connection,
             count,
         }))
     }
-
+    pub fn refresh(&mut self) -> Result<()> {
+        self.count = self.location.refresh()?.requests.len();
+        Ok(())
+    }
     pub fn location(&self) -> &Location {
         &self.location
     }
@@ -54,79 +54,83 @@ impl Lookup {
 
     pub fn position(&self, id: &MessageId, before: usize) -> Result<Option<usize>> {
         Ok(self
-            .connection
-            .query_row(
-                "SELECT position FROM requests WHERE session=?1 AND id=?2 AND position<?3",
-                params![self.session().as_str(), id.as_str(), before.min(self.count)],
-                |r| r.get(0),
-            )
-            .optional()?)
+            .location
+            .cached_index()
+            .ids
+            .get(id)
+            .copied()
+            .filter(|position| *position < before.min(self.count)))
     }
-
+    pub(super) fn has_request(&self, id: &MessageId) -> bool {
+        let index = self.location.cached_index();
+        index.ids.get(id).is_some_and(|position| {
+            *position < self.count && index.requests[*position].original.is_none()
+        })
+    }
+    pub(super) fn has_response(&self, id: &MessageId) -> bool {
+        self.location.cached_index().responses.contains_key(id)
+    }
     pub fn automatic_request(
         &self,
         source: &str,
         event: &str,
         before: usize,
     ) -> Result<Option<MessageId>> {
-        let id: Option<String>=self.connection.query_row("SELECT id FROM requests WHERE session=?1 AND source=?2 AND event=?3 AND position<?4 ORDER BY position LIMIT 1", params![self.session().as_str(),source,event,before.min(self.count)], |r|r.get(0)).optional()?;
-        Ok(id.map(MessageId::new).transpose()?)
+        let position = self
+            .location
+            .cached_index()
+            .triggers
+            .get(&(source.into(), event.into()))
+            .copied();
+        match position {
+            Some(position) => Ok(self.at(position, before)?.map(|entry| entry.message.id)),
+            None => Ok(None),
+        }
     }
-
     pub fn get(&self, id: &MessageId, before: usize) -> Result<Option<Entry>> {
-        self.find("id", id, before)
+        match self.position(id, before)? {
+            Some(position) => self.at(position, before),
+            None => Ok(None),
+        }
     }
     pub fn response(&self, id: &MessageId, before: usize) -> Result<Option<Entry>> {
-        self.find("request_id", id, before)
-    }
-
-    fn find(&self, column: &str, id: &MessageId, before: usize) -> Result<Option<Entry>> {
-        let sql = format!(
-            "SELECT r.metadata,c.body FROM requests r JOIN body_values c ON c.id=r.body
-             WHERE r.session=?1 AND r.{column}=?2 AND r.position<?3"
-        );
-        let row: Option<(String, String)> = self
-            .connection
-            .query_row(
-                &sql,
-                params![self.session().as_str(), id.as_str(), before.min(self.count)],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        row.map(|(metadata, body)| super::decode(metadata, body))
-            .transpose()
-    }
-
-    /// Read one committed prefix in order, validating positions and indexed identities.
-    pub(super) fn visit(&self, mut visit: impl FnMut(usize, Entry) -> Result<()>) -> Result<()> {
-        let mut statement = self.connection.prepare(
-            "SELECT r.position,r.id,r.metadata,c.body FROM requests r JOIN body_values c ON c.id=r.body
-             WHERE r.session=?1 AND r.position<?2 ORDER BY r.position"
-        )?;
-        let mut rows = statement.query(params![self.session().as_str(), self.count])?;
-        let mut next = 0;
-        while let Some(row) = rows.next()? {
-            let position: usize = row.get(0)?;
-            ensure!(position == next, "missing request position");
-            let id: String = row.get(1)?;
-            let entry = super::decode(row.get(2)?, row.get(3)?)?;
-            ensure!(
-                entry.message.id.as_str() == id,
-                "message archive identifier index mismatch"
-            );
-            visit(position, entry)?;
-            next += 1;
+        let position = self.location.cached_index().responses.get(id).copied();
+        match position {
+            Some(position) => self.at(position, before),
+            None => Ok(None),
         }
-        ensure!(next == self.count, "missing request position");
+    }
+    pub(super) fn visit(&self, mut visit: impl FnMut(usize, Entry) -> Result<()>) -> Result<()> {
+        let addresses = self.location.cached_index().requests[..self.count]
+            .iter()
+            .map(|request| request.address)
+            .collect::<Vec<_>>();
+        let mut reader = file::Reader::new(&self.location)?;
+        for (position, address) in addresses.into_iter().enumerate() {
+            visit(position, reader.request(address)?)?;
+        }
         Ok(())
     }
-
-    pub fn at(&self, position: usize, before: usize) -> Result<Option<Entry>> {
+    pub fn record(&self, position: usize, before: usize) -> Option<Record> {
         if position >= before.min(self.count) {
-            return Ok(None);
+            return None;
         }
-        let row:Option<(String,String)>=self.connection.query_row("SELECT r.metadata,c.body FROM requests r JOIN body_values c ON c.id=r.body WHERE r.session=?1 AND r.position=?2",params![self.session().as_str(),position],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-        row.map(|(meta, body)| super::decode(meta, body))
+        let index = self.location.cached_index();
+        Some(Record {
+            location: self.location.clone(),
+            address: index.requests[position].address,
+        })
+    }
+    pub fn original(&self, position: usize, before: usize) -> Option<Record> {
+        if position >= before.min(self.count) {
+            return None;
+        }
+        let original = self.location.cached_index().requests[position].original;
+        original.and_then(|original| self.record(original, position))
+    }
+    pub fn at(&self, position: usize, before: usize) -> Result<Option<Entry>> {
+        self.record(position, before)
+            .map(|record| record.read())
             .transpose()
     }
 }

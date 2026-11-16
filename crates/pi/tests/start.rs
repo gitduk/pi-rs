@@ -9,13 +9,14 @@ use agent::session::Session;
 use pi_store::session::{Header, Store};
 
 // A chat-completions endpoint answering every request with `reply`.
-fn endpoint(reply: &'static str) -> String {
+fn endpoint(reply: impl Into<String>) -> String {
     recording_endpoint(reply).0
 }
 
 fn recording_endpoint(
-    reply: &'static str,
+    reply: impl Into<String>,
 ) -> (String, std::sync::mpsc::Receiver<(String, Vec<u8>)>) {
+    let reply = reply.into();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let (send, received) = std::sync::mpsc::channel();
@@ -92,7 +93,7 @@ impl Pi {
     }
 
     // Configured to talk to an endpoint that always says `reply`.
-    fn answering(reply: &'static str) -> Self {
+    fn answering(reply: impl Into<String>) -> Self {
         use std::os::unix::fs::PermissionsExt;
         let pi = Self::new();
         let settings = pi.home.path().join("settings.toml");
@@ -117,6 +118,7 @@ impl Pi {
             .env("PI_HOME", self.home.path())
             .env("NO_PROXY", "127.0.0.1")
             .env("no_proxy", "127.0.0.1")
+            .env_remove("PI_LOG")
             .envs(vars.iter().copied())
             .stdin(Stdio::null())
             .output()
@@ -131,7 +133,7 @@ impl Pi {
         Store::new(self.home.path().join("sessions"))
     }
 
-    // Every file under the session store: transcripts, journals, claims.
+    // Every file under the session store: transcripts and claims.
     fn filed(&self) -> Vec<PathBuf> {
         fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
             for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -151,7 +153,7 @@ fn said(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-// Each refusal comes before the journal and the transcript are made.
+// A refused start leaves no session archive.
 #[test]
 fn a_refused_start_files_nothing() {
     let pi = Pi::new();
@@ -167,7 +169,7 @@ fn a_refused_start_files_nothing() {
     assert_eq!(pi.filed(), Vec::<PathBuf>::new());
 }
 
-// A one-shot prompt nobody asked to keep leaves nothing, not even a log.
+// One-shot execution keeps no session archive; diagnostics are independent.
 #[test]
 fn a_one_shot_prompt_prints_the_reply_and_files_nothing() {
     let pi = Pi::answering("pong");
@@ -175,6 +177,35 @@ fn a_one_shot_prompt_prints_the_reply_and_files_nothing() {
     assert!(out.status.success(), "{}", said(&out));
     assert!(String::from_utf8_lossy(&out.stdout).contains("pong"));
     assert_eq!(pi.filed(), Vec::<PathBuf>::new());
+    assert!(
+        !pi.home.path().join("logs").exists(),
+        "default runs create no diagnostic files"
+    );
+    assert!(!said(&out).contains("diagnostics:"));
+
+    let prompt = "private-prompt-marker";
+    let out = pi.run_with_env(&[prompt], &[("PI_LOG", "trace")]);
+    assert!(out.status.success(), "{}", said(&out));
+    assert!(said(&out).contains("diagnostics:"));
+    assert!(pi.filed().is_empty(), "diagnostics do not create a session");
+    let logs: Vec<_> = std::fs::read_dir(pi.home.path().join("logs"))
+        .unwrap()
+        .collect();
+    assert_eq!(logs.len(), 1);
+    let path = logs[0].as_ref().unwrap().path();
+    let log = std::fs::read_to_string(&path).unwrap();
+    assert!(log.contains("pi::wire"));
+    assert!(
+        !log.contains(prompt),
+        "request content must stay out of diagnostics"
+    );
+
+    let blocked = Pi::answering("pong");
+    std::fs::write(blocked.home.path().join("logs"), "occupied").unwrap();
+    let out = blocked.run_with_env(&["hi"], &[("PI_LOG", "debug")]);
+    assert!(out.status.success(), "{}", said(&out));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("pong"));
+    assert!(said(&out).contains("diagnostics unavailable:"));
 }
 
 #[test]
@@ -255,6 +286,75 @@ format = "chat"
     }
 }
 
+#[test]
+fn a_large_reply_stores_only_final_messages() {
+    let pi = Pi::answering(format!("greeting-reply-marker{}", "x".repeat(128 * 1024)));
+    let path = pi
+        .store()
+        .save(
+            &pi.workspace(),
+            Header {
+                id: "greeting",
+                model: "local/m",
+                name: None,
+                created: 1,
+                spent: Default::default(),
+            },
+            &Session::new(),
+        )
+        .unwrap();
+    let out = pi.run(&["--resume", "greeting", "greeting-input-marker"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let text = std::fs::read_to_string(&path.path).unwrap();
+    let records: Vec<serde_json::Value> = text
+        .lines()
+        .flat_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            match value {
+                serde_json::Value::Array(items) => items,
+                item => vec![item],
+            }
+        })
+        .collect();
+    let types: Vec<_> = records
+        .iter()
+        .map(|record| record["type"].as_str().unwrap_or("missing"))
+        .collect();
+    assert_eq!(types, ["session", "input", "assistant"], "{text}");
+    assert_eq!(text.matches("greeting-input-marker").count(), 1);
+    assert_eq!(text.matches("greeting-reply-marker").count(), 1);
+    assert_eq!(records[2]["status"], "done");
+    let saved = Store::read(&path).unwrap();
+    assert_eq!(saved.session.entries().len(), 2);
+    assert_eq!(
+        pi_store::session::messages::read(&path)
+            .unwrap()
+            .unwrap()
+            .entries
+            .len(),
+        2
+    );
+    let before = std::fs::read(&path.path).unwrap();
+    pi.store()
+        .save(
+            &pi.workspace(),
+            Header {
+                id: "greeting",
+                model: &saved.model,
+                name: saved.name.as_deref(),
+                created: saved.created,
+                spent: saved.spent,
+            },
+            &saved.session,
+        )
+        .unwrap();
+    assert_eq!(
+        std::fs::read(&path.path).unwrap(),
+        before,
+        "unchanged saves append nothing"
+    );
+}
+
 // A session named with `--resume` is kept: the turn lands in it, under its
 // own id, birth and name — until `--name` gives it another.
 #[test]
@@ -284,14 +384,37 @@ fn a_resumed_one_shot_is_filed_into_the_session_it_named() {
         .collect();
     assert_eq!(prompts, ["before", "again"]);
     assert!(stored.session.entries().len() > before + 1, "and the reply");
+    assert!(!pi.home.path().join("logs").exists());
     assert!(
-        pi.store().journal_path(&pi.workspace(), "s1").is_file(),
-        "a kept session keeps its journal"
+        !pi.filed()
+            .iter()
+            .any(|path| path.file_name().is_some_and(|name| name == "journal.jsonl"))
     );
 
     let out = pi.run(&["--resume", "s1", "--name", "renamed", "more"]);
     assert!(out.status.success(), "{}", said(&out));
     assert_eq!(Store::read(&path).unwrap().name.as_deref(), Some("renamed"));
+
+    for _ in 0..2 {
+        let out = pi.run_with_env(&["--resume", "s1", "diagnose"], &[("PI_LOG", "debug")]);
+        assert!(out.status.success(), "{}", said(&out));
+    }
+    let logs: Vec<_> = std::fs::read_dir(pi.home.path().join("logs"))
+        .unwrap()
+        .collect();
+    assert_eq!(
+        logs.len(),
+        2,
+        "each process owns its log, even when resuming the same session"
+    );
+    for log in logs {
+        let text = std::fs::read_to_string(log.unwrap().path()).unwrap();
+        assert!(
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .any(|record| record["session"] == "s1")
+        );
+    }
 }
 
 // A session whose model the config no longer reaches still opens: the model

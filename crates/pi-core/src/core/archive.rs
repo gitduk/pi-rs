@@ -1,50 +1,79 @@
-//! Child conversation checkpoints and final saves in the workspace database.
+//! Child conversation checkpoints and final saves in independent session files.
 //!
 //! Child usage returns through the tool result to its parent's meter.
 
 use std::sync::Arc;
 
-use agent::Archive;
 use agent::session::Session;
-
-use pi_store::session::{Store, now};
+use agent::{Archive, ArchiveWriter};
+use pi_store::session::{Location, Store, now};
 
 pub struct Filed {
     store: Store,
-    // The checkout it ran in — the same one its caller is in, because a
-    // subagent does not get a tree of its own.
     root: std::path::PathBuf,
-    model: String,
 }
 
 impl Filed {
-    /// Handed straight out as the trait object the tool takes: nothing here
-    /// needs the concrete type, and a caller that has to spell the coercion is
-    /// a caller doing this crate's execution.
-    pub fn armed(store: Store, root: std::path::PathBuf, model: String) -> Arc<dyn Archive> {
-        Arc::new(Self { store, root, model })
-    }
-
-    fn write_job(
-        &self,
-        parent: &str,
-        id: &str,
-        model: &str,
-        session: Session,
-    ) -> impl FnOnce() -> anyhow::Result<pi_store::session::Location> + Send + 'static {
-        let (store, root, parent, id, model) = (
-            self.store.clone(),
-            self.root.clone(),
-            parent.to_owned(),
-            id.to_owned(),
-            model.to_owned(),
-        );
-        move || store.save_subagent(&parent, &id, &root, &model, now(), &session)
+    pub fn armed(store: Store, root: std::path::PathBuf) -> Arc<dyn Archive> {
+        Arc::new(Self { store, root })
     }
 }
 
-/// A run with nowhere to file: a one-shot keeps no transcript, so the subagents
-/// it calls keep none either.
+struct Writer {
+    store: Store,
+    root: std::path::PathBuf,
+    at: Location,
+    parent: String,
+    model: String,
+    created: u64,
+}
+
+impl Writer {
+    fn save(&self, session: Session) -> futures::future::BoxFuture<'_, Result<(), String>> {
+        // The queued job also owns the index if its awaiting run is cancelled.
+        let (store, root, at, parent, model, created) = (
+            self.store.clone(),
+            self.root.clone(),
+            self.at.clone(),
+            self.parent.clone(),
+            self.model.clone(),
+            self.created,
+        );
+        Box::pin(async move {
+            super::saves::wait(move || {
+                store.save_subagent_at(&at, &parent, &root, &model, created, &session)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("child transcript not saved: {e:#}"))
+        })
+    }
+}
+
+impl Archive for Filed {
+    fn open(&self, parent: &str, id: &str, model: &str) -> Box<dyn ArchiveWriter + '_> {
+        Box::new(Writer {
+            store: self.store.clone(),
+            root: self.root.clone(),
+            at: self.store.path_of(&self.root, id),
+            parent: parent.into(),
+            model: model.into(),
+            created: now(),
+        })
+    }
+}
+
+impl ArchiveWriter for Writer {
+    fn checkpoint(&self, session: &Session) -> futures::future::BoxFuture<'_, Result<(), String>> {
+        self.save(session.clone())
+    }
+
+    fn finish(&self, session: Session) -> futures::future::BoxFuture<'_, Result<(), String>> {
+        self.save(session)
+    }
+}
+
+/// A run with nowhere to file keeps no child transcripts either.
 pub fn nowhere() -> Arc<dyn Archive> {
     Arc::new(Nowhere)
 }
@@ -52,60 +81,13 @@ pub fn nowhere() -> Arc<dyn Archive> {
 struct Nowhere;
 
 impl Archive for Nowhere {
-    fn keep(&self, _parent: &str, _id: &str, _session: Session) {}
+    fn open(&self, _parent: &str, _id: &str, _model: &str) -> Box<dyn ArchiveWriter + '_> {
+        Box::new(Nowhere)
+    }
 }
 
-impl Archive for Filed {
-    fn draft<'a>(
-        &'a self,
-        _parent: &'a str,
-        id: &'a str,
-        draft: agent::session::Draft,
-    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
-        let at = self.store.path_of(&self.root, id);
-        Box::pin(async move {
-            super::saves::wait(move || pi_store::session::append_draft(&at, &draft))
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| format!("child draft save failed: {e:#}"))
-        })
-    }
-
-    fn checkpoint<'a>(
-        &'a self,
-        parent: &'a str,
-        id: &'a str,
-        model: &'a str,
-        session: &Session,
-    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
-        let write = self.write_job(parent, id, model, session.clone());
-        Box::pin(async move {
-            super::saves::wait(write)
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| format!("child checkpoint failed: {e:#}"))?;
-            Ok(())
-        })
-    }
-
-    // On the saver thread: several subagents saving must not each serialize
-    // megabytes on the tool path, and `flush` joins whatever is queued.
-    fn keep(&self, parent: &str, id: &str, session: Session) {
-        self.keep_model(parent, id, &self.model, session);
-    }
-
-    fn keep_model(&self, parent: &str, id: &str, model: &str, session: Session) {
-        let write = self.write_job(parent, id, model, session);
-        let id = id.to_owned();
-        super::saves::behind(move || {
-            if let Err(e) = write() {
-                tracing::warn!(
-                    target: "pi::session",
-                    id,
-                    error = %format!("{e:#}"),
-                    "subagent transcript not saved"
-                );
-            }
-        });
+impl ArchiveWriter for Nowhere {
+    fn finish(&self, _session: Session) -> futures::future::BoxFuture<'_, Result<(), String>> {
+        Box::pin(async { Ok(()) })
     }
 }

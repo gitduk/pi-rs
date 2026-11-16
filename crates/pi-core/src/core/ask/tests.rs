@@ -455,7 +455,7 @@ async fn concurrent_channels_commit_one_answer_and_retries_survive_reload() {
     setup.input.close_calls(message::Status::Stopped).unwrap();
     setup.owner.complete(message::Status::Done, vec![]).unwrap();
     let archive = pi_store::session::Location::new(
-        setup.dir.path().join("project.db"),
+        setup.dir.path().join("session.jsonl"),
         setup.messages.session(),
     );
     setup.messages.snapshot().save(&archive).unwrap();

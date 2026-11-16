@@ -4,8 +4,8 @@ use crate::core::instructions::short;
 use agent::Totals;
 
 use super::Core;
+use pi_store::diagnostics;
 use pi_store::icons;
-use pi_store::journal;
 use pi_store::listing::{Listing, Row};
 
 impl Core {
@@ -111,20 +111,20 @@ impl Core {
             format!(
                 "{} · {}",
                 lane.id(),
-                short(&self.store.path_of(root, lane.id()).database, root)
+                short(&self.store.path_of(root, lane.id()).path, root)
             ),
         ]);
         rows.push(match lane.unsaved() {
             Some(why) => session.noting(format!("not saved: {why}")),
             None => session,
         });
-        rows.push(match (journal::path(), journal::failure()) {
-            (Some(p), Some(why)) => {
-                Row::new(["journal".into(), short(&p, root)]).noting(format!("stopped: {why}"))
-            }
-            (Some(p), None) => Row::new(["journal".into(), short(&p, root)]),
-            (None, _) => Row::new(["journal", "off"]).noting("PI_LOG is off, or it would not open"),
-        });
+        if let Some(path) = diagnostics::path() {
+            let row = Row::new(["diagnostics".into(), short(&path, root)]);
+            rows.push(match diagnostics::failure() {
+                Some(why) => row.noting(format!("stopped: {why}")),
+                None => row,
+            });
+        }
         if let Some(version) = crate::core::update::newer() {
             rows.push(Row::new(["update".into(), format!("{version} installed")]));
         } else if let Some(version) = crate::core::update::released() {

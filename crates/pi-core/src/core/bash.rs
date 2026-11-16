@@ -38,7 +38,7 @@ pub async fn run_bash(
         output,
         completion,
         // The command as typed: rtk's rewrite is a transparent proxy, and the
-        // journal keeps how it actually ran.
+        // diagnostic output identifies execution context when enabled.
         text: format!(
             "Ran `{}`\n{}",
             out.preview(),

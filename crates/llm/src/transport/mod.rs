@@ -51,7 +51,6 @@ pub(crate) async fn exchange(
     url: String,
     spec: &ModelSpec,
     req: &Request,
-    body: &serde_json::Value,
     call: reqwest::RequestBuilder,
 ) -> crate::Result<reqwest::Response> {
     tracing::debug!(
@@ -66,10 +65,6 @@ pub(crate) async fn exchange(
         effort = ?req.effort,
         "request"
     );
-    // The body runs to hundreds of kilobytes and is the one thing a 400 is
-    // actually about, so it rides one level below everything else.
-    tracing::trace!(target: "pi::wire", format, body = %body, "request body");
-
     let began = std::time::Instant::now();
     let resp = match call.send().await {
         Ok(resp) => resp,
@@ -154,7 +149,7 @@ impl<'a> Call<'a> {
     /// Body on, out to the wire, and the exchange logged as one flow.
     pub(crate) async fn send(self, body: &Value) -> Result<reqwest::Response> {
         let call = self.call.json(body);
-        exchange(self.format, self.url, self.spec, self.req, body, call).await
+        exchange(self.format, self.url, self.spec, self.req, call).await
     }
 }
 

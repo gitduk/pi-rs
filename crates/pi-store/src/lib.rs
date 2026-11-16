@@ -1,7 +1,7 @@
 //! The disk, and the names the config speaks.
 //!
 //! Two things live here: the files a run reads/writes (`session`, `archive`,
-//! `journal`, `config`, `settings`, `memory`) and the config vocabulary (`theme`, `statusline`,
+//! `diagnostics`, `config`, `settings`, `memory`) and the config vocabulary (`theme`, `statusline`,
 //! `keys`, `status`, `icons`, `args`, `text`, `listing`) — the latter is here,
 //! not in `ui`, because it's what a setting is *called*, not drawn.
 
@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 pub mod args;
 pub mod config;
+pub mod diagnostics;
 pub mod icons;
-pub mod journal;
 pub mod keys;
 pub mod listing;
 pub mod memory;

@@ -4,10 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "pi's disk and config vocabulary: settings, sessions, journal, keys, theme"
+description = "pi's disk and config vocabulary: settings, sessions, archives, keys, theme"
 
 [dependencies]
-rusqlite = { version = "0.32.1", features = ["bundled"] }
 message.workspace = true
 transcript.workspace = true
 llm.workspace = true

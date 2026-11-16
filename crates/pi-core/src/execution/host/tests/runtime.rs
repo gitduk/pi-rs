@@ -770,9 +770,18 @@ async fn a_stream_drain_does_not_overtake_queued_execution_starts() {
 #[derive(Default)]
 struct ChildArchive(std::sync::Mutex<Vec<String>>);
 
+struct ChildWriter<'a>(&'a ChildArchive, String);
+
 impl agent::Archive for ChildArchive {
-    fn keep(&self, _: &str, id: &str, _: Session) {
-        self.0.lock().unwrap().push(id.to_owned());
+    fn open(&self, _: &str, id: &str, _: &str) -> Box<dyn agent::ArchiveWriter + '_> {
+        Box::new(ChildWriter(self, id.into()))
+    }
+}
+
+impl agent::ArchiveWriter for ChildWriter<'_> {
+    fn finish(&self, _: Session) -> futures::future::BoxFuture<'_, Result<(), String>> {
+        self.0.0.lock().unwrap().push(self.1.clone());
+        Box::pin(async { Ok(()) })
     }
 }
 

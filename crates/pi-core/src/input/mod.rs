@@ -158,8 +158,7 @@ impl Intent {
     }
 }
 
-// Said once to the user and once to the journal: nothing-happened is hard
-// to read back later, once the terminal has scrolled and disk has moved on.
+// Report a refusal and retain its cause when diagnostics are enabled.
 pub(crate) fn refused(what: &str, e: anyhow::Error) -> String {
     let detail = format!("{e:#}");
     tracing::warn!(target: "pi::session", command = what, error = %detail, "refused");

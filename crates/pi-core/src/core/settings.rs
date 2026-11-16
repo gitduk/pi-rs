@@ -55,7 +55,6 @@ impl Core {
         // stamps stay as last read, so an edit since is still a reload's to apply.
         resolved.watched = lane.resolved().watched.clone();
         resolved.catalog_generation = lane.resolved().catalog_generation;
-        let model = lane.agent().spec().model.clone();
         self.lanes.at_mut(index).prompt_files_read(at);
         if unchanged {
             return None;
@@ -65,7 +64,7 @@ impl Core {
         // Said as it changes, not on every read.
         let left_out = resolved.prompt_files.left_out(&root);
         let left_out = left_out.filter(|now| was.left_out(&root).as_ref() != Some(now));
-        let archive = self.archive(root, model);
+        let archive = self.archive(root);
         let retry = crate::core::retry(&self.lanes[index].environment().config);
         let executions = self.executions.clone();
         self.lanes.at_mut(index).rearm(
@@ -170,9 +169,6 @@ impl Core {
         let running = self.lanes.at(at).agent().spec().clone();
         let (replacement, notes) = super::dial::replacement(&self.pinned, &config, &running.model);
         let retarget = replacement.map(|dialled| (dialled.transport, dialled.spec));
-        let model = retarget
-            .as_ref()
-            .map_or(running.model, |(_, s)| s.model.clone());
         // The compactor holds the summarizer's connection, so it's rebuilt
         // here or `summarize_model`/`idle_timeout` never follow a reload.
         let retry = crate::core::retry(&config);
@@ -181,7 +177,7 @@ impl Core {
 
         // Only here, with everything computed, is anything touched — and in
         // one `rearm`, so the copy a run in flight forces is taken once.
-        let archive = self.archive(root.clone(), model);
+        let archive = self.archive(root.clone());
         let idle = retry.idle;
         let executions = self.executions.clone();
         self.lanes.at_mut(at).ctx_mut().workspace = workspace;
@@ -339,7 +335,7 @@ impl Core {
         transport: std::sync::Arc<dyn llm::Transport>,
         spec: llm::ModelSpec,
     ) {
-        let archive = self.archive(self.lane().root().to_path_buf(), spec.model.clone());
+        let archive = self.archive(self.lane().root().to_path_buf());
         let resolved = self.lane().resolved().clone();
         let retry = crate::core::retry(self.config());
         // The child is built from this agent, so the tool is hung again for it

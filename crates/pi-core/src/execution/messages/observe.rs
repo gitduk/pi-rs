@@ -2,8 +2,7 @@
 
 use super::{Error, LIMITS, Messages, Table};
 use message::{Message, RequestId, WireKind};
-use pi_store::session::Location;
-use pi_store::session::messages::Lookup;
+use pi_store::session::messages::Record;
 use std::sync::Arc;
 
 pub use ::execution::channel::{Cursor, Observed};
@@ -18,7 +17,10 @@ pub struct Observation {
 
 enum Next {
     Memory(Option<Arc<Message>>),
-    Archive { path: Location, before: usize },
+    Archive {
+        record: Record,
+        original: Option<Record>,
+    },
 }
 
 impl Messages {
@@ -94,11 +96,9 @@ impl Observation {
                 };
                 match next {
                     Next::Memory(message) => message,
-                    Next::Archive { path, before } => {
-                        let session = self.cursor.session.clone();
-                        let at = self.cursor.next;
+                    Next::Archive { record, original } => {
                         self.reading = Some(tokio::task::spawn_blocking(move || {
-                            read_committed(&path, &session, at, before)
+                            read_committed(record, original)
                         }));
                         continue;
                     }
@@ -142,27 +142,21 @@ impl Table {
         }
         let archive = self.archive.as_ref().ok_or(Error::ArchiveUnavailable)?;
         Ok(Next::Archive {
-            path: archive.location().clone(),
-            before: self.base,
+            record: archive.record(at, self.base).ok_or(Error::Cursor)?,
+            original: archive.original(at, self.base),
         })
     }
 }
 
-fn read_committed(
-    path: &Location,
-    session: &message::SessionId,
-    at: usize,
-    before: usize,
-) -> Result<Arc<Message>, Error> {
-    let archive = Lookup::committed(path, session, before)?;
-    let entry = archive.at(at, before)?.ok_or(Error::Cursor)?;
-    if &entry.message.session != session {
-        return Err(Error::Session);
-    }
+fn read_committed(record: Record, original: Option<Record>) -> Result<Arc<Message>, Error> {
+    let entry = record.read()?;
     let original = match &entry.message.kind {
         WireKind::Request(_) => None,
         WireKind::Response { request, .. } => {
-            let original = archive.get(request, at)?.ok_or(Error::Parent)?;
+            let original = original.ok_or(Error::Parent)?.read()?;
+            if &original.message.id != request {
+                return Err(Error::Parent);
+            }
             Some(original.message.validate(None, LIMITS)?)
         }
     };
@@ -183,6 +177,7 @@ impl ::execution::channel::Observation for Observation {
 mod tests {
     use super::*;
     use message::{Block, InputKind, Request, SessionId, Status, WireMessage};
+    use pi_store::session::Location;
 
     #[test]
     #[expect(
@@ -212,7 +207,7 @@ mod tests {
             messages
                 .snapshot()
                 .save(&Location::new(
-                    dir.path().join("project.db"),
+                    dir.path().join("session.jsonl"),
                     messages.session(),
                 ))
                 .unwrap();

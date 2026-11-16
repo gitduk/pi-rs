@@ -242,8 +242,7 @@ impl Core {
         for at in 0..self.lanes.len() {
             let lane = &self.lanes[at];
             let retry = lane.resolved().retry;
-            let archive =
-                self.archive(lane.root().to_path_buf(), lane.agent().spec().model.clone());
+            let archive = self.archive(lane.root().to_path_buf());
             let resolved = lane.resolved().clone();
             self.lanes
                 .at_mut(at)
@@ -257,14 +256,9 @@ impl Core {
         self.lanes.ahead()
     }
 
-    // Where a subagent started in this lane files what it did. Root and
-    // model vary (`/worktree`, `/model`); the rest never does.
-    fn archive(
-        &self,
-        root: std::path::PathBuf,
-        model: String,
-    ) -> std::sync::Arc<dyn agent::Archive> {
-        archive::Filed::armed(self.store.clone(), root, model)
+    // Children file their work in the checkout they started in.
+    fn archive(&self, root: std::path::PathBuf) -> std::sync::Arc<dyn agent::Archive> {
+        archive::Filed::armed(self.store.clone(), root)
     }
 
     pub fn lane_mut(&mut self) -> &mut Lane {
@@ -889,7 +883,6 @@ mod tests {
             super::archive::Filed::armed(
                 pi_store::session::Store::new(root.join("state")),
                 root.to_path_buf(),
-                model.into(),
             ),
             agent::Retry::default(),
             None,

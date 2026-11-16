@@ -1046,11 +1046,11 @@ impl Table {
                 target: "pi::background", execution = id, chars = text.chars().count(), "told progress"
             ),
             Told::Reply(text) => tracing::info!(
-                target: "pi::background", execution = id, chars = text.chars().count(), reply = %text, "told reply"
+                target: "pi::background", execution = id, chars = text.chars().count(), "told reply"
             ),
             Told::Asked => tracing::info!(target: "pi::background", execution = id, "told asked"),
             Told::Answer(answer) => {
-                tracing::info!(target: "pi::background", execution = id, ?answer, "told answer")
+                tracing::info!(target: "pi::background", execution = id, accepted = answer.is_ok(), answered = matches!(answer, Ok(Some(_))), "told answer")
             }
             // Said where they happen: a question up or down, an answer refused.
             Told::Question { .. } | Told::Closed(_) | Told::Refused { .. } => {}
@@ -1457,7 +1457,7 @@ impl Table {
         let ago = execution.started_at.elapsed().unwrap_or_default();
         tracing::info!(
             target: "pi::background", execution = execution.id, invocation = ?execution.invocation,
-            root = %execution.root.display(), owner = ?execution.owner, command = %execution.again.command, cwd = %execution.again.cwd.display(), "carried over"
+            root = %execution.root.display(), owner = ?execution.owner, command_bytes = execution.again.command.len(), cwd = %execution.again.cwd.display(), "carried over"
         );
         let phase = Phase::Over {
             stopped: execution.stopped,
@@ -1712,7 +1712,7 @@ impl Commands {
             }
             None => tracing::info!(
                 target: "pi::background", tool = asker, question = question.id, owner = ?owner, back = asked.back,
-                text = %question.text, options = ?question.options, "ask"
+                text_bytes = question.text.len(), options = question.options.len(), "ask"
             ),
         }
         let answer = asked.back.then(|| {
@@ -1809,7 +1809,7 @@ impl RunHandle for Handle {
 
     fn rerun(&self, how: Rerun, again: Again) {
         self.table.update(self.id, self.run, |i| {
-            tracing::info!(target: "pi::background", execution = self.id, command = %again.command, cwd = %again.cwd.display(), "prepared");
+            tracing::info!(target: "pi::background", execution = self.id, command_bytes = again.command.len(), cwd = %again.cwd.display(), "prepared");
             i.rerun = Some(Restart {
                 how,
                 again: again.clone(),
@@ -1942,11 +1942,13 @@ impl ::execution::channel::Channel for Handle {
     }
 
     fn status(&self, text: String) {
-        self.table.update(self.id, self.run, |i| {
-            if i.progress != text {
-                tracing::info!(target: "pi::background", execution = self.id, status = %text, "status");
-                i.progress = text;
+        self.table.update_if(self.id, self.run, |i| {
+            if i.progress == text {
+                return false;
             }
+            tracing::info!(target: "pi::background", execution = self.id, status_bytes = text.len(), "status");
+            i.progress = text;
+            true
         });
     }
 
@@ -2445,7 +2447,7 @@ impl Handle {
         let question = inner.number(question);
         tracing::info!(
             target: "pi::background", execution = self.id, question = question.id,
-            text = %question.text, options = ?question.options, waits = waiter.is_some(),
+            text_bytes = question.text.len(), options = question.options.len(), waits = waiter.is_some(),
             "question"
         );
         if let Some(waiter) = waiter {
