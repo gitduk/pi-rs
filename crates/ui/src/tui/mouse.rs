@@ -725,7 +725,7 @@ fn copy_out(code: &str) -> String {
 
 /// The blank rows between the transcript and whatever is pinned under it —
 /// a panel or the bar — so its last line never reads as part of them.
-pub(super) const HISTORY_GAP: u16 = 1;
+const HISTORY_GAP: u16 = 1;
 
 /// One band under the transcript, listed in the order it is laid: the order
 /// is also what a short screen keeps, so the input line goes first and the

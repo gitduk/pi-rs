@@ -11,6 +11,7 @@ use pi_store::listing::{Listing, Row};
 use pi_store::session::ResumeChoice;
 
 mod arguments;
+pub(crate) mod context;
 pub use arguments::{Args, Input, Parameter, Sources, Subcommand, Values};
 
 #[derive(Clone)]
@@ -33,7 +34,7 @@ pub struct Command {
     /// One line of it. A skill's description is written for the model and is
     /// routinely longer than a line, so it arrives here already cut down.
     pub help: Cow<'static, str>,
-    /// What the word means to the door. A skill's row carries [`hand_on`], the
+    /// What the word means to the door. A skill's row carries `hand_on`, the
     /// same thing a word the table does not have gets.
     pub intent: fn(&str, String) -> Intent,
     pub source: Source,
@@ -159,14 +160,14 @@ pub(crate) const BUILTIN: &[Command] = &[
     Command::builtin(
         "/status",
         Args::None,
-        "what this session stands on, has spent, and where it writes",
+        "runtime configuration, spending, diagnostics and session paths",
         |_, _| Intent::Builtin(Builtin::Status),
     ),
     Command::builtin(
-        "/content",
-        Args::None,
-        "everything the model is given before your first word, AGENTS.md included",
-        |_, _| Intent::Builtin(Builtin::Content),
+        "/context",
+        Args::optional("name", Values::Context),
+        "context charts and directories; inspect a prompt/tool name or message number",
+        |_, rest| Intent::Builtin(Builtin::Context(rest)),
     ),
     Command::builtin("/help", Args::None, "this list", |_, _| {
         Intent::Builtin(Builtin::Help)

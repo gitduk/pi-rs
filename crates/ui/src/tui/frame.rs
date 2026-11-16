@@ -8,6 +8,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, TableState};
 
 use super::Ui;
+use super::browse::{PageInput, PageLayout};
 use super::call::{self, drawn, pending_line};
 use super::menu::MenuEntry;
 use super::mouse::{Pane, Regions, Target, row_in};
@@ -106,9 +107,7 @@ impl Ui {
             _ => Vec::new(),
         };
         let area = self.screen.area();
-        // Rows come from the layout, not from what they drew: a flash that
-        // comes and goes must not move the panel under it.
-        // The input line first: a bar cut short beats a line nobody can see.
+        // Only the normal frame determines the transcript's viewport.
         let panes = [
             Pane::Editor(input.len()),
             Pane::Statusline {
@@ -123,16 +122,30 @@ impl Ui {
                 place: Place::Top,
                 rows: self.layout.rows(Place::Top),
             },
-            // A page is read over all of the conversation: its own rows take
-            // the room the background commands would.
-            Pane::Executions(match paged {
-                true => 0,
-                false => executions.len(),
-            }),
+            Pane::Executions(executions.len()),
         ];
-        let regions = Regions::layout(area, &panes);
+        let transcript = Regions::layout(area, &panes);
+        let page = paged.then(|| {
+            let input = if self.editor.is_empty()
+                && self.images.is_empty()
+                && menu.is_empty()
+                && !self.search_typing()
+            {
+                PageInput::Empty
+            } else {
+                PageInput::Editing
+            };
+            PageLayout::of(
+                transcript,
+                text.iter().map(screen::Piece::height).sum(),
+                input,
+            )
+        });
+        let mut regions = page
+            .as_ref()
+            .map_or(transcript, |page| page.regions(transcript));
         for row in view.surface.scrollback.iter_mut() {
-            row.prepare_preview(&self.paint, width, regions.history.height as usize);
+            row.prepare_preview(&self.paint, width, transcript.history.height as usize);
         }
         if self.search_due() {
             let laid: Vec<Laid> = ScrollbackRows::new(&view.surface.scrollback, &self.paint, width)
@@ -198,8 +211,6 @@ impl Ui {
         let input_view: Vec<Line<'static>> =
             input.into_iter().skip(editor_top).take(editor_h).collect();
         let caret_in_view = (caret.0 as usize).saturating_sub(editor_top);
-        let hist_view = regions.history.height as usize;
-        let most = self.most(&text, hist_view);
         self.search_land(view, &regions);
         if let Some(at) = rewind {
             self.land_at(view, at, &regions);
@@ -243,36 +254,49 @@ impl Ui {
         // The `top` a window opens on, from the anchor that names it.
         let top_of = |a: Anchor| (move |t: &Target| Spot::of(*t).cmp(&Some(a.spot)), a.rows);
         let at = top.map(top_of);
-        // The history row a page's output starts on, the transcript above it.
+        let under = view.surface.scroll.top.map(top_of);
+        let (mut background, background_scroll) = screen::window_tagged(
+            scrollback.chain(live_stream),
+            transcript.history.height as usize,
+            view.surface.scroll.by,
+            under,
+            usize::MAX,
+        );
         let mut output_at = None;
-        let (tagged_rows, scroll) = if paged && hist_view > 0 {
-            // The page lies over the transcript's bottom rows, under a rule
-            // that a page taller than the region pushes up to its top row.
-            let (text, scroll) =
-                screen::window_tagged(text_stream, hist_view - 1, scroll, at, most);
-            let under = view.surface.scroll.top.map(top_of);
-            let (mut rows, _) = screen::window_tagged(
-                scrollback.chain(live_stream),
-                hist_view,
-                view.surface.scroll.by,
-                under,
-                usize::MAX,
-            );
-            let room = (hist_view - 1).saturating_sub(text.len());
-            output_at = Some(room);
-            rows.truncate(room);
-            rows.resize(room, (Line::default(), Target::Gap, 0));
-            rows.push((Line::default(), Target::Rule, 0));
-            rows.extend(text);
-            (rows, scroll)
-        } else {
-            screen::window_tagged(
-                scrollback.chain(live_stream).chain(text_stream),
-                hist_view,
-                scroll,
-                at,
-                most,
-            )
+        let (tagged_rows, scroll, below) = match page {
+            Some(page) => {
+                let (mut text, scroll) = screen::window_tagged(
+                    text_stream,
+                    page.body.height as usize,
+                    scroll,
+                    at,
+                    page.max_scroll,
+                );
+                let mut below = scroll;
+                if scroll > 0
+                    && let Some(last) = text.last_mut()
+                {
+                    // Replace the last row without changing the reading window's size.
+                    *last = (Line::default(), Target::Gap, 0);
+                    regions.gap = Rect {
+                        y: page.body.bottom() - 1,
+                        height: 1,
+                        ..page.body
+                    };
+                    // The covered row is also unread content.
+                    below += 1;
+                }
+                let room = page.rule.y.saturating_sub(page.surface.y) as usize;
+                output_at = Some(room);
+                background.truncate(room);
+                background.resize(room, (Line::default(), Target::Gap, 0));
+                if page.rule.height > 0 {
+                    background.push((Line::default(), Target::Rule, 0));
+                }
+                background.extend(text);
+                (background, scroll, below)
+            }
+            None => (background, background_scroll, background_scroll),
         };
 
         let mut rows = Vec::with_capacity(tagged_rows.len());
@@ -338,13 +362,13 @@ impl Ui {
         self.below = if self.background_focus.is_some() {
             0
         } else {
-            scroll
+            below
         };
-        let gap = if self.background_focus.is_none() && scroll > 0 {
+        let gap = if self.below > 0 {
             let shine = self
                 .pointer
                 .is_some_and(|(_, row)| row_in(regions.gap, row).is_some());
-            let more = format!("{scroll} more below");
+            let more = format!("{below} more below");
             Some(Line::from(self.paint.action_hint(shine, more)).centered())
         } else {
             None
@@ -505,8 +529,12 @@ impl Ui {
                 frame.buffer_mut().set_style(regions.editor, band);
             }
             frame.render_widget(Rows(&input_view), regions.editor);
-            let caret_row = regions.editor.y + caret_in_view as u16;
-            frame.set_cursor_position(command_caret.unwrap_or((caret.1, caret_row)));
+            if let Some(caret) = command_caret {
+                frame.set_cursor_position(caret);
+            } else if regions.editor.height > 0 {
+                let caret_row = regions.editor.y + caret_in_view as u16;
+                frame.set_cursor_position((caret.1, caret_row));
+            }
         });
     }
 
@@ -714,18 +742,6 @@ impl Ui {
             .iter()
             .map(|line| line.ready(self.screen.width()))
             .collect()
-    }
-
-    // How far back the window may go. A page's stops at its head: the
-    // transcript under it is only what it was opened over.
-    fn most(&self, text: &[screen::Ready<'static>], hist_view: usize) -> usize {
-        match self.page() {
-            Some(_) => {
-                let rows: usize = text.iter().map(screen::Piece::height).sum();
-                rows.saturating_sub(hist_view.saturating_sub(1))
-            }
-            None => usize::MAX,
-        }
     }
 
     // Where the top row last drawn opens the next window. A live row is drawn

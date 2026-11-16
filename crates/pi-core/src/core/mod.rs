@@ -8,7 +8,7 @@ pub mod archive;
 pub mod ask;
 pub mod bash;
 pub mod catalog;
-pub mod content;
+pub mod context;
 pub mod dial;
 pub mod environment;
 pub mod hooks;
@@ -397,13 +397,13 @@ impl Core {
                 Step::Handled(help(self.commands(), &self.lane().agent().brief.registry))
             }
             Builtin::Status => Step::Handled(self.status()),
+            Builtin::Context(arg) => Step::Handled(self.context(&arg)),
             // Bare, it is asked; with a level, a change the surface shows.
             Builtin::Effort(arg) if arg.trim().is_empty() => {
                 Step::Handled(Listing::say(self.effort("")))
             }
             Builtin::Effort(arg) => Step::Notice(notice(self.effort(&arg))),
             Builtin::Mcp(arg) => self.mcp().command(&arg),
-            Builtin::Content => Step::Handled(self.content()),
             Builtin::New => match self.new_session() {
                 Ok(()) => Step::Swap(String::new()),
                 Err(why) => Step::Notice(why),

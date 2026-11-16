@@ -13,9 +13,13 @@
 | `/mcp`, `/mcp restart [name]`      | list MCP servers and tools, or reconnect      |
 | `/settings`                        | edit the project's config                     |
 | `/edit [file]`                     | edit a prompt, an `AGENTS.md`, or memory      |
-| `/status`, `/keys`, `/help`        | show session paths and spend, bindings, or commands |
+| `/keys`, `/help`                  | show bindings or commands |
 | `/exit`                            | exit pi, as with `ctrl+d`                     |
-| `/content`                         | show current system blocks, their sources, and tool definitions |
+| `/status`                         | runtime configuration, spending, diagnostics and session paths |
+| `/context`                            | window budget, ranked sources and compact directories; % of full window |
+| `/context <name>`                      | inspect a prompt/tool or message number; completion uses `prompt:` and `tool:` for ambiguous names |
+| `/context system`, `/context tools`        | full system prompt or all tool definitions |
+| `/context messages`, `/context raw`        | all message numbers, or full prompt and tool definitions |
 | `/<skill> [args]`                  | run a skill (also one-shot: `pi "/commit"`)   |
 | `!<command>`                       | run a shell command and record its output     |
 | `!!<command>`                      | start one in the background and keep typing   |

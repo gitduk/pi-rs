@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod context;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -44,15 +45,29 @@ pub const ARG_CHARS: usize = 1_024;
 /// every argument short enough to be worth keeping. A `write`'s path survives
 /// and its file content does not.
 pub fn omitted_args(call: &ToolCall, notice: &str) -> ToolCall {
-    let mut out = call.clone();
-    if let Some(map) = out.args.as_object_mut() {
-        for v in map.values_mut() {
-            if v.as_str().is_some_and(|t| t.chars().count() > ARG_CHARS) {
-                *v = serde_json::Value::String(notice.to_string());
-            }
-        }
+    let args = match call.args.as_object() {
+        Some(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    let value = if value
+                        .as_str()
+                        .is_some_and(|text| text.chars().nth(ARG_CHARS).is_some())
+                    {
+                        serde_json::Value::String(notice.to_owned())
+                    } else {
+                        value.clone()
+                    };
+                    (key.clone(), value)
+                })
+                .collect(),
+        ),
+        None => call.args.clone(),
+    };
+    ToolCall {
+        id: call.id.clone(),
+        name: call.name.clone(),
+        args,
     }
-    out
 }
 
 /// What the oversized arguments of `call` weigh in characters — nothing when
@@ -1057,18 +1072,9 @@ impl Session {
         id: EntryId,
         gone: &HashMap<(EntryId, usize), &str>,
     ) -> Vec<AssistantContent> {
-        if gone.is_empty() {
-            return blocks.to_vec();
-        }
-        blocks
-            .iter()
-            .enumerate()
-            .map(|(n, b)| match (b, gone.get(&(id, n))) {
-                (AssistantContent::ToolCall(c), Some(notice)) => {
-                    AssistantContent::ToolCall(omitted_args(c, notice))
-                }
-                _ => b.clone(),
-            })
+        context::assistant_blocks(blocks, id, gone)
+            .into_iter()
+            .map(std::borrow::Cow::into_owned)
             .collect()
     }
 
@@ -1145,82 +1151,16 @@ impl Session {
     }
 
     pub fn context(&self) -> Vec<Message> {
-        let summaries = self.summaries();
-        let gone = self.block_omissions();
-        let mut out: Vec<Message> = Vec::new();
-        let mut first_user = true;
-
-        for seen in self.view() {
-            let blocks = match seen {
-                Seen::As(Entry::Answer { id, blocks, .. }) => {
-                    out.push(Message::Assistant {
-                        content: Self::shown_blocks(blocks, *id, &gone),
-                    });
-                    continue;
-                }
-                // An assistant turn is never omitted: its `tool_use` blocks
-                // must stay to keep the answering results legal.
-                Seen::Omitted {
-                    entry: Entry::Answer { id, blocks, .. },
-                    ..
-                } => {
-                    out.push(Message::Assistant {
-                        content: Self::shown_blocks(blocks, *id, &gone),
-                    });
-                    continue;
-                }
-                Seen::As(entry) => user_block(entry),
-                Seen::Omitted { entry, notice } => omitted_block(entry, notice),
-            };
-
-            let mut content = blocks;
-            if first_user {
-                first_user = false;
-                for s in &summaries {
-                    content.push(UserContent::Text(Text {
-                        text: injected_summary(s),
-                    }));
-                }
-            }
-            out.push(Message::User { content });
-        }
-        order_results(&mut out);
+        let out: Vec<Message> = self
+            .context_view()
+            .into_iter()
+            .map(context::Message::into_owned)
+            .collect();
         debug_assert!(
             paired(&out),
             "a tool result is split from its call: {out:?}"
         );
         out
-    }
-}
-
-// Retained results follow completion order; the model sees call order.
-fn order_results(messages: &mut [Message]) {
-    for at in 0..messages.len() {
-        let (before, after) = messages.split_at_mut(at + 1);
-        let Message::Assistant { .. } = &before[at] else {
-            continue;
-        };
-        let count = after.iter().take_while(|m| matches!(m,
-            Message::User { content } if matches!(content.as_slice(), [UserContent::ToolResult(_)])
-        )).count();
-        if count < 2 {
-            continue;
-        }
-        let order: HashMap<_, _> = before[at]
-            .tool_calls()
-            .enumerate()
-            .map(|(i, call)| (call.id.as_str(), i))
-            .collect();
-        after[..count].sort_by_key(|m| match m {
-            Message::User { content } => match &content[0] {
-                UserContent::ToolResult(result) => order
-                    .get(result.call.as_str())
-                    .copied()
-                    .unwrap_or(usize::MAX),
-                _ => unreachable!("result range"),
-            },
-            _ => unreachable!("result range"),
-        });
     }
 }
 
@@ -1266,47 +1206,19 @@ pub fn injected_summary(s: &str) -> String {
 /// wire; callers skip it. `shown` and `preview` stay behind — the screen's
 /// fields are not the model's.
 pub fn user_block(entry: &Entry) -> Vec<UserContent> {
-    match entry {
-        Entry::Ask { ask, .. } => {
-            let mut out: Vec<UserContent> = ask
-                .relayed
-                .iter()
-                .map(|note| UserContent::Text(Text { text: note.clone() }))
-                .collect();
-            // An image-only ask sends no text block: providers reject the
-            // empty one.
-            if !ask.text.is_empty() || ask.images.is_empty() {
-                out.push(UserContent::Text(Text {
-                    text: ask.text.clone(),
-                }));
-            }
-            out.extend(ask.images.iter().cloned().map(UserContent::Image));
-            out
-        }
-        Entry::Bash { run, .. } => vec![UserContent::Text(Text {
-            text: run.text.clone(),
-        })],
-        Entry::Note { note, .. } => vec![UserContent::Text(Text { text: note.clone() })],
-        Entry::Tool { result, .. } => vec![UserContent::ToolResult(result.clone())],
-        _ => Vec::new(),
-    }
+    context::user_blocks(entry)
+        .into_iter()
+        .map(context::UserContent::into_owned)
+        .collect()
 }
 
 /// The blocks an omitted entry keeps. A result must stay a result, or the
 /// `tool_use` it answers is left dangling.
 pub fn omitted_block(entry: &Entry, notice: &str) -> Vec<UserContent> {
-    match entry {
-        Entry::Tool { result: r, .. } => {
-            let mut out = r.clone();
-            out.content = vec![ToolResultContent::Text(Text {
-                text: notice.to_string(),
-            })];
-            vec![UserContent::ToolResult(out)]
-        }
-        _ => vec![UserContent::Text(Text {
-            text: notice.to_string(),
-        })],
-    }
+    context::omitted_blocks(entry, notice)
+        .into_iter()
+        .map(context::UserContent::into_owned)
+        .collect()
 }
 
 #[cfg(test)]

@@ -2,8 +2,8 @@
 //!
 //! The value itself is `pi_store::settings`; this is what the Core does to it.
 
+use super::context::carries_reasoning;
 use super::meter::{column_widths, summary};
-use super::status::carries_reasoning;
 use super::{Core, resolve};
 use crate::input::commands::Choice;
 use crate::input::{Step, refused};

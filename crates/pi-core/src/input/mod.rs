@@ -35,7 +35,7 @@ pub enum Intent {
 pub enum Builtin {
     Help,
     Status,
-    Content,
+    Context(String),
     Name(String),
     // The session to switch to, or empty to list what there is.
     Resume(String),
@@ -95,7 +95,7 @@ impl Intent {
             Intent::Builtin(
                 Builtin::Help
                 | Builtin::Status
-                | Builtin::Content
+                | Builtin::Context(_)
                 | Builtin::Name(_)
                 | Builtin::Model(_)
                 | Builtin::Effort(_),

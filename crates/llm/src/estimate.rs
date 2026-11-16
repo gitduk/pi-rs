@@ -91,11 +91,19 @@ pub fn message(m: &Message, spec: &ModelSpec) -> usize {
 pub fn user_block(b: &UserContent) -> usize {
     match b {
         UserContent::Text(t) => of(&t.text),
-        UserContent::Image(_) => IMAGE_TOKENS,
-        UserContent::ToolResult(r) => {
-            result_head(r) + r.content.iter().map(result_part).sum::<usize>()
-        }
+        UserContent::Image(value) => image(value),
+        UserContent::ToolResult(result) => tool_result(result),
     }
+}
+
+/// The conservative cost of an image, without copying its encoded data.
+pub fn image(_: &crate::message::Image) -> usize {
+    IMAGE_TOKENS
+}
+
+/// Budget a borrowed tool result using the same framing as a user block.
+pub fn tool_result(result: &ToolResult) -> usize {
+    result_head(result) + result.content.iter().map(result_part).sum::<usize>()
 }
 
 /// What a result costs once its content is a notice rather than the body: the
@@ -115,7 +123,7 @@ fn result_part(p: &ToolResultContent) -> usize {
     match p {
         ToolResultContent::Text(t) => of(&t.text),
         ToolResultContent::Json { value } => of_bytes(json_bytes(value)),
-        ToolResultContent::Image(_) => IMAGE_TOKENS,
+        ToolResultContent::Image(value) => image(value),
     }
 }
 

@@ -111,7 +111,13 @@ other artifacts. Existing JSON sessions are imported on first use and retained
 with a `.legacy` suffix.
 
 `~/.pi/statusline.json` is the layout of the row above and
-under the input line, and `/status` prints the session's paths and spend.
+under the input line. `/status` shows runtime configuration, spending and session paths.
+`/context` shows the window budget, ranked sources and compact directories;
+percentages use the full model window.
+`/context <name>` inspects a prompt/tool or message number;
+`system`, `tools`, `messages` and `raw` select complete content views.
+Groups show original names. For ambiguous names, completion offers `prompt:<name>`
+and `tool:<name>` to select the prompt block or tool definition.
 
 ## Develop
 

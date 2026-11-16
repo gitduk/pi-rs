@@ -1,12 +1,18 @@
 //! A listing as lines: the columns lined up.
 
 use pi_store::icons;
-use pi_store::listing::Listing;
+use pi_store::listing::{Format, Listing};
 use pi_store::text;
 
 /// Rows as text, each multi-cell row's first cell padded to the widest such
 /// cell — done here, since only drawing knows the width to fit.
 pub fn lines(listing: &Listing) -> Vec<String> {
+    if listing.format == Format::Report {
+        return crate::report::lines(listing, 80, None)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+    }
     split(listing)
         .into_iter()
         .map(|(head, rest)| head + &rest)

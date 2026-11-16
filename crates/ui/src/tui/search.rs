@@ -179,7 +179,9 @@ enum Want {
 impl Ui {
     // The view's first and last rows, by the targets the last frame drew.
     fn view_places(&self) -> Option<(Place, Place)> {
-        let last = self.place_at(self.row_targets.len().checked_sub(1)?)?;
+        let last = (0..self.row_targets.len())
+            .rev()
+            .find_map(|row| self.place_at(row))?;
         Some((self.top_place()?, last))
     }
 

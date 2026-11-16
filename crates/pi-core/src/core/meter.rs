@@ -5,12 +5,22 @@
 
 use pi_store::icons;
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
 use llm::meter::Meter;
 use llm::stream::Usage;
 use llm::totals::Totals;
+
+// Recent observations belong to this run; retaining them never retains payloads.
+const CONTEXT_SAMPLES: usize = 24;
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum ContextSample {
+    Request(usize),
+    Compacted,
+}
 
 /// Every value a status line can draw on, as far as it is known right now:
 /// the run in flight's own figures, not the session's.
@@ -52,6 +62,7 @@ pub struct Tally {
     meter: Arc<Meter>,
     base: Totals,
     ctx: Option<(usize, usize)>,
+    context_samples: VecDeque<ContextSample>,
     compactions: usize,
     // The run's warnings, kept whole for `/status`.
     compacted: Option<agent::Report>,
@@ -116,6 +127,7 @@ impl Tally {
             agent::Event::Context { used, window } => {
                 self.reported = true;
                 self.ctx = Some((*used, *window));
+                self.push_context(ContextSample::Request(*used));
             }
             agent::Event::Compacted(report) => {
                 self.compactions += 1;
@@ -123,6 +135,7 @@ impl Tally {
                 // The last count is of a transcript that is no longer there;
                 // only the next request's count says what this one occupies.
                 self.ctx = None;
+                self.push_context(ContextSample::Compacted);
             }
             agent::Event::Refit(why) => self.refits.push(why.clone()),
             agent::Event::Warning(gap) => self.gaps.push(gap.clone()),
@@ -190,6 +203,17 @@ impl Tally {
     /// The context used against the window, as the last event said.
     pub fn ctx(&self) -> Option<(usize, usize)> {
         self.ctx
+    }
+
+    pub(super) fn context_samples(&self) -> &VecDeque<ContextSample> {
+        &self.context_samples
+    }
+
+    fn push_context(&mut self, sample: ContextSample) {
+        if self.context_samples.len() == CONTEXT_SAMPLES {
+            self.context_samples.pop_front();
+        }
+        self.context_samples.push_back(sample);
     }
 
     // What a row should show: this run's numbers once it has any, else the ones

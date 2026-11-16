@@ -98,6 +98,7 @@ impl Ui {
             worktrees: Some(&worktrees),
             editable: Some(&editable),
             servers: Some(&servers),
+            prompt_blocks: &self.prompt_blocks,
         });
         // Bottom-up: the best match belongs right above the input.
         Assistance::new(

@@ -85,6 +85,60 @@ async fn remote_commands_return_the_same_content_that_the_local_surface_displays
 }
 
 #[tokio::test]
+async fn context_inspection_is_read_only_and_available_during_a_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tui = surface(dir.path());
+    let mut session = agent::session::Session::default();
+    session.send_prompt("remember this request", None);
+    session.push_assistant(vec![llm::message::AssistantContent::Text(
+        llm::message::Text {
+            text: "the recorded reply".into(),
+        },
+    )]);
+    let expected = session.context();
+    tui.core.lane_mut().return_session(session);
+    tui.core.lane_mut().finish();
+    let (execution, mut rx) = bridge(&tui);
+    for (command, contains) in [
+        ("/status", "session"),
+        ("/context", "current input"),
+        ("/context messages", "remember this request"),
+        ("/context 2", "the recorded reply"),
+        ("/context 0", "No message numbered 0"),
+        ("/context missing", "No context item named missing"),
+    ] {
+        submit(&mut tui, execution.as_ref(), command).await;
+        assert_eq!(response(&mut rx).1, Response::Started);
+        let Response::Finished { text, outcome } = response(&mut rx).1 else {
+            panic!("inspection completes synchronously")
+        };
+        assert_eq!(outcome, Outcome::Done);
+        assert!(text.contains(contains), "{command}: {text}");
+        assert_eq!(tui.core.lane().session().unwrap().context(), expected);
+        assert!(!tui.core.lane().is_running());
+    }
+    let session = tui.core.lane_mut().take_session().unwrap();
+    tui.core
+        .lane_mut()
+        .begin(tokio_util::sync::CancellationToken::new());
+    for (command, contains) in [
+        ("/status", "session"),
+        ("/context", "message breakdown unavailable"),
+        ("/context messages", "Try again after it finishes"),
+    ] {
+        submit(&mut tui, execution.as_ref(), command).await;
+        assert_eq!(response(&mut rx).1, Response::Started);
+        let Response::Finished { text, .. } = response(&mut rx).1 else {
+            panic!("inspection completes while running")
+        };
+        assert!(text.contains(contains), "{command}: {text}");
+        assert!(tui.core.lane().is_running());
+    }
+    tui.core.lane_mut().return_session(session);
+    tui.core.lane_mut().finish();
+}
+
+#[tokio::test]
 async fn a_status_request_and_a_refused_compact_do_not_end_the_running_models_response() {
     let dir = tempfile::tempdir().unwrap();
     let mut tui = surface(dir.path());

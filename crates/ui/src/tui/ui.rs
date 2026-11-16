@@ -165,6 +165,7 @@ pub(super) struct Ui {
     // The front lane's tools, for slash commands; read only when needed,
     // since reading one re-stats the tools directory.
     pub(super) tools: Option<Arc<agent::Briefing>>,
+    pub(super) prompt_blocks: Vec<pi_core::input::commands::Choice>,
     // The execution a click opened under its row.
     pub(super) background_open: Option<OpenCommand>,
     // Whose own line each live tool row the last frame drew is, from the top.
@@ -300,6 +301,7 @@ impl Ui {
             every_command: Vec::new(),
             background_results_shown: false,
             tools: None,
+            prompt_blocks: Vec::new(),
             background_open: None,
             tool_rows: Vec::new(),
             command_rows: Vec::new(),
@@ -432,6 +434,17 @@ impl Ui {
         // Likewise the completion list: a reload is allowed to define models —
         // and skills — the last one did not.
         self.choices = core.choices();
+        let blocks = &core.lane().resolved().prompt_blocks;
+        if !self
+            .prompt_blocks
+            .iter()
+            .map(|choice| (choice.name.as_str(), choice.note.as_str()))
+            .eq(blocks
+                .iter()
+                .map(|block| (block.name, block.source.as_str())))
+        {
+            self.prompt_blocks = core.prompt_blocks();
+        }
         self.mcp = core.mcp().clone();
         // The theme takes the view it was painted into — the opening block is
         // painted in it — and every copy takes the terminal's band.

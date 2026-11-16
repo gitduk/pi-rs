@@ -21,6 +21,7 @@ pub enum Values {
     Editable,
     Said,
     Servers,
+    Context,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -42,7 +43,8 @@ impl Parameter {
             | Values::LinkedWorktrees
             | Values::Editable
             | Values::Said
-            | Values::Servers => self.name.into(),
+            | Values::Servers
+            | Values::Context => self.name.into(),
         }
     }
 
@@ -140,6 +142,7 @@ pub struct Sources<'a> {
     pub worktrees: Option<&'a dyn Fn() -> &'a [Choice]>,
     pub editable: Option<&'a dyn Fn() -> &'a [Choice]>,
     pub servers: Option<&'a dyn Fn() -> Vec<Choice>>,
+    pub prompt_blocks: &'a [Choice],
 }
 
 enum Target {
@@ -289,12 +292,13 @@ impl<'a> Input<'a> {
                 let (head, typed) = (&self.line[..*start], &self.line[*start..]);
                 match args {
                     Args::None => Vec::new(),
-                    Args::Value(p) => values(p.values, head, typed, sources),
+                    Args::Value(p) => values(p.values, head, typed, sources, self.tools),
                     Args::Subcommands { commands, fallback } => {
                         // Keep ordinary values first to preserve their default rank.
                         // Subcommands require an explicit choice.
-                        let mut offered = fallback
-                            .map_or_else(Vec::new, |p| values(p.values, head, typed, sources));
+                        let mut offered = fallback.map_or_else(Vec::new, |p| {
+                            values(p.values, head, typed, sources, self.tools)
+                        });
                         offered.extend(commands.iter().filter(|c| c.word.starts_with(typed)).map(
                             |c| Candidate {
                                 show: c.word.into(),
@@ -317,7 +321,13 @@ impl<'a> Input<'a> {
     }
 }
 
-fn values(source: Values, head: &str, typed: &str, sources: &Sources<'_>) -> Vec<Candidate> {
+fn values(
+    source: Values,
+    head: &str,
+    typed: &str,
+    sources: &Sources<'_>,
+    tools: Option<&tool::Registry>,
+) -> Vec<Candidate> {
     match source {
         Values::Text | Values::Directory => Vec::new(),
         Values::Fixed(names) => {
@@ -335,6 +345,7 @@ fn values(source: Values, head: &str, typed: &str, sources: &Sources<'_>) -> Vec
         | Values::LinkedWorktrees
         | Values::Editable
         | Values::Servers
+        | Values::Context
             if typed.contains(char::is_whitespace) =>
         {
             Vec::new()
@@ -359,25 +370,19 @@ fn values(source: Values, head: &str, typed: &str, sources: &Sources<'_>) -> Vec
         Values::Worktrees => offer(sources.worktrees.map_or(&[], |f| f()), head, typed),
         Values::LinkedWorktrees => {
             let trees: &[Choice] = sources.worktrees.map_or(&[], |f| f());
-            let mut offered = offer(trees.get(1..).unwrap_or_default(), head, typed);
-            if typed.is_empty() {
-                for candidate in &mut offered {
-                    candidate.picked_only = true;
-                }
-            }
-            offered
+            explicit_choices(trees.get(1..).unwrap_or_default(), head, typed)
         }
         Values::Editable => offer(sources.editable.map_or(&[], |f| f()), head, typed),
+        Values::Context => {
+            let choices: Vec<_> = super::context::items(sources.prompt_blocks, tools)
+                .into_iter()
+                .map(|item| item.choice)
+                .collect();
+            explicit_choices(&choices, head, typed)
+        }
+
         Values::Servers => {
-            let mut offered = offer(&sources.servers.map_or_else(Vec::new, |f| f()), head, typed);
-            // Without a name, the operation applies to the whole set. An
-            // unchosen suggestion must not silently narrow that operation.
-            if typed.is_empty() {
-                for candidate in &mut offered {
-                    candidate.picked_only = true;
-                }
-            }
-            offered
+            explicit_choices(&sources.servers.map_or_else(Vec::new, |f| f()), head, typed)
         }
         Values::Said => {
             let named = sources.said.iter().any(|s| s.name == typed);
@@ -429,6 +434,18 @@ fn values(source: Values, head: &str, typed: &str, sources: &Sources<'_>) -> Vec
                 .collect()
         }
     }
+}
+
+// An empty name can mean listing or operating on the whole set. An unchosen
+// suggestion must not silently narrow that operation to the first item.
+fn explicit_choices(choices: &[Choice], head: &str, typed: &str) -> Vec<Candidate> {
+    let mut offered = offer(choices, head, typed);
+    if typed.is_empty() || choices.iter().any(|choice| choice.name == typed) {
+        for candidate in &mut offered {
+            candidate.picked_only = true;
+        }
+    }
+    offered
 }
 
 #[cfg(test)]

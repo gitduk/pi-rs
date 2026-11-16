@@ -9,12 +9,72 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::Line;
 
 use super::Ui;
+use super::mouse::Regions;
 use super::view::{Scroll, View};
 use pi_core::core::Core;
 use pi_store::keys::Mode;
 use pi_store::listing::Listing;
 
 pub(super) const MORE: &str = " · more";
+
+pub(super) enum PageInput {
+    Empty,
+    Editing,
+}
+
+/// An overlay over the normal frame, with its own reading window.
+pub(super) struct PageLayout {
+    pub(super) surface: Rect,
+    pub(super) rule: Rect,
+    pub(super) body: Rect,
+    pub(super) max_scroll: usize,
+    covers_editor: bool,
+}
+
+impl PageLayout {
+    pub(super) fn of(base: Regions, rows: usize, input: PageInput) -> Self {
+        let covers_editor = matches!(input, PageInput::Empty) && base.statusline_top.height == 0;
+        let bottom = if covers_editor {
+            base.editor.bottom()
+        } else {
+            base.statusline_top.y
+        };
+        let height = bottom.saturating_sub(base.history.y);
+        let surface = Rect {
+            height,
+            ..base.history
+        };
+        let rule_height = surface.height.min(1);
+        let body_height = rows.min((surface.height - rule_height) as usize) as u16;
+        let body = Rect {
+            y: surface.bottom() - body_height,
+            height: body_height,
+            ..surface
+        };
+        Self {
+            surface,
+            rule: Rect {
+                y: body.y - rule_height,
+                height: rule_height,
+                ..surface
+            },
+            body,
+            max_scroll: rows.saturating_sub(body_height as usize),
+            covers_editor,
+        }
+    }
+
+    /// Visible hit regions after the page covers the base frame.
+    pub(super) fn regions(&self, mut base: Regions) -> Regions {
+        base.history = self.surface;
+        base.gap = Rect::default();
+        base.executions.height = 0;
+        if self.covers_editor {
+            base.editor.height = 0;
+        }
+        base
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct MoreAreas {

@@ -6,14 +6,41 @@
 /// A read-only answer, as rows of cells: the layout is decided by whoever
 /// draws it, not here.
 ///
-/// One shape for every such answer, since they differ in content, not in how
-/// a row reads.
+/// A report can give its rows semantic roles so each surface can arrange
+/// summaries and sections without knowing the command that produced them.
 #[derive(Debug, Default, PartialEq)]
 pub struct Listing {
     pub rows: Vec<Row>,
     /// A list read by scanning: one screen row per row, cut where it ends,
     /// rather than wrapped to read whole.
     pub brief: bool,
+    /// Reports group semantic rows into independently sized sections.
+    pub format: Format,
+}
+
+/// The document structure, independent of a particular surface.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    #[default]
+    Rows,
+    Report,
+}
+
+/// A row's meaning in a report; the surface chooses its appearance.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    #[default]
+    Plain,
+    Title,
+    Metric,
+    Progress {
+        used: usize,
+        total: usize,
+    },
+    Section,
+    Budget,
+    Hint,
+    Footer,
 }
 
 /// One row: what it says, and the aside after it.
@@ -26,6 +53,7 @@ pub struct Row {
     /// The aside after the cells, in the voice a note is said in everywhere
     /// else — the separator it is said with is the layout's, not this row's.
     pub note: Option<String>,
+    pub role: Role,
 }
 
 impl Listing {
@@ -34,6 +62,15 @@ impl Listing {
         Self {
             rows: rows.into_iter().collect(),
             brief: false,
+            format: Format::Rows,
+        }
+    }
+
+    /// A report with a lead summary and independently arranged sections.
+    pub fn report(rows: impl IntoIterator<Item = Row>) -> Self {
+        Self {
+            format: Format::Report,
+            ..Self::of(rows)
         }
     }
 
@@ -59,7 +96,14 @@ impl Row {
         Self {
             cells: cells.into_iter().map(Into::into).collect(),
             note: None,
+            role: Role::Plain,
         }
+    }
+
+    /// Give a report row its semantic role.
+    pub fn with_role(mut self, role: Role) -> Self {
+        self.role = role;
+        self
     }
 
     /// The same row with an aside after it.

@@ -601,6 +601,15 @@ pub trait Tool: Send + Sync {
     fn schema(&self) -> Value;
     fn tier(&self) -> Tier;
 
+    /// The definition sent to the model, shared by registry listings and lookups.
+    fn definition(&self) -> llm::request::ToolDef {
+        llm::request::ToolDef {
+            name: self.name().to_string(),
+            description: self.description().to_string(),
+            input_schema: self.schema(),
+        }
+    }
+
     /// The semantic model request represented by this capability invocation.
     fn model_request(&self, args: &Value) -> (message::ModelRequest, Vec<message::Block>) {
         (

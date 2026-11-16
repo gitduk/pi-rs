@@ -149,14 +149,7 @@ impl Registry {
     }
 
     pub fn defs(&self) -> Vec<ToolDef> {
-        self.all()
-            .values()
-            .map(|t| ToolDef {
-                name: t.name().to_string(),
-                description: t.description().to_string(),
-                input_schema: t.schema(),
-            })
-            .collect()
+        self.all().values().map(|t| t.definition()).collect()
     }
 
     // What the sources hold now that no offered tool or cut rules out.

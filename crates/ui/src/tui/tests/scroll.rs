@@ -1394,7 +1394,6 @@ fn a_page_lies_over_the_commands() {
     let mut view = View::default();
     ui.executions = vec![background_command(1, Invocation::shell("serve"))];
     ui.flush(&lane, &mut view);
-    let talk = ui.regions.history.height;
     assert_eq!(ui.regions.executions.height, 1, "the execution has its row");
 
     ui.open_page(
@@ -1404,17 +1403,21 @@ fn a_page_lies_over_the_commands() {
     );
     ui.flush(&lane, &mut view);
     assert_eq!(
-        ui.regions.history.height,
-        talk + 1,
-        "the execution's row is the page's"
+        ui.regions.history.bottom(),
+        ui.regions.statusline.y,
+        "the page covers the commands, gap and empty input up to the statusline"
     );
     let last = ui.regions.history.bottom() - 1;
-    assert!(
-        matches!(ui.target_at(last), Some(crate::tui::mouse::Target::Text(_))),
-        "{:?}",
-        ui.target_at(last)
-    );
+    assert!(ui.jump_at(last), "the bottom hint jumps to the page's end");
     assert!((0..24).all(|row| ui.command_at(row).is_none()));
+    ui.on_mouse_click(&mut view, 0, last);
+    ui.flush(&lane, &mut view);
+    assert!(!ui.jump_at(last), "no hint remains at the end");
+    assert_eq!(
+        ui.drawn[(last - ui.regions.history.y) as usize],
+        "line 59",
+        "the last content row replaces the hint"
+    );
 }
 
 // A group of `n` calls, each on one line.

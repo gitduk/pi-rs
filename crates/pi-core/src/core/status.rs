@@ -1,12 +1,7 @@
-//! What a status line reads: the parts of a lane a reader is shown, and the
-//! numbers behind them.
-//!
-//! The vocabulary is `pi_store::status` and the drawing is the surface's; this
-//! is where the values come from.
+//! Runtime configuration, spending, diagnostics and session storage.
 
 use crate::core::instructions::short;
 use agent::Totals;
-use llm::figures;
 
 use super::Core;
 use pi_store::icons;
@@ -30,11 +25,7 @@ impl Core {
         };
         rows.push(Row::new([
             "model".into(),
-            format!(
-                "{}{sep}effort {effort}{sep}{} window",
-                spec.model,
-                figures::size(spec.context_window.into())
-            ),
+            format!("{}{sep}effort {effort}", spec.model),
         ]));
         // An explicit URL names its flag; otherwise use the active model's
         // provider identity alongside the host its requests actually reach.
@@ -66,17 +57,6 @@ impl Core {
             ]));
         }
 
-        // Only the provider's count, which a compaction or a resume voids.
-        let context = match lane.tally().ctx().filter(|&(_, w)| w > 0) {
-            Some((used, window)) => format!(
-                "{} / {} ({}%)",
-                figures::short(used as u64),
-                figures::size(window as u64),
-                used * 100 / window
-            ),
-            None => "counted by the next request".to_string(),
-        };
-        rows.push(Row::new(["context".into(), context]));
         // Behind the usage line's `compacted ×N` and `↓`.
         if let Some(report) = tally.compacted() {
             let line = super::meter::compaction_line(report);
@@ -112,19 +92,6 @@ impl Core {
             let extra: Vec<_> = extra.iter().map(|p| short(p, root)).collect();
             rows.push(Row::new(["also writes".into(), extra.join(", ")]));
         }
-        if let Some(system) = &resolved.system {
-            rows.push(Row::new(["system prompt".into(), short(system, root)]));
-        }
-        if !resolved.prompts.is_empty() {
-            let prompts: Vec<_> = resolved.prompts.iter().map(|p| short(p, root)).collect();
-            rows.push(Row::new(["prompts".into(), prompts.join(", ")]));
-        }
-        if !resolved.instructions.is_empty() {
-            rows.push(Row::new([
-                "instructions".into(),
-                resolved.instructions.join(", "),
-            ]));
-        }
         rows.push(Row::new(["pi", concat!("v", env!("CARGO_PKG_VERSION"))]));
         rows.push(match pi_tools::rtk::state() {
             pi_tools::rtk::State::On(version) => Row::new(["rtk".into(), version]),
@@ -137,9 +104,6 @@ impl Core {
         let servers = self.mcp().summary();
         if !servers.is_empty() {
             rows.push(Row::new(["mcp".into(), servers.join(", ")]));
-        }
-        if !resolved.memory.is_empty() {
-            rows.push(Row::new(["memory".into(), resolved.memory.join(", ")]));
         }
 
         let session = Row::new([
@@ -168,17 +132,4 @@ impl Core {
         }
         Listing::of(rows)
     }
-}
-
-// Whether the transcript holds prior-turn reasoning — worth saying at a
-// switch, since it's the one part of history that doesn't survive intact.
-pub(super) fn carries_reasoning(session: &agent::session::Session) -> bool {
-    // The view, not every entry: what compaction has already dropped is not
-    // going to reach the new model in any form, demoted or otherwise.
-    session.view().iter().any(|s| {
-        s.entry().blocks().is_some_and(|bs| {
-            bs.iter()
-                .any(|b| matches!(b, llm::message::AssistantContent::Reasoning(_)))
-        })
-    })
 }

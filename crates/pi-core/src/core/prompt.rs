@@ -137,16 +137,12 @@ impl Standing {
 Commands start in the workspace.",
             escaped(self.workspace.display())
         ));
-        if !tool::Tier::Write.under(self.tier) {
-            return;
-        }
-        out.push_str(match self.fenced {
-            true => {
+        if self.fenced && tool::Tier::Write.under(self.tier) {
+            out.push_str(
                 "\n\nThe `write` and `edit` tools can change files only inside the workspace. \
-They can also change files in pi's home when a `<pi_home>` block specifies it."
-            }
-            false => "\n\nThe `write` and `edit` tools can change files anywhere.",
-        });
+They can also change files in pi's home when a `<pi_home>` block specifies it.",
+            );
+        }
     }
 
     fn project_tools(&self, out: &mut String) {
@@ -200,8 +196,8 @@ The user's current request takes precedence over standing instructions.",
             return;
         }
         out.push_str(&format!(
-            "\n\n<memory>\nNotes from earlier sessions may be outdated. \
-Current user instructions take precedence.\n{}\n</memory>",
+            "\n\n<memory_context>\nNotes from earlier sessions may be outdated. \
+Current user instructions take precedence.\n{}\n</memory_context>",
             files(&self.memory)
         ));
     }
@@ -277,7 +273,7 @@ mod tests {
             fenced.contains("can change files only inside the workspace"),
             "{fenced}"
         );
-        assert!(open.contains("can change files anywhere"), "{open}");
+        assert!(!open.contains("`write` and `edit`"), "{open}");
     }
 
     // Blocks point at each other ("below"), and the prompt is cached by
@@ -291,7 +287,7 @@ mod tests {
             "<project_tools path=",
             "<pi_home path=",
             "<instructions path",
-            "<memory>",
+            "<memory_context>",
             "<env",
         ];
         assert!(order.windows(2).all(|w| at(w[0]) < at(w[1])), "{text}");

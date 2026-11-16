@@ -8,6 +8,7 @@ pub mod block;
 pub mod listing;
 mod markdown;
 pub mod render;
+mod report;
 pub mod sgr;
 pub mod skills;
 pub mod status;
