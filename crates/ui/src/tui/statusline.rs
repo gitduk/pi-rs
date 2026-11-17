@@ -1012,7 +1012,7 @@ impl Scripts {
             let env = ScriptEnv {
                 session: session.to_path_buf(),
                 width,
-                facts: facts_once.get_or_insert_with(|| facts()).clone(),
+                facts: facts_once.get_or_insert_with(&facts).clone(),
             };
             tokio::spawn(async move {
                 let said = run_once(run, timeout, env).await;
