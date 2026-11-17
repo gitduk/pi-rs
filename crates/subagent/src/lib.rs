@@ -228,10 +228,10 @@ impl Doing {
 impl Heard {
     // `turn 3 · 41.2k/3.1k · read src/lib.rs`: where the child is, for the
     // caller's progress. The call goes last, so a line cut short loses it first.
-    fn progress(&self) -> String {
+    fn progress(&self, prefix: &str) -> String {
         let mut spent = self.spent;
         spent.add(&self.turn);
-        let mut parts = vec![format!("turn {}", self.turns.max(1))];
+        let mut parts = vec![format!("{prefix}turn {}", self.turns.max(1))];
         if spent.input + spent.output > 0 {
             parts.push(llm::figures::slash(spent.input, spent.output));
         }
@@ -243,8 +243,8 @@ impl Heard {
 }
 
 // The caller gets the child's progress only when it reads differently.
-fn tell(caller: &Ctx, heard: &Heard, said: &mut String) {
-    let progress = heard.progress();
+fn tell(caller: &Ctx, heard: &Heard, said: &mut String, prefix: &str) {
+    let progress = heard.progress(prefix);
     if progress != *said {
         caller.progress(progress.clone());
         *said = progress;
@@ -512,6 +512,13 @@ impl Prepared {
             mut model_notes,
             instructions,
         } = self;
+        // Background invocations already carry the model in their title.
+        let model_prefix = if args.background {
+            String::new()
+        } else {
+            format!("{} · ", agent.spec().model)
+        };
+        let description = format!("{model_prefix}{}", args.description);
         let timeout = tool::limit::timeout(
             args.timeout_ms.map(|ms| ms.get()),
             tool::limit::DEFAULT_CALL,
@@ -525,7 +532,7 @@ impl Prepared {
         let heard = tokio::spawn(async move {
             let mut heard = Heard::default();
             let mut said = String::new();
-            tell(&caller, &heard, &mut said);
+            tell(&caller, &heard, &mut said, &model_prefix);
             loop {
                 // A held call is shown when its hold ends, even if the child
                 // falls silent then, as it does under a long command.
@@ -534,7 +541,7 @@ impl Prepared {
                         event = rx.recv() => event,
                         _ = tokio::time::sleep_until(due.into()) => {
                             heard.doing.settle(Instant::now());
-                            tell(&caller, &heard, &mut said);
+                            tell(&caller, &heard, &mut said, &model_prefix);
                             continue;
                         }
                     },
@@ -565,7 +572,7 @@ impl Prepared {
                     _ => {}
                 }
                 heard.doing.settle(now);
-                tell(&caller, &heard, &mut said);
+                tell(&caller, &heard, &mut said, &model_prefix);
             }
             heard
         });
@@ -683,7 +690,7 @@ impl Prepared {
                     answer(&heard, Some(&error), lost, &wrote, None),
                     &model_notes,
                 ))
-                .with_preview(format!("{}: {error}", args.description.replace('\n', " ")))
+                .with_preview(format!("{}: {error}", description.replace('\n', " ")))
                 .with_spent(heard.spent)
                 .warned(),
             });
@@ -787,7 +794,7 @@ impl Prepared {
             answer(&heard, cut.as_deref(), lost, &wrote, check.as_ref()),
             &model_notes,
         ))
-        .with_preview(sketch(&args.description, &heard))
+        .with_preview(sketch(&description, &heard))
         .with_spent(heard.spent);
         if unfinished && outcome == ExecutionOutcome::Succeeded {
             outcome = ExecutionOutcome::Incomplete;
