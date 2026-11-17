@@ -379,20 +379,19 @@ impl Tool for Subagent {
         if ctx.cancel.is_cancelled() {
             return Err(ToolError::Cancelled);
         }
-        let label = format!(
-            "{} · {}",
-            prepared.agent.spec().model,
-            prepared.args.description
-        );
         let execution = executions.start(
             ctx.into(),
             Invocation::Task {
                 name: Self::NAME.into(),
-                description: label.clone(),
+                description: prepared.args.description.clone(),
             },
             stop,
         );
         let id = execution.id();
+        let preview = format!(
+            "{} [background #{id}]",
+            named(&prepared.agent.spec().model, &prepared.args.description)
+        );
         let progress = execution.clone();
         let progress: tool::Progress = Arc::new(move |text| progress.channel().status(text));
         let detached = detached.with_progress(progress.clone());
@@ -414,7 +413,7 @@ impl Tool for Subagent {
         });
         Ok(
             ToolOutput::text(json!({"task_id": id, "status": "running"}).to_string())
-                .with_preview(format!("{label} [background #{id}]")),
+                .with_preview(preview),
         )
     }
 }
@@ -512,13 +511,8 @@ impl Prepared {
             mut model_notes,
             instructions,
         } = self;
-        // Background invocations already carry the model in their title.
-        let model_prefix = if args.background {
-            String::new()
-        } else {
-            format!("{} · ", agent.spec().model)
-        };
-        let description = format!("{model_prefix}{}", args.description);
+        let model_prefix = format!("{} · ", agent.spec().model);
+        let description = named(&agent.spec().model, &args.description);
         let timeout = tool::limit::timeout(
             args.timeout_ms.map(|ms| ms.get()),
             tool::limit::DEFAULT_CALL,
@@ -816,6 +810,11 @@ fn with_model_notes(body: String, notes: &[String]) -> String {
     } else {
         format!("{}\n\n{body}", notes.join("\n"))
     }
+}
+
+// What a caller reads of a task: the model that runs it, then the task.
+fn named(model: &str, description: &str) -> String {
+    format!("{model} · {description}")
 }
 
 // The finished-call line: task, then its cost in brackets. The task leads
