@@ -7,12 +7,12 @@ use ratatui::text::Line;
 use super::screen;
 use crate::listing;
 use crate::render::Paint;
-use pi_store::listing::{Format, Listing};
+use pi_store::listing::Listing;
 
 /// What a command answered as lines of at most `width` columns, the key
 /// column muted so what a row is reads apart from what it says.
 pub fn lines(content: &Listing, width: usize, paint: &Paint) -> Vec<Line<'static>> {
-    if content.format == Format::Report {
+    if content.is_report() {
         return crate::report::lines(content, width, Some(paint));
     }
     rows(content, width)

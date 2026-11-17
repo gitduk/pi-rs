@@ -52,7 +52,7 @@ impl Tui {
                     Outcome::Done,
                 );
                 if models && let Some(read) = &mut self.ui.read {
-                    read.models = Some(self.core.model_listing());
+                    read.source = Some(super::browse::Source::Models(self.core.model_listing()));
                 }
             }
             Action::Bash(command) => {

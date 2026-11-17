@@ -6,8 +6,13 @@ use ratatui::text::{Line, Span};
 
 use crate::{render::Paint, wrap};
 
-const MAX_WIDTH: usize = 104;
-const TWO_COLUMNS: usize = 96;
+// A numeric column is at least this wide, and set off by this many spaces.
+const NUMERIC_WIDTH: usize = 6;
+const NUMERIC_GAP: usize = 2;
+// The width a table needs before it draws numeric columns beside its names.
+const WIDE_WIDTH: usize = 28;
+// A name column of the wide width, both numeric columns and their gaps.
+const MIN_COLUMN_WIDTH: usize = WIDE_WIDTH + 2 * (NUMERIC_WIDTH + NUMERIC_GAP);
 const COLUMN_GAP: usize = 4;
 
 #[derive(Clone, Copy)]
@@ -40,9 +45,7 @@ pub(crate) fn lines(report: &Listing, width: usize, paint: Option<&Paint>) -> Ve
     if width == 0 {
         return Vec::new();
     }
-    let body_width = width
-        .saturating_sub(if width >= 16 { 4 } else { 0 })
-        .min(MAX_WIDTH);
+    let body_width = width.saturating_sub(if width >= 16 { 4 } else { 0 });
     let margin = (width - body_width) / 2;
     let mut lead = Vec::new();
     let mut sections: Vec<Vec<&Row>> = Vec::new();
@@ -63,31 +66,29 @@ pub(crate) fn lines(report: &Listing, width: usize, paint: Option<&Paint>) -> Ve
         out.extend(render(summary, body_width, paint));
     }
     let directories = sections.get(1..).unwrap_or_default();
-    if width >= TWO_COLUMNS {
-        let left_width = (body_width - COLUMN_GAP) / 2;
-        let right_width = body_width - COLUMN_GAP - left_width;
-        for pair in directories.chunks(2) {
-            out.push(Line::default());
-            let mut left = render(&pair[0], left_width, paint).into_iter();
-            let mut right = pair
-                .get(1)
-                .map_or_else(Vec::new, |section| render(section, right_width, paint))
-                .into_iter();
-            while left.len() > 0 || right.len() > 0 {
-                let mut line = left.next().unwrap_or_default();
-                if let Some(other) = right.next() {
-                    line.spans.push(Span::raw(
-                        " ".repeat(left_width.saturating_sub(line.width()) + COLUMN_GAP),
-                    ));
+    let columns = ((body_width + COLUMN_GAP) / (MIN_COLUMN_WIDTH + COLUMN_GAP))
+        .min(directories.len())
+        .max(1);
+    let column_width = (body_width - COLUMN_GAP * (columns - 1)) / columns;
+    for group in directories.chunks(columns) {
+        out.push(Line::default());
+        let mut rendered: Vec<_> = group
+            .iter()
+            .map(|section| render(section, column_width, paint).into_iter())
+            .collect();
+        while rendered.iter().any(|lines| lines.len() > 0) {
+            let mut line = Line::default();
+            let mut used = 0;
+            for (column, lines) in rendered.iter_mut().enumerate() {
+                if let Some(other) = lines.next() {
+                    let start = column * (column_width + COLUMN_GAP);
+                    let pad = start.saturating_sub(used);
+                    used = start + other.width();
+                    line.spans.push(Span::raw(" ".repeat(pad)));
                     line.spans.extend(other.spans);
                 }
-                out.push(line);
             }
-        }
-    } else {
-        for section in directories {
-            out.push(Line::default());
-            out.extend(render(section, body_width, paint));
+            out.push(line);
         }
     }
     if !footer.is_empty() {
@@ -114,16 +115,16 @@ impl Columns {
             .map(|row| text::width(cell(row, 1)))
             .max()
             .unwrap_or(0)
-            .max(6);
+            .max(NUMERIC_WIDTH);
         let share = rows
             .iter()
             .filter(|row| row.role == Role::Budget)
             .map(|row| text::width(cell(row, 2)))
             .max()
             .unwrap_or(0)
-            .max(6);
+            .max(NUMERIC_WIDTH);
         Self {
-            name: width.saturating_sub(tokens + share + 4),
+            name: width.saturating_sub(tokens + share + 2 * NUMERIC_GAP),
             tokens,
             share,
         }
@@ -137,8 +138,9 @@ impl Columns {
         paint: Option<&Paint>,
         headings: bool,
     ) {
+        let gap = " ".repeat(NUMERIC_GAP);
         spans.push(Span::raw(format!(
-            "  {}",
+            "{gap}{}",
             " ".repeat(self.tokens.saturating_sub(text::width(tokens)))
         )));
         spans.push(span(
@@ -147,7 +149,7 @@ impl Columns {
             tokens,
         ));
         spans.push(Span::raw(format!(
-            "  {}",
+            "{gap}{}",
             " ".repeat(self.share.saturating_sub(text::width(share)))
         )));
         spans.push(span(paint, Tone::Muted, share));
@@ -237,12 +239,12 @@ fn render(rows: &[&Row], width: usize, paint: Option<&Paint>) -> Vec<Line<'stati
                     span(paint, Tone::Muted, "─".repeat(width - filled)),
                 ])
             }
-            Role::Section if width >= 28 => {
+            Role::Section if width >= WIDE_WIDTH => {
                 let mut spans = label(row, columns.name, paint, true);
                 columns.values(&mut spans, "TOKENS", "WINDOW", paint, true);
                 Line::from(spans)
             }
-            Role::Budget if width >= 28 => {
+            Role::Budget if width >= WIDE_WIDTH => {
                 let mut spans = if text::width(cell(row, 0)) > columns.name {
                     let name = Line::from(span(paint, Tone::Plain, cell(row, 0)));
                     out.extend(wrap::fit(&name, width));

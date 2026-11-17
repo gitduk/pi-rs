@@ -141,9 +141,26 @@ impl PageLine {
     }
 }
 
+// What a page was laid out from, when it can be laid out again: the width
+// changes, or the list it came from does.
+pub(super) enum Source {
+    // The model list, which a reload can add to.
+    Models(Listing),
+    // A command's report, whose rows never change once answered.
+    Report(Listing),
+}
+
+impl Source {
+    fn listing(&self) -> &Listing {
+        match self {
+            Self::Models(listing) | Self::Report(listing) => listing,
+        }
+    }
+}
+
 pub(super) struct Read {
     pub(super) page: Vec<PageLine>,
-    pub(super) models: Option<Listing>,
+    pub(super) source: Option<Source>,
     // Where the page is scrolled to, as the transcript has its own.
     pub(super) scroll: Scroll,
     // The mode the line goes back to when the page closes, if opening it
@@ -152,21 +169,40 @@ pub(super) struct Read {
 }
 
 impl Ui {
+    // Columns land on other rows, so the page has none to stay on: it reads
+    // from its head, as one just opened does.
+    fn relayout(&mut self, source: Source, view: &mut View) {
+        let lines = super::slash::lines(source.listing(), self.screen.width(), &self.paint);
+        self.search_close(view);
+        self.selection = None;
+        if let Some(read) = &mut self.read {
+            read.page = lines.into_iter().map(PageLine::from).collect();
+            read.scroll = Scroll {
+                by: super::screen::TOP,
+                top: None,
+            };
+            read.source = Some(source);
+        }
+    }
+
+    pub(super) fn reflow_page(&mut self, view: &mut View) {
+        let Some(source) = self.read.as_mut().and_then(|read| read.source.take()) else {
+            return;
+        };
+        self.relayout(source, view);
+    }
+
     pub(super) fn refresh_model_page(&mut self, core: &Core, view: &mut View) {
-        let Some(previous) = self.read.as_ref().and_then(|read| read.models.as_ref()) else {
+        let Some(Source::Models(previous)) =
+            self.read.as_ref().and_then(|read| read.source.as_ref())
+        else {
             return;
         };
         let models = core.model_listing();
         if previous == &models {
             return;
         }
-        self.search_close(view);
-        let lines = super::slash::lines(&models, self.screen.width(), &self.paint);
-        if let Some(read) = &mut self.read {
-            read.page = lines.into_iter().map(PageLine::from).collect();
-            read.models = Some(models);
-            read.scroll.top = None;
-        }
+        self.relayout(Source::Models(models), view);
     }
 
     pub(super) fn page(&self) -> Option<&[PageLine]> {
@@ -189,6 +225,11 @@ impl Ui {
         }
         let lines = super::slash::lines(&content, self.screen.width(), &self.paint);
         self.open_page(lines.into_iter().map(PageLine::from).collect());
+        if content.is_report()
+            && let Some(read) = &mut self.read
+        {
+            read.source = Some(Source::Report(content));
+        }
     }
 
     // Read `page` in the history region, from its first line.
@@ -207,7 +248,7 @@ impl Ui {
         self.search = None;
         self.read = Some(Read {
             page,
-            models: None,
+            source: None,
             // The draw stops `TOP` at the page's head.
             scroll: Scroll {
                 by: super::screen::TOP,

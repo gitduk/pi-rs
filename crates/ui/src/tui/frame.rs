@@ -30,6 +30,9 @@ const MENU_PADDING: usize = 2;
 
 impl Ui {
     pub(super) fn flush(&mut self, lane: &Lane, view: &mut View) {
+        if self.drawn_width != self.screen.width() {
+            self.reflow_page(view);
+        }
         self.pin_selection(view);
         self.repaint(view, lane);
         // Asked once a frame: the list and the hint are one answer, and asking

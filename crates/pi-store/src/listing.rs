@@ -86,6 +86,12 @@ impl Listing {
         Self::of(lines.into_iter().map(|l| Row::new([l.into()])))
     }
 
+    /// Whether a surface lays this out as a report: sections it arranges
+    /// itself, rather than rows drawn as they come.
+    pub fn is_report(&self) -> bool {
+        self.format == Format::Report
+    }
+
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
