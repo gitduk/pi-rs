@@ -268,7 +268,7 @@ The `pi-setup` skill's own `settings.toml` shows the configuration format.
 ## Skills
 
 pi reads script and skill directories during the session.
-A new script or skill becomes available to the model on its next turn.
+New or updated scripts and skills appear in the next request to the model.
 A skill's `/name` command becomes available the next time you type.
 A skill is a directory containing `SKILL.md`.
 Use `~/.pi/skills/` or the nearest `.pi/skills/` up to the repository root.

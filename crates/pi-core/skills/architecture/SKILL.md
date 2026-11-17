@@ -16,8 +16,8 @@ For design-only requests, report the design without editing. For reviews, report
 3. Find structural mismatches, duplication, and unnecessary complexity.
 4. Design the simplest data model and boundaries that satisfy the requirements.
 5. Compare alternatives when tradeoffs materially affect correctness, maintenance, or reversibility.
-6. Implement in verifiable steps, preserving behavior unless changes are requested.
-7. Run relevant checks and report the design, changes, and remaining risks.
+6. Implement changes only when the user requests implementation. Preserve behavior outside the requested scope.
+7. Verify implemented changes with checks proportional to their risk. Report the requested result and remaining uncertainty.
 
 ## Principles
 

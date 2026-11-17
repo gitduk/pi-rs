@@ -3,7 +3,7 @@
 Each script must have a header and a description.
 Use `description` for an interpreted script, or `[package] description` for Rust.
 A missing or invalid header, description, or name produces an unusable tool entry that explains the problem.
-After you fix the problem, the tool becomes available on your next turn.
+After you fix the problem, the tool appears in the next request to the model.
 
 The description is the caller's only tool documentation.
 State what the tool does and how it formats its answer.

@@ -19,7 +19,7 @@ Do not embed that data in the implementation.
 The `<pi_home>` block specifies pi's home.
 pi uses `$PI_HOME` if you set it, or `~/.pi` otherwise.
 pi reads tool directories during the session.
-A new or updated tool becomes available on the next turn.
+A new or updated tool appears in the next request to the model.
 You do not need to restart pi.
 Use the tools currently offered to determine which capabilities are available.
 
@@ -107,15 +107,23 @@ fn main() {
 
 ## Add and check a tool
 
-1. Check that the name is available.
+For description-only edits, check the interface syntax and requested text.
+Inspect the diff for unrelated changes.
+Stop when these checks pass.
+
+For new tools or behavior changes, use the following steps:
+
+1. For a new or renamed tool, check that the name is available.
    A built-in tool takes precedence over a new script with the same name.
    An existing script also keeps its name.
    pi reports the conflict and skips the later script.
-   Choose another name.
-2. Write the file.
-3. Run a successful case manually, using the same input and environment pi provides.
-   Run a failing case.
-   Check its error message.
+   If the name conflicts, choose another name.
+2. Write the requested changes.
+3. Run relevant success and failure cases with isolated fixtures when available.
+   Use the input and environment pi provides.
+   Check their output and error messages.
+   Run live cases only when the task authorizes their effects.
+   Report checks that cannot run with the available inputs or authorization.
    Example: `echo '{"file":"Cargo.toml"}' | file=Cargo.toml bash <tools-dir>/count.sh`.
    For Rust, replace `bash` with `cargo +nightly -Zscript --quiet`.
-4. Call the tool on your next turn.
+4. If verification requires a registered call, use the tool when it appears in the model's tool list.

@@ -163,7 +163,7 @@ Write boundaries still apply.\n</project_tools>",
         out.push_str(&format!(
             "\n\n<pi_home path=\"{}\">\nUse this directory for tools and skills shared across projects only when requested. \
 Do not store task files here. \
-New tools and skills become available on the next turn.\n\n\
+New tools and skills appear in the next request to the model.\n\n\
 Read `tool-creator` for tools, `pi-usage` for skills, or `pi-setup` for model and MCP configuration.\n</pi_home>",
             escaped(home.display())
         ));
