@@ -368,6 +368,9 @@ impl Ui {
     ) {
         let folded = view.surface.folds.folded;
         view.surface = Surface::from(session, &self.paint, folded, root);
+        // The old conversation's opening and ending are not this one's.
+        view.state.first_ask = None;
+        view.state.outcome = None;
         view.drawn = true;
         self.rows_moved();
     }

@@ -101,6 +101,11 @@ impl ModelSpec {
     pub fn wire_model(&self) -> &str {
         self.wire_id.as_deref().unwrap_or(&self.model)
     }
+
+    /// The provider the selection identity names, when it names one.
+    pub fn provider(&self) -> Option<&str> {
+        self.model.split_once('/').map(|(name, _)| name)
+    }
 }
 
 impl Pricing {

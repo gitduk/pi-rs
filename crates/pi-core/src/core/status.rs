@@ -40,7 +40,7 @@ impl Core {
                 rows.push(Row::new(["endpoint", endpoint]));
             }
             _ => {
-                let provider = spec.model.split_once('/').map(|(name, _)| name);
+                let provider = spec.provider();
                 let endpoint = provider.map_or_else(
                     || spec.base_url.clone(),
                     |name| format!("{} ([provider.{name}])", spec.base_url),

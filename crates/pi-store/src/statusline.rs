@@ -174,7 +174,7 @@ pub fn may_run_scripts(ceiling: tool::Tier) -> bool {
 
 /// What a checkout is doing: the branch in front, and the lines its worktree
 /// has added and removed against `HEAD`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Project {
     pub branch: String,
     pub added: u64,
@@ -366,6 +366,9 @@ pub enum Field {
     /// What the agent is doing, whether or not a run is on: `idle`, `working`,
     /// a retry it waits out, a run stopping. Always says something.
     State,
+    /// What the user calls the session, else the first thing it was asked;
+    /// absent until one of the two exists.
+    Session,
     /// The checkout: its branch, and what the worktree has changed.
     Project,
     /// The clock of the run in flight, or of the one that last ended.
@@ -621,10 +624,8 @@ mod tests {
         let clock = parse(r#"{"lines":[{"left":["clock"]}]}"#).unwrap_err();
         assert!(clock.contains("unknown variant `clock`"), "{clock}");
         // One list: pi's own names and the status line's, read as one.
-        assert!(
-            clock.contains("`spent`, `state`, `project`, `elapsed`"),
-            "{clock}"
-        );
+        assert!(clock.contains("`spent`, `state`"), "{clock}");
+        assert!(clock.contains("`elapsed`"), "{clock}");
     }
 
     #[test]

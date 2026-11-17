@@ -61,13 +61,16 @@ A missing `style` is muted.
 
 ## Fields
 
-`tabs` `flash` `model` `effort` `tier` `update` `spent` `state` `project`
-`elapsed` `in_out` `speed` `cache` `cost` `ctx` `compacted` `queued` `worktree`
+`tabs` `flash` `model` `effort` `tier` `update` `spent` `state` `session`
+`project` `elapsed` `in_out` `speed` `cache` `cost` `ctx` `compacted` `queued`
+`worktree`
 
 - `project` — the branch, then the lines the worktree added and removed, in a
   diff's own colours.
 - `state` — `idle`, `working`, `compacting`, `stopping`, or a retry it waits
   out. Always says something.
+- `session` — what the user calls this session, else the first thing it was
+  asked, cut short; absent until one of the two exists.
 - `elapsed` — how long the run in flight has taken, and how long the run that
   last ended took once the row is back to idle.
 - `spent` — what the session has cost so far; `cost` — what the run in flight,
@@ -106,12 +109,25 @@ A script item carries exactly one of `command` or `name`.
   row.
 - A script is told `PI_SESSION_DIR`, the directory of the session it draws for,
   `PI_COLUMNS`, the row's width in cells, and `PI_FACTS`, one JSON object of
-  what the row knows: `model`, `effort`, `tier`, `state`, `spent`, `alerts`,
-  `update`, `released`, `project` (`branch`, `added`, `removed`), and `run`
-  (the names a field draws with, except `in_out`, which comes as `input` and
-  `output`; `elapsed` is in seconds).
-- A value the row leaves out is `null`; `project` is absent rather than null
-  outside a repository.
+  what the row knows, the same values its fields draw from:
+  - `model`, `provider`, `effort`, `tier`, `running`, `state`, `alerts`,
+    `update`, `released`;
+  - `session` — `id`, `name` (only once the user names it), `title` (that name,
+    else the first thing it was asked), `started` in seconds since the epoch,
+    `workspace`, and `spent`: `usage` (`input`, `output`, `cache_read`,
+    `cache_write`) with `cost` in dollars, the whole session, children and
+    compactions alike;
+  - `run` — `elapsed` in seconds, `input`, `output`, `cache` as a percent,
+    `cost`, `ctx` as `[used, window]`, `context_window`, `speed`, `compacted`,
+    `queued`, `worktree`, `retry` (`attempt`, `wait` in seconds), and `outcome`
+    (`ok`, `stopped` or `failed`) once a run ends;
+  - `tabs` — every checkout on the bar: `name`, and `mark` (`front`, `done`,
+    `failed`, `plain`, `unopened`);
+  - `jobs` — background executions: `running`, `back` (ended with results
+    waiting), `stopped`, `exited`;
+  - `project` — `branch`, `added`, `removed`.
+- A value the row leaves out is `null`; `session` and `project` are absent
+  rather than null outside a lane and outside a repository.
 
 The statusline redraws from the last answer, so a slow script never stalls the
 screen.

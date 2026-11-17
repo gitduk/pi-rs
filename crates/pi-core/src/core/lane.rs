@@ -851,6 +851,20 @@ impl Lane {
         &self.talk.id
     }
 
+    /// When this session began, in seconds since the epoch.
+    pub fn created(&self) -> u64 {
+        self.talk.created
+    }
+
+    /// What the user calls this session, if a name was given.
+    pub fn name(&self) -> Option<String> {
+        self.talk
+            .name
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     pub fn set_name(&mut self, name: Option<String>) {
         *self
             .talk

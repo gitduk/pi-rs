@@ -1664,7 +1664,13 @@ fn a_line_draws_the_models_name_and_the_input_keeps_its_identity() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     let view = crate::tui::front_view(&mut tui.views, tui.core.lane());
-    let facts = crate::tui::statusline::Facts::of(tui.core.lane(), view, None);
+    let facts = crate::tui::statusline::Facts::of(
+        tui.core.lane(),
+        view,
+        None,
+        Vec::new(),
+        Default::default(),
+    );
     assert_eq!(
         facts.value(pi_store::statusline::Field::Model).as_deref(),
         Some("m"),

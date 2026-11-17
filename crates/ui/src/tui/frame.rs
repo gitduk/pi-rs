@@ -16,8 +16,8 @@ use super::row::{PendingTool, Row, count};
 use super::screen::{self, Rows};
 use super::scrollback::{Piece, ScrollbackRows, body};
 use super::search::{self, Anchor, Laid, Spot};
-use super::statusline::Facts;
-use super::view::{Scroll, StreamKind, View};
+use super::statusline::{Checkout, Facts, Jobs};
+use super::view::{Scroll, StreamKind, View, remember_first_ask};
 use crate::render;
 use crate::render::Paint;
 use pi_core::core::question::{Asker, Question};
@@ -94,7 +94,20 @@ impl Ui {
                 line.style = line.style.add_modifier(ratatui::style::Modifier::REVERSED);
             }
         }
-        let facts = Facts::of(lane, view, self.project.clone());
+        remember_first_ask(view, lane);
+        let facts = Facts::of(
+            lane,
+            view,
+            self.project.clone(),
+            self.tabs
+                .iter()
+                .map(|tab| Checkout {
+                    name: tab.name.clone(),
+                    mark: tab.mark,
+                })
+                .collect(),
+            Jobs::of(&self.every_command),
+        );
         let session = self.lists.store.session_dir(lane.root(), lane.id());
         let (over_rows, bar_rows) = self.statusline_lines(&facts, width, &session);
         let over_lines: Vec<_> = over_rows.iter().map(|row| row.line.clone()).collect();

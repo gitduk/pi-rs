@@ -76,13 +76,34 @@ pub struct State {
     // How long the run that last ended took, kept past it: `elapsed` reads
     // this between runs rather than going blank.
     pub(super) ended: Option<std::time::Duration>,
+    // How that run went, kept beside its time for what reads the line between
+    // runs: a script asks, and the rows it left say nothing of it.
+    pub(super) outcome: Option<Ending>,
+    // The first thing this session was asked, kept for a row to name it by
+    // when the user gave it no name of their own.
+    pub(super) first_ask: Option<String>,
+}
+
+// How much of that first ask a row shows: one line of the bar, not the whole
+// prompt.
+const TITLE_WIDTH: usize = 24;
+
+/// How a run ended, as the row's `outcome` states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Ending {
+    Ok,
+    Stopped,
+    Failed,
 }
 
 impl State {
-    /// Ends the run in flight, keeping its time for the `elapsed` part.
-    pub(super) fn settle(&mut self) {
+    /// Ends the run in flight, keeping its time and how it went for the parts
+    /// that read them between runs.
+    pub(super) fn settle(&mut self, outcome: Ending) {
         if let Some(work) = self.work.take() {
             self.ended = Some(work.since.elapsed());
+            self.outcome = Some(outcome);
         }
     }
 }
@@ -239,6 +260,21 @@ pub(super) fn snapshot(lane: &Lane, view: &View) -> Snapshot {
             .filter(|q| q.line.is_none())
             .count(),
     )
+}
+
+/// Keeps the first thing a session was asked, for a row to name it by: the
+/// transcript is away while a run holds it, so this is read between runs.
+pub(super) fn remember_first_ask(view: &mut View, lane: &Lane) {
+    if view.state.first_ask.is_some() {
+        return;
+    }
+    let Some(session) = lane.session() else {
+        return;
+    };
+    let Some(ask) = session.first_ask() else {
+        return;
+    };
+    view.state.first_ask = Some(pi_store::text::clip(ask.shown_text(), TITLE_WIDTH));
 }
 
 // Fields rather than `&mut self`: the caller still reads/writes the

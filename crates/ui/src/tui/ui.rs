@@ -204,8 +204,9 @@ pub(super) fn lane_name(lane: &Lane) -> String {
 
 // How a checkout shows on the bar: front, how its last run ended, plain
 // name, or `Unopened`. A run in flight shows nothing — only finished state.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Mark {
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Mark {
     Front,
     Done,
     Failed,

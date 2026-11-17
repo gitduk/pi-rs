@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::Tui;
 use super::term::{Deafened, EXIT_GRACE, external_editor, scratch_file};
-use super::view::{Doing, Work, front_view, tail_of, view_at};
+use super::view::{Doing, Ending, Work, front_view, tail_of, view_at};
 use ::execution::channel::Outcome;
 use pi_core::driver::Origin;
 #[cfg(test)]
@@ -652,6 +652,7 @@ impl Tui {
         self.drivers.turn_ended(token, &how);
 
         let ok = out.is_ok();
+        let ending = Self::outcome_of(&out);
         // Non-model tasks have their ending in the operation output. The
         // streamed model run still closes its own live rows here.
         self.close_run(
@@ -661,6 +662,7 @@ impl Tui {
             } else {
                 Ok(Default::default())
             },
+            ending,
         );
         if lane == self.core.lanes.front() {
             if unsend && let Some(id) = self.core.lane().last_ask() {
@@ -676,9 +678,10 @@ impl Tui {
     }
 
     fn settle_compact(&mut self, settled: execution::host::Returned) {
+        let outcome = Self::outcome_of(&settled.result);
         view_at(&mut self.views, self.core.lanes[settled.lane].token())
             .state
-            .settle();
+            .settle(outcome);
     }
 
     fn show_recovery(&mut self, settled: &execution::host::Returned) {
@@ -700,15 +703,24 @@ impl Tui {
         self.say_notice_of(settled.lane, &text);
     }
 
+    // How a run ended, for the row's `outcome` part: a stop is not a failure.
+    fn outcome_of(result: &RunResult) -> Ending {
+        match result {
+            Ok(_) => Ending::Ok,
+            Err(error) if error.is_cancelled() => Ending::Stopped,
+            Err(_) => Ending::Failed,
+        }
+    }
+
     // Draw the end of a run into its lane's view, on screen or not.
-    pub(super) fn close_run(&mut self, lane: usize, out: RunResult) {
+    pub(super) fn close_run(&mut self, lane: usize, out: RunResult, ending: Ending) {
         let token = self.core.lanes[lane].token();
         let view = view_at(&mut self.views, token);
         self.ui.close(view);
         // A cancelled run's calls got no `ToolEnd`; their animated rows
         // need to reach scrollback before the next flush freezes them.
         self.ui.abandon_tools(view);
-        view.state.settle();
+        view.state.settle(ending);
         match out {
             Ok(_) => {}
             Err(error) if error.is_cancelled() => {

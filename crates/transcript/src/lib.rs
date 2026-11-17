@@ -923,6 +923,15 @@ impl Session {
         self.entries.iter().rev().find_map(Entry::prompt)
     }
 
+    /// What the user first said: the prompt this conversation opened with, as
+    /// a row names the session by it when nobody gave it a name.
+    pub fn first_ask(&self) -> Option<&Prompt> {
+        self.entries.iter().find_map(|e| match e {
+            Entry::Ask { ask, .. } if ask.relayed.is_none() => Some(ask),
+            _ => None,
+        })
+    }
+
     /// The last question the user asked, when there is one to take back.
     ///
     /// Prompts only: a shell command's output is not something anyone sent, and

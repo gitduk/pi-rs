@@ -7,8 +7,9 @@ use tokio::io::AsyncBufReadExt;
 use llm::request::Effort;
 use ratatui::layout::{Constraint, Layout as RowLayout, Rect};
 use ratatui::text::{Line, Span};
+use serde::Serialize;
 
-use super::view::{View, Work, snapshot};
+use super::view::{Ending, View, Work, snapshot};
 use super::{Mark, Ui, flash_for, screen};
 use pi_core::core::lane::Lane;
 use pi_core::core::meter::Snapshot;
@@ -21,23 +22,21 @@ const MUTED: Look = Look::Tone(Tone::Muted);
 // Room between the two sides of a row.
 const GAP: usize = 2;
 
-/// What a statusline row reads off the lane in front.
-#[derive(Debug, Clone, PartialEq)]
+/// What a statusline row reads off the lane in front, and what its scripts are
+/// told: one shape for both, so a value cannot drift between the two.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct Facts {
-    /// What the run in flight, or the one that last ended, spent and did: the
-    /// numbers every part but `spent` reads.
-    pub run: Snapshot,
-    /// Absent on a one-shot run's line, which has no lane behind it.
-    pub effort: Option<Effort>,
-    pub tier: Option<TierArg>,
-    /// Whether this run's ceiling lets a script run at all: an outside command
-    /// is the same power the `bash` tool asks for.
-    pub may_run_scripts: bool,
+    /// The model as its endpoint names it; absent until a lane names one.
+    pub model: Option<String>,
+    /// The provider its selection identity names, when it names one.
+    pub provider: Option<String>,
+    /// Absent when the model thinks at no level, `off` among them.
+    pub effort: Option<&'static str>,
+    pub tier: Option<String>,
+    /// Whether a run is in flight, rather than the one that last ended.
     pub running: bool,
-    /// What the agent is doing, in the words a row draws: the `state` field.
+    /// What the agent is doing, in the words the `state` field draws.
     pub state: String,
-    /// What the session has spent, in dollars, as each call ends.
-    pub spent: f64,
     /// What is wrong and stays so until it is fixed, drawn where a flash
     /// goes whenever none is up; `/status` says why.
     pub alerts: Vec<String>,
@@ -45,9 +44,151 @@ pub(crate) struct Facts {
     pub update: Option<String>,
     /// The latest release, while it is ahead of this pi.
     pub released: Option<String>,
+    /// The session in front; absent on a one-shot line, which has no lane.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<Session>,
+    pub run: Run,
+    /// The checkouts on the bar, in its order: state the screen owns, and a
+    /// script cannot read anywhere else.
+    pub tabs: Vec<Checkout>,
+    /// Where the checkout's background executions stand.
+    pub jobs: Jobs,
     /// The checkout as `project` draws it; read once a second, and absent
     /// outside a repository.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<pi_store::statusline::Project>,
+    /// Whether this run's ceiling lets a script run at all: an outside command
+    /// is the same power the `bash` tool asks for.
+    #[serde(skip)]
+    pub may_run_scripts: bool,
+}
+
+/// The session a row speaks for, as its scripts read it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct Session {
+    /// The id it is saved under.
+    pub id: String,
+    /// What the user calls it, if anything.
+    pub name: Option<String>,
+    /// What a row names it by: that name, else the first thing it was asked.
+    pub title: Option<String>,
+    /// When it began, in seconds since the epoch.
+    pub started: u64,
+    /// The checkout it works in, absolute.
+    pub workspace: String,
+    /// What the whole session has spent, children and compactions alike.
+    pub spent: llm::Totals,
+}
+
+/// The run in flight, or the one that last ended.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct Run {
+    /// Seconds it has run, or ran; absent before one starts.
+    pub elapsed: Option<f64>,
+    pub input: u64,
+    pub output: u64,
+    /// Percent of the prompt read from cache; absent until a request states it.
+    pub cache: Option<u64>,
+    /// In dollars; zero is an unpriced model rather than a free run.
+    pub cost: f64,
+    /// Tokens the last request occupied and the window it did so in, as the
+    /// provider counted them.
+    pub ctx: Option<(usize, usize)>,
+    /// The model's window, known before any request states one.
+    pub context_window: Option<usize>,
+    pub speed: Option<f64>,
+    pub compacted: usize,
+    pub queued: usize,
+    /// The worktree the session works in; absent in the repository's own.
+    pub worktree: Option<String>,
+    /// The retry it waits out; `state` says `retry` while one is set.
+    pub retry: Option<Retry>,
+    /// How the run that last ended went; absent while one runs.
+    pub outcome: Option<Ending>,
+}
+
+/// A retry the run waits out, before it sends again.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct Retry {
+    pub attempt: usize,
+    /// Seconds until the next attempt.
+    pub wait: f64,
+}
+
+/// One checkout on the bar: its name and how its last run ended.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct Checkout {
+    pub name: String,
+    pub mark: Mark,
+}
+
+/// The checkout's background executions, counted by where each stands.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub(crate) struct Jobs {
+    pub running: usize,
+    /// Ended, its results waiting to be delivered.
+    pub back: usize,
+    pub stopped: usize,
+    pub exited: usize,
+}
+
+impl Jobs {
+    pub(super) fn of(executions: &[pi_core::driver::background::BackgroundCommand]) -> Self {
+        use pi_core::driver::background::State;
+        let mut jobs = Jobs::default();
+        for execution in executions {
+            match execution.state {
+                State::Running => jobs.running += 1,
+                State::Back => jobs.back += 1,
+                State::Stopped => jobs.stopped += 1,
+                State::Exited => jobs.exited += 1,
+            }
+        }
+        jobs
+    }
+}
+
+impl Run {
+    /// A snapshot's numbers, plus the window only the lane knows.
+    fn of(snapshot: &Snapshot, context_window: Option<usize>) -> Self {
+        Self {
+            elapsed: snapshot.elapsed.map(|d| d.as_secs_f64()),
+            input: snapshot.input,
+            output: snapshot.output,
+            cache: snapshot.cached,
+            cost: snapshot.cost,
+            ctx: snapshot.ctx,
+            context_window,
+            speed: snapshot.speed,
+            compacted: snapshot.compactions,
+            queued: snapshot.queued,
+            worktree: snapshot.worktree.clone(),
+            retry: None,
+            outcome: None,
+        }
+    }
+}
+
+// What only the screen knows of the run: the retry it waits out, and how the
+// run that last ended went.
+fn screen_of(work: Option<&Work>, ended: Option<Ending>) -> (Option<Retry>, Option<Ending>) {
+    let retry = work
+        .and_then(|work| work.retry.as_ref())
+        .map(|retry| Retry {
+            attempt: retry.attempt,
+            wait: retry.wait.as_secs_f64(),
+        });
+    // A run in flight has no outcome yet; the one that ended left its own.
+    let outcome = match work {
+        Some(_) => None,
+        None => ended,
+    };
+    (retry, outcome)
+}
+
+// The endpoint's own name for the model, or nothing before a lane names one.
+fn endpoint_model(model: &str) -> Option<String> {
+    (!model.is_empty()).then(|| model.to_string())
 }
 
 impl Facts {
@@ -56,34 +197,43 @@ impl Facts {
     pub(crate) fn value(&self, field: Field) -> Option<String> {
         let run = &self.run;
         Some(match field {
-            Field::Model if run.model_name.is_empty() => return None,
-            Field::Model => run.model_name.clone(),
-            Field::Effort if self.effort? == Effort::Off => return None,
-            Field::Effort => self.effort?.name().to_string(),
-            Field::Tier => self.tier?.name(),
+            Field::Model => self.model.clone()?,
+            Field::Effort => self.effort?.to_string(),
+            Field::Tier => self.tier.clone()?,
             Field::Update => match (&self.update, &self.released) {
                 (Some(installed), _) => format!("restart for {installed}"),
                 (None, Some(released)) => format!("{released} available"),
                 (None, None) => return None,
             },
-            Field::Spent if self.spent <= 0.0 => return None,
-            Field::Spent => llm::figures::dollars(self.spent),
+            Field::Spent => {
+                let spent = self.session.as_ref()?.spent.cost;
+                if spent <= 0.0 {
+                    return None;
+                }
+                llm::figures::dollars(spent)
+            }
             Field::State if self.state.is_empty() => return None,
             Field::State => self.state.clone(),
-            Field::Elapsed if self.running => return crate::status::running_time(run.elapsed?),
-            Field::Elapsed => llm::figures::elapsed(run.elapsed?),
+            Field::Session => self.session.as_ref()?.title.clone()?,
+            Field::Elapsed => {
+                let seconds = std::time::Duration::from_secs_f64(run.elapsed?);
+                return match self.running {
+                    true => crate::status::running_time(seconds),
+                    false => Some(llm::figures::elapsed(seconds)),
+                };
+            }
             // Each half appears once the provider states it: most state both
             // only as the stream ends, and a waiting line of dashes reads as
             // broken.
             Field::InOut if run.input == 0 && run.output == 0 => return None,
             Field::InOut => llm::figures::in_out_so_far(run.input, run.output),
             Field::Speed => format!("{:.0} t/s", run.speed?),
-            Field::Cache => format!("{}% cached", run.cached?),
+            Field::Cache => format!("{}% cached", run.cache?),
             // An unpriced model reports no cost rather than $0.
             Field::Cost if run.cost <= 0.0 => return None,
             Field::Cost => llm::figures::dollars(run.cost),
             Field::Ctx => return crate::status::context(run.ctx?),
-            Field::Compacted => return crate::status::compacted(run.compactions),
+            Field::Compacted => return crate::status::compacted(run.compacted),
             Field::Queued if run.queued == 0 => return None,
             Field::Queued => format!("{} queued", run.queued),
             Field::Worktree => run.worktree.clone()?,
@@ -93,74 +243,64 @@ impl Facts {
         })
     }
 
-    /// The facts a script cannot read for itself, as one JSON object: the names
-    /// a field draws with, except `in_out`, which comes as `input` and
-    /// `output`.
+    /// The facts as its scripts read them: the same shape the fields draw
+    /// from, so a script's value and the row's cannot disagree.
     pub(crate) fn json(&self) -> String {
-        let run = &self.run;
-        let mut facts = serde_json::json!({
-            "model": (!run.model_name.is_empty()).then_some(&run.model_name),
-            "effort": self.effort.filter(|e| *e != Effort::Off).map(|e| e.name()),
-            "tier": self.tier.map(|t| t.name()),
-            "state": &self.state,
-            "spent": (self.spent > 0.0).then_some(self.spent),
-            "alerts": &self.alerts,
-            "update": &self.update,
-            "released": &self.released,
-            "run": {
-                "elapsed": run.elapsed.map(|t| t.as_secs_f64()),
-                "input": run.input,
-                "output": run.output,
-                "cache": run.cached,
-                "cost": run.cost,
-                "ctx": run.ctx,
-                "speed": run.speed,
-                "compacted": run.compactions,
-                "queued": run.queued,
-                "worktree": &run.worktree,
-            },
-        });
-        if let Some(project) = &self.project {
-            facts["project"] = serde_json::json!({
-                "branch": &project.branch,
-                "added": project.added,
-                "removed": project.removed,
-            });
-        }
-        facts.to_string()
+        // A row holds no number JSON cannot carry; a line still must not fall
+        // over if one ever turns up, so an empty object stands in.
+        serde_json::to_string(self).unwrap_or_else(|error| {
+            tracing::warn!(target: "pi::statusline", error = %error, "facts not written");
+            "{}".into()
+        })
     }
 
     /// The one-shot line's facts: a run's numbers with no lane behind them,
     /// which is all `status.parts` reads.
     pub(crate) fn from_snapshot(run: Snapshot) -> Self {
         Self {
-            run,
+            model: endpoint_model(&run.model_name),
+            provider: None,
             effort: None,
             tier: None,
-            may_run_scripts: false,
             running: false,
             state: String::new(),
-            spent: 0.0,
             alerts: Vec::new(),
             update: None,
             released: None,
+            session: None,
+            run: Run::of(&run, None),
+            tabs: Vec::new(),
+            jobs: Jobs::default(),
             project: None,
+            may_run_scripts: false,
         }
     }
 
-    pub(super) fn of(lane: &Lane, view: &View, project: Option<statusline::Project>) -> Self {
+    pub(super) fn of(
+        lane: &Lane,
+        view: &View,
+        project: Option<statusline::Project>,
+        tabs: Vec<Checkout>,
+        jobs: Jobs,
+    ) -> Self {
+        let snapshot = snapshot(lane, view);
+        let spec = lane.agent().spec();
+        let name = lane.name();
+        let work = view.state.work.as_ref();
+        let (retry, outcome) = screen_of(work, view.state.outcome);
         Self {
-            run: snapshot(lane, view),
+            model: endpoint_model(&snapshot.model_name),
+            provider: spec.provider().map(str::to_string),
             // A model that takes no effort thinks at no level the run sets.
-            effort: Some(match lane.agent().spec().accepts_effort {
+            effort: Some(match spec.accepts_effort {
                 true => lane.agent().brief.effort,
                 false => Effort::Off,
-            }),
-            tier: Some(lane.resolved().ceiling.into()),
-            may_run_scripts: pi_store::statusline::may_run_scripts(lane.resolved().ceiling),
+            })
+            .filter(|effort| *effort != Effort::Off)
+            .map(Effort::name),
+            tier: Some(TierArg::name(lane.resolved().ceiling.into())),
             running: lane.is_running(),
-            state: state_of(view.state.work.as_ref()),
-            spent: lane.spent().cost,
+            state: state_of(work),
             alerts: [
                 lane.unsaved().map(|_| "unsaved"),
                 pi_store::diagnostics::failed().then_some("diagnostics stopped"),
@@ -171,7 +311,23 @@ impl Facts {
             .collect(),
             update: pi_core::core::update::newer(),
             released: pi_core::core::update::released(),
+            session: Some(Session {
+                id: lane.id().to_string(),
+                title: name.clone().or_else(|| view.state.first_ask.clone()),
+                name,
+                started: lane.created(),
+                workspace: lane.root().to_string_lossy().into_owned(),
+                spent: lane.spent(),
+            }),
+            run: Run {
+                retry,
+                outcome,
+                ..Run::of(&snapshot, Some(spec.context_window as usize))
+            },
+            tabs,
+            jobs,
             project,
+            may_run_scripts: pi_store::statusline::may_run_scripts(lane.resolved().ceiling),
         }
     }
 }
