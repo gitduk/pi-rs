@@ -133,15 +133,35 @@ impl Layout {
     /// Whether any row draws `field`: the work behind it is worth doing only
     /// then.
     pub fn uses(&self, field: Field) -> bool {
-        fn walk(items: &[Item], field: Field) -> bool {
-            items.iter().any(|item| match item {
-                Item::Field(f) => *f == field,
-                Item::Styled(s) => s.field == field,
-                Item::Group(g) => walk(&g.group, field),
-                Item::Text(_) | Item::Script(_) => false,
-            })
+        self.items().any(|item| match item {
+            Item::Field(f) => *f == field,
+            Item::Styled(s) => s.field == field,
+            _ => false,
+        })
+    }
+
+    /// Whether any row draws a script: what a script reads is worth reading
+    /// even when no field shows it.
+    pub fn scripted(&self) -> bool {
+        self.items().any(|item| matches!(item, Item::Script(_)))
+    }
+
+    /// Every item in the layout, groups opened, in drawing order.
+    pub fn items(&self) -> impl Iterator<Item = &Item> {
+        fn walk<'a>(items: &'a [Item], out: &mut Vec<&'a Item>) {
+            for item in items {
+                out.push(item);
+                if let Item::Group(g) = item {
+                    walk(&g.group, out);
+                }
+            }
         }
-        (self.lines.iter()).any(|line| walk(&line.left, field) || walk(&line.right, field))
+        let mut out = Vec::new();
+        for line in &self.lines {
+            walk(&line.left, &mut out);
+            walk(&line.right, &mut out);
+        }
+        out.into_iter()
     }
 }
 
@@ -187,8 +207,9 @@ pub struct Script {
     pub style: Look,
 }
 
-/// The shortest cadence a script may ask for: a row is not a loop's timer.
-pub const EVERY_LEAST: u64 = 15;
+/// The shortest cadence a script may ask for: one run a second, not one a
+/// frame.
+pub const EVERY_LEAST: u64 = 1;
 /// The longest a run may hold its cell: a row is not a job's home.
 pub const TIMEOUT_MOST: u64 = 300;
 fn every_default() -> u64 {
@@ -347,7 +368,7 @@ pub enum Field {
     State,
     /// The checkout: its branch, and what the worktree has changed.
     Project,
-    /// The run in flight's clock, while one is on.
+    /// The clock of the run in flight, or of the one that last ended.
     Elapsed,
     /// What the run has sent and heard back, in tokens.
     InOut,

@@ -61,7 +61,8 @@ pub struct Surface {
     pub(super) tail: Option<EntryId>,
 }
 
-// What this run is doing, as far as the screen knows; ends with the run.
+// What this run is doing, as far as the screen knows; ends with the run, the
+// time it took excepted.
 // Cost tally lives on the lane, outliving this screen.
 #[derive(Default)]
 pub struct State {
@@ -72,6 +73,18 @@ pub struct State {
     // `Lane::turn` says whether a run is on; this field alone must not
     // decide that.
     pub(super) work: Option<Work>,
+    // How long the run that last ended took, kept past it: `elapsed` reads
+    // this between runs rather than going blank.
+    pub(super) ended: Option<std::time::Duration>,
+}
+
+impl State {
+    /// Ends the run in flight, keeping its time for the `elapsed` part.
+    pub(super) fn settle(&mut self) {
+        if let Some(work) = self.work.take() {
+            self.ended = Some(work.since.elapsed());
+        }
+    }
 }
 
 // One run, as the screen draws it.
@@ -210,13 +223,16 @@ pub(super) fn view_at(views: &mut Views, token: u64) -> &mut View {
     views.entry(token).or_default()
 }
 
-// What a lane's status line is drawn from: what events can't say —
-// when the turn started, what's queued behind it. Typed lines are drawn
-// under the status line already, so only the unseen rest is counted.
+// What a lane's status line is drawn from: when the turn started or the last
+// one ended, plus the queued lines not already drawn under the bar.
 pub(super) fn snapshot(lane: &Lane, view: &View) -> Snapshot {
     lane.snapshot(
         lane.model_name(),
-        view.state.work.as_ref().map(|w| w.since.elapsed()),
+        view.state
+            .work
+            .as_ref()
+            .map(|w| w.since.elapsed())
+            .or(view.state.ended),
         view.queued
             .lock()
             .iter()

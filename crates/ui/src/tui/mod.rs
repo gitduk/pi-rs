@@ -768,11 +768,14 @@ impl Tui {
             if looked.elapsed() >= std::time::Duration::from_secs(1) {
                 looked = std::time::Instant::now();
                 self.refresh_files();
-                // Two `git` calls: only for a layout that draws the checkout.
-                self.ui.project = match self.ui.layout.uses(pi_store::statusline::Field::Project) {
-                    true => statusline::project_of(self.core.lane().root()),
-                    false => None,
-                };
+                // Two `git` calls: only for a layout that draws the checkout,
+                // or a script that may read it from `PI_FACTS`.
+                let layout = &self.ui.layout;
+                self.ui.project =
+                    match layout.uses(pi_store::statusline::Field::Project) || layout.scripted() {
+                        true => statusline::project_of(self.core.lane().root()),
+                        false => None,
+                    };
                 self.reload_statusline();
                 self.save_shown();
             }

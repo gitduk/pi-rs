@@ -5,7 +5,7 @@ description: Configure pi's statusline layout, fields, colours, and script value
 
 # Set the statusline
 
-The statusline is the one row under the input line.
+The statusline is the rows above and under the input line.
 Its layout is a single JSON document kept at `<pi_home>/statusline.json`.
 Use the directory in the `<pi_home>` block.
 This directory is `$PI_HOME` when set, otherwise `~/.pi`.
@@ -68,6 +68,8 @@ A missing `style` is muted.
   diff's own colours.
 - `state` — `idle`, `working`, `compacting`, `stopping`, or a retry it waits
   out. Always says something.
+- `elapsed` — how long the run in flight has taken, and how long the run that
+  last ended took once the row is back to idle.
 - `spent` — what the session has cost so far; `cost` — what the run in flight,
   or the one that last ended, cost.
 - `cache` `ctx` `cost` are kept in the session's own `statusline.json`, so a
@@ -90,16 +92,26 @@ A script item carries exactly one of `command` or `name`.
 - `name` runs `<pi_home>/statusline.d/<name>`, which must be executable. Write
   the file, make it executable, then name it here. The name takes no `/`, no
   `..`, and no leading `-`.
-- `every` is the seconds between runs, at least 15, default 60.
+- `every` is the seconds between runs, at least 1, default 60.
 - `timeout` is the seconds one run may take before it is killed, default 15.
   A script says how long it needs, so a slow one is not mistaken for a hung one.
 - `style` colours its answer like any other item's text.
 - `placeholder` stands in until the first answer, default `…`.
-- Only the first line of output shows; control characters are dropped.
+- Only the first line of output shows. SGR runs (`ESC[31m…ESC[0m`, a real byte 0x1b) colour it —
+  the same vocabulary a theme writes, applied over `style` — and every other
+  escape and control character is dropped.
 - A failing script keeps its last answer; one that never answered keeps the
   placeholder.
 - At most four scripts run at once, each one alone, and none of them blocks the
   row.
+- A script is told `PI_SESSION_DIR`, the directory of the session it draws for,
+  `PI_COLUMNS`, the row's width in cells, and `PI_FACTS`, one JSON object of
+  what the row knows: `model`, `effort`, `tier`, `state`, `spent`, `alerts`,
+  `update`, `released`, `project` (`branch`, `added`, `removed`), and `run`
+  (the names a field draws with, except `in_out`, which comes as `input` and
+  `output`; `elapsed` is in seconds).
+- A value the row leaves out is `null`; `project` is absent rather than null
+  outside a repository.
 
 The statusline redraws from the last answer, so a slow script never stalls the
 screen.

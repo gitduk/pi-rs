@@ -45,6 +45,9 @@ pub(crate) struct Facts {
     pub update: Option<String>,
     /// The latest release, while it is ahead of this pi.
     pub released: Option<String>,
+    /// The checkout as `project` draws it; read once a second, and absent
+    /// outside a repository.
+    pub project: Option<pi_store::statusline::Project>,
 }
 
 impl Facts {
@@ -90,6 +93,43 @@ impl Facts {
         })
     }
 
+    /// The facts a script cannot read for itself, as one JSON object: the names
+    /// a field draws with, except `in_out`, which comes as `input` and
+    /// `output`.
+    pub(crate) fn json(&self) -> String {
+        let run = &self.run;
+        let mut facts = serde_json::json!({
+            "model": (!run.model_name.is_empty()).then_some(&run.model_name),
+            "effort": self.effort.filter(|e| *e != Effort::Off).map(|e| e.name()),
+            "tier": self.tier.map(|t| t.name()),
+            "state": &self.state,
+            "spent": (self.spent > 0.0).then_some(self.spent),
+            "alerts": &self.alerts,
+            "update": &self.update,
+            "released": &self.released,
+            "run": {
+                "elapsed": run.elapsed.map(|t| t.as_secs_f64()),
+                "input": run.input,
+                "output": run.output,
+                "cache": run.cached,
+                "cost": run.cost,
+                "ctx": run.ctx,
+                "speed": run.speed,
+                "compacted": run.compactions,
+                "queued": run.queued,
+                "worktree": &run.worktree,
+            },
+        });
+        if let Some(project) = &self.project {
+            facts["project"] = serde_json::json!({
+                "branch": &project.branch,
+                "added": project.added,
+                "removed": project.removed,
+            });
+        }
+        facts.to_string()
+    }
+
     /// The one-shot line's facts: a run's numbers with no lane behind them,
     /// which is all `status.parts` reads.
     pub(crate) fn from_snapshot(run: Snapshot) -> Self {
@@ -104,10 +144,11 @@ impl Facts {
             alerts: Vec::new(),
             update: None,
             released: None,
+            project: None,
         }
     }
 
-    pub(super) fn of(lane: &Lane, view: &View) -> Self {
+    pub(super) fn of(lane: &Lane, view: &View, project: Option<statusline::Project>) -> Self {
         Self {
             run: snapshot(lane, view),
             // A model that takes no effort thinks at no level the run sets.
@@ -130,6 +171,7 @@ impl Facts {
             .collect(),
             update: pi_core::core::update::newer(),
             released: pi_core::core::update::released(),
+            project,
         }
     }
 }
@@ -311,6 +353,7 @@ impl Ui {
         &mut self,
         facts: &Facts,
         width: usize,
+        session: &std::path::Path,
     ) -> (Vec<StatuslineRow>, Vec<StatuslineRow>) {
         let held = self
             .pointer
@@ -325,11 +368,14 @@ impl Ui {
         // something. What has not answered yet stands as its placeholder.
         // A layout outlives the run that wrote it, and the ceiling does not:
         // a command file may only run where `bash` itself would be offered.
-        self.scripts.start_due(&self.layout, facts.may_run_scripts);
+        self.scripts
+            .start_due(&self.layout, facts.may_run_scripts, session, width, || {
+                facts.json()
+            });
         let mut over = Vec::new();
         let mut under = Vec::new();
         for line in &self.layout.lines {
-            let (row, hit) = self.bar_row(line, facts, width);
+            let (row, hit) = self.bar_row(line, facts, width, session);
             match line.place {
                 statusline::Place::Top => {
                     if let Some(hit) = hit {
@@ -356,9 +402,10 @@ impl Ui {
         line: &statusline::Line,
         facts: &Facts,
         width: usize,
+        session: &std::path::Path,
     ) -> (StatuslineRow, Option<FlashHit>) {
-        let left = self.pieces(&line.left, facts);
-        let right = self.pieces(&line.right, facts);
+        let left = self.pieces(&line.left, facts, session);
+        let right = self.pieces(&line.right, facts, session);
         let sep = match &line.sep {
             Some(t) => self.text(t).unwrap_or_default(),
             None => vec![self.tab_sep.clone()],
@@ -426,14 +473,14 @@ impl Ui {
         )
     }
 
-    fn pieces(&self, items: &[Item], facts: &Facts) -> Vec<Piece> {
+    fn pieces(&self, items: &[Item], facts: &Facts, session: &std::path::Path) -> Vec<Piece> {
         items
             .iter()
             .filter_map(|item| match item {
                 Item::Field(Field::Tabs) => self.tabs_piece(),
                 Item::Styled(s) if s.field == Field::Tabs => self.tabs_piece(),
-                Item::Group(g) => self.group(g, facts).map(Piece::Spans),
-                item => self.spans(item, facts).map(Piece::Spans),
+                Item::Group(g) => self.group(g, facts, session).map(Piece::Spans),
+                item => self.spans(item, facts, session).map(Piece::Spans),
             })
             .collect()
     }
@@ -447,7 +494,12 @@ impl Ui {
 
     // One item other than the checkouts or a group, None when it has nothing
     // to say.
-    fn spans(&self, item: &Item, facts: &Facts) -> Option<Vec<Span<'static>>> {
+    fn spans(
+        &self,
+        item: &Item,
+        facts: &Facts,
+        session: &std::path::Path,
+    ) -> Option<Vec<Span<'static>>> {
         let flash_slot = match item {
             Item::Field(part) => *part == Field::Flash,
             Item::Styled(s) => s.field == Field::Flash,
@@ -467,7 +519,11 @@ impl Ui {
             Item::Styled(s) if s.field == Field::Project => return self.project_spans(&s.style),
             Item::Styled(s) => (self.value(s.field, facts)?, &s.style),
             Item::Text(t) => return self.text(t),
-            Item::Script(s) => (self.scripts.shown(s), &s.style),
+            Item::Script(s) => {
+                let answer = self.scripts.shown(s, session);
+                let spans = self.script_spans(&answer, &s.style);
+                return (!spans.is_empty()).then_some(spans);
+            }
             Item::Group(_) => return None,
         };
         self.text(&statusline::Text {
@@ -478,10 +534,15 @@ impl Ui {
 
     // A group goes whole when it holds parts and none of them had anything to
     // say: its labels would stand alone.
-    fn group(&self, g: &statusline::Group, facts: &Facts) -> Option<Vec<Span<'static>>> {
+    fn group(
+        &self,
+        g: &statusline::Group,
+        facts: &Facts,
+        session: &std::path::Path,
+    ) -> Option<Vec<Span<'static>>> {
         let (mut spans, mut parts, mut said) = (Vec::new(), 0, 0);
         for item in &g.group {
-            let got = self.spans(item, facts);
+            let got = self.spans(item, facts, session);
             if matches!(item, Item::Field(_) | Item::Styled(_)) {
                 parts += 1;
                 said += usize::from(got.is_some());
@@ -535,6 +596,16 @@ impl Ui {
                     .span(self.tone(&t.style).as_ref(), t.text.replace('\n', " ")),
             ]
         })
+    }
+
+    // A script writes its own colours: the SGR runs it printed colour its text,
+    // over the item's own style. With colour off the runs drop.
+    fn script_spans(&self, answer: &str, look: &Look) -> Vec<Span<'static>> {
+        let base = match self.paint.color {
+            true => crate::sgr::style_to_ratatui(self.tone(look).as_ref()),
+            false => ratatui::style::Style::default(),
+        };
+        sgr_spans(answer, base, self.paint.color)
     }
 
     fn tone<'a>(&'a self, look: &'a Look) -> std::borrow::Cow<'a, pi_store::theme::Style> {
@@ -627,6 +698,77 @@ fn holds_flash(items: &[Item]) -> bool {
     })
 }
 
+// A script's answer split at its SGR runs: each text it printed, and the
+// parameters of the run that follows — absent when nothing closed one.
+fn sgr_runs(answer: &str) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    let mut text = String::new();
+    let mut open: Option<pi_store::text::Escape> = None;
+    let mut run = String::new();
+    for c in answer.chars() {
+        if pi_store::text::escaping(&mut open, c) {
+            run.push(c);
+            if open.is_none() {
+                if let Some(params) = sgr_params(&run) {
+                    out.push((std::mem::take(&mut text), Some(params)));
+                }
+                run.clear();
+            }
+            continue;
+        }
+        if !c.is_control() {
+            text.push(c);
+        }
+    }
+    out.push((text, None));
+    out
+}
+
+// The parameters of an `ESC [ … m` run: the only escape the row obeys.
+fn sgr_params(run: &str) -> Option<String> {
+    let params = run.strip_prefix("\x1b[")?.strip_suffix('m')?;
+    params
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == ';')
+        .then(|| params.to_string())
+}
+
+// A script's answer as spans: its SGR runs colour the text after them in the
+// same vocabulary a theme writes.
+pub(super) fn sgr_spans(
+    answer: &str,
+    base: ratatui::style::Style,
+    colored: bool,
+) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut style = base;
+    for (text, params) in sgr_runs(answer) {
+        if !text.is_empty() {
+            out.push(Span::styled(text, style));
+        }
+        if let Some(params) = params.filter(|_| colored) {
+            style = match params.as_str() {
+                // A bare reset returns to the item's own colour, not the
+                // terminal's default.
+                "" | "0" => base,
+                // Each run adds to the one before: `ESC[1m` then `ESC[31m`
+                // keeps the bold.
+                params => crate::sgr::parse_sgr(params, style),
+            };
+        }
+    }
+    // The answer's own edges are not part of it: a leading or trailing blank
+    // would otherwise hold the row's space without drawing anything.
+    if let Some(first) = out.first_mut() {
+        first.content = first.content.trim_start().to_string().into();
+    }
+    if let Some(last) = out.last_mut() {
+        last.content = last.content.trim_end().to_string().into();
+    }
+    out.retain(|span| !span.content.is_empty());
+    out
+}
+
 fn spans_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(Span::width).sum()
 }
@@ -653,6 +795,14 @@ const ANSWER_CAP: u64 = 4096;
 // How many script runs may be out at once: a row is not a job queue.
 const SCRIPT_RUNS: usize = 4;
 
+/// What a script is told about where it runs: the session the row draws for,
+/// the room that row has, and the facts it cannot read for itself.
+pub(super) struct ScriptEnv {
+    session: std::path::PathBuf,
+    width: usize,
+    facts: String,
+}
+
 impl Scripts {
     pub(super) fn new() -> Self {
         let (tx, rx) = unbounded_channel();
@@ -664,8 +814,15 @@ impl Scripts {
     }
 
     /// One run of each script that is due, and none twice over.
-    pub(super) fn start_due(&mut self, layout: &statusline::Layout, may_run: bool) {
-        let runnable = scripts_of(layout);
+    pub(super) fn start_due(
+        &mut self,
+        layout: &statusline::Layout,
+        may_run: bool,
+        session: &std::path::Path,
+        width: usize,
+        facts: impl Fn() -> String,
+    ) {
+        let runnable = scripts_of(layout, session);
         // Keys the layout no longer names keep neither a slot nor an answer.
         self.answers
             .retain(|key, _| runnable.iter().any(|(_, k)| k == key));
@@ -673,6 +830,8 @@ impl Scripts {
             return;
         }
         let mut running = self.answers.values().filter(|a| a.running).count();
+        // One document per call, however many scripts read it.
+        let mut facts_once: Option<String> = None;
         for (script, key) in runnable {
             if running >= SCRIPT_RUNS {
                 break;
@@ -694,8 +853,13 @@ impl Scripts {
             answer.running = true;
             answer.ran = Some(Instant::now());
             running += 1;
+            let env = ScriptEnv {
+                session: session.to_path_buf(),
+                width,
+                facts: facts_once.get_or_insert_with(|| facts()).clone(),
+            };
             tokio::spawn(async move {
-                let said = run_once(run, timeout).await;
+                let said = run_once(run, timeout, env).await;
                 let _ = tx.send((key, said));
             });
         }
@@ -715,8 +879,8 @@ impl Scripts {
     }
 
     /// What stands in this script's place: its answer, or its own placeholder.
-    fn shown(&self, script: &statusline::Script) -> String {
-        let key = key_of(script);
+    fn shown(&self, script: &statusline::Script, session: &std::path::Path) -> String {
+        let key = key_of(script, session);
         match self.answers.get(&key).and_then(|a| a.text.clone()) {
             Some(text) => text,
             None => script.waiting().to_string(),
@@ -725,7 +889,11 @@ impl Scripts {
 }
 
 // One run: the shell's line, or the named file. Killed at its own deadline.
-async fn run_once(run: statusline::Runnable, timeout: std::time::Duration) -> Option<String> {
+async fn run_once(
+    run: statusline::Runnable,
+    timeout: std::time::Duration,
+    env: ScriptEnv,
+) -> Option<String> {
     let mut command = match run {
         statusline::Runnable::Shell(line) => {
             let mut command = tokio::process::Command::new("sh");
@@ -734,6 +902,10 @@ async fn run_once(run: statusline::Runnable, timeout: std::time::Duration) -> Op
         }
         statusline::Runnable::File(path) => tokio::process::Command::new(path),
     };
+    command
+        .env("PI_SESSION_DIR", &env.session)
+        .env("PI_COLUMNS", env.width.to_string())
+        .env("PI_FACTS", &env.facts);
     let command = command.kill_on_drop(true);
     command
         .stdout(std::process::Stdio::piped())
@@ -753,33 +925,40 @@ async fn run_once(run: statusline::Runnable, timeout: std::time::Duration) -> Op
     }
     let _ = child.start_kill();
     let first = printed.lines().next().unwrap_or_default();
-    // What a program prints is text to draw, never an escape to obey.
-    let said: String = first.chars().filter(|c| !c.is_control()).collect();
-    (!said.trim().is_empty()).then(|| said.trim().to_string())
+    // A program's answer is text to draw, never an escape to obey: its SGR
+    // runs are read when the row draws it, and every other escape stays out.
+    spoken_line(first)
+}
+
+// The one line a script printed, or none when it said nothing but colour and
+// blanks.
+pub(super) fn spoken_line(found: &str) -> Option<String> {
+    let spoken = sgr_runs(found)
+        .iter()
+        .any(|(text, _)| !text.trim().is_empty());
+    spoken.then(|| found.trim().to_string())
 }
 
 // Every script in the layout, with the key its answer is kept under.
-fn scripts_of(layout: &statusline::Layout) -> Vec<(&statusline::Script, String)> {
-    fn walk<'a>(items: &'a [statusline::Item], out: &mut Vec<(&'a statusline::Script, String)>) {
-        for item in items {
-            match item {
-                statusline::Item::Script(s) => out.push((s, key_of(s))),
-                statusline::Item::Group(g) => walk(&g.group, out),
-                _ => {}
-            }
-        }
-    }
-    let mut out = Vec::new();
-    for line in &layout.lines {
-        walk(&line.left, &mut out);
-        walk(&line.right, &mut out);
-    }
-    out
+fn scripts_of<'a>(
+    layout: &'a statusline::Layout,
+    session: &std::path::Path,
+) -> Vec<(&'a statusline::Script, String)> {
+    layout
+        .items()
+        .filter_map(|item| match item {
+            statusline::Item::Script(s) => Some((s, key_of(s, session))),
+            _ => None,
+        })
+        .collect()
 }
 
-fn key_of(script: &statusline::Script) -> String {
-    match script.name.is_some() {
+fn key_of(script: &statusline::Script, session: &std::path::Path) -> String {
+    let label = match script.name.is_some() {
         true => format!("name:{}", script.label()),
         false => format!("command:{}", script.label()),
-    }
+    };
+    // A script's answer belongs to the session it answered for: a lane switch
+    // must not pair one session's env with another's output.
+    format!("{}|{label}", session.display())
 }

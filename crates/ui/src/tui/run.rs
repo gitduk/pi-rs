@@ -678,7 +678,7 @@ impl Tui {
     fn settle_compact(&mut self, settled: execution::host::Returned) {
         view_at(&mut self.views, self.core.lanes[settled.lane].token())
             .state
-            .work = None;
+            .settle();
     }
 
     fn show_recovery(&mut self, settled: &execution::host::Returned) {
@@ -708,7 +708,7 @@ impl Tui {
         // A cancelled run's calls got no `ToolEnd`; their animated rows
         // need to reach scrollback before the next flush freezes them.
         self.ui.abandon_tools(view);
-        view.state.work = None;
+        view.state.settle();
         match out {
             Ok(_) => {}
             Err(error) if error.is_cancelled() => {

@@ -13,6 +13,9 @@ use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 /// `speed`, `compacted`, `queued`, `worktree`). `style` on any of them names a
 /// theme tone (`muted`, `heading`, `emphasis`, `code`, `input`, `ok`, `err`,
 /// `add`, `del`) or writes one out (`"34"`, `{"color":"#5c9cf5","sgr":["bold"]}`).
+/// A script is told the session it draws for (`PI_SESSION_DIR`), the row's
+/// width in cells (`PI_COLUMNS`), and what the row knows as JSON (`PI_FACTS`);
+/// the SGR runs it prints colour its answer.
 pub struct Statusline;
 
 #[async_trait::async_trait]
@@ -35,7 +38,7 @@ impl Tool for Statusline {
         json!({ "type": "object", "properties": {
             "layout": {
                 "type": "object",
-                "description": "lines: [{place, left, right, sep}] of items; `place` is top or bottom (default bottom); an item is a field's name, or {field, style}, {text, style}, {group: [...]} or {script: {command or name, every, timeout, placeholder}}. A script shows the first line it prints."
+                "description": "lines: [{place, left, right, sep}] of items; `place` is top or bottom (default bottom); an item is a field's name, or {field, style}, {text, style}, {group: [...]} or {script: {command or name, every, timeout, placeholder}}. A script shows the first line it prints, and is told `PI_SESSION_DIR`, `PI_COLUMNS` and `PI_FACTS`; its SGR runs colour it."
             },
             "reset": { "type": "boolean", "description": "put the built-in default back and drop the file" }
         }, "additionalProperties": false })
