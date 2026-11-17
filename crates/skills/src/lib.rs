@@ -1,7 +1,7 @@
 mod load;
 mod paths;
 
-pub use load::{Load, included, instructions, source};
+pub use load::{Load, delivered, included, instructions, source};
 pub use paths::Paths;
 
 use llm::slice::head_bytes;
@@ -249,8 +249,10 @@ impl Shelf {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mut loaded = Vec::new();
-        for skill in selected {
+        // Every body is read before any is counted: one that fails here must
+        // not leave a count for instructions that never reached the model.
+        let mut texts = Vec::with_capacity(selected.len());
+        for skill in &selected {
             let text = match skill.builtin {
                 Some(text) => text.to_string(),
                 None => {
@@ -273,9 +275,13 @@ impl Shelf {
                     text.len() as u64,
                 )));
             }
-            loaded.push(instructions(skill, &text));
+            texts.push(text);
         }
-        Ok(loaded)
+        Ok(selected
+            .iter()
+            .zip(texts)
+            .map(|(skill, text)| instructions(skill, &text))
+            .collect())
     }
 
     fn fresh<T>(&self, read: impl FnOnce(&Seen) -> T) -> T {

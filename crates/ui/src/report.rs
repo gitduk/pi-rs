@@ -109,20 +109,18 @@ struct Columns {
 
 impl Columns {
     fn of(rows: &[&Row], width: usize) -> Self {
-        let tokens = rows
-            .iter()
-            .filter(|row| row.role == Role::Budget)
-            .map(|row| text::width(cell(row, 1)))
-            .max()
-            .unwrap_or(0)
-            .max(NUMERIC_WIDTH);
-        let share = rows
-            .iter()
-            .filter(|row| row.role == Role::Budget)
-            .map(|row| text::width(cell(row, 2)))
-            .max()
-            .unwrap_or(0)
-            .max(NUMERIC_WIDTH);
+        // A section row names the columns under it, so its own cells count
+        // toward the width a heading has to fit in.
+        let numeric = |at: usize| {
+            rows.iter()
+                .filter(|row| matches!(row.role, Role::Budget | Role::Section))
+                .map(|row| text::width(cell(row, at)))
+                .max()
+                .unwrap_or(0)
+                .max(NUMERIC_WIDTH)
+        };
+        let tokens = numeric(1);
+        let share = numeric(2);
         Self {
             name: width.saturating_sub(tokens + share + 2 * NUMERIC_GAP),
             tokens,
@@ -241,7 +239,7 @@ fn render(rows: &[&Row], width: usize, paint: Option<&Paint>) -> Vec<Line<'stati
             }
             Role::Section if width >= WIDE_WIDTH => {
                 let mut spans = label(row, columns.name, paint, true);
-                columns.values(&mut spans, "TOKENS", "WINDOW", paint, true);
+                columns.values(&mut spans, cell(row, 1), cell(row, 2), paint, true);
                 Line::from(spans)
             }
             Role::Budget if width >= WIDE_WIDTH => {

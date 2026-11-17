@@ -8,6 +8,9 @@ use pi_store::listing::{Role, Row};
 use std::cmp::Reverse;
 
 const LARGEST_MESSAGES: usize = 3;
+// A skill loaded once and never again still costs a row on every read; the
+// ones that are used are the ones worth reading.
+const MOST_SKILLS: usize = 8;
 
 pub(super) fn rows(lane: &Lane) -> Vec<Row> {
     let spec = lane.agent().spec();
@@ -85,7 +88,7 @@ pub(super) fn rows(lane: &Lane) -> Vec<Row> {
         ]));
     }
     rows.push(Row::new([""]));
-    rows.push(Row::new(["Sources"]).with_role(Role::Section));
+    rows.push(section("Sources", "WINDOW"));
     let mut sources = [
         (
             "system",
@@ -112,7 +115,7 @@ pub(super) fn rows(lane: &Lane) -> Vec<Row> {
     }
 
     let mut directories = Vec::with_capacity(3);
-    let mut system_rows = vec![Row::new(["System"]).with_role(Role::Section)];
+    let mut system_rows = vec![section("System", "WINDOW")];
     let mut remaining = brief.system.as_str();
     let mut prompts = Vec::with_capacity(lane.resolved().prompt_blocks.len());
     for block in &lane.resolved().prompt_blocks {
@@ -129,11 +132,8 @@ pub(super) fn rows(lane: &Lane) -> Vec<Row> {
 
     directories.push((system, system_rows));
     tools.retain(|(_, tokens)| window == 0 || percentage(*tokens, window) != "0.0%");
-    let mut tool_rows = vec![
-        Row::new(["Tools"])
-            .noting(format!("{} / {} shown", tools.len(), defs.len()))
-            .with_role(Role::Section),
-    ];
+    let mut tool_rows =
+        vec![section("Tools", "WINDOW").noting(format!("{} / {} shown", tools.len(), defs.len()))];
     for (tool, tokens) in tools {
         tool_rows.push(budget(&tool.name, tokens, window));
     }
@@ -144,7 +144,7 @@ pub(super) fn rows(lane: &Lane) -> Vec<Row> {
     if let Some(history) = &history
         && !history.is_empty()
     {
-        let mut message_rows = vec![Row::new(["Messages"]).with_role(Role::Section)];
+        let mut message_rows = vec![section("Messages", "WINDOW")];
         let mut categories: Vec<_> = messages::CATEGORIES
             .into_iter()
             .zip(parts)
@@ -165,6 +165,30 @@ pub(super) fn rows(lane: &Lane) -> Vec<Row> {
         directories.push((message_tokens, message_rows));
     }
     directories.sort_by_key(|(tokens, _)| Reverse(*tokens));
+    // A skill costs nothing until it is loaded, so it reads beside the sources
+    // rather than inside them: its tokens are what a load would add, and its
+    // count outlives this session.
+    let loads = pi_store::state::read().skills;
+    if !loads.is_empty() {
+        let mut skills: Vec<_> = loads.into_iter().collect();
+        skills.sort_by_key(|(_, load)| Reverse((load.loads, load.bytes)));
+        let loaded = skills.len();
+        skills.truncate(MOST_SKILLS);
+        let mut heading = section("Skills", "COUNT");
+        if loaded > skills.len() {
+            heading = heading.noting(format!("{} / {} shown", skills.len(), loaded));
+        }
+        let mut skill_rows = vec![heading];
+        skill_rows.extend(skills.into_iter().map(|(name, load)| {
+            Row::new([
+                name,
+                estimated(estimate::bytes(load.bytes as usize)),
+                load.loads.to_string(),
+            ])
+            .with_role(Role::Budget)
+        }));
+        directories.push((0, skill_rows));
+    }
     for (_, directory) in directories {
         rows.push(Row::new([""]));
         rows.extend(directory);
@@ -174,12 +198,18 @@ pub(super) fn rows(lane: &Lane) -> Vec<Row> {
 }
 
 fn budget(name: &str, tokens: usize, window: usize) -> Row {
-    Row::new([
-        name.into(),
-        format!("~{}", figures::short(tokens as u64)),
-        percentage(tokens, window),
-    ])
-    .with_role(Role::Budget)
+    Row::new([name.into(), estimated(tokens), percentage(tokens, window)]).with_role(Role::Budget)
+}
+
+// A section row names the numeric columns its own rows are read under; the
+// second is the one a section has that another does not.
+fn section(name: &str, share: &str) -> Row {
+    Row::new([name, "TOKENS", share]).with_role(Role::Section)
+}
+
+// An estimate, marked as one: a provider's own count may differ.
+fn estimated(tokens: usize) -> String {
+    format!("~{}", figures::short(tokens as u64))
 }
 
 fn trend(rows: &mut Vec<Row>, tally: &crate::core::meter::Tally) {

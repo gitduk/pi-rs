@@ -1,7 +1,7 @@
 //! The disk, and the names the config speaks.
 //!
 //! Two things live here: the files a run reads/writes (`session`, `archive`,
-//! `diagnostics`, `config`, `settings`, `memory`) and the config vocabulary (`theme`, `statusline`,
+//! `diagnostics`, `config`, `settings`, `memory`, `state`) and the config vocabulary (`theme`, `statusline`,
 //! `keys`, `status`, `icons`, `args`, `text`, `listing`) — the latter is here,
 //! not in `ui`, because it's what a setting is *called*, not drawn.
 
@@ -17,6 +17,7 @@ pub mod memory;
 pub mod provider;
 pub mod session;
 pub mod settings;
+pub mod state;
 pub mod status;
 pub mod statusline;
 pub mod text;

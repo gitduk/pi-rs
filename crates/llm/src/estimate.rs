@@ -23,11 +23,11 @@ const IMAGE_TOKENS: usize = 1_568;
 /// A bound on what a string costs. Public because the system prompt and tool
 /// schemas come out of the same budget the transcript does.
 pub fn text(s: &str) -> usize {
-    of_bytes(s.len())
+    bytes(s.len())
 }
 
 /// The same bound for something already measured in bytes.
-fn of_bytes(n: usize) -> usize {
+pub fn bytes(n: usize) -> usize {
     n.div_ceil(BYTES_PER_TOKEN)
 }
 
@@ -122,7 +122,7 @@ fn result_head(r: &ToolResult) -> usize {
 fn result_part(p: &ToolResultContent) -> usize {
     match p {
         ToolResultContent::Text(t) => of(&t.text),
-        ToolResultContent::Json { value } => of_bytes(json_bytes(value)),
+        ToolResultContent::Json { value } => bytes(json_bytes(value)),
         ToolResultContent::Image(value) => image(value),
     }
 }
@@ -150,7 +150,7 @@ fn whole_block(b: &AssistantContent) -> usize {
             })
             .sum(),
         AssistantContent::ToolCall(c) => {
-            BLOCK_OVERHEAD + of(&c.id) + of(&c.name) + of_bytes(json_bytes(&c.args))
+            BLOCK_OVERHEAD + of(&c.id) + of(&c.name) + bytes(json_bytes(&c.args))
         }
     }
 }
@@ -182,10 +182,7 @@ pub fn tool_defs(tools: &[ToolDef]) -> usize {
     tools
         .iter()
         .map(|t| {
-            BLOCK_OVERHEAD
-                + of(&t.name)
-                + of(&t.description)
-                + of_bytes(json_bytes(&t.input_schema))
+            BLOCK_OVERHEAD + of(&t.name) + of(&t.description) + bytes(json_bytes(&t.input_schema))
         })
         .sum()
 }

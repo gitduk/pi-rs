@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -7,6 +9,19 @@ use tool::limit::{MAX_BYTES, over_limit};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
 const SOURCE_PREFIX: &str = "skill:";
+
+/// What a completed load reports: the skill's name and the bytes delivered.
+type Delivery = Box<dyn Fn(&str, usize) + Send + Sync>;
+
+/// Who counts a load. The host that knows where state lives installs one;
+/// without it nothing is counted.
+static DELIVERED: OnceLock<Delivery> = OnceLock::new();
+
+/// Count every skill's instructions that reach the model, wherever they leave
+/// from. Set once, before the first load.
+pub fn delivered(sink: impl Fn(&str, usize) + Send + Sync + 'static) {
+    let _ = DELIVERED.set(Box::new(sink));
+}
 
 /// Identifies instructions explicitly supplied as context.
 pub fn source(name: &str) -> String {
@@ -159,7 +174,8 @@ fn sibling_files(dir: &std::path::Path) -> (Vec<String>, bool) {
 ///
 /// Shared with a surface that runs a skill at the user's word: the model is
 /// given the same instructions either way, and the skill tool is how a skill's
-/// own files are reached.
+/// own files are reached. Every delivery is counted here: this is the one call
+/// a load cannot skip.
 pub fn instructions(skill: &Skill, text: &str) -> String {
     let source = match skill.builtin {
         Some(_) => "built-in".to_string(),
@@ -189,6 +205,9 @@ pub fn instructions(skill: &Skill, text: &str) -> String {
             listed.join("\n"),
             skill.name
         ));
+    }
+    if let Some(count) = DELIVERED.get() {
+        count(&skill.name, out.len());
     }
     out
 }

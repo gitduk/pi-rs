@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 pi-core.workspace = true
 pi-store.workspace = true
+skills.workspace = true
 ui.workspace = true
 agent.workspace = true
 llm.workspace = true

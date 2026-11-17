@@ -1965,6 +1965,7 @@ dependencies = [
  "pi-store",
  "pi-tools",
  "serde_json",
+ "skills",
  "tempfile",
  "tokio",
  "tokio-util",

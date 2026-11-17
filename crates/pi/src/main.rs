@@ -149,6 +149,9 @@ async fn run(updated_from: Option<String>) -> Result<Ended> {
         Ok(None) => {}
         Err(error) => eprintln!("diagnostics unavailable: {error}"),
     }
+    // A load outlives the run that made it, so it is filed where the pi root
+    // keeps what crosses sessions.
+    skills::delivered(pi_store::state::skill_loaded);
     let prompt = read_prompt(&args)?;
     let start = start(args, prompt.is_none()).await?;
     match prompt {
