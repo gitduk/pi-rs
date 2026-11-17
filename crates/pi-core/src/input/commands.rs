@@ -625,6 +625,7 @@ mod tests {
             name: name.into(),
             description: "Sync configuration. More details.".into(),
             dir: "/nowhere".into(),
+            paths: Default::default(),
             builtin: None,
             builtin_files: Vec::new(),
         }

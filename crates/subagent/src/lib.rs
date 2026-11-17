@@ -590,7 +590,16 @@ impl Prepared {
                 args.prompt,
             )
         };
-        let mut session = Session::with_prompt(prompt);
+        let mut session = Session::new();
+        session.send(agent::session::Prompt {
+            text: prompt,
+            context: args
+                .skills
+                .iter()
+                .map(|name| skills::source(name))
+                .collect(),
+            ..Default::default()
+        });
         // One span for the whole child, so the log can file its records
         // under it rather than lose them among its siblings'.
         let child_span = tracing::info_span!(

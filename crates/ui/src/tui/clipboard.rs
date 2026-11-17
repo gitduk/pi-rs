@@ -14,19 +14,20 @@ const TYPES: [(&str, &str); 4] = [
 ];
 
 pub(super) fn prompt(
-    text: String,
+    mut prompt: agent::session::Prompt,
     shown: Option<String>,
     images: &[PathBuf],
 ) -> agent::session::Prompt {
-    let (text, shown, images) = match with_paths(&text, images) {
-        Some((sent, named)) => (sent, shown.or(Some(text)), attached(&named)),
-        None => (text, shown, Vec::new()),
+    let shown = shown.or(prompt.shown.take());
+    let (text, shown, images) = match with_paths(&prompt.text, images) {
+        Some((sent, named)) => (sent, shown.or(Some(prompt.text)), attached(&named)),
+        None => (prompt.text, shown, Vec::new()),
     };
     agent::session::Prompt {
         text,
         shown,
         images,
-        relayed: None,
+        ..prompt
     }
 }
 

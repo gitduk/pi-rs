@@ -2966,6 +2966,7 @@ mod tests {
                     images: vec![],
                     shown: None,
                     relayed: None,
+                    context: Vec::new(),
                 },
             )
             .unwrap();

@@ -17,6 +17,7 @@ async fn free_text_answers_the_same_request_without_parsing_commands() {
         images: vec![],
         shown: None,
         relayed: None,
+        context: Vec::new(),
     };
     let (_, mut owner) = messages
         .admit(crate::driver::Origin::Typed, prompt)
@@ -123,6 +124,7 @@ impl Setup {
                     images: vec![],
                     shown: None,
                     relayed: None,
+                    context: Vec::new(),
                 },
             )
             .unwrap()

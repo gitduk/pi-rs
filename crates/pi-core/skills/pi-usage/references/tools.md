@@ -274,6 +274,25 @@ A skill is a directory containing `SKILL.md`.
 Use `~/.pi/skills/` or the nearest `.pi/skills/` up to the repository root.
 Outside a repository, use the workspace's `.pi/skills/`.
 
+A skill can declare workspace-relative file globs in its YAML header:
+
+```yaml
+name: rust-conventions
+description: Rust coding conventions
+paths:
+  - "**/*.rs"
+  - "**/Cargo.toml"
+```
+
+After reading a matching file, pi reminds the model to load the skill before
+making changes. The reminder repeats until the skill's instructions load
+successfully and in full. Truncated output does not mark instructions as loaded.
+Reading a reference file does not count as loading the skill.
+Context compaction resets loaded skills, so pi can remind the model again.
+Resuming a session restores this state from its retained history.
+Omitting `paths` leaves the skill available without file-based reminders.
+Directory listings, saved output, and file access through bash do not trigger them.
+
 These follow the same location rules as scripts.
 If both locations contain the same script or skill name, pi offers the project's
 version.

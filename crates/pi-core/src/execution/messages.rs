@@ -1180,6 +1180,7 @@ mod tests {
             images: vec![],
             shown: None,
             relayed: None,
+            context: Vec::new(),
         };
         let first = messages
             .admit(crate::driver::Origin::Typed, prompt())

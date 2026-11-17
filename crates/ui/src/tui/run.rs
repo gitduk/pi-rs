@@ -389,7 +389,7 @@ impl Tui {
                     &[]
                 };
                 self.deliver_prompt_for(
-                    super::clipboard::prompt(send, Some(typed), images),
+                    super::clipboard::prompt(send.into(), Some(typed), images),
                     request,
                     None,
                 );

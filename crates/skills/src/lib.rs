@@ -1,6 +1,8 @@
 mod load;
+mod paths;
 
-pub use load::{Load, instructions};
+pub use load::{Load, included, instructions, source};
+pub use paths::Paths;
 
 use llm::slice::head_bytes;
 use serde::Deserialize;
@@ -20,6 +22,7 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub dir: PathBuf,
+    pub paths: Paths,
     /// The whole `SKILL.md` when it is compiled in rather than kept in `dir`.
     pub builtin: Option<&'static str>,
     /// Referenced files compiled into a built-in skill, addressed by relative name.
@@ -30,13 +33,19 @@ impl Skill {
     /// A skill compiled into the binary, from its whole `SKILL.md`, which
     /// must name it; `None` when the header gives no usable name or description.
     pub fn builtin(text: &'static str) -> Option<Self> {
-        let (Some(name), Some(description)) = frontmatter(text).ok()? else {
+        let Header {
+            name: Some(name),
+            description: Some(description),
+            paths,
+        } = header(text).ok()?
+        else {
             return None;
         };
         usable(&name).then(|| Self {
             name,
             description,
             dir: PathBuf::new(),
+            paths,
             builtin: Some(text),
             builtin_files: Vec::new(),
         })
@@ -61,10 +70,12 @@ fn usable(name: &str) -> bool {
     (1..=64).contains(&name.len()) && name.chars().all(tool::name_char)
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct Header {
     name: Option<String>,
     description: Option<String>,
+    #[serde(default)]
+    paths: Paths,
 }
 
 /// Read `name` and `description` out of a `---` fenced header.
@@ -74,30 +85,27 @@ struct Header {
 /// all is `Ok((None, None))`; a header that will not parse is an `Err`,
 /// reported rather than silently misread.
 pub fn frontmatter(text: &str) -> Result<(Option<String>, Option<String>), String> {
-    let Some(rest) = text.strip_prefix("---") else {
-        return Ok((None, None));
-    };
-    let Some(end) = rest.find("\n---") else {
-        return Ok((None, None));
-    };
-    let header = rest[..end].trim();
-    if header.is_empty() {
-        return Ok((None, None));
-    }
-    let Header { name, description } =
-        serde_yaml_ng::from_str(header).map_err(|e| format!("not valid skill frontmatter: {e}"))?;
+    let Header {
+        name, description, ..
+    } = header(text)?;
     Ok((name, description))
+}
+
+fn header(text: &str) -> Result<Header, String> {
+    let Some((header, _)) = split(text).filter(|(header, _)| !header.is_empty()) else {
+        return Ok(Header::default());
+    };
+    serde_yaml_ng::from_str(header).map_err(|e| format!("not valid skill frontmatter: {e}"))
 }
 
 /// Everything below the frontmatter.
 pub fn body(text: &str) -> &str {
-    let Some(rest) = text.strip_prefix("---") else {
-        return text;
-    };
-    match rest.find("\n---") {
-        Some(end) => rest[end + 4..].trim_start_matches(['\n', '\r']),
-        None => text,
-    }
+    split(text).map_or(text, |(_, body)| body)
+}
+
+fn split(text: &str) -> Option<(&str, &str)> {
+    let (header, body) = text.strip_prefix("---")?.split_once("\n---")?;
+    Some((header.trim(), body.trim_start_matches(['\n', '\r'])))
 }
 
 // What a skill directory turned out to be.
@@ -122,8 +130,12 @@ fn read_one(dir: &Path) -> Read {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Read::None;
     };
-    let (declared, description) = match frontmatter(&text) {
-        Ok(pair) => pair,
+    let Header {
+        name: declared,
+        description,
+        paths,
+    } = match header(&text) {
+        Ok(header) => header,
         Err(why) => return Read::Problem(format!("{}: {why}", dir.display())),
     };
     let shown = dir.display();
@@ -162,6 +174,7 @@ fn read_one(dir: &Path) -> Read {
         name,
         description,
         dir: dir.to_path_buf(),
+        paths,
         builtin: None,
         builtin_files: Vec::new(),
     }))

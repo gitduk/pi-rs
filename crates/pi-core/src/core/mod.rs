@@ -25,6 +25,7 @@ pub mod resolve;
 pub mod saves;
 pub mod settings;
 pub mod shells;
+mod skill_paths;
 pub mod status;
 pub mod statusline;
 pub mod tools;
@@ -366,7 +367,10 @@ impl Core {
                 name: pi_tools::bash::Bash::NAME.to_string(),
                 args: serde_json::json!({ "command": command, "background": true }),
             },
-            Intent::Prompt(send) => Step::Prompt { send, typed: None },
+            Intent::Prompt(send) => Step::Prompt {
+                send: send.into(),
+                typed: None,
+            },
             Intent::Surface { word, args } => Step::Surface { word, args },
             Intent::Tool { name, args } => {
                 match crate::input::commands::call_of(
@@ -586,6 +590,7 @@ mod tests {
             name: name.to_string(),
             description: description.to_string(),
             dir: std::path::PathBuf::from("/nowhere").join(name),
+            paths: Default::default(),
             builtin: None,
             builtin_files: Vec::new(),
         }
@@ -779,6 +784,7 @@ mod tests {
             images: Vec::new(),
             shown: Some("!git status".into()),
             relayed: None,
+            context: Vec::new(),
         });
 
         let Entry::Bash { run: t, .. } = &s.entries()[0] else {

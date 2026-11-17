@@ -167,7 +167,7 @@ pub(crate) fn refused(what: &str, e: anyhow::Error) -> String {
 
 // Body goes in whole, not fetched later: the model shouldn't spend a turn
 // re-learning instructions `/commit` says the user already chose.
-fn expanded(skill: &Skill, args: &str) -> Result<String, String> {
+fn expanded(skill: &Skill, args: &str) -> Result<agent::session::Prompt, String> {
     let text = skill.text().map_err(|e| {
         let why = refused(&skill.name, anyhow::anyhow!("{}: {e}", skill.dir.display()));
         format!("cannot run {} — {why}", skill.name)
@@ -189,7 +189,11 @@ fn expanded(skill: &Skill, args: &str) -> Result<String, String> {
         args = !args.is_empty(),
         "skill invoked"
     );
-    Ok(out)
+    Ok(agent::session::Prompt {
+        text: out,
+        context: vec![skills::source(&skill.name)],
+        ..Default::default()
+    })
 }
 
 // The skill a word names, if it names one. A built-in never reaches here —
@@ -262,7 +266,7 @@ pub(crate) fn step_for(commands: &[Command], word: &str, args: &str) -> Step {
 ///
 /// An unknown word reads as prose, not a refused typo: refusing trades a
 /// recoverable "what did you mean" for an unrecoverable one.
-pub fn expand(commands: &[Command], line: &str) -> Option<Result<String, String>> {
+pub fn expand(commands: &[Command], line: &str) -> Option<Result<agent::session::Prompt, String>> {
     let Intent::Other { word, args } = read(line, commands, None) else {
         return None;
     };
@@ -387,7 +391,7 @@ pub enum Step {
     // What to send, and the typed line when a skill expanded into it —
     // `rewind_nodes()` reads the latter so a pick list doesn't offer raw SKILL.md.
     Prompt {
-        send: String,
+        send: agent::session::Prompt,
         typed: Option<String>,
     },
     // Needs the network, so the surface runs it and reports.
@@ -457,9 +461,10 @@ mod tests {
             typed.as_deref(),
             Some("/review Review src/api.rs without edits.")
         );
-        assert!(send.contains("Skill: `review`\nSource: built-in"));
-        assert!(send.contains("Read the changed code."));
-        assert!(send.ends_with("Review src/api.rs without edits.\n"));
-        assert!(!send.contains("description:"));
+        assert!(send.text.contains("Skill: `review`\nSource: built-in"));
+        assert!(send.text.contains("Read the changed code."));
+        assert!(send.text.ends_with("Review src/api.rs without edits.\n"));
+        assert!(!send.text.contains("description:"));
+        assert_eq!(send.context, [skills::source("review")]);
     }
 }

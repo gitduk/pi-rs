@@ -41,6 +41,7 @@ impl Messages {
             images,
             shown: automatic.then(|| "automatic input".into()),
             relayed: automatic.then(|| "This input was submitted by a program.".into()),
+            context: Vec::new(),
         };
         self.admit_message(message, prompt)
     }

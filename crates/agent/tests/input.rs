@@ -58,6 +58,7 @@ fn prompt(text: &str) -> Prompt {
         images: Vec::new(),
         shown: None,
         relayed: None,
+        context: Vec::new(),
     }
 }
 

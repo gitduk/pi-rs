@@ -264,6 +264,7 @@ impl Agent {
         for turn in 1.. {
             receive(session, ctx, reporter, input).await;
             heed(session, reporter, input).await;
+            self.remind(session, ctx, reporter).await;
             reporter.report(Event::TurnStart { turn }).await;
             // Entered around each await, not held across it — a guard spanning
             // an await labels whatever else the runtime polls meanwhile.
@@ -309,6 +310,9 @@ impl Agent {
                 if fitted.changed {
                     compactions += 1;
                     held = None;
+                    if self.remind(session, ctx, reporter).await {
+                        continue;
+                    }
                 }
                 if receive(session, ctx, reporter, input).await {
                     continue;
@@ -551,6 +555,18 @@ impl Agent {
         }
 
         unreachable!("an unlimited run can only leave by returning inside the loop")
+    }
+
+    async fn remind(&self, session: &mut Session, ctx: &Ctx, reporter: &Reporter) -> bool {
+        let Some(note) = self.brief.hooks.remind(session, ctx, &self.brief.registry) else {
+            return false;
+        };
+        if matches!(session.view().last(), Some(session::Seen::As(session::Entry::Note { note: current, .. })) if *current == note)
+        {
+            return false;
+        }
+        report_note(session, reporter, note).await;
+        true
     }
 
     /// What a manual compaction leaves alone, against this agent's window: the

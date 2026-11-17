@@ -141,7 +141,7 @@ impl Tui {
                 } else {
                     &[]
                 };
-                let prompt = clipboard::prompt(text, None, images);
+                let prompt = clipboard::prompt(text.into(), None, images);
                 match self.core.lane().messages().admit(request.origin, prompt) {
                     Ok(input) => Pending::Prompt(input),
                     Err(error) => {

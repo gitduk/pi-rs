@@ -176,6 +176,7 @@ mod tests {
                 images: Vec::new(),
                 shown: None,
                 relayed: None,
+                context: Vec::new(),
             },
         }
     }
@@ -256,6 +257,7 @@ mod tests {
                 ),
                 shown: Some("watch".into()),
                 relayed: Some("came from a command".into()),
+                context: Vec::new(),
                 images: Vec::new(),
             },
         };

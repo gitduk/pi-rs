@@ -289,6 +289,26 @@ pub struct Read;
 
 impl Read {
     pub const NAME: &'static str = "read";
+
+    /// The regular file delivered by a successful read, excluding saved output.
+    pub fn file(result: &llm::message::ToolResult) -> Option<&std::path::Path> {
+        if result.name != Self::NAME || result.is_error {
+            return None;
+        }
+        result.content.iter().find_map(|block| {
+            let llm::message::ToolResultContent::Json { value } = block else {
+                return None;
+            };
+            value.get("file_read")?.as_str().map(std::path::Path::new)
+        })
+    }
+}
+
+fn file_output(mut out: ToolOutput, path: &std::path::Path) -> ToolOutput {
+    out.content.push(llm::message::ToolResultContent::Json {
+        value: json!({ "file_read": path.to_string_lossy() }),
+    });
+    out
 }
 
 #[async_trait]
@@ -407,7 +427,18 @@ impl Tool for Read {
         }
         let bytes = tokio::fs::read(&path).await?;
         if let Some(media_type) = llm::message::Image::media_type(&bytes) {
-            return Ok(image(&rel, media_type, &bytes));
+            let out = image(&rel, media_type, &bytes);
+            return Ok(
+                if out
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, llm::message::ToolResultContent::Image(_)))
+                {
+                    file_output(out, &path)
+                } else {
+                    out
+                },
+            );
         }
         if looks_binary(&bytes) {
             return Ok(ToolOutput::text(format!(
@@ -475,7 +506,8 @@ impl Tool for Read {
                             .into(),
                         kind: Kind::Outline { lines },
                     },
-                );
+                )
+                .map(|out| file_output(out, &path));
             }
         }
 
@@ -484,10 +516,10 @@ impl Tool for Read {
         let start = offset - 1;
 
         if lines == 0 {
-            return Ok(ToolOutput::text(format!(
-                "{rel} is empty ({} bytes)",
-                bytes.len()
-            )));
+            return Ok(file_output(
+                ToolOutput::text(format!("{rel} is empty ({} bytes)", bytes.len())),
+                &path,
+            ));
         }
         if start >= lines {
             return Ok(ToolOutput::text(format!(
@@ -527,6 +559,7 @@ impl Tool for Read {
                 },
             },
         )
+        .map(|out| file_output(out, &path))
     }
 }
 

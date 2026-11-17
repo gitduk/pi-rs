@@ -350,7 +350,7 @@ pub fn arm(
         None => Arc::new(::execution::channel::NoOne),
     };
     let mut brief = resolved.brief.clone();
-    Arc::make_mut(&mut brief).hooks = resolved.hooks.arm(ask.clone());
+    Arc::make_mut(&mut brief).hooks = resolved.hooks.arm(ask.clone(), resolved.shelf.clone());
     let mut subagent = Subagent::prompted(
         agent,
         brief.clone(),

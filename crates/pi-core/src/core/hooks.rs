@@ -58,11 +58,16 @@ impl Declared {
     }
 
     /// The hooks, their questions put through `ask`.
-    pub fn arm(&self, ask: Arc<dyn Ask>) -> Arc<dyn agent::Hooks> {
-        match &self.0 {
+    pub fn arm(
+        &self,
+        ask: Arc<dyn Ask>,
+        skills: Option<Arc<skills::Shelf>>,
+    ) -> Arc<dyn agent::Hooks> {
+        let hooks = match &self.0 {
             Some((hooks, workspace)) => of(hooks, workspace, ask),
             None => Arc::new(agent::NoHooks),
-        }
+        };
+        super::skill_paths::arm(hooks, skills)
     }
 }
 

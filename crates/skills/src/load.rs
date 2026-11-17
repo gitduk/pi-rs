@@ -6,12 +6,59 @@ use crate::{Skill, body};
 use tool::limit::{MAX_BYTES, over_limit};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
+const SOURCE_PREFIX: &str = "skill:";
+
+/// Identifies instructions explicitly supplied as context.
+pub fn source(name: &str) -> String {
+    format!("{SOURCE_PREFIX}{name}")
+}
+
 impl Load {
     /// The name the tool answers to.
     pub const NAME: &'static str = "skill";
+
+    /// The instructions successfully loaded by this call, excluding reference files.
+    pub fn loaded(result: &llm::message::ToolResult) -> Option<&str> {
+        if result.name != Self::NAME || result.is_error {
+            return None;
+        }
+        let llm::message::ToolResultContent::Text(text) = result.content.first()? else {
+            return None;
+        };
+        result.content.iter().find_map(|block| {
+            let llm::message::ToolResultContent::Json { value } = block else {
+                return None;
+            };
+            let context = value.get("loaded_context")?;
+            let source = context.get("source")?.as_str()?;
+            let name = source
+                .strip_prefix(SOURCE_PREFIX)
+                .filter(|name| crate::usable(name))?;
+            (context.get("bytes")?.as_u64()? == text.text.len() as u64).then_some(name)
+        })
+    }
 }
 
 const NAME: &str = Load::NAME;
+
+/// Instruction names from explicitly recorded context sources.
+pub fn included(sources: &[String]) -> impl Iterator<Item = &str> {
+    sources.iter().filter_map(|source| {
+        source
+            .strip_prefix(SOURCE_PREFIX)
+            .filter(|name| crate::usable(name))
+    })
+}
+
+fn loaded_output(skill: &Skill, text: &str) -> ToolOutput {
+    let text = instructions(skill, text);
+    let context =
+        json!({ "loaded_context": { "source": source(&skill.name), "bytes": text.len() } });
+    let mut out = ToolOutput::text(text).with_preview(skill.name.clone());
+    out.content
+        .push(llm::message::ToolResultContent::Json { value: context });
+    out
+}
 
 #[derive(Deserialize)]
 struct Args {
@@ -205,9 +252,7 @@ impl Tool for Load {
                             .join(", ")
                     ))),
                 },
-                None => Ok(
-                    ToolOutput::text(instructions(skill, text)).with_preview(skill.name.clone())
-                ),
+                None => Ok(loaded_output(skill, text)),
             };
         }
         let Some(rel) = args.file else {
@@ -225,8 +270,7 @@ impl Tool for Load {
             let text = tokio::fs::read_to_string(path)
                 .await
                 .map_err(|e| ToolError::Invalid(format!("{}: {e}", args.name)))?;
-            let out = instructions(skill, &text);
-            return Ok(ToolOutput::text(out).with_preview(skill.name.clone()));
+            return Ok(loaded_output(skill, &text));
         };
 
         // A file argument stays inside the skill's own directory; that is the

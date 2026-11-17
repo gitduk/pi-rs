@@ -519,7 +519,7 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
     let prompt = match expand(&resolved.commands, &prompt) {
         Some(Ok(instructions)) => instructions,
         Some(Err(why)) => bail!("{why}"),
-        None => prompt,
+        None => prompt.into(),
     };
 
     // Only the one-shot path prints what a run emits.
@@ -584,15 +584,10 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         surface: words,
     };
     core.restore_messages()?;
-    let input = core.lane().messages().admit(
-        pi_core::driver::Origin::Typed,
-        agent::session::Prompt {
-            text: prompt,
-            images: Vec::new(),
-            shown: None,
-            relayed: None,
-        },
-    )?;
+    let input = core
+        .lane()
+        .messages()
+        .admit(pi_core::driver::Origin::Typed, prompt)?;
     let request =
         pi_core::execution::Request::new(pi_core::driver::Origin::Typed, core.lane().token());
     let started = core

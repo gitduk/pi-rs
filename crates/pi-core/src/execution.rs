@@ -62,7 +62,7 @@ pub enum Action {
         output: Output,
     },
     Prompt {
-        send: String,
+        send: agent::session::Prompt,
         typed: Option<String>,
     },
     Bash(String),

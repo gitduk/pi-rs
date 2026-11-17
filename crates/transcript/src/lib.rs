@@ -104,7 +104,7 @@ pub struct Compaction {
 ///
 /// `text` reaches the wire; `shown` is the screen echo and rewind label;
 /// `images` ride only with an ask. A note carries neither, hence a bare `String`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Prompt {
     /// What the model reads.
     pub text: String,
@@ -126,6 +126,24 @@ pub struct Prompt {
     /// echoes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relayed: Option<String>,
+    /// Opaque sources of context explicitly included in this input's text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<String>,
+}
+
+impl From<String> for Prompt {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            ..Self::default()
+        }
+    }
+}
+
+impl From<&str> for Prompt {
+    fn from(text: &str) -> Self {
+        text.to_string().into()
+    }
 }
 
 fn one_or_many<'de, D>(de: D) -> Result<Vec<Image>, D::Error>
@@ -589,6 +607,7 @@ impl Session {
                                         images: Vec::new(),
                                         shown: None,
                                         relayed: None,
+                                        context: Vec::new(),
                                     });
                                 }
                             },
@@ -600,6 +619,7 @@ impl Session {
                                         images: vec![i],
                                         shown: None,
                                         relayed: None,
+                                        context: Vec::new(),
                                     });
                                 }
                             },
@@ -633,6 +653,7 @@ impl Session {
             images: Vec::new(),
             shown: None,
             relayed: None,
+            context: Vec::new(),
         })
     }
 
@@ -838,6 +859,7 @@ impl Session {
             images,
             shown,
             relayed: None,
+            context: Vec::new(),
         });
     }
 
@@ -849,6 +871,7 @@ impl Session {
             images: Vec::new(),
             shown: Some(label),
             relayed: Some(note),
+            context: Vec::new(),
         });
     }
 
@@ -1269,6 +1292,7 @@ mod tests {
             }],
             shown: None,
             relayed: None,
+            context: Vec::new(),
         });
 
         let msgs = s.context();
@@ -1598,6 +1622,7 @@ mod tests {
                 images: Vec::new(),
                 shown: None,
                 relayed: None,
+                context: Vec::new(),
             });
         };
         let note = |s: &mut Session| {

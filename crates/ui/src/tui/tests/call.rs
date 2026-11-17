@@ -114,6 +114,7 @@ fn a_prompt_joining_the_run_spends_the_unsend() {
                 images: Vec::new(),
                 shown: None,
                 relayed: None,
+                context: Vec::new(),
             },
         }]),
     );

@@ -8,10 +8,15 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tool::{Ctx, ToolOutput};
 
-use crate::Event;
+use crate::{Event, session::Session};
 
 #[async_trait]
 pub trait Hooks: Send + Sync {
+    /// Context-dependent instructions to file before the next model request.
+    fn remind(&self, _session: &Session, _ctx: &Ctx, _tools: &tool::Registry) -> Option<String> {
+        None
+    }
+
     /// `Err` refuses the call, carrying what the model is told instead.
     async fn before(&self, _tool: &str, _args: &Value, _ctx: &Ctx) -> Result<(), String> {
         Ok(())
@@ -51,6 +56,10 @@ pub struct GatesOnly(pub Arc<dyn Hooks>);
 
 #[async_trait]
 impl Hooks for GatesOnly {
+    fn remind(&self, session: &Session, ctx: &Ctx, tools: &tool::Registry) -> Option<String> {
+        self.0.remind(session, ctx, tools)
+    }
+
     async fn before(&self, tool: &str, args: &Value, ctx: &Ctx) -> Result<(), String> {
         self.0.before(tool, args, ctx).await
     }

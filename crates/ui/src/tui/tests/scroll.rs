@@ -1291,6 +1291,7 @@ fn the_rewind_list_follows_prompts_without_changing_the_transcript() {
                     shown: Some(prompt.into()),
                     images: Vec::new(),
                     relayed: None,
+                    context: Vec::new(),
                 })
             } else {
                 session.prompt(prompt)

@@ -88,6 +88,7 @@ fn prompt() -> Prompt {
         images: vec![],
         shown: None,
         relayed: None,
+        context: Vec::new(),
     }
 }
 

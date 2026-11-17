@@ -15,12 +15,16 @@ pub enum Annotation {
         at: u64,
         shown: Option<String>,
         relayed: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        context: Vec<String>,
     },
     Bash {
         id: EntryId,
         at: u64,
         shown: Option<String>,
         relayed: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        context: Vec<String>,
     },
     Answer {
         id: EntryId,
@@ -80,6 +84,7 @@ impl Record {
                     at,
                     shown: ask.shown.clone(),
                     relayed: ask.relayed.clone(),
+                    context: ask.context.clone(),
                 },
                 vec![Content::User(prompt_body(ask))],
             ),
@@ -89,6 +94,7 @@ impl Record {
                     at,
                     shown: run.shown.clone(),
                     relayed: run.relayed.clone(),
+                    context: run.context.clone(),
                 },
                 vec![Content::User(prompt_body(run))],
             ),
@@ -173,20 +179,22 @@ impl Record {
                 at,
                 shown,
                 relayed,
+                context,
             } => Entry::Ask {
                 id,
                 at,
-                ask: read_prompt(messages, shown, relayed)?,
+                ask: read_prompt(messages, shown, relayed, context)?,
             },
             Annotation::Bash {
                 id,
                 at,
                 shown,
                 relayed,
+                context,
             } => Entry::Bash {
                 id,
                 at,
-                run: read_prompt(messages, shown, relayed)?,
+                run: read_prompt(messages, shown, relayed, context)?,
             },
             Annotation::Answer { id, at } => Entry::Answer {
                 id,
@@ -211,7 +219,7 @@ impl Record {
                 }
             }
             Annotation::Note { id, at } => {
-                let prompt = read_prompt(messages, None, None)?;
+                let prompt = read_prompt(messages, None, None, Vec::new())?;
                 if !prompt.images.is_empty() {
                     return Err(invalid("image in context note"));
                 }
@@ -269,6 +277,7 @@ fn read_prompt(
     messages: Vec<Content>,
     shown: Option<String>,
     relayed: Option<String>,
+    context: Vec<String>,
 ) -> Result<Prompt, serde_json::Error> {
     let mut messages = messages.into_iter();
     let Some(Content::User(body)) = messages.next() else {
@@ -294,6 +303,7 @@ fn read_prompt(
         images,
         shown,
         relayed,
+        context,
     })
 }
 

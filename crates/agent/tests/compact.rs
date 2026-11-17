@@ -1063,6 +1063,7 @@ fn a_bang_command_goes_with_the_question_that_refers_to_it() {
         images: Vec::new(),
         shown: Some("!cargo test".into()),
         relayed: None,
+        context: Vec::new(),
     });
     s.prompt("fix that");
     s.push_assistant(vec![AssistantContent::Text(llm::message::Text {
@@ -1109,6 +1110,7 @@ fn a_bang_command_can_be_shrunk_where_a_question_cannot() {
         images: Vec::new(),
         shown: Some("!cargo test".into()),
         relayed: None,
+        context: Vec::new(),
     });
     s.prompt("fix that");
     s.push_assistant(vec![AssistantContent::Text(llm::message::Text {

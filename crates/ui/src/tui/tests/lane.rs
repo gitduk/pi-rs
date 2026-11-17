@@ -265,6 +265,7 @@ async fn a_panicked_bang_does_not_lay_its_transcript_down_again() {
         images: Vec::new(),
         shown: Some("!ls".into()),
         relayed: None,
+        context: Vec::new(),
     });
     tui.core.lane_mut().return_session(s);
     let token = tui.core.lane().token();
@@ -1179,6 +1180,7 @@ async fn a_typed_followup_waits_for_the_run_and_survives_cancellation() {
             url: "https://example.test/image.png".into(),
         }],
         relayed: Some("original provenance".into()),
+        context: Vec::new(),
     };
     assert!(!tui.deliver_prompt(ask.clone(), Origin::Typed, Some("new direction".into()),));
     assert!(!tui.core.runtime_busy(), "no second run was started");

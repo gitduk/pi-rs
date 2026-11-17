@@ -2837,6 +2837,7 @@ name = "skills"
 version = "2.9.11"
 dependencies = [
  "async-trait",
+ "globset",
  "llm",
  "serde",
  "serde_json",

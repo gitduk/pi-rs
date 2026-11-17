@@ -79,5 +79,6 @@ pub fn record_bash(session: &mut Session, command: &str, text: String) {
         images: Vec::new(),
         shown: Some(format!("!{command}")),
         relayed: None,
+        context: Vec::new(),
     });
 }
