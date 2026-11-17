@@ -87,7 +87,7 @@ pub struct Foreground {
     body: String,
     /// What the command printed, tags left out: the rows a screen shows.
     output: Vec<String>,
-    preview: String,
+    screen: String,
     changes: Option<crate::drift::Report>,
 }
 
@@ -115,12 +115,12 @@ impl Foreground {
             completion,
             body,
             output,
-            preview,
+            screen,
             changes,
         } = self;
         let out = match completion {
-            Completion::Exited(code) => finished(code, body, preview),
-            Completion::Background { .. } => ToolOutput::text(body).with_preview(preview),
+            Completion::Exited(code) => finished(code, body, screen),
+            Completion::Background { .. } => ToolOutput::text(body).with_screen(screen),
         };
         match changes {
             Some(changes) => changes.append(out, &output),
@@ -164,7 +164,7 @@ impl Drop for LiveTask {
     }
 }
 
-// One line: whoever reads the preview, and the log, treat further newlines
+// One line: whoever reads the screen, and the log, treat further newlines
 // as structure, not text.
 fn first_line(command: &str) -> &str {
     command.split('\n').next().unwrap_or_default()
@@ -348,7 +348,7 @@ async fn schedule(
     call: Call,
     invocation: Invocation,
 ) -> Result<ToolOutput, ToolError> {
-    let preview = args
+    let screen = args
         .label()
         .map_or_else(|| invocation.title().into_owned(), str::to_string);
     let timeout = args.named_timeout();
@@ -370,7 +370,7 @@ async fn schedule(
     }
     Ok(
         ToolOutput::text(format!("Started background command #{id}."))
-            .with_preview(format!("{preview} [background #{id}]")),
+            .with_screen(format!("{screen} [background #{id}]")),
     )
 }
 
@@ -508,7 +508,7 @@ impl Bash {
             )
             .await;
         }
-        let preview = args
+        let screen = args
             .label()
             .unwrap_or_else(|| first_line(&args.command))
             .to_string();
@@ -521,7 +521,7 @@ impl Bash {
         prepared.output = call.output;
         prepared.timeout = kept;
         Ok(self
-            .finish(prepared, invocation, preview, Some(timeout), ctx)
+            .finish(prepared, invocation, screen, Some(timeout), ctx)
             .await?
             .into_output())
     }
@@ -530,7 +530,7 @@ impl Bash {
         &self,
         prepared: Again,
         invocation: Invocation,
-        mut preview: String,
+        mut screen: String,
         deadline: Option<std::time::Duration>,
         ctx: &Ctx,
     ) -> Result<Foreground, ToolError> {
@@ -585,7 +585,7 @@ impl Bash {
                     execution.watch(peek);
                     execution.rerun(rerun(prepared.clone(), ctx), prepared);
                     supervise(running, execution);
-                    preview = format!("{preview} [background #{id}]");
+                    screen = format!("{screen} [background #{id}]");
                     (Completion::Background { id },
                      format!("The user moved this command to the background as command #{id}. Continue independent work; its result will arrive later."),
                      Vec::new())
@@ -602,7 +602,7 @@ impl Bash {
             completion,
             body,
             output,
-            preview,
+            screen,
             changes: crate::drift::report(&moved),
         })
     }
@@ -752,14 +752,14 @@ impl Ran {
 
 // The result an exited command leaves: what it printed, and the exit when it
 // did not end well.
-fn finished(code: i32, mut body: String, preview: String) -> ToolOutput {
+fn finished(code: i32, mut body: String, screen: String) -> ToolOutput {
     if code != 0 {
         body.push_str(&format!("exit {}\n", code));
     }
     if body.is_empty() {
         body.push_str("exit 0, no output");
     }
-    let out = ToolOutput::text(body).with_preview(preview);
+    let out = ToolOutput::text(body).with_screen(screen);
     if code != 0 { out.warned() } else { out }
 }
 
@@ -880,10 +880,10 @@ mod background_tests {
         let output = result.into_output();
         assert!(output.warned);
         assert_eq!(output.flatten().matches("exit 3").count(), 2);
-        // The row the screen draws: the command, what it printed, then the
+        // What the screen draws: the command, what it printed, then the
         // file's rows — each marked, so none reads as another's.
-        let preview = output.preview();
-        let rows: Vec<&str> = preview.lines().collect();
+        let screen = output.screen();
+        let rows: Vec<&str> = screen.lines().collect();
         assert_eq!(
             rows[0],
             "printf 'exit 3'; printf 'after\\n' > tracked.txt; exit 3"
@@ -1157,7 +1157,7 @@ mod background_tests {
             .unwrap()
             .unwrap();
         assert!(out.flatten().contains("command #7"), "{}", out.flatten());
-        assert!(out.preview().contains("[background #7]"));
+        assert!(out.screen().contains("[background #7]"));
         let peek = sink.output.lock().unwrap().clone().expect("watched");
         assert!(peek.latest().contains("before"), "{}", peek.latest());
         ctx.cancel.cancel();
@@ -1356,7 +1356,7 @@ mod background_tests {
             "a foreground call must wait for its command"
         );
         assert!(out.warned);
-        assert!(!out.preview().contains("[background"));
+        assert!(!out.screen().contains("[background"));
         for expected in ["before", "after", "warning", "exit 3"] {
             assert!(out.flatten().contains(expected), "{}", out.flatten());
         }

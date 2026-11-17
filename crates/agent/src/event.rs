@@ -41,7 +41,7 @@ pub enum Event {
         id: String,
         name: String,
         outcome: Outcome,
-        preview: String,
+        screen: String,
         // From its `ToolStart` to when it landed.
         took: std::time::Duration,
     },
@@ -125,7 +125,7 @@ impl Event {
             Self::ToolEnd {
                 id,
                 name,
-                preview: text,
+                screen: text,
                 ..
             }
             | Self::ToolDenied {

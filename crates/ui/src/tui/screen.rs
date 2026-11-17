@@ -494,8 +494,8 @@ mod tests {
         let call = crate::render::Finished {
             outcome: crate::render::Outcome::Done,
             name: "write",
-            preview: "sample.py +1 -1\n+1 \n-1 x\n 2 y",
-            place: None,
+            screen: "sample.py +1 -1\n+1 \n-1 x\n 2 y",
+            cwd: None,
             took: None,
         };
         {

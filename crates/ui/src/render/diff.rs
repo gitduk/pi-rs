@@ -369,12 +369,12 @@ mod tests {
     fn changes_keep_syntax_colours_on_a_row_and_on_its_page() {
         use ratatui::style::Modifier;
         let p = Paint::new(true);
-        let preview = "sample.py +1 -1\n-1 value = foo('old')\n+1 value = bar(123)";
+        let screen = "sample.py +1 -1\n-1 value = foo('old')\n+1 value = bar(123)";
         let call = super::super::Finished {
             outcome: super::super::Outcome::Done,
             name: "write",
-            preview,
-            place: None,
+            screen,
+            cwd: None,
             took: None,
         };
         let lines = super::super::result_rows(&call, false, &p, 80);

@@ -98,8 +98,8 @@ impl Paint {
         spans
     }
 
-    /// A line of what a call asked for, painted as the call's own line is:
-    /// a shell command keeps its syntax colours, a path its own.
+    /// A line of the argument a call was made with, painted as the call's own
+    /// line is: a shell command keeps its syntax colours, a path its own.
     pub(super) fn call_line(&self, name: &str, text: &str) -> Vec<Span<'static>> {
         // No colour check here: `shell` and `span` paint nothing without colour.
         if name == pi_tools::bash::Bash::NAME {
@@ -590,10 +590,10 @@ pub(crate) fn render_coded_at(text: &str, paint: &Paint, width: Option<usize>) -
 
 /// The diff rows a sketched (folded) result shows under its head.
 const SKETCH_LIMIT: usize = 16;
-/// The preview rows a folded result shows: the head plus the sketch limit.
+/// The rows a folded result shows: the head plus the sketch limit.
 pub const SKETCHED_ROWS: usize = 1 + SKETCH_LIMIT;
 
-/// Whether `rows` preview rows, head included, fold to `SKETCHED_ROWS`.
+/// Whether a result of `rows` rows, head included, folds to `SKETCHED_ROWS`.
 pub fn folds(rows: usize) -> bool {
     llm::figures::shown(rows, SKETCHED_ROWS) < rows
 }
@@ -626,9 +626,9 @@ pub fn outcome_style(outcome: Outcome, theme: &Theme) -> &Style {
 pub struct Finished<'a> {
     pub outcome: Outcome,
     pub name: &'a str,
-    pub preview: &'a str,
+    pub screen: &'a str,
     /// Where it ran, when not the workspace root.
-    pub place: Option<&'a str>,
+    pub cwd: Option<&'a str>,
     /// How long it ran, when known.
     pub took: Option<std::time::Duration>,
 }
@@ -664,18 +664,15 @@ pub(crate) fn result_parts(
         outcome_style(call.outcome, &p.theme),
         outcome_glyph(call.outcome),
     );
-    let (head, rest) = call.preview.split_once('\n').unwrap_or((call.preview, ""));
-    // Past the mark, the name and the `…` a cut adds; the place and time
+    let (head, rest) = call.screen.split_once('\n').unwrap_or((call.screen, ""));
+    // Past the mark, the name and the `…` a cut adds; the cwd and time
     // are kept whole, the command gives way to them.
-    let placed = placed(call.place) + &ran_for(call.took);
-    let fits = title_room(room, Line::raw(format!("{}  ", call.name)).width(), &placed);
+    let end = tail(call.cwd, &ran_for(call.took));
+    let fits = title_room(room, Line::raw(format!("{}  ", call.name)).width(), &end);
     let border = Line::from(vec![p.span(mark_style, mark), Span::raw(" ")]);
-    let mut spans = p.tool_call(
-        call.name,
-        &format!("{} {}", call.name, clip(head, fits)),
-        hovered,
-    );
-    spans.push(p.span_hovered(hovered, &p.theme.muted, placed));
+    let named = named(call.name, &clip(head, fits));
+    let mut spans = p.tool_call(call.name, &named, hovered);
+    spans.push(p.span_hovered(hovered, &p.theme.muted, end));
     let mut out = vec![(Line::from(spans), Some(border))];
     let diff_lines: Vec<&str> = rest.lines().collect();
     let (rows, footer) = sketched(&diff_lines);
@@ -764,15 +761,15 @@ pub fn describe(
         Event::ToolEnd {
             name,
             outcome,
-            preview,
+            screen,
             took,
             ..
         } => {
             let call = Finished {
                 outcome: *outcome,
                 name,
-                preview,
-                place: None,
+                screen,
+                cwd: None,
                 took: Some(*took),
             };
             return Some(result_rows(&call, false, p, width));
@@ -942,19 +939,20 @@ impl Renderer {
     }
 }
 
-/// A tool name plus the one argument its summary picked out; the caller
-/// draws the prefix (spinner, queued mark, or finished mark) itself.
-pub fn named(name: &str, summary: &str) -> String {
-    if summary.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name} {summary}")
+/// A tool's line as every row that shows one writes it: its name, then what
+/// the call was made with — the name dropped when the text opens with it.
+/// The caller draws the prefix (spinner, queued mark, finished mark) itself.
+pub fn named(name: &str, text: &str) -> String {
+    match (text.is_empty(), text.starts_with(name)) {
+        (true, _) => name.to_string(),
+        (false, true) if text[name.len()..].starts_with(char::is_whitespace) => text.to_string(),
+        (false, _) => format!("{name} {text}"),
     }
 }
 
 /// Where a call ran, when that is not the workspace `root`: the `cwd` it
 /// named, relative to `root` when it lies inside.
-pub fn place(args: &serde_json::Value, root: &std::path::Path) -> Option<String> {
+pub fn cwd(args: &serde_json::Value, root: &std::path::Path) -> Option<String> {
     let cwd = args.get("cwd")?.as_str()?.trim();
     let cwd = std::path::Path::new(cwd)
         .strip_prefix(root)
@@ -970,10 +968,16 @@ pub fn place(args: &serde_json::Value, root: &std::path::Path) -> Option<String>
     (!cwd.is_empty() && cwd != ".").then(|| cwd.to_string())
 }
 
-/// `place` as the tail of the call's own line, ` · in crates/ui`; a row
+/// A call's `cwd` as the tail of its own line, ` · in crates/ui`; a row
 /// speaking for many calls leaves it off.
-pub fn placed(place: Option<&str>) -> String {
-    place.map_or_else(String::new, |p| format!("{}in {p}", icons::PART_SEP))
+pub fn in_cwd(cwd: Option<&str>) -> String {
+    cwd.map_or_else(String::new, |cwd| format!("{}in {cwd}", icons::PART_SEP))
+}
+
+/// A call's line end: where it ran, then how long it has been out or ran —
+/// the one place that order is written.
+pub fn tail(cwd: Option<&str>, rest: &str) -> String {
+    in_cwd(cwd) + rest
 }
 
 /// How long a call runs before its line says so. A quick one's time is
@@ -1080,8 +1084,8 @@ mod tests {
         let call = super::Finished {
             outcome: super::Outcome::Done,
             name: "bash",
-            preview: "cd /home/wukaige/ai-agent && echo \"=== 改动\"; git diff src/server/app.py | head -40",
-            place: Some("crates/ui"),
+            screen: "cd /home/wukaige/ai-agent && echo \"=== 改动\"; git diff src/server/app.py | head -40",
+            cwd: Some("crates/ui"),
             took: Some(std::time::Duration::from_secs(3)),
         };
         for width in [24, 80, 180] {
@@ -1163,7 +1167,7 @@ mod tests {
     #[test]
     fn an_absolute_cwd_reads_relative_to_the_root() {
         let root = std::path::Path::new("/w/pi");
-        let at = |cwd: &str| super::place(&serde_json::json!({ "cwd": cwd }), root);
+        let at = |cwd: &str| super::cwd(&serde_json::json!({ "cwd": cwd }), root);
         assert_eq!(at("/w/pi"), None);
         assert_eq!(at("/w/pi/"), None);
         assert_eq!(at("/w/pi/crates/ui"), Some("crates/ui".into()));

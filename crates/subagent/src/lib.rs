@@ -388,7 +388,7 @@ impl Tool for Subagent {
             stop,
         );
         let id = execution.id();
-        let preview = format!(
+        let screen = format!(
             "{} [background #{id}]",
             named(&prepared.agent.spec().model, &prepared.args.description)
         );
@@ -413,7 +413,7 @@ impl Tool for Subagent {
         });
         Ok(
             ToolOutput::text(json!({"task_id": id, "status": "running"}).to_string())
-                .with_preview(preview),
+                .with_screen(screen),
         )
     }
 }
@@ -684,7 +684,7 @@ impl Prepared {
                     answer(&heard, Some(&error), lost, &wrote, None),
                     &model_notes,
                 ))
-                .with_preview(format!("{}: {error}", description.replace('\n', " ")))
+                .with_screen(format!("{}: {error}", one_line(&description)))
                 .with_spent(heard.spent)
                 .warned(),
             });
@@ -766,8 +766,7 @@ impl Prepared {
                     Err(why) => Outcome::NoVerdict(why.to_string()),
                 };
                 Some(Checked {
-                    // Flattened, since it is about to be quoted into one line.
-                    command: command.replace('\n', " "),
+                    command: one_line(command),
                     outcome,
                 })
             }
@@ -788,7 +787,7 @@ impl Prepared {
             answer(&heard, cut.as_deref(), lost, &wrote, check.as_ref()),
             &model_notes,
         ))
-        .with_preview(sketch(&description, &heard))
+        .with_screen(sketch(&description, &heard))
         .with_spent(heard.spent);
         if unfinished && outcome == ExecutionOutcome::Succeeded {
             outcome = ExecutionOutcome::Incomplete;
@@ -812,6 +811,11 @@ fn with_model_notes(body: String, notes: &[String]) -> String {
     }
 }
 
+// One row's words: a newline left in would break the row in two.
+fn one_line(text: &str) -> String {
+    text.replace('\n', " ")
+}
+
 // What a caller reads of a task: the model that runs it, then the task.
 fn named(model: &str, description: &str) -> String {
     format!("{model} · {description}")
@@ -821,9 +825,7 @@ fn named(model: &str, description: &str) -> String {
 // because several children run at once, so a bare cost names none of them.
 fn sketch(description: &str, heard: &Heard) -> String {
     let spent = llm::figures::slash(heard.spent.input, heard.spent.output);
-    // Flattened, not trusted: this is a single line, and a newline in it
-    // would break the line in two.
-    let task = description.replace('\n', " ");
+    let task = one_line(description);
     match task.trim() {
         // Nothing to hold apart from, so the brackets would enclose the
         // whole line rather than rank it.

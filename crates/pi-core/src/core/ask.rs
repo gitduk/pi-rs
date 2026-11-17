@@ -131,7 +131,7 @@ impl Tool for AskUser {
                     }
                     return Ok(ToolOutput {
                         content: crate::driver::input::answer_content(response.body()),
-                        preview: None,
+                        screen: None,
                         spent: Default::default(),
                         warned: false,
                     });

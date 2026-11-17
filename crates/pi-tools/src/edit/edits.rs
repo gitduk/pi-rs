@@ -16,10 +16,10 @@ pub struct Landed {
     pub start: usize,
     pub end: usize,
     /// The original lines it displaced, in order. Empty for an insertion.
-    pub took: Vec<String>,
+    pub replaced: Vec<String>,
     /// The 1-based line this edit acted on, in the content it resolved
     /// against: for an insertion, the line it landed on.
-    pub took_at: usize,
+    pub replaced_at: usize,
 }
 
 /// What an edit does where its anchor lands.
@@ -284,12 +284,12 @@ pub fn apply(path: &str, content: &str, edits: &[Edit]) -> Result<Applied, Refus
         } else {
             line
         };
-        let took_at = line_at(p.span.start);
-        let took = if point(p) {
+        let replaced_at = line_at(p.span.start);
+        let replaced = if point(p) {
             Vec::new()
         } else {
             let last = line_at(p.span.end - 1);
-            let rows = lines.get(took_at - 1..last.min(lines.len()));
+            let rows = lines.get(replaced_at - 1..last.min(lines.len()));
             rows.unwrap_or_default()
                 .iter()
                 .map(|r| r.to_string())
@@ -298,8 +298,8 @@ pub fn apply(path: &str, content: &str, edits: &[Edit]) -> Result<Applied, Refus
         landed.push(Landed {
             start,
             end,
-            took,
-            took_at,
+            replaced,
+            replaced_at,
         });
         cursor = p.span.end;
     }

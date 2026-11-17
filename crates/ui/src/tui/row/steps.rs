@@ -18,15 +18,16 @@ pub struct PendingTool {
     /// The call's name and leading argument, read the way the live line read
     /// them — they already agree with the row the call will land as.
     pub name: String,
-    pub preview: String,
+    /// The one-line summary of its arguments the live line reads.
+    pub summary: String,
     /// How far the call has got. A call that lands badly is never the
     /// row's — it's on its way to its own line.
     pub stage: Stage,
     /// Whole seconds it has been out, or ran once landed; `None` while
     /// queued. Whole, so a frame within the same second compares equal.
     pub secs: Option<u64>,
-    /// Where it runs, as `render::place` reads it off its arguments.
-    pub place: Option<String>,
+    /// Where it runs, as `render::cwd` reads it off its arguments.
+    pub cwd: Option<String>,
 }
 
 /// Where a call in flight stands, each stage holding what only it has.
@@ -61,10 +62,6 @@ impl Stage {
 }
 
 impl PendingTool {
-    fn desc(&self) -> String {
-        desc_of(&self.name, &self.preview)
-    }
-
     fn landed(&self) -> bool {
         matches!(self.stage, Stage::Landed(_))
     }
@@ -87,19 +84,6 @@ fn think_frame(tick: usize) -> &'static str {
 pub fn out_for(progress: Option<&str>, secs: Option<u64>) -> String {
     let progress = progress.map_or_else(String::new, |p| format!("{}{p}", icons::PART_SEP));
     progress + &render::ran_for(secs.map(std::time::Duration::from_secs))
-}
-
-// The tool and its leading argument, named the one way every row that
-// shows a tool does: name alone with nothing under it, dropped if redundant.
-pub(super) fn desc_of(name: &str, preview: &str) -> String {
-    let head = preview.lines().next().unwrap_or("").trim();
-    if head.is_empty() {
-        name.to_string()
-    } else if head.starts_with(name) && head[name.len()..].starts_with(char::is_whitespace) {
-        head.to_string()
-    } else {
-        format!("{name} {head}")
-    }
 }
 
 /// The indent aligning detail lines and list controls with step text.
@@ -251,12 +235,11 @@ impl Head {
 
 // Progress and elapsed time stay on the call's own line.
 fn pending_head(p: &PendingTool, tick: usize) -> Head {
-    let place = render::placed(p.place.as_deref());
     Head {
         mark: p.stage.mark(tick),
-        text: p.desc(),
+        text: render::named(&p.name, &p.summary),
         tool: Some(p.name.clone()),
-        tail: place + &out_for(p.stage.progress(), p.secs),
+        tail: render::tail(p.cwd.as_deref(), &out_for(p.stage.progress(), p.secs)),
         more: false,
     }
 }
@@ -312,7 +295,7 @@ impl Step {
     // keeps its head and newest lines around a count, not every line.
     fn opened_len(&self) -> usize {
         match self {
-            Step::Tool(call) => call.row_len(),
+            Step::Tool(call) => call.height(),
             Step::Thinking {
                 lines, live: true, ..
             } if folds_middle(lines.len()) => FOLD_ROWS,
@@ -473,7 +456,7 @@ impl Step {
 
     // Whether line `j` of it answers a click: its own line opens or closes
     // it, the count under it reads the rest.
-    fn answers(&self, j: usize, width: usize) -> bool {
+    fn opens_at(&self, j: usize, width: usize) -> bool {
         match self {
             Step::Tool(call) => call.opens_at(j, usize::MAX, width),
             Step::Thinking { .. } => j == 0 && self.opens(width),
@@ -881,13 +864,13 @@ impl Group {
             spans.push(paint.span(&paint.theme.muted, icons::BAR_CELL.repeat(spent)));
         }
         spans.push(Span::raw(" "));
-        spans.push(paint.span(&paint.theme.muted, self.summary()));
+        spans.push(paint.span(&paint.theme.muted, self.tally()));
         Line::from(spans)
     }
 
     // What the group holds: each tool with how often it ran, the heaviest
     // first, then the reasoning. A tool's name is never pluralised.
-    fn summary(&self) -> String {
+    fn tally(&self) -> String {
         let mut tools: BTreeMap<&str, usize> = BTreeMap::new();
         let mut lines = 0;
         for step in &self.steps {
@@ -971,7 +954,7 @@ impl Group {
         }
         let reshaped = self.pending.len() != held.len()
             || self.pending.iter().zip(held).any(|(a, b)| {
-                (&a.name, &a.preview, a.landed()) != (&b.name, &b.preview, b.landed())
+                (&a.name, &a.summary, a.landed()) != (&b.name, &b.summary, b.landed())
             });
         self.pending = held.to_vec();
         reshaped
@@ -1043,7 +1026,7 @@ impl Fold for Group {
             return Some(i);
         }
         let (k, j) = self.row_at(i)?;
-        self.steps[k].answers(j, width).then_some(i)
+        self.steps[k].opens_at(j, width).then_some(i)
     }
 
     fn toggle_at(&mut self, i: usize, width: usize, screen: usize) -> bool {
@@ -1115,8 +1098,8 @@ mod tests {
 
     use crate::tui::row::test_call as call;
 
-    fn tool(name: &str, preview: &str) -> Call {
-        call(name, preview, "", "")
+    fn tool(name: &str, screen: &str) -> Call {
+        call(name, screen, "", "")
     }
 
     // A folded group of these calls, in order.
@@ -1131,17 +1114,17 @@ mod tests {
 
     // A call in flight, as the row is handed one: `landed` says whether its
     // result is in yet.
-    fn pending(name: &str, preview: &str, landed: bool) -> PendingTool {
+    fn pending(name: &str, summary: &str, landed: bool) -> PendingTool {
         PendingTool {
             name: name.to_string(),
-            preview: preview.to_string(),
+            summary: summary.to_string(),
             stage: if landed {
                 Stage::Landed(Outcome::Done)
             } else {
                 Stage::Running { progress: None }
             },
             secs: None,
-            place: None,
+            cwd: None,
         }
     }
 
@@ -1289,7 +1272,7 @@ mod tests {
         let mut listed = bundle(vec![tool("read", "a.rs")]);
         assert!(listed.join(think(1, 3, false)).is_ok());
         assert!(listed.join(Step::Tool(ran)).is_ok());
-        listed.prepare_preview(&paint, 80, 40);
+        listed.prepare_layout(&paint, 80, 40);
         assert!(
             !listed.toggle_at(2, &paint, 80, usize::MAX),
             "a cut line is read on a page"
@@ -1302,7 +1285,7 @@ mod tests {
         let short = call("bash", "cat a", "cat a", "one\ntwo\n");
         let mut plain_row = bundle(vec![tool("read", "a.rs")]);
         assert!(plain_row.join(Step::Tool(short)).is_ok());
-        plain_row.prepare_preview(&paint, 80, 40);
+        plain_row.prepare_layout(&paint, 80, 40);
         opens_as_in_place(plain_row, 1);
         opens_as_in_place(
             Row::thinking(
@@ -1337,14 +1320,30 @@ mod tests {
             row.toggle_at(4, &paint, 80, usize::MAX),
             "the call past it still answers"
         );
-        // Its own line, one line of the argument, a blank, one back, and the
-        // count over the rest of what it asked for.
-        assert_eq!(row.len(), 9, "the count opens the argument whole");
+        // Its own line, then a blank, one row of what came back, and the
+        // count over the rest of what it was made with.
         let lines = shown(&row, 80);
-        assert_eq!(lines[6].trim(), "", "a blank row parts command from output");
-        assert_eq!(lines[7].trim(), "hi", "what it printed, under the blank");
-        assert!(lines[8].contains("more"), "{lines:?}");
-        assert_eq!(row.click_line(5, 80), None, "a body line opens nothing");
+        let head = lines
+            .iter()
+            .position(|line| line.contains("cat <<EOF"))
+            .expect("the call's own line");
+        assert_eq!(
+            lines[head + 1].trim(),
+            "",
+            "a blank row parts command from output"
+        );
+        assert_eq!(
+            lines[head + 2].trim(),
+            "hi",
+            "what came back, under the blank"
+        );
+        assert!(lines[head + 3].contains("more"), "{lines:?}");
+        assert_eq!(row.len(), head + 4, "nothing past the count");
+        assert_eq!(
+            row.click_line(head + 1, 80),
+            None,
+            "a body line opens nothing"
+        );
         assert!(
             row.toggle_at(1, &paint, 80, usize::MAX) && row.toggle_at(2, &paint, 80, usize::MAX)
         );

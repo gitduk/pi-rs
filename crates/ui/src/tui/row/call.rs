@@ -9,13 +9,13 @@ use ratatui::text::Line;
 
 use std::cell::RefCell;
 
-use super::steps::{STEP_INDENT, StepMark, desc_of, text_room};
+use super::steps::{STEP_INDENT, StepMark, text_room};
 use super::{Fold, Opening, page_of};
 use crate::render::{self, Outcome, Paint};
 use crate::tui::browse::PageLine;
 use pi_store::text;
 
-/// One row under a call's line: what it was asked, or what came back.
+/// One row under a call's line: what it was made with, or what came back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Part {
     /// A line of the argument the call was made with — a command, a path.
@@ -31,6 +31,28 @@ enum Part {
     Change(String),
 }
 
+/// The rows a row draws under a call's line: the one block it keeps of the
+/// page, and the argument's leading line when the line above does not read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Glimpse {
+    /// Whether the body's leading row, the argument's line, is the row's too.
+    lead: bool,
+    /// The body rows of the block the row draws, its parting blank row first.
+    block: Range<usize>,
+}
+
+impl Glimpse {
+    // How many rows the row draws under its line.
+    fn len(&self) -> usize {
+        usize::from(self.lead) + self.block.len()
+    }
+
+    // The body rows the row draws under its line, in order.
+    fn rows(&self) -> impl Iterator<Item = usize> + '_ {
+        self.lead.then_some(0).into_iter().chain(self.block.clone())
+    }
+}
+
 /// A tool call, however it came out.
 #[derive(Debug, Clone)]
 pub struct Call {
@@ -41,12 +63,11 @@ pub struct Call {
     text: String,
     // Every row it holds, in the order the page reads them.
     body: Vec<Part>,
-    // Which of them a row shows: the argument's first line, then what the
-    // call found. What a command printed is the page's, and so is the rest
-    // of its argument.
-    row: Vec<usize>,
+    // What a row shows of them. What a command printed is the page's, and so
+    // is the rest of its argument.
+    glimpse: Glimpse,
     // Where the call ran, when not the workspace root.
-    place: Option<String>,
+    cwd: Option<String>,
     pub took: Option<Duration>,
     // Open where it stands, or closed to its own line. Its place sets this
     // when it lands; from then it is the reader's.
@@ -73,8 +94,8 @@ impl PartialEq for Call {
             && self.name == other.name
             && self.text == other.text
             && self.body == other.body
-            && self.row == other.row
-            && self.place == other.place
+            && self.glimpse == other.glimpse
+            && self.cwd == other.cwd
             && self.took == other.took
             && self.open == other.open
     }
@@ -83,47 +104,58 @@ impl PartialEq for Call {
 impl Eq for Call {}
 
 // One block of a call's body, after the blank row that parts it from the block
-// before it. Answers where it landed.
-fn block(body: &mut Vec<Part>, rows: &[String], part: fn(String) -> Part) -> Range<usize> {
+// before it. Answers the rows it holds, that blank row first.
+fn block(
+    body: &mut Vec<Part>,
+    rows: &[String],
+    part: fn(String) -> Part,
+    heads: fn(&str) -> bool,
+) -> Range<usize> {
     if rows.is_empty() {
         return 0..0;
     }
+    let at = body.len();
     body.push(Part::Gap);
-    let at = body.len()..body.len() + rows.len();
-    body.extend(rows.iter().cloned().map(part));
-    at
+    for line in rows {
+        if heads(line) && !matches!(body.last(), Some(Part::Gap)) {
+            body.push(Part::Gap);
+        }
+        body.push(part(line.clone()));
+    }
+    at..body.len()
 }
 
 impl Call {
-    /// A call as its result leaves it: `preview` is what the tool said of
+    /// A call as its result leaves it: `screen` is what the tool said of
     /// itself — its first line the call's line, any rows under it what it
-    /// drew for the screen — `asked` the argument it was made with, and
-    /// `answer` what the call answered, once that is known.
+    /// drew for the screen — `argument` the text it was made with, and
+    /// `result` what the call answered, once that is known.
     pub fn new(
         outcome: Outcome,
         name: &str,
-        preview: &str,
-        asked: &str,
-        answer: Option<&str>,
+        screen: &str,
+        argument: &str,
+        result: Option<&str>,
     ) -> Self {
-        // A line naming its tool alone says nothing of what was asked: the
-        // argument tells it, when that reads as one.
+        // A line naming its tool alone says nothing of what it was made with:
+        // the argument tells it, when that reads as one.
         let recovered;
-        let preview = if preview.trim() == name {
-            recovered = serde_json::from_str(asked)
+        let screen = if screen.trim() == name {
+            recovered = serde_json::from_str(argument)
                 .map(|args| tool::summary(&args).into_owned())
-                .unwrap_or_else(|_| asked.to_string());
+                .unwrap_or_else(|_| argument.to_string());
             recovered.as_str()
         } else {
-            preview
+            screen
         };
-        let head = preview.lines().next().unwrap_or_default().trim();
-        // Keep an argument line unless the line already reads it.
-        let first = asked.lines().next().unwrap_or_default().trim();
-        let read = !first.is_empty() && !head.is_empty() && head.contains(first);
-        let asked: Vec<String> = asked
+        let head = screen.lines().next().unwrap_or_default().trim();
+        // The page keeps what the call's own line does not already read: a
+        // command is that line, and what it carries below is not.
+        let first = argument.lines().next().unwrap_or_default().trim();
+        let head_reads = !first.is_empty() && !head.is_empty() && head.contains(first);
+        let argument: Vec<String> = argument
             .lines()
-            .skip(usize::from(read))
+            .skip(usize::from(head_reads))
             .map(str::to_string)
             .collect();
         // What the tool sketched is what a screen shows; the result is the
@@ -132,7 +164,7 @@ impl Call {
         // changed — and a blank row parts each from the one before it.
         let mut output: Vec<String> = Vec::new();
         let mut change: Vec<String> = Vec::new();
-        for line in preview.lines().skip(1) {
+        for line in screen.lines().skip(1) {
             match tool::row::kind(line) {
                 tool::row::Kind::Output(_) => output.push(line.to_string()),
                 _ => change.push(line.to_string()),
@@ -140,7 +172,7 @@ impl Call {
         }
         // Nothing sketched: what it answered is the body.
         let result: Vec<String> = if output.is_empty() && change.is_empty() {
-            answer
+            result
                 .map(|out| {
                     pi_core::core::tools::shown(name, out)
                         .map(str::to_string)
@@ -152,44 +184,29 @@ impl Call {
         };
         // The page reads them all: the argument at its line's foot, then a
         // blank, then each block after it in turn.
-        let mut body: Vec<Part> = asked.iter().cloned().map(Part::Argument).collect();
-        let output_at = block(&mut body, &output, Part::Output);
-        // A command that changed more than one file parts them: a blank row
-        // between one file's rows and the next file's head, so the rows under
-        // a name stay its own.
-        let mut change_at = 0..0;
-        if !change.is_empty() {
-            body.push(Part::Gap);
-            change_at.start = body.len();
-            for line in &change {
-                let names = matches!(tool::row::kind(line), tool::row::Kind::File { .. });
-                if names && !matches!(body.last(), Some(Part::Gap)) {
-                    body.push(Part::Gap);
-                }
-                body.push(Part::Change(line.clone()));
-            }
-            change_at.end = body.len();
-        }
-        let result_at = block(&mut body, &result, Part::Result);
-        // The row keeps the argument's first line and what the call found: a
-        // command that changed files is read for its change, not for what it
-        // printed on the way, and the rest of a script is the page's.
+        let mut body: Vec<Part> = argument.iter().cloned().map(Part::Argument).collect();
+        let output_at = block(&mut body, &output, Part::Output, |_| false);
+        // A command that changed several files parts them: a blank row before
+        // each file's head, so the rows under a name stay its own.
+        let change_at = block(&mut body, &change, Part::Change, |line| {
+            matches!(tool::row::kind(line), tool::row::Kind::File { .. })
+        });
+        let result_at = block(&mut body, &result, Part::Result, |_| false);
+        // The row keeps what the call found — a change before what it printed —
+        // and the argument's leading line, unless the call's line reads it.
         let shown = [&change_at, &result_at, &output_at]
             .into_iter()
             .find(|at| !at.is_empty())
-            .unwrap_or(&output_at);
-        let mut row: Vec<usize> = (0..asked.len().min(1)).collect();
-        if !shown.is_empty() {
-            row.push(shown.start - 1);
-            row.extend(shown.clone());
-        }
+            .cloned()
+            .unwrap_or_default();
+        let lead = !head_reads && !argument.is_empty();
         Self {
             outcome,
             name: name.to_string(),
-            text: desc_of(name, preview),
+            text: render::named(name, head),
             body,
-            row,
-            place: None,
+            glimpse: Glimpse { lead, block: shown },
+            cwd: None,
             took: None,
             // A change is what a call shows unasked; anything else waits for
             // a click, or for the group it folds into to open with it.
@@ -199,8 +216,8 @@ impl Call {
     }
 
     /// Where the call ran, when not the workspace root.
-    pub fn at(mut self, place: Option<String>) -> Self {
-        self.place = place;
+    pub fn in_cwd(mut self, cwd: Option<String>) -> Self {
+        self.cwd = cwd;
         self.painted = RefCell::new(None);
         self
     }
@@ -212,9 +229,8 @@ impl Call {
         self
     }
 
-    /// The calls a run's group holds: one that landed well. A call with
-    /// nothing under its line is one of them, and only stops being clickable.
-    pub fn holds(&self) -> bool {
+    /// Whether it landed well: a failed call is read on its own line.
+    pub fn landed_well(&self) -> bool {
         matches!(self.outcome, Outcome::Done | Outcome::Warned)
     }
 
@@ -225,8 +241,8 @@ impl Call {
     }
 
     /// Whether what it holds is a change to files rather than output: the
-    /// rows a tool sketched, which want a line of their own.
-    pub fn sketched(&self) -> bool {
+    /// rows a tool drew, which want a line of their own.
+    pub fn changed(&self) -> bool {
         self.body.iter().any(|part| matches!(part, Part::Change(_)))
     }
 
@@ -247,13 +263,13 @@ impl Call {
 
     /// The rows it would take open where nothing bounds it: what a caller
     /// weighs it by before it is opened.
-    pub fn row_len(&self) -> usize {
-        self.rows_at(usize::MAX)
+    pub fn height(&self) -> usize {
+        self.height_in(usize::MAX)
     }
 
-    // The row's view of its body, `i` rows in.
-    fn glimpse(&self, i: usize) -> Option<&Part> {
-        self.row.get(i).and_then(|&at| self.body.get(at))
+    // The part the row's `i`th line under its line draws.
+    fn kept_part(&self, i: usize) -> Option<&Part> {
+        self.glimpse.rows().nth(i).and_then(|at| self.body.get(at))
     }
 
     /// The rows it takes, `rows` being what its place allows: its own line,
@@ -261,13 +277,13 @@ impl Call {
     /// A place that bounds nothing says so with `usize::MAX`.
     pub fn len(&self, rows: usize) -> usize {
         match self.open {
-            true => self.rows_at(rows),
+            true => self.height_in(rows),
             false => 1,
         }
     }
 
     // The rows it takes open in a place that allows `rows`.
-    fn rows_at(&self, rows: usize) -> usize {
+    fn height_in(&self, rows: usize) -> usize {
         let (body, left) = self.shown(rows);
         1 + body + usize::from(left > 0)
     }
@@ -283,8 +299,9 @@ impl Call {
         if room == 0 {
             return (0, 0);
         }
-        let short = self.row.len() < self.body.len();
-        let body = self.row.len().min(room.saturating_sub(usize::from(short)));
+        let drawn = self.glimpse.len();
+        let short = drawn < self.body.len();
+        let body = drawn.min(room.saturating_sub(usize::from(short)));
         (body, self.body.len().saturating_sub(body))
     }
 
@@ -309,7 +326,7 @@ impl Call {
         text::width(&self.text) > text_room(width, &self.tail())
     }
 
-    /// The call's line: its mark, its name and what it asked for.
+    /// The call's line: its mark, its name and what it was made with.
     pub fn head(
         &self,
         hovered: bool,
@@ -356,7 +373,7 @@ impl Call {
                 &mut had.lines
             }
             slot => {
-                let lines = (0..self.rows_at(rows))
+                let lines = (0..self.height_in(rows))
                     .map(|j| self.lay(j, rows, hover == Some(j), paint, width))
                     .collect();
                 &mut slot
@@ -388,7 +405,7 @@ impl Call {
         let border = Line::from(STEP_INDENT);
         let room = render::result_room(width);
         let (body, left) = self.shown(rows);
-        let line = match self.glimpse(j - 1).filter(|_| j <= body) {
+        let line = match self.kept_part(j - 1).filter(|_| j <= body) {
             None => match left > 0 && j == 1 + body {
                 true => Line::from(paint.action_hint(hovered, format!("{left} more"))),
                 false => Line::default(),
@@ -413,14 +430,14 @@ impl Call {
 
     // Where it ran and how long for, kept whole when the text is cut.
     fn tail(&self) -> String {
-        render::placed(self.place.as_deref()) + &render::ran_for(self.took)
+        render::tail(self.cwd.as_deref(), &render::ran_for(self.took))
     }
 }
 
 #[cfg(test)]
 // A call that landed well, as the screen holds one.
-pub(crate) fn test_call(name: &str, preview: &str, asked: &str, answer: &str) -> Call {
-    Call::new(Outcome::Done, name, preview, asked, Some(answer))
+pub(crate) fn test_call(name: &str, screen: &str, argument: &str, answer: &str) -> Call {
+    Call::new(Outcome::Done, name, screen, argument, Some(answer))
 }
 
 impl Fold for Call {

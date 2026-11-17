@@ -186,7 +186,7 @@ mod tests {
             id: EntryId(0),
             at: 0,
             result: ToolResult::text(call, name, body),
-            preview: None,
+            screen: None,
             warned: false,
             took: None,
         }

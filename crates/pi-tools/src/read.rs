@@ -43,7 +43,7 @@ fn image(rel: &str, media_type: &str, bytes: &[u8]) -> ToolOutput {
             }),
             ToolResultContent::Image(image),
         ],
-        preview: None,
+        screen: None,
         spent: Default::default(),
         warned: false,
     }
@@ -178,13 +178,13 @@ fn deliver(ctx: &Ctx, rel: &str, view: View) -> Result<ToolOutput, ToolError> {
     // assembled strings can disagree at the margin, eliding rows with no way back.
     let full = view.text(None);
     let Some(spilled) = spill::write(ctx, &full)? else {
-        return Ok(ToolOutput::text(full).with_preview(view.shown(rel, None)));
+        return Ok(ToolOutput::text(full).with_screen(view.shown(rel, None)));
     };
     let cut = view.cut();
     let mut body = view.text(cut);
     body.push('\n');
     body.push_str(&spilled.note());
-    Ok(ToolOutput::text(body).with_preview(view.shown(rel, cut)))
+    Ok(ToolOutput::text(body).with_screen(view.shown(rel, cut)))
 }
 
 // Lines `start..end`, 0-based, as `(1-based number, text)`: only those are
@@ -257,7 +257,7 @@ async fn spill_lines(
         body.push_str(row);
     }
     body.push_str(&note);
-    Ok(ToolOutput::text(body).with_preview(shown))
+    Ok(ToolOutput::text(body).with_screen(shown))
 }
 
 // The rows of a spill at `offset` for `limit` lines, and whether more follow.

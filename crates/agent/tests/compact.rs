@@ -524,7 +524,7 @@ mod budget {
                 name: "read".into(),
                 args: json!({ "path": format!("f{i}.rs") }),
             })]);
-            s.push_previewed(vec![(
+            s.push_drawn(vec![(
                 ToolResult::text(format!("c{i}"), "read", big(4_000)),
                 Default::default(),
             )]);

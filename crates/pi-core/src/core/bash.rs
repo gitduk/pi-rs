@@ -41,7 +41,7 @@ pub async fn run_bash(
         // diagnostic output identifies execution context when enabled.
         text: format!(
             "Ran `{}`\n{}",
-            out.preview(),
+            out.screen(),
             if body.is_empty() {
                 "(no output)"
             } else {

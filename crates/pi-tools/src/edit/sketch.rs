@@ -72,10 +72,10 @@ fn is_blank(row: &Row) -> bool {
 
 // How a landing's rows line up: what it displaced, what it put there, and the
 // rows it left alone — in file order, so each change keeps its surroundings.
-fn aligned(at: usize, took: &[String], start: usize, gave: &[&str], out: &mut Vec<Row>) {
+fn aligned(at: usize, replaced: &[String], start: usize, gave: &[&str], out: &mut Vec<Row>) {
     // Rows this diff aligns, and the numbers they carry: the old file for a
     // row that went, the new one for a row that came or stayed.
-    let was: Vec<&str> = took.iter().map(String::as_str).collect();
+    let was: Vec<&str> = replaced.iter().map(String::as_str).collect();
     // A run of moved rows reads top to bottom whatever order the ops arrive
     // in: what went, then what came, with the kept rows between.
     let base = out.len();
@@ -117,7 +117,7 @@ pub(crate) fn rows(path: &str, applied: &Applied, changed_run: usize) -> Vec<Row
     for l in &applied.landed {
         untouched(&mut rows, &lines, next, l.start.saturating_sub(1));
         let gave = hunk_rows(&lines, l);
-        aligned(l.took_at, &l.took, l.start, gave, &mut rows);
+        aligned(l.replaced_at, &l.replaced, l.start, gave, &mut rows);
         next = l.end.saturating_add(1);
     }
     untouched(&mut rows, &lines, next, lines.len());

@@ -69,7 +69,7 @@ fn loaded_output(skill: &Skill, text: &str) -> ToolOutput {
     let text = instructions(skill, text);
     let context =
         json!({ "loaded_context": { "source": source(&skill.name), "bytes": text.len() } });
-    let mut out = ToolOutput::text(text).with_preview(skill.name.clone());
+    let mut out = ToolOutput::text(text).with_screen(skill.name.clone());
     out.content
         .push(llm::message::ToolResultContent::Json { value: context });
     out
@@ -254,7 +254,7 @@ impl Tool for Load {
             return match args.file {
                 Some(rel) => match skill.builtin_files.iter().find(|(name, _)| name == &rel) {
                     Some((_, text)) => {
-                        Ok(ToolOutput::text(*text).with_preview(format!("{}/{rel}", args.name)))
+                        Ok(ToolOutput::text(*text).with_screen(format!("{}/{rel}", args.name)))
                     }
                     None if skill.builtin_files.is_empty() => Err(ToolError::Invalid(format!(
                         "{}/{rel}: a built-in skill has no files",
@@ -316,7 +316,7 @@ impl Tool for Load {
             )));
         }
         let text = tokio::fs::read_to_string(&real).await?;
-        Ok(ToolOutput::text(text).with_preview(format!("{}/{rel}", skill.name)))
+        Ok(ToolOutput::text(text).with_screen(format!("{}/{rel}", skill.name)))
     }
 }
 

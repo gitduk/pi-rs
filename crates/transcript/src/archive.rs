@@ -115,7 +115,7 @@ impl Record {
             ),
             Entry::Tool {
                 result,
-                preview,
+                screen,
                 warned,
                 took,
                 ..
@@ -124,7 +124,7 @@ impl Record {
                     id,
                     at,
                     drawn: Drawn {
-                        preview: preview.clone(),
+                        screen: screen.clone(),
                         warned: *warned,
                         took: *took,
                     },
@@ -213,7 +213,7 @@ impl Record {
                     id,
                     at,
                     result,
-                    preview: drawn.preview,
+                    screen: drawn.screen,
                     warned: drawn.warned,
                     took: drawn.took,
                 }

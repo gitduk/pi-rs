@@ -13,10 +13,8 @@ use serde_json::{Value, json};
 use tool::limit::{MAX_BYTES, over_limit};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
-/// The diff a whole-file write shows: one landing that took every old row,
+/// The diff a whole-file write shows: one landing that replaced every old row,
 /// changed runs cut past `changed_run` rows.
-/// The rows a whole-file rewrite changed, and the same rows as one text: the
-/// two ways a caller reads one change.
 pub(crate) fn rewrite_rows(
     path: &str,
     old: &str,
@@ -29,18 +27,19 @@ pub(crate) fn rewrite_rows(
         landed: vec![edits::Landed {
             start: 1,
             end: rows,
-            took: edits::split_bom(old)
+            replaced: edits::split_bom(old)
                 .1
                 .lines()
                 .map(str::to_string)
                 .collect(),
-            took_at: 1,
+            replaced_at: 1,
         }],
         left_blank: Vec::new(),
     };
     sketch_rows(path, &applied, changed_run)
 }
 
+/// The same rows as one text, for a caller that reads the diff as a string.
 pub(crate) fn rewrite_sketch(path: &str, old: &str, new: &str, changed_run: usize) -> String {
     tool::row::render(&rewrite_rows(path, old, new, changed_run))
 }
@@ -354,7 +353,7 @@ impl Tool for Edit {
         if stale {
             report.push_str(&format!("\nfile changed since your last view: {path}"));
         }
-        // The model is spared a long run; the preview carries it whole.
-        Ok(ToolOutput::text(report).with_preview(sketch(path, &applied, usize::MAX)))
+        // The model is spared a long run; the screen carries it whole.
+        Ok(ToolOutput::text(report).with_screen(sketch(path, &applied, usize::MAX)))
     }
 }

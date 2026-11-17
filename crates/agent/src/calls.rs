@@ -278,7 +278,7 @@ fn landed(
             Landed::Answered(
                 ToolResult::error(call.id.clone(), &call.name, body.clone()),
                 Drawn {
-                    preview: Some(body),
+                    screen: Some(body),
                     warned: false,
                     took: Some(took),
                 },
@@ -292,7 +292,7 @@ fn landed(
                 is_error: false,
             };
             let drawn = Drawn {
-                preview: out.preview,
+                screen: out.screen,
                 warned: out.warned,
                 took: Some(took),
             };

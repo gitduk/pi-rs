@@ -163,6 +163,6 @@ impl Tool for Models {
         let mut catalog = snapshot.catalog.clone();
         catalog["discovery"] = json!(snapshot.discovery);
         Ok(ToolOutput::text(catalog.to_string())
-            .with_preview(format!("{} known models", snapshot.count)))
+            .with_screen(format!("{} known models", snapshot.count)))
     }
 }

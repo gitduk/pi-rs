@@ -618,7 +618,7 @@ impl Tool for Remote {
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let mut params = CallToolRequestParams::new(self.remote.clone());
-        let preview = tool::summary(&args).into_owned();
+        let screen = tool::summary(&args).into_owned();
         if let Value::Object(mut map) = args {
             if self.described {
                 map.remove(DESCRIPTION);
@@ -656,7 +656,7 @@ impl Tool for Remote {
         }
         Ok(ToolOutput {
             content: out,
-            preview: Some(preview),
+            screen: Some(screen),
             spent: Default::default(),
             warned: false,
         })

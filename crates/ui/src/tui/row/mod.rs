@@ -42,27 +42,27 @@ pub struct Row(
 #[derive(Default)]
 struct Height {
     measured: RefCell<Option<Measured>>,
-    preview: RefCell<Option<Box<Preview>>>,
+    layout: RefCell<Option<Box<Layout>>>,
     hovered: Cell<Option<NonZeroUsize>>,
     // The rows a fold may take on screen, as the last frame allowed.
     budget: Cell<usize>,
 }
 
-struct Preview {
+struct Layout {
     width: usize,
     budget: usize,
-    lines: Vec<PreviewLine>,
+    lines: Vec<LayoutLine>,
 }
 
 #[derive(Clone, Copy)]
-enum PreviewLine {
+enum LayoutLine {
     // `rows` is what the line still shows when the window cut it short.
     Content { source: usize, rows: Option<usize> },
     // The footer that opens the rest of a cut, and the line it cuts.
     More { heading: usize, remaining: usize },
 }
 
-impl PreviewLine {
+impl LayoutLine {
     fn source(self) -> usize {
         match self {
             Self::Content { source, .. } => source,
@@ -85,10 +85,10 @@ impl PreviewLine {
     }
 }
 
-impl Preview {
+impl Layout {
     fn heading(&self, source: usize) -> Option<usize> {
         self.lines.iter().position(
-            |line| matches!(line, PreviewLine::Content { source: at, .. } if *at == source),
+            |line| matches!(line, LayoutLine::Content { source: at, .. } if *at == source),
         )
     }
 }
@@ -101,7 +101,7 @@ fn fold_budget(height: usize) -> usize {
 
 // What the window can hold of a fold's lines: all of them, or a cut that
 // spends its last row on a footer naming the rows left out.
-fn within_budget(lines: Vec<PreviewLine>, heights: &[usize], budget: usize) -> Vec<PreviewLine> {
+fn within_budget(lines: Vec<LayoutLine>, heights: &[usize], budget: usize) -> Vec<LayoutLine> {
     let total: usize = lines.iter().map(|line| line.rows(heights)).sum();
     if total <= budget {
         return lines;
@@ -115,9 +115,9 @@ fn within_budget(lines: Vec<PreviewLine>, heights: &[usize], budget: usize) -> V
         let take = rows.min(left);
         if take < rows {
             if take > 0
-                && let PreviewLine::Content { source, .. } = line
+                && let LayoutLine::Content { source, .. } = line
             {
-                kept.push(PreviewLine::Content {
+                kept.push(LayoutLine::Content {
                     source,
                     rows: Some(take),
                 });
@@ -130,7 +130,7 @@ fn within_budget(lines: Vec<PreviewLine>, heights: &[usize], budget: usize) -> V
         shown += take;
         kept.push(line);
     }
-    kept.push(PreviewLine::More {
+    kept.push(LayoutLine::More {
         heading,
         remaining: total - shown,
     });
@@ -179,7 +179,7 @@ impl Height {
 
     fn clear(&self) {
         *self.measured.borrow_mut() = None;
-        *self.preview.borrow_mut() = None;
+        *self.layout.borrow_mut() = None;
     }
 }
 
@@ -212,7 +212,7 @@ enum Kind {
     Banner(Banner),
     // An empty group marks a removed row.
     Lines(Vec<(Line<'static>, Option<Line<'static>>)>),
-    Result(Call),
+    Call(Call),
     Relayed(Relayed),
     Steps(Group),
 }
@@ -253,7 +253,7 @@ fn page_of(lines: Opened) -> Opening {
 // A row that opens and closes. A new kind that folds implements this and
 // joins `Row::fold`; nothing else about folding names the kinds.
 trait Fold {
-    // Whether the content is open in place and needs a preview budget.
+    // Whether the content is open in place and needs a layout budget.
     fn is_open(&self) -> bool;
     fn click_start(&self, _heading: usize) -> usize {
         0
@@ -294,7 +294,7 @@ trait Fold {
     // What a page reads for line `i`: the row's lines whole.
     fn opening(&self, i: usize, paint: &Paint) -> Option<Opening>;
     // Whether it draws its own rows inside the budget, in place of the slice
-    // a preview is otherwise measured and cut to.
+    // a layout is otherwise measured and cut to.
     fn lays_out(&self) -> bool {
         false
     }
@@ -332,7 +332,7 @@ impl Row {
     fn fold(&self) -> Option<&dyn Fold> {
         match &self.0 {
             Kind::Steps(g) => Some(g),
-            Kind::Result(r) => Some(r),
+            Kind::Call(r) => Some(r),
             Kind::Relayed(r) => Some(r),
             _ => None,
         }
@@ -341,7 +341,7 @@ impl Row {
     fn fold_mut(&mut self) -> Option<&mut dyn Fold> {
         match &mut self.0 {
             Kind::Steps(g) => Some(g),
-            Kind::Result(r) => Some(r),
+            Kind::Call(r) => Some(r),
             Kind::Relayed(r) => Some(r),
             _ => None,
         }
@@ -563,12 +563,12 @@ impl Row {
         self.toggle_at(0, &Paint::new(false), 80, usize::MAX)
     }
 
-    fn preview_line(&self, i: usize) -> Option<PreviewLine> {
-        self.1.preview.borrow().as_deref()?.lines.get(i).copied()
+    fn layout_line(&self, i: usize) -> Option<LayoutLine> {
+        self.1.layout.borrow().as_deref()?.lines.get(i).copied()
     }
 
     fn source_line(&self, i: usize) -> usize {
-        self.preview_line(i).map_or(i, PreviewLine::source)
+        self.layout_line(i).map_or(i, LayoutLine::source)
     }
 
     // The line under the pointer, when there is one: the hover is kept
@@ -594,7 +594,7 @@ impl Row {
             _ => self.fold()?.click_at(source, self.budget(), width),
         }?;
         self.1
-            .preview
+            .layout
             .borrow()
             .as_deref()
             .map_or(Some(heading), |p| Some(p.heading(heading).unwrap_or(i)))
@@ -735,8 +735,8 @@ impl Row {
     }
 
     pub(super) fn has_more(&self, i: usize, width: usize) -> bool {
-        self.1.preview.borrow().as_deref().is_some_and(|p| {
-            p.width == width && matches!(p.lines.get(i), Some(PreviewLine::More { .. }))
+        self.1.layout.borrow().as_deref().is_some_and(|p| {
+            p.width == width && matches!(p.lines.get(i), Some(LayoutLine::More { .. }))
         })
     }
 
@@ -751,7 +751,7 @@ impl Row {
                 .and_then(NonZeroUsize::new),
         );
         let hovered = hovered
-            .filter(|&i| !matches!(self.preview_line(i), Some(PreviewLine::More { .. })))
+            .filter(|&i| !matches!(self.layout_line(i), Some(LayoutLine::More { .. })))
             .map(|i| self.source_line(i));
         let reshaped = match &mut self.0 {
             Kind::Steps(g) => g.update(hovered, spin, held),
@@ -772,7 +772,7 @@ impl Row {
     /// A tool call as its result leaves it: the live path, which never holds
     /// a `ToolResult`, and the rebuild's, which does.
     pub fn call(call: Call) -> Self {
-        Self::new(Kind::Result(call))
+        Self::new(Kind::Call(call))
     }
 
     /// Say `said` beside this row's first line, until `FLASH` has passed.
@@ -869,7 +869,7 @@ impl Row {
     /// Wraps not counted; `line_height` gives a line's screen rows.
     pub fn len(&self) -> usize {
         self.1
-            .preview
+            .layout
             .borrow()
             .as_deref()
             .map_or_else(|| self.full_len(), |p| p.lines.len())
@@ -885,7 +885,7 @@ impl Row {
             | Kind::Said { .. } => 1,
             Kind::Banner(banner) => banner.len(),
             Kind::Lines(lines) => lines.len(),
-            Kind::Result(call) => call.len(self.budget()),
+            Kind::Call(call) => call.len(self.budget()),
             Kind::Relayed(r) => r.len(),
             Kind::Steps(g) => g.len(),
         }
@@ -899,7 +899,7 @@ impl Row {
 
     /// Give each fold the height its frame allows: a budget for an open
     /// fold, a window for a group.
-    pub(super) fn prepare_preview(&mut self, paint: &Paint, width: usize, height: usize) {
+    pub(super) fn prepare_layout(&mut self, paint: &Paint, width: usize, height: usize) {
         let budget = fold_budget(height);
         let moved = self.budget() != budget;
         self.1.budget.set(budget);
@@ -929,7 +929,7 @@ impl Row {
         }
         if self
             .1
-            .preview
+            .layout
             .borrow()
             .as_deref()
             .is_some_and(|p| p.width == width && p.budget == budget)
@@ -939,15 +939,15 @@ impl Row {
         if !self.fold().is_some_and(Fold::is_open) {
             return;
         }
-        *self.1.measured.borrow_mut() = None;
-        *self.1.preview.borrow_mut() = None;
-        let mut heights = Vec::with_capacity(self.full_len());
-        for i in 0..self.full_len() {
+        self.1.clear();
+        let full = self.full_len();
+        let mut heights = Vec::with_capacity(full);
+        for i in 0..full {
             let (line, border) = self.full_line(i, paint, width);
             heights.push(screen::wrap_rows(border.as_ref(), &line, width));
         }
-        let lines = (0..heights.len()).map(PreviewLine::content).collect();
-        *self.1.preview.borrow_mut() = Some(Box::new(Preview {
+        let lines = (0..heights.len()).map(LayoutLine::content).collect();
+        *self.1.layout.borrow_mut() = Some(Box::new(Layout {
             width,
             budget,
             lines: within_budget(lines, &heights, budget),
@@ -974,8 +974,8 @@ impl Row {
         paint: &Paint,
         width: usize,
     ) -> (Line<'static>, Option<Line<'static>>) {
-        match self.preview_line(i) {
-            Some(PreviewLine::More { heading, remaining }) => {
+        match self.layout_line(i) {
+            Some(LayoutLine::More { heading, remaining }) => {
                 let border = self
                     .fold()
                     .and_then(|fold| fold.more_border(heading, paint, width))
@@ -984,7 +984,7 @@ impl Row {
                 let line = Line::from(paint.action_hint(self.lit(i), format!("{remaining} more")));
                 (screen::clip_line(&line, room), border)
             }
-            Some(PreviewLine::Content {
+            Some(LayoutLine::Content {
                 source,
                 rows: Some(rows),
             }) => {
@@ -1000,7 +1000,7 @@ impl Row {
                     .collect::<Vec<_>>();
                 (Line::from(spans), border)
             }
-            Some(PreviewLine::Content { source, rows: None }) => {
+            Some(LayoutLine::Content { source, rows: None }) => {
                 self.full_line(source, paint, width)
             }
             None => self.full_line(i, paint, width),
@@ -1033,7 +1033,7 @@ impl Row {
                 (Line::from(spans), None)
             }
             // Only the line a click answers lights up: what it opens does not.
-            Kind::Result(call) => call.line(i, self.budget(), self.hover(), paint, width),
+            Kind::Call(call) => call.line(i, self.budget(), self.hover(), paint, width),
             Kind::Relayed(r) => r.line(i, paint, width),
             Kind::Steps(g) => g.line(i, paint, width),
         };
@@ -1128,18 +1128,18 @@ impl Row {
         }
     }
 
-    pub(super) fn block(&self) -> super::spacing::Block {
-        use super::spacing::Block;
+    pub(super) fn section(&self) -> super::spacing::Section {
+        use super::spacing::Section;
 
         match &self.0 {
-            Kind::Said { at: Some(_), .. } => Block::Prompt,
-            Kind::Said { at: None, .. } => Block::PromptContinuation,
-            Kind::Relayed(_) => Block::Relayed,
-            Kind::Result(_) => Block::Tools,
-            Kind::Steps(group) if group.has_tools() => Block::Tools,
-            Kind::Answer(line, _) if !line.spans.is_empty() || self.2.is_some() => Block::Prose,
-            Kind::CodeLine(_) | Kind::Code(_) | Kind::Block(_) => Block::Prose,
-            _ => Block::Other,
+            Kind::Said { at: Some(_), .. } => Section::Prompt,
+            Kind::Said { at: None, .. } => Section::PromptContinuation,
+            Kind::Relayed(_) => Section::Relayed,
+            Kind::Call(_) => Section::Tools,
+            Kind::Steps(group) if group.has_tools() => Section::Tools,
+            Kind::Answer(line, _) if !line.spans.is_empty() || self.2.is_some() => Section::Prose,
+            Kind::CodeLine(_) | Kind::Code(_) | Kind::Block(_) => Section::Prose,
+            _ => Section::Other,
         }
     }
 

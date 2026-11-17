@@ -125,8 +125,6 @@ fn a_prompt_joining_the_run_spends_the_unsend() {
 // adoption's equality check compares rows born from one source.
 #[test]
 fn an_errored_tool_adopts_its_full_body() {
-    use agent::session::{Entry, EntryId};
-
     let mut ui = test_ui(80, 24);
     let (_dir, mut lane) = a_running_lane();
     let mut view = View::default();
@@ -148,24 +146,16 @@ fn an_errored_tool_adopts_its_full_body() {
             id: "c1".into(),
             name: "edit".into(),
             outcome: agent::Outcome::Failed,
-            preview: body.into(),
+            screen: body.into(),
             took: std::time::Duration::ZERO,
         },
     );
-    // What the loop files for the call: error content, and the preview
-    // the event showed riding along (see `run_calls`'s error arm).
+    // What the loop files for the call: the error, and the screen it showed.
     ui.on_event(
         &mut lane,
         &mut view,
         agent::Event::Committed {
-            entries: vec![Entry::Tool {
-                id: EntryId(7),
-                at: 0,
-                result: llm::message::ToolResult::error("c1", "edit", body),
-                preview: Some(body.into()),
-                warned: false,
-                took: None,
-            }],
+            entries: vec![failed_entry(7, "c1", "edit", body)],
         },
     );
 
@@ -376,7 +366,7 @@ fn a_click_opens_what_a_running_call_printed() {
             id: "c".into(),
             name: "bash".into(),
             outcome: agent::Outcome::Done,
-            preview: String::new(),
+            screen: String::new(),
             took: std::time::Duration::ZERO,
         },
     );
@@ -459,7 +449,7 @@ fn a_failing_call_never_joins_the_row() {
             id: "b".into(),
             name: "read".into(),
             outcome: agent::Outcome::Failed,
-            preview: "Error: no such file".into(),
+            screen: "Error: no such file".into(),
             took: std::time::Duration::ZERO,
         },
     );
@@ -525,7 +515,7 @@ fn a_failing_call_keeps_where_it_ran() {
             id: "b".into(),
             name: "bash".into(),
             outcome: agent::Outcome::Failed,
-            preview: "no such dir".into(),
+            screen: "no such dir".into(),
             took: std::time::Duration::ZERO,
         },
     );
@@ -568,7 +558,7 @@ fn a_call_keeps_how_long_it_ran() {
             id: "b".into(),
             name: "bash".into(),
             outcome: agent::Outcome::Failed,
-            preview: "no such dir".into(),
+            screen: "no such dir".into(),
             took: std::time::Duration::from_millis(5_400),
         },
     );
@@ -662,7 +652,7 @@ fn read_landed(
             id: call.into(),
             name: "read".into(),
             outcome: agent::Outcome::Done,
-            preview: path.into(),
+            screen: path.into(),
             took: std::time::Duration::ZERO,
         },
     );
@@ -675,13 +665,13 @@ fn read_landed(
     );
 }
 
-fn tool_entry(id: u64, call: &str, name: &str, preview: &str) -> agent::session::Entry {
+fn tool_entry(id: u64, call: &str, name: &str, screen: &str) -> agent::session::Entry {
     use agent::session::{Entry, EntryId};
     Entry::Tool {
         id: EntryId(id),
         at: 0,
         result: llm::message::ToolResult::text(call, name, format!("the body of {call}")),
-        preview: Some(preview.into()),
+        screen: Some(screen.into()),
         warned: false,
         took: None,
     }
@@ -693,7 +683,7 @@ fn failed_entry(id: u64, call: &str, name: &str, body: &str) -> agent::session::
         id: EntryId(id),
         at: 0,
         result: llm::message::ToolResult::error(call, name, body),
-        preview: Some(body.into()),
+        screen: Some(body.into()),
         warned: false,
         took: None,
     }
@@ -772,4 +762,57 @@ fn a_change_report_keeps_its_own_row() {
         !scrollback.iter().any(Row::is_steps),
         "and so does an edit's"
     );
+}
+
+// A call whose line says something else keeps the argument on a row of its
+// own, with the rest of what came back counted under it.
+#[test]
+fn an_argument_the_line_does_not_read_keeps_its_row() {
+    use crate::render::Outcome;
+
+    let paint = Paint::new(false);
+    let call = Call::new(
+        Outcome::Done,
+        "script",
+        "a script",
+        "python x.py\nextra",
+        Some("ok"),
+    );
+    let rows: Vec<String> = (0..call.height())
+        .map(|j| call.line(j, usize::MAX, None, &paint, 80).0.to_string())
+        .collect();
+    assert_eq!(rows[1], "python x.py", "{rows:?}");
+    assert_eq!(rows[2], "", "a blank row parts it from what came back");
+    assert_eq!(rows[3], "ok", "{rows:?}");
+    assert!(rows[4].contains("more"), "{rows:?}");
+}
+
+// A command carrying a script says it on its one line: what it changed is
+// what the rows under it are, never the rest of the command.
+#[test]
+fn a_long_argument_takes_no_rows_of_its_own() {
+    use crate::render::Outcome;
+
+    let paint = Paint::new(false);
+    let command = "cd /x && sed -i 's/a/b/' y.rs && cat >> t.rs <<'EOF'\n\n#[test]\nfn t() {}\nEOF";
+    let sketch = "y.rs +2 -2\n-1 let a = 1;\n+1 let a = 2;";
+    let line = command.lines().next().expect("a command line");
+    let call = Call::new(
+        Outcome::Done,
+        "bash",
+        &format!("{line}\n{sketch}"),
+        command,
+        None,
+    );
+    let rows: Vec<String> = (0..call.height())
+        .map(|j| call.line(j, usize::MAX, None, &paint, 80).0.to_string())
+        .collect();
+    // Its line, a blank, then the change: none of the script under the line.
+    let change = sketch.lines().next().expect("a change row");
+    assert_eq!(rows[1], "", "{rows:?}");
+    assert_eq!(rows[2], change, "{rows:?}");
+    let under = rows[1..].join("\n");
+    for hidden in command.lines().skip(1).filter(|line| !line.is_empty()) {
+        assert!(!under.contains(hidden), "{rows:?}");
+    }
 }

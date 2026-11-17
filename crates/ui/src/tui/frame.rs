@@ -50,8 +50,8 @@ impl Ui {
         let last = view.surface.scrollback.len().checked_sub(1);
         let row_holds = view.surface.scrollback.last().is_some_and(Row::is_steps);
         let now = std::time::Instant::now();
-        let held = if row_holds {
-            call::held(&view.state.tools, now)
+        let pending = if row_holds {
+            call::pending(&view.state.tools, now)
         } else {
             Vec::new()
         };
@@ -65,7 +65,7 @@ impl Ui {
         for (idx, row) in view.surface.scrollback.iter_mut().enumerate() {
             // Only the last row takes them, and only the last row can be the
             // summary they belong to: any other is handed nothing.
-            let flight: &[PendingTool] = if Some(idx) == last { &held } else { &[] };
+            let flight: &[PendingTool] = if Some(idx) == last { &pending } else { &[] };
             let hovered = self.hovered_scrollback.filter(|h| h.0 == idx).map(|h| h.1);
             row.update_live(hovered, self.spinner, flight);
         }
@@ -149,7 +149,7 @@ impl Ui {
             .as_ref()
             .map_or(transcript, |page| page.regions(transcript));
         for row in view.surface.scrollback.iter_mut() {
-            row.prepare_preview(&self.paint, width, transcript.history.height as usize);
+            row.prepare_layout(&self.paint, width, transcript.history.height as usize);
         }
         if self.search_due() {
             let laid: Vec<Laid> = ScrollbackRows::new(&view.surface.scrollback, &self.paint, width)
@@ -799,7 +799,7 @@ impl Ui {
             pending.push((*t, (line, border)));
         }
         let mut spacing = super::spacing::Spacing::after(&view.surface.scrollback);
-        if !pending.is_empty() && spacing.push(super::spacing::Block::Tools) {
+        if !pending.is_empty() && spacing.push(super::spacing::Section::Tools) {
             out.push(Line::default(), None);
         }
         for (t, (line, border)) in pending {
@@ -836,7 +836,7 @@ impl Ui {
         };
         if !thinking
             && content.first().is_some_and(|line| !line.spans.is_empty())
-            && spacing.push(super::spacing::Block::Prose)
+            && spacing.push(super::spacing::Section::Prose)
         {
             out.push(Line::default(), None);
         }

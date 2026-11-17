@@ -252,7 +252,7 @@ impl Tool for Grep {
         let total: usize = hits.iter().map(|h| h.lines.len()).sum();
         // The pattern leads, the tallies are ranked under it: a row saying
         // only how much it found names nothing the caller can recognise.
-        let preview = format!(
+        let screen = format!(
             "{} [{} · {}]",
             args.pattern,
             count(hits.len(), "file"),
@@ -291,7 +291,7 @@ impl Tool for Grep {
                 .collect();
             let notice = over(hits.len() - rows.len(), "file");
             return Ok(
-                ToolOutput::text(spill::fit(ctx, &rows, "files", &notice)?).with_preview(preview)
+                ToolOutput::text(spill::fit(ctx, &rows, "files", &notice)?).with_screen(screen)
             );
         }
 
@@ -322,6 +322,6 @@ impl Tool for Grep {
         }
         let notice = over(total - shown, "match");
 
-        Ok(ToolOutput::text(spill::fit(ctx, &sections, "files", &notice)?).with_preview(preview))
+        Ok(ToolOutput::text(spill::fit(ctx, &sections, "files", &notice)?).with_screen(screen))
     }
 }

@@ -1,9 +1,9 @@
-//! Space between conversation blocks, shared by settled and streaming rows.
+//! Space between conversation sections, shared by settled and streaming rows.
 
 use super::row::Row;
 
 #[derive(Clone, Copy)]
-pub(super) enum Block {
+pub(super) enum Section {
     Prompt,
     PromptContinuation,
     Relayed,
@@ -14,7 +14,7 @@ pub(super) enum Block {
 
 #[derive(Default)]
 pub(super) struct Spacing {
-    previous: Option<Block>,
+    previous: Option<Section>,
     has_turn: bool,
 }
 
@@ -22,30 +22,30 @@ impl Spacing {
     pub(super) fn after(rows: &[Row]) -> Self {
         let mut spacing = Self::default();
         for row in rows.iter().filter(|row| row.len() > 0) {
-            spacing.push(row.block());
+            spacing.push(row.section());
         }
         spacing
     }
 
-    /// Whether this block needs a blank row before it. Streaming continuations
-    /// stay inside their block and must not pass through here again.
-    pub(super) fn push(&mut self, next: Block) -> bool {
+    /// Whether the next section needs a blank row before it. Streaming
+    /// continuations stay inside their section, never passing here again.
+    pub(super) fn push(&mut self, next: Section) -> bool {
         let gap = match next {
-            Block::PromptContinuation => false,
+            Section::PromptContinuation => false,
             // A prompt stands apart from what follows it, as it does from
             // what precedes it.
             _ if matches!(
                 self.previous,
-                Some(Block::Prompt | Block::PromptContinuation)
+                Some(Section::Prompt | Section::PromptContinuation)
             ) =>
             {
                 true
             }
-            Block::Prompt => self.has_turn,
-            Block::Prose => matches!(self.previous, Some(Block::Tools)),
-            Block::Tools | Block::Relayed | Block::Other => false,
+            Section::Prompt => self.has_turn,
+            Section::Prose => matches!(self.previous, Some(Section::Tools)),
+            Section::Tools | Section::Relayed | Section::Other => false,
         };
-        self.has_turn |= matches!(next, Block::Prompt | Block::Relayed);
+        self.has_turn |= matches!(next, Section::Prompt | Section::Relayed);
         self.previous = Some(next);
         gap
     }

@@ -212,18 +212,18 @@ impl Tool for Write {
         // Same split as read: the model's line names the version an edit matches
         // against; the log keeps the hash too, for when an edit goes wrong.
         tracing::info!(target: "pi::write", path = %rel, hash = %hash, "wrote");
-        let mut preview = crate::edit::rewrite_sketch(
+        let mut screen = crate::edit::rewrite_sketch(
             &rel,
             &String::from_utf8_lossy(&was.unwrap_or_default()),
             &content,
             usize::MAX,
         );
-        preview.insert_str(preview.find('\n').unwrap_or(preview.len()), note);
+        screen.insert_str(screen.find('\n').unwrap_or(screen.len()), note);
         Ok(ToolOutput::text(format!(
             "{} wrote {lines} {unit}, {} bytes{note}",
             crate::rows::header(&rel),
             content.len()
         ))
-        .with_preview(preview))
+        .with_screen(screen))
     }
 }

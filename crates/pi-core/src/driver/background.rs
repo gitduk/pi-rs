@@ -2239,9 +2239,9 @@ impl Controls for Commands {
                 true => "nothing in the background".to_string(),
                 false => executions.join("\n"),
             };
-            return Ok(ToolOutput::text(out).with_preview("list"));
+            return Ok(ToolOutput::text(out).with_screen("list"));
         };
-        let preview = match &which {
+        let screen = match &which {
             Named::All => format!("{} all", control.key()),
             Named::Ids(ids) => {
                 let ids: Vec<String> = ids.iter().map(|id| format!("#{id}")).collect();
@@ -2256,7 +2256,7 @@ impl Controls for Commands {
             let said = std::iter::once(format!("{verb} {}", done.join(", ")));
             Ok(
                 ToolOutput::text(said.chain(failed).collect::<Vec<_>>().join("\n"))
-                    .with_preview(preview.clone()),
+                    .with_screen(screen.clone()),
             )
         };
         // Stopping passes none along instead: the table knows which of its own
@@ -2278,11 +2278,11 @@ impl Controls for Commands {
             )),
             Control::Restart => reply("restarted", self.table.restart_each(root, &ids)),
             Control::Output if ids.is_empty() => {
-                Ok(ToolOutput::text("nothing in the background").with_preview(preview))
+                Ok(ToolOutput::text("nothing in the background").with_screen(screen))
             }
             Control::Output if wait => {
                 let out = self.wait(root, &ids, ctx).await?;
-                Ok(ToolOutput::text(out).with_preview(format!("{preview}, waited")))
+                Ok(ToolOutput::text(out).with_screen(format!("{screen}, waited")))
             }
             Control::Output => {
                 // One command answers for itself; several need telling apart.
@@ -2301,7 +2301,7 @@ impl Controls for Commands {
                 if silent {
                     out.push_str(QUIET);
                 }
-                Ok(ToolOutput::text(out).with_preview(preview))
+                Ok(ToolOutput::text(out).with_screen(screen))
             }
         }
     }

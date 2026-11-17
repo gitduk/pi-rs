@@ -110,7 +110,7 @@ fn banner_height_changes_invalidate_measurements() {
     let width = 80;
     let mut heights = Vec::new();
     for height in [40, 8, 40] {
-        row.prepare_preview(&paint, width, height);
+        row.prepare_layout(&paint, width, height);
         let (line, border) = row.line(0, &paint, width);
         let actual = crate::tui::screen::wrap_rows(border.as_ref(), &line, width);
         let measured = row.line_height(0, &paint, width);
@@ -1449,6 +1449,12 @@ fn bar_cells(row: &Row, i: usize, paint: &Paint, width: usize) -> (usize, usize)
     (on, off)
 }
 
+// Whether any of the row's lines carries a bar cell.
+fn carries_bar(row: &Row, paint: &Paint, width: usize) -> bool {
+    let text = |i| row.line(i, paint, width).0.to_string();
+    (0..row.len()).any(|i| text(i).contains(icons::BAR_CELL))
+}
+
 // A group taller than its window shows its newest steps over a bar that
 // says where the window sits; every step is still there.
 #[test]
@@ -1457,7 +1463,7 @@ fn a_window_shows_its_newest_steps_over_its_bar() {
     let width = 80;
     let mut row = step_calls(30);
     // The window is its own height whatever the history holds: steps and a bar.
-    row.prepare_preview(&paint, width, 40);
+    row.prepare_layout(&paint, width, 40);
     let lines: Vec<String> = (0..row.len())
         .map(|i| row.line(i, &paint, width).0.to_string())
         .collect();
@@ -1476,7 +1482,7 @@ fn a_window_shows_its_newest_steps_over_its_bar() {
     // eight fills with its steps and the bar, not with seven and nothing.
     let mut taller = step_calls(30);
     let room = 8;
-    taller.prepare_preview(&paint, width, room);
+    taller.prepare_layout(&paint, width, room);
     assert_eq!(
         taller.len(),
         room,
@@ -1489,7 +1495,6 @@ fn a_window_shows_its_newest_steps_over_its_bar() {
             break;
         }
     }
-    let bar = row.len() - 1;
     assert_eq!(bar_cells(&row, bar, &paint, width), (0, 10), "at the top");
 
     // One step up from the bottom greys the last cell alone.
@@ -1503,15 +1508,9 @@ fn a_window_shows_its_newest_steps_over_its_bar() {
 
     // A group that fits the window has no bar under it.
     let mut short = step_calls(5);
-    short.prepare_preview(&paint, width, 40);
+    short.prepare_layout(&paint, width, 40);
     assert_eq!(short.len(), 5);
-    assert!(!(0..short.len()).any(|i| {
-        short
-            .line(i, &paint, width)
-            .0
-            .to_string()
-            .contains(icons::BAR_CELL)
-    }));
+    assert!(!carries_bar(&short, &paint, width));
 }
 
 // The wheel turns the window while it can move and says so, so the frame
@@ -1521,7 +1520,7 @@ fn a_window_scrolls_by_lines_and_stops_at_its_ends() {
     let paint = Paint::new(false);
     let width = 80;
     let mut row = step_calls(30);
-    row.prepare_preview(&paint, width, 40);
+    row.prepare_layout(&paint, width, 40);
 
     let last = row.len() - 2;
     let bottom = row.line(last, &paint, width).0.to_string();
@@ -1549,7 +1548,6 @@ fn a_window_scrolls_by_lines_and_stops_at_its_ends() {
             break;
         }
     }
-    let last = row.len() - 2;
     assert!(
         row.line(last, &paint, width)
             .0
@@ -1567,7 +1565,7 @@ fn a_step_that_fits_opens_in_the_window() {
     let mut row = step_calls(6);
     let ran = call("bash", "cat a", "cat a", "one\ntwo\n");
     assert!(row.join(Step::Tool(ran)).is_ok());
-    row.prepare_preview(&paint, width, 40);
+    row.prepare_layout(&paint, width, 40);
     let head = row.len() - 1;
     assert!(
         row.toggle_at(head, &paint, width, usize::MAX),
@@ -1594,9 +1592,9 @@ fn a_step_too_tall_for_the_window_opens_on_a_page() {
     let width = 80;
     let body: String = (1..=15).map(|i| format!("line {i}\n")).collect();
     let big = call("bash", "cat big", "cat big", &body);
-    let mut row = Row::steps(Step::Tool(call("read", "f0", "", "")), true);
+    let mut row = step_calls(1);
     assert!(row.join(Step::Tool(big)).is_ok());
-    row.prepare_preview(&paint, width, 40);
+    row.prepare_layout(&paint, width, 40);
     let head = (0..row.len())
         .find(|&i| row.line(i, &paint, width).0.to_string().contains("cat big"))
         .expect("the call keeps its line");
@@ -1626,7 +1624,7 @@ fn a_relayed_turn_too_tall_for_its_rows_opens_on_a_page() {
     let width = 80;
     let long: String = (1..=30).map(|i| format!("line {i}\n\n")).collect();
     let mut row = Row::relayed("automatic input", &long, 0, &paint);
-    row.prepare_preview(&paint, width, 20);
+    row.prepare_layout(&paint, width, 20);
     assert!(
         !row.toggle_at(0, &paint, width, usize::MAX),
         "it does not open in place"
@@ -1643,7 +1641,7 @@ fn a_relayed_turn_too_tall_for_its_rows_opens_on_a_page() {
     // One the rows hold opens in place, with no count at its end.
     let short: String = (1..=4).map(|i| format!("line {i}\n\n")).collect();
     let mut row = Row::relayed("automatic input", &short, 0, &paint);
-    row.prepare_preview(&paint, width, 20);
+    row.prepare_layout(&paint, width, 20);
     assert!(
         row.toggle_at(0, &paint, width, usize::MAX),
         "it fits, so it opens"
@@ -1662,7 +1660,7 @@ fn an_opened_turn_reads_its_own_line_plain() {
     let paint = Paint::new(true);
     let text: String = (1..=3).map(|i| format!("line {i}\n\n")).collect();
     let mut row = Row::relayed("automatic input", &text, 0, &paint);
-    row.prepare_preview(&paint, 80, 40);
+    row.prepare_layout(&paint, 80, 40);
     let muted = crate::sgr::style_to_ratatui(&paint.theme.muted);
     let plain = crate::sgr::style_to_ratatui(&paint.theme.input);
     assert_eq!(row.line(0, &paint, 80).0.spans[0].style, muted, "shut");
@@ -1729,12 +1727,12 @@ fn an_open_turn_that_no_longer_fits_still_closes() {
     let width = 80;
     let text: String = (1..=6).map(|i| format!("line {i}\n\n")).collect();
     let mut row = Row::relayed("automatic input", &text, 0, &paint);
-    row.prepare_preview(&paint, width, 40);
+    row.prepare_layout(&paint, width, 40);
     assert!(
         row.toggle_at(0, &paint, width, usize::MAX),
         "a tall enough window opens it"
     );
-    row.prepare_preview(&paint, width, 8);
+    row.prepare_layout(&paint, width, 8);
     assert!(
         row.page_at(0, &paint, width, usize::MAX).is_none(),
         "an open row is not read on a page"
@@ -1854,19 +1852,13 @@ fn a_window_that_fits_exactly_carries_no_bar() {
     let paint = Paint::new(false);
     let width = 80;
     let mut exact = step_calls(7);
-    exact.prepare_preview(&paint, width, 40);
+    exact.prepare_layout(&paint, width, 40);
     assert_eq!(exact.len(), 7, "seven steps fill the window");
-    assert!(!(0..exact.len()).any(|i| {
-        exact
-            .line(i, &paint, width)
-            .0
-            .to_string()
-            .contains(icons::BAR_CELL)
-    }));
+    assert!(!carries_bar(&exact, &paint, width));
 
     // A frame shorter than the window gives the window its rows alone.
     let mut short = step_calls(10);
-    short.prepare_preview(&paint, width, 6);
+    short.prepare_layout(&paint, width, 6);
     assert_eq!(short.len(), 6, "the frame decides when it is shorter");
 }
 
@@ -1951,7 +1943,7 @@ fn an_opened_line_that_wraps_counts_against_the_budget() {
     let mut row = Row::relayed(&label, "one line\n", 0, &paint);
     // Budget 3: shut, the line is one row and the turn would open; opened,
     // the line wraps to two and the turn no longer fits.
-    row.prepare_preview(&paint, width, 6);
+    row.prepare_layout(&paint, width, 6);
     assert!(
         row.page_at(0, &paint, width, usize::MAX).is_some(),
         "the wrapped line is counted"

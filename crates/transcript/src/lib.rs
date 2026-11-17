@@ -219,11 +219,13 @@ mod millis {
 }
 
 /// What the screen drew for a result, kept beside it so a rebuild draws the
-/// same row: its preview line, whether the result asked for a look, and how
+/// same row: the rows it drew, whether the result asked for a look, and how
 /// long the call ran.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Drawn {
-    pub preview: Option<String>,
+    // Archives written before this was named `screen` hold it as `preview`.
+    #[serde(alias = "preview")]
+    pub screen: Option<String>,
     pub warned: bool,
     pub took: Option<std::time::Duration>,
 }
@@ -258,14 +260,15 @@ pub enum Entry {
         at: u64,
         blocks: Vec<AssistantContent>,
     },
-    // A tool's result, plus the copy the screen drew for it. `preview` sits
+    // A tool's result, plus the copy the screen drew for it. `screen` sits
     // beside `ToolResult` rather than inside it, so no wire encoder sends it.
     Tool {
         id: EntryId,
         at: u64,
         result: ToolResult,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        preview: Option<String>,
+        // Sessions written before this was named `screen` hold it as `preview`.
+        #[serde(default, alias = "preview", skip_serializing_if = "Option::is_none")]
+        screen: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         warned: bool,
         // How long the call ran; a session written before calls were timed
@@ -625,7 +628,7 @@ impl Session {
                             },
                             UserContent::ToolResult(r) => {
                                 flush(&mut log, &mut pending);
-                                log.push_previewed(vec![(r, Drawn::default())]);
+                                log.push_drawn(vec![(r, Drawn::default())]);
                             }
                         }
                     }
@@ -722,12 +725,12 @@ impl Session {
     /// the encoder's business.
     pub fn push_results(&mut self, results: Vec<ToolResult>) -> Vec<EntryId> {
         let results = results.into_iter().map(|r| (r, Drawn::default()));
-        self.push_previewed(results.collect())
+        self.push_drawn(results.collect())
     }
 
     /// The same, carrying what the screen drew for each — an edit's diff
     /// rows, which the rebuild must draw rather than read back from the result.
-    pub fn push_previewed(&mut self, results: Vec<(ToolResult, Drawn)>) -> Vec<EntryId> {
+    pub fn push_drawn(&mut self, results: Vec<(ToolResult, Drawn)>) -> Vec<EntryId> {
         results
             .into_iter()
             .map(|(result, drawn)| {
@@ -736,7 +739,7 @@ impl Session {
                     id,
                     at,
                     result,
-                    preview: drawn.preview,
+                    screen: drawn.screen,
                     warned: drawn.warned,
                     took: drawn.took,
                 });
@@ -827,7 +830,7 @@ impl Session {
     }
 
     fn close(&mut self, open: Vec<(String, String)>, closing: &str) {
-        self.push_previewed(
+        self.push_drawn(
             open.into_iter()
                 .map(|(id, name)| (ToolResult::text(id, name, closing), Drawn::default()))
                 .collect(),
@@ -1184,7 +1187,7 @@ pub fn injected_summary(s: &str) -> String {
 }
 
 /// The wire blocks one entry projects to. Empty for what never reaches the
-/// wire; callers skip it. `shown` and `preview` stay behind — the screen's
+/// wire; callers skip it. `shown` and `screen` stay behind — the screen's
 /// fields are not the model's.
 pub fn user_block(entry: &Entry) -> Vec<UserContent> {
     context::user_blocks(entry)
@@ -1233,6 +1236,14 @@ mod tests {
         let old = r#"{"kind":"tool","id":2,"at":1,"preview":"ls",
             "result":{"call":"c","name":"bash","content":[{"type":"text","text":"x"}]}}"#;
         let entry: Entry = serde_json::from_str(old).unwrap();
+        // An archive's copy of the rows carries the old key too.
+        let drawn: Drawn = serde_json::from_str(r#"{"preview":"ls","warned":false}"#).unwrap();
+        assert_eq!(drawn.screen.as_deref(), Some("ls"), "{drawn:?}");
+        // The key a session wrote before the rename still names its rows.
+        assert!(
+            matches!(&entry, Entry::Tool { screen: Some(rows), .. } if rows.as_str() == "ls"),
+            "{entry:?}"
+        );
         assert!(
             matches!(
                 entry,
@@ -1249,11 +1260,11 @@ mod tests {
 
         let mut s = Session::with_prompt("go");
         let drawn = Drawn {
-            preview: Some("false".into()),
+            screen: Some("false".into()),
             warned: true,
             took: Some(std::time::Duration::from_millis(5_400)),
         };
-        s.push_previewed(vec![(ToolResult::text("c", "bash", "exit 1"), drawn)]);
+        s.push_drawn(vec![(ToolResult::text("c", "bash", "exit 1"), drawn)]);
         let back: Session = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         let five = Some(std::time::Duration::from_millis(5_400));
         assert!(

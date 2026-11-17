@@ -110,9 +110,9 @@ pub(super) struct Folds {
     // How the last group — the one `ctrl+t` names — is folded; survives
     // the group itself until the key flips it again.
     pub(super) last: bool,
-    // Each call's leading argument and non-root place, by call id, until its
+    // Each call's leading argument and non-root cwd, by call id, until its
     // result lands: the result does not carry them.
-    pub(super) asked: HashMap<String, (String, Option<String>)>,
+    pub(super) arguments: HashMap<String, (String, Option<String>)>,
 }
 
 // Default is folded=true: results are rarely worth the scrollback space.
@@ -124,7 +124,7 @@ impl Default for Folds {
             streaming: None,
             folded: true,
             last: true,
-            asked: HashMap::new(),
+            arguments: HashMap::new(),
         }
     }
 }
@@ -154,29 +154,34 @@ impl Folds {
         }
     }
 
-    // Keep what call `id` asked for, for the step it lands as; where it
-    // runs comes back too, for the live line.
-    pub(super) fn ask(
+    // Keep the argument call `id` was made with, for the step it lands as;
+    // where it runs comes back too, for the live line.
+    pub(super) fn keep_argument(
         &mut self,
         id: &str,
         args: &serde_json::Value,
         root: &std::path::Path,
     ) -> Option<String> {
-        let place = render::place(args, root);
-        let asked = (tool::asked(args).to_string(), place.clone());
-        self.asked.insert(id.to_string(), asked);
-        place
+        let cwd = render::cwd(args, root);
+        self.arguments.insert(
+            id.to_string(),
+            (tool::argument(args).to_string(), cwd.clone()),
+        );
+        cwd
     }
 
-    // What call `id` asked for, left in place: its result is drawing but its
-    // entry has not landed yet.
-    pub(super) fn peek_asked(&self, id: &str) -> &str {
-        self.asked.get(id).map_or("", |(asked, _)| asked.as_str())
+    // The argument call `id` was made with, left in place: its result is
+    // drawing but its entry has not landed yet.
+    pub(super) fn peek_argument(&self, id: &str) -> &str {
+        self.arguments
+            .get(id)
+            .map_or("", |(argument, _)| argument.as_str())
     }
 
-    // What call `id` asked for and where, once: its result has landed.
-    pub(super) fn take_asked(&mut self, id: &str) -> (String, Option<String>) {
-        self.asked.remove(id).unwrap_or_default()
+    // The argument call `id` was made with, and where it ran: its result has
+    // landed.
+    pub(super) fn take_argument(&mut self, id: &str) -> (String, Option<String>) {
+        self.arguments.remove(id).unwrap_or_default()
     }
 
     // The next block id. The one place ids come from, so a rebuilt block and
@@ -386,7 +391,7 @@ impl<'a> ScrollbackRows<'a> {
         let mut previous: Option<usize> = None;
         let mut spacing = super::spacing::Spacing::default();
         for (idx, row) in rows.iter().enumerate().filter(|(idx, _)| lens[*idx] > 0) {
-            let gap = spacing.push(row.block());
+            let gap = spacing.push(row.section());
             if let Some(prev) = previous {
                 separators[prev] = gap;
             }
@@ -585,7 +590,7 @@ pub(super) fn scrollback_from(
                         }
                         AssistantContent::ToolCall(c) => {
                             if answered.contains(&c.id) {
-                                folds.ask(&c.id, &c.args, root);
+                                folds.keep_argument(&c.id, &c.args, root);
                                 continue;
                             }
                             out.push(Row::tool_start(
@@ -620,16 +625,16 @@ pub(super) fn scrollback_from(
             }
             // Neither is anything the screen shows.
             LogEntry::Compaction { .. } => {}
-            // A tool's row is the call itself, built where the text it
-            // asked with is still at hand.
+            // A tool's row is the call itself, built where the argument it
+            // was made with is still at hand.
             LogEntry::Tool {
                 result,
-                preview,
+                screen,
                 warned,
                 took,
                 ..
             } => {
-                if let Some(call) = call_of(folds, result, preview.as_deref(), *warned, *took) {
+                if let Some(call) = call_of(folds, result, screen.as_deref(), *warned, *took) {
                     push_tool_row(&mut out, folds, call);
                 }
             }
@@ -646,13 +651,13 @@ pub(super) fn scrollback_from(
     out
 }
 
-/// The call a committed tool entry leaves: its row from the entry, and what it
-/// asked with and where it ran from what the live path kept for its id —
-/// `ToolResult` lacks both.
+/// The call a committed tool entry leaves: its row from the entry, and the
+/// argument it was made with plus where it ran from what the live path kept for
+/// its id — `ToolResult` lacks both.
 pub(super) fn call_of(
     folds: &mut Folds,
     result: &llm::message::ToolResult,
-    preview: Option<&str>,
+    screen: Option<&str>,
     warned: bool,
     took: Option<std::time::Duration>,
 ) -> Option<Call> {
@@ -661,18 +666,18 @@ pub(super) fn call_of(
     if agent::session::is_stopped_call(result) {
         return None;
     }
-    let (asked, place) = folds.take_asked(&result.call);
-    let preview = tool::preview_of(preview, &result.content);
+    let (argument, cwd) = folds.take_argument(&result.call);
+    let screen = tool::screen_of(screen, &result.content);
     let output = llm::message::flatten(&result.content);
     Some(
         Call::new(
             agent::Outcome::of(result.is_error, warned),
             &result.name,
-            &preview,
-            &asked,
+            &screen,
+            &argument,
             Some(&output),
         )
-        .at(place)
+        .in_cwd(cwd)
         .timed(took),
     )
 }
@@ -700,8 +705,8 @@ pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
         LogEntry::Note { .. } | LogEntry::Tally { .. } => None,
         LogEntry::Plain { text, .. } => Some(Row::notice_lines(text, paint)),
         LogEntry::Notice { text, .. } => Some(Row::report_lines(text, paint)),
-        // A tool's row is built from what its call asked with, which only
-        // the two who file entries still hold: see `call_of`.
+        // A tool's row is built from the argument its call was made with,
+        // which only the two who file entries still hold: see `call_of`.
         LogEntry::Tool { .. } => None,
         _ => None,
     }?;

@@ -304,7 +304,7 @@ impl Tool for Fetch {
         if let Some(s) = spilled {
             body.push_str(&format!("{}\n", s.note()));
         }
-        Ok(ToolOutput::text(body).with_preview(format!("{} {}", got.status, got.url)))
+        Ok(ToolOutput::text(body).with_screen(format!("{} {}", got.status, got.url)))
     }
 }
 

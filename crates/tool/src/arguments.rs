@@ -23,10 +23,10 @@ fn leading(args: &Value) -> Option<&str> {
     .find_map(|key| text(args, key))
 }
 
-/// What a call is opened on: the shell command it ran when it ran one, else
-/// its leading argument. A head says a call's label when it has one, so the
-/// command is what opening the call is for.
-pub fn asked(args: &Value) -> Cow<'_, str> {
+/// The argument a call was made with, as text: the shell command it ran when
+/// it ran one, else its leading argument, else its arguments as JSON. A head
+/// says a call's label when it has one, so this is what opening the call reads.
+pub fn argument(args: &Value) -> Cow<'_, str> {
     text(args, "command")
         .or_else(|| leading(args))
         .map(Cow::Borrowed)

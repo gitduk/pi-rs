@@ -182,7 +182,7 @@ impl Tool for Remember {
                 touched.push(&c.file);
             }
         }
-        let preview = touched.join(", ");
+        let screen = touched.join(", ");
         let project = main_root(ctx.workspace.root());
         let Some(_held) = self.memory.lock() else {
             return Err(ToolError::Invalid(
@@ -220,7 +220,7 @@ impl Tool for Remember {
         let mut out = plan.done;
         out.extend(plan.missed.iter().map(|m| format!("not done: {m}")));
         out.push(format!("memory now {} of {BUDGET} bytes", plan.after));
-        Ok(ToolOutput::text(out.join("\n")).with_preview(preview))
+        Ok(ToolOutput::text(out.join("\n")).with_screen(screen))
     }
 }
 

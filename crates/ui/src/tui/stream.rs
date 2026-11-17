@@ -163,12 +163,12 @@ impl Ui {
             // each matched back by id.
             Event::ToolQueued { id, name, args } => {
                 self.close(view);
-                let place = view.surface.folds.ask(id, args, lane.root());
+                let cwd = view.surface.folds.keep_argument(id, args, lane.root());
                 view.state.tools.push(RunTool {
                     id: id.clone(),
                     name: name.clone(),
                     summary: crate::render::summarize(args),
-                    place,
+                    cwd,
                     run: Run::Queued,
                     output: None,
                     open: false,
@@ -200,16 +200,16 @@ impl Ui {
                 id,
                 name,
                 outcome,
-                preview,
+                screen,
                 took,
             } => {
                 self.close(view);
                 // Parked until the entry commits; adoption checks it against
                 // what the entry derives to.
-                let asked = view.surface.folds.peek_asked(id);
+                let argument = view.surface.folds.peek_argument(id);
                 if let Some(t) = view.state.tools.iter_mut().find(|t| t.id == *id) {
-                    let call = Call::new(*outcome, name, preview, asked, None)
-                        .at(t.place.clone())
+                    let call = Call::new(*outcome, name, screen, argument, None)
+                        .in_cwd(t.cwd.clone())
                         .timed(Some(*took));
                     t.run = Run::Landed(call);
                     t.output = None;
@@ -292,7 +292,7 @@ impl Ui {
     // (the call's own end event is never sent), so file the start line.
     pub(super) fn abandon_tools(&mut self, view: &mut View) {
         for t in std::mem::take(&mut view.state.tools) {
-            view.surface.folds.take_asked(&t.id);
+            view.surface.folds.take_argument(&t.id);
             let row = match t.run {
                 Run::Landed(call) => Row::call(call),
                 Run::Queued | Run::Running { .. } => {
@@ -313,7 +313,7 @@ impl Ui {
             }
             if let LogEntry::Tool {
                 result,
-                preview,
+                screen,
                 warned,
                 took,
                 ..
@@ -324,7 +324,7 @@ impl Ui {
                 let call = call_of(
                     &mut view.surface.folds,
                     result,
-                    preview.as_deref(),
+                    screen.as_deref(),
                     *warned,
                     *took,
                 );

@@ -61,31 +61,31 @@ fn hunk_help(before: &str, after: &str, landed: &[Landed]) -> String {
     let mut off = String::new();
     let shown = llm::figures::shown(landed.len(), SHOWN);
     for l in landed.iter().take(shown) {
-        // The model's own numbering: nothing was written, so `took_at` is the
-        // line the anchor sits on, where `start` is where it would have landed.
-        let at = l.took_at;
-        let took_len = l.took.len().saturating_sub(1);
-        let addr = if took_len == 0 {
+        // The model's own numbering: nothing was written, so `replaced_at` is
+        // the line the anchor sits on, where `start` is where it would land.
+        let at = l.replaced_at;
+        let replaced_len = l.replaced.len().saturating_sub(1);
+        let addr = if replaced_len == 0 {
             format!("{at}")
         } else {
-            format!("{at}-{}", at + took_len)
+            format!("{at}-{}", at + replaced_len)
         };
-        if l.took.is_empty() {
+        if l.replaced.is_empty() {
             out.push_str(&format!("\n  {addr}(insertion)"));
         } else {
             let cur = l
-                .took
+                .replaced
                 .iter()
                 .map(|s| crop(s, 60))
                 .collect::<Vec<_>>()
                 .join("\n    ");
             out.push_str(&format!("\n  {addr}: `{cur}`"));
         }
-        let took: isize = l.took.iter().map(|s| brace_net(s)).sum();
+        let removed: isize = l.replaced.iter().map(|s| brace_net(s)).sum();
         let gave: isize = hunk_rows(&new, l).iter().map(|s| brace_net(s)).sum();
-        if took != gave {
+        if removed != gave {
             let mut line = format!(
-                "\n  {addr}: proposed net brace count {gave}, replaced net brace count {took}"
+                "\n  {addr}: proposed net brace count {gave}, replaced net brace count {removed}"
             );
             // Where the construct the anchor opened at actually ends, read off
             // the file the model will address: the extent it got wrong, named.
@@ -136,22 +136,25 @@ fn balanced_end(lines: &[&str], start: usize) -> Option<usize> {
     None
 }
 
-// What the model is told beyond the sketch: landings that took a whole block
-// when only a line was meant — the extent it got wrong, named.
+// What the model is told beyond the sketch: landings that replaced a whole
+// block when only a line was meant — the extent it got wrong, named.
 pub(super) fn notes(path: &str, before: &str, applied: &Applied) -> String {
     let old: Vec<&str> = before.lines().collect();
     let extents = by_row(path, before);
     let mut out = String::new();
     for l in &applied.landed {
-        let Some((cs, ce)) = extents.get(&l.took_at).copied() else {
+        let Some((cs, ce)) = extents.get(&l.replaced_at).copied() else {
             continue;
         };
         let Some(covered) = old.get(cs - 1..ce) else {
             continue;
         };
         if ce > cs
-            && l.took.len() == covered.len()
-            && l.took.iter().zip(covered).all(|(t, w)| t == w)
+            && l.replaced.len() == covered.len()
+            && l.replaced
+                .iter()
+                .zip(covered)
+                .all(|(row, block)| row == block)
         {
             out.push_str(&format!(
                 "  covered the block at lines {cs}-{ce}: `{}`\n",

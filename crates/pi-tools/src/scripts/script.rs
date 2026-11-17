@@ -183,7 +183,6 @@ impl Tool for Script {
             .envs(shared.iter().map(|(k, v)| (k, v)))
             .envs(self.env(&args, &shared));
         let input = serde_json::to_vec(&args).unwrap_or_default();
-        let preview = tool::summary(&args).into_owned();
         if self.background {
             let shell = self.shell.as_ref().ok_or_else(|| {
                 ToolError::Invalid("background script calls are unavailable in this run".into())
@@ -242,7 +241,7 @@ impl Tool for Script {
             true => ToolOutput::text(format!("{}: no output", self.name)),
             false => ToolOutput::text(captured.noted()),
         }
-        .with_preview(preview);
+        .with_screen(tool::summary(&args));
         Ok(crate::drift::tell(out, &output, &moved))
     }
 }

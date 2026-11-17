@@ -3,7 +3,7 @@ use llm::message::ToolResultContent;
 use serde_json::{Deserializer, Value};
 
 mod arguments;
-pub use arguments::{arguments, asked, summary};
+pub use arguments::{argument, arguments, summary};
 
 /// A character every provider accepts in a tool name: a-z, A-Z, 0-9, `-`, `_`.
 pub fn name_char(c: char) -> bool {
@@ -188,9 +188,10 @@ impl ToolError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolOutput {
     pub content: Vec<ToolResultContent>,
-    /// One line for a progress display. Set it when the first line of the
-    /// result is structure rather than content.
-    pub preview: Option<String>,
+    /// The rows a screen draws for this result: its head line, then whatever
+    /// the tool sketched under it. Set it when the result's own first line is
+    /// not the head.
+    pub screen: Option<String>,
     /// What the call spent, for a tool that runs a model of its own. Tokens
     /// only: what they are worth is the surface's arithmetic, not ours.
     pub spent: llm::stream::Usage,
@@ -205,7 +206,7 @@ impl ToolOutput {
             content: vec![ToolResultContent::Text(llm::message::Text {
                 text: body.into(),
             })],
-            preview: None,
+            screen: None,
             spent: llm::stream::Usage::default(),
             warned: false,
         }
@@ -217,8 +218,8 @@ impl ToolOutput {
         self
     }
 
-    pub fn with_preview(mut self, line: impl Into<String>) -> Self {
-        self.preview = Some(line.into());
+    pub fn with_screen(mut self, screen: impl Into<String>) -> Self {
+        self.screen = Some(screen.into());
         self
     }
 
@@ -229,10 +230,10 @@ impl ToolOutput {
         self
     }
 
-    /// Falls back to the first line of the result, which is right for tools
-    /// whose result opens with content rather than a marker.
-    pub fn preview(&self) -> String {
-        preview_of(self.preview.as_deref(), &self.content)
+    /// What a screen draws for this result: `screen` as the tool set it, else
+    /// the content's first line.
+    pub fn screen(&self) -> String {
+        screen_of(self.screen.as_deref(), &self.content)
     }
 
     pub fn flatten(&self) -> String {
@@ -240,11 +241,11 @@ impl ToolOutput {
     }
 }
 
-/// The one line a result shows folded: the tool's own `preview` if it made
-/// one, else the content's first line.
-pub fn preview_of(preview: Option<&str>, content: &[ToolResultContent]) -> String {
-    match preview {
-        Some(p) => p.to_string(),
+/// What a result's row shows: the tool's own `screen` if it made one, else
+/// the content's first line.
+pub fn screen_of(screen: Option<&str>, content: &[ToolResultContent]) -> String {
+    match screen {
+        Some(screen) => screen.to_string(),
         None => llm::message::flatten(content)
             .lines()
             .next()

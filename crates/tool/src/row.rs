@@ -1,6 +1,6 @@
 //! The rows under a result's head: one text, one writer and one reader.
 //!
-//! A tool's preview is the row its result draws — a head line, then these
+//! A tool's screen is the rows its result draws — a head line, then these
 //! rows. `render` writes them and `parse` reads them back, so the shape
 //! exists once: a reader never has to guess whether a line a command printed
 //! is one of the rows below it.
@@ -59,7 +59,7 @@ impl Sign {
 const OUTPUT: &str = "· ";
 const GAP: char = '⋮';
 
-/// The rows as the preview holds them: a head's rows, one text.
+/// The rows as the screen holds them: a head's rows, one text.
 pub fn render(rows: &[Row]) -> String {
     let width = rows
         .iter()

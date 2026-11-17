@@ -146,8 +146,8 @@ impl Report {
             .push(llm::message::ToolResultContent::Text(llm::message::Text {
                 text: self.content,
             }));
-        let head = out.preview();
-        let head = head.lines().next().unwrap_or_default();
+        let screen = out.screen();
+        let head = screen.lines().next().unwrap_or_default();
         let mut rows: Vec<Row> = output
             .iter()
             .filter(|row| !row.trim().is_empty())
@@ -155,7 +155,7 @@ impl Report {
             .map(|row| Row::Output(row.clone()))
             .collect();
         rows.extend(self.rows);
-        out.preview = Some(if rows.is_empty() {
+        out.screen = Some(if rows.is_empty() {
             head.to_string()
         } else {
             format!("{head}\n{}", render(&rows))

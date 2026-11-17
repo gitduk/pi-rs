@@ -11,7 +11,7 @@ use tool::{Ctx, ToolOutput};
 fn bound(mut result: ToolResult, ctx: &Ctx) -> ToolResult {
     let output = ToolOutput {
         content: std::mem::take(&mut result.content),
-        preview: None,
+        screen: None,
         spent: Default::default(),
         warned: false,
     };
@@ -54,7 +54,7 @@ pub(crate) fn reconcile(
             Some((_, drawn)) => (drawn, Vec::new()),
             None => (Drawn::default(), Vec::new()),
         };
-        drawn.preview = None;
+        drawn.screen = None;
         drawn.warned = false;
         result = bound(result, ctx);
         result.content.extend(suffix);
@@ -117,7 +117,7 @@ pub(crate) async fn retain(
     if results.is_empty() {
         return Ok(Vec::new());
     }
-    let ids = session.push_previewed(results);
+    let ids = session.push_drawn(results);
     let entries = session.entries_for(&ids);
     for &entry in &entries {
         if let crate::session::Entry::Tool { result, .. } = entry {
@@ -134,7 +134,7 @@ pub(crate) async fn retain(
     for &entry in &entries {
         if let crate::session::Entry::Tool {
             result,
-            preview,
+            screen,
             warned,
             took: Some(took),
             ..
@@ -144,7 +144,7 @@ pub(crate) async fn retain(
                 id: result.call.clone(),
                 name: result.name.clone(),
                 outcome: crate::Outcome::of(result.is_error, *warned),
-                preview: tool::preview_of(preview.as_deref(), &result.content),
+                screen: tool::screen_of(screen.as_deref(), &result.content),
                 took: *took,
             });
         }

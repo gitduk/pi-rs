@@ -12,8 +12,7 @@ use super::mouse::Target;
 use super::row::{self, Call, PendingTool, Row, Stage, StepMark};
 use super::scrollback::{Folds, Scrollback};
 use super::ui::OpenCommand;
-use crate::render::Outcome;
-use crate::render::{Paint, named};
+use crate::render::{Paint, named, tail};
 use pi_core::core::tools::modifies;
 use pi_core::driver::background::{BackgroundCommand, Invocation, State};
 use pi_store::icons;
@@ -25,7 +24,7 @@ pub(super) struct RunTool {
     pub(super) name: String,
     pub(super) summary: String,
     // Where it runs, when not the workspace root.
-    pub(super) place: Option<String>,
+    pub(super) cwd: Option<String>,
     pub(super) run: Run,
     // What it printed so far, while it still runs: the latest view, replaced
     // whole each time it reports.
@@ -80,10 +79,10 @@ impl RunTool {
 
     // Whether the group draws this call: true from when a foldable call is
     // queued until it ends badly — a failed call is on its way to its own line.
-    fn held(&self) -> bool {
+    fn foldable(&self) -> bool {
         !modifies(&self.name)
             && match &self.run {
-                Run::Landed(call) => call.outcome != Outcome::Failed,
+                Run::Landed(call) => call.landed_well(),
                 Run::Queued | Run::Running { .. } => true,
             }
     }
@@ -110,32 +109,32 @@ pub(super) fn pending_line(
     };
     let border = Line::from(paint.span(&paint.theme.muted, format!("{} ", mark.glyph())));
     let mut spans = paint.tool_call(&t.name, &named, false);
-    spans.push(paint.span(
-        &paint.theme.muted,
-        crate::render::placed(t.place.as_deref()) + &out,
-    ));
+    spans.push(paint.span(&paint.theme.muted, tail(t.cwd.as_deref(), &out)));
     (Line::from(spans), border)
 }
 
 // Foldable calls, shown from when they are queued so the row doesn't jump
 // when the result lands.
-pub(super) fn held(tools: &[RunTool], now: Instant) -> Vec<PendingTool> {
+pub(super) fn pending(tools: &[RunTool], now: Instant) -> Vec<PendingTool> {
     tools
         .iter()
-        .filter(|t| t.held())
+        .filter(|t| t.foldable())
         .map(|t| PendingTool {
             name: t.name.clone(),
-            preview: t.summary.clone(),
+            summary: t.summary.clone(),
             stage: t.stage(),
             secs: t.out_secs(now),
-            place: t.place.clone(),
+            cwd: t.cwd.clone(),
         })
         .collect()
 }
 
-// Calls the live block draws: the complement of `held`'s foldable set.
+// Calls the live block draws: the complement of `pending`'s foldable set.
 pub(super) fn drawn(tools: &[RunTool], row_holds: bool) -> Vec<&RunTool> {
-    tools.iter().filter(|t| !(row_holds && t.held())).collect()
+    tools
+        .iter()
+        .filter(|t| !(row_holds && t.foldable()))
+        .collect()
 }
 
 // Where a tool's row goes: a call that landed well with rows of its own is a
@@ -146,7 +145,7 @@ pub(super) fn push_tool_row(scrollback: &mut Scrollback, folds: &mut Folds, call
     // it ran is not what it changed — and anything that failed. The rest is a
     // step of the group, closed with it, where the window says what it cannot
     // hold.
-    if call.holds() && !call.sketched() && !modifies(&call.name) {
+    if call.landed_well() && !call.changed() && !modifies(&call.name) {
         folds.join(scrollback, row::Step::Tool(call));
         return;
     }
