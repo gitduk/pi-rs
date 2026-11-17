@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "execution"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "async-trait",
  "message",
@@ -1522,7 +1522,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "llm"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "async-trait",
  "eventsource-stream",
@@ -1577,7 +1577,7 @@ dependencies = [
 
 [[package]]
 name = "mcp"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "async-trait",
  "http",
@@ -1632,7 +1632,7 @@ dependencies = [
 
 [[package]]
 name = "message"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "base64 0.23.1",
  "serde",
@@ -1954,7 +1954,7 @@ dependencies = [
 
 [[package]]
 name = "pi"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "agent",
  "anyhow",
@@ -1976,7 +1976,7 @@ dependencies = [
 
 [[package]]
 name = "pi-core"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "agent",
  "anyhow",
@@ -2006,7 +2006,7 @@ dependencies = [
 
 [[package]]
 name = "pi-store"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2027,7 +2027,7 @@ dependencies = [
 
 [[package]]
 name = "pi-tools"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "async-trait",
  "execution",
@@ -2835,7 +2835,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skills"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "async-trait",
  "globset",
@@ -2930,7 +2930,7 @@ dependencies = [
 
 [[package]]
 name = "subagent"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "agent",
  "async-trait",
@@ -3319,7 +3319,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tool"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "async-trait",
  "llm",
@@ -3422,7 +3422,7 @@ dependencies = [
 
 [[package]]
 name = "transcript"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "llm",
  "message",
@@ -3554,7 +3554,7 @@ checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
 
 [[package]]
 name = "ui"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "agent",
  "anyhow",
