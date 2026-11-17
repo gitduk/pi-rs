@@ -307,6 +307,8 @@ impl Tui {
             .editor
             .seed_history(history_of(&self.core.store, &root));
         self.ui.at_root = root;
+        // The row's checkout follows the root now, not on the next look.
+        self.look_project();
     }
 
     // Brings the screen into step after a lane switch: parks the old
@@ -433,6 +435,18 @@ impl Tui {
                 self.notice(format!("statusline set aside: {why}"));
             }
         }
+    }
+
+    // Runs `git` only for a layout that draws the checkout, or a script that
+    // may read it from `PI_FACTS`.
+    fn look_project(&mut self) {
+        let layout = &self.ui.layout;
+        let wanted = layout.uses(pi_store::statusline::Field::Project) || layout.scripted();
+        self.ui.project = if wanted {
+            statusline::project_of(self.core.lane().root())
+        } else {
+            None
+        };
     }
 
     // The catalog's answer, when one has come: a poll on a channel, so it costs
@@ -768,14 +782,7 @@ impl Tui {
             if looked.elapsed() >= std::time::Duration::from_secs(1) {
                 looked = std::time::Instant::now();
                 self.refresh_files();
-                // Two `git` calls: only for a layout that draws the checkout,
-                // or a script that may read it from `PI_FACTS`.
-                let layout = &self.ui.layout;
-                self.ui.project =
-                    match layout.uses(pi_store::statusline::Field::Project) || layout.scripted() {
-                        true => statusline::project_of(self.core.lane().root()),
-                        false => None,
-                    };
+                self.look_project();
                 self.reload_statusline();
                 self.save_shown();
             }
