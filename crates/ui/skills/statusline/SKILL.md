@@ -65,8 +65,8 @@ A missing `style` is muted.
 `project` `elapsed` `in_out` `speed` `cache` `cost` `ctx` `compacted` `queued`
 `worktree`
 
-- `project` — the branch, then the lines the worktree added and removed, in a
-  diff's own colours.
+- `project` — the checkout directory's name, then, inside a repository, the
+  branch and the lines the worktree added and removed, in a diff's own colours.
 - `state` — `idle`, `working`, `compacting`, `stopping`, or a retry it waits
   out. Always says something.
 - `session` — what the user calls this session, else the first thing it was
@@ -125,9 +125,10 @@ A script item carries exactly one of `command` or `name`.
     `failed`, `plain`, `unopened`);
   - `jobs` — background executions: `running`, `back` (ended with results
     waiting), `stopped`, `exited`;
-  - `project` — `branch`, `added`, `removed`.
-- A value the row leaves out is `null`; `session` and `project` are absent
-  rather than null outside a lane and outside a repository.
+  - `project` — `name`, then `branch`, `added`, `removed` inside a repository;
+    `branch` is `null` outside one.
+- A value the row leaves out is `null`; `session` is absent rather than null
+  outside a lane.
 
 The statusline redraws from the last answer, so a slow script never stalls the
 screen.

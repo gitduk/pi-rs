@@ -172,11 +172,12 @@ pub fn may_run_scripts(ceiling: tool::Tier) -> bool {
     tool::Tier::Exec.under(ceiling)
 }
 
-/// What a checkout is doing: the branch in front, and the lines its worktree
-/// has added and removed against `HEAD`.
+/// What a checkout is: the directory's own name, then, inside a repository,
+/// the branch and the lines its worktree has added and removed against `HEAD`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Project {
-    pub branch: String,
+    pub name: String,
+    pub branch: Option<String>,
     pub added: u64,
     pub removed: u64,
 }
@@ -369,7 +370,8 @@ pub enum Field {
     /// What the user calls the session, else the first thing it was asked;
     /// absent until one of the two exists.
     Session,
-    /// The checkout: its branch, and what the worktree has changed.
+    /// The checkout: its directory name, its branch, and what the worktree
+    /// has changed.
     Project,
     /// The clock of the run in flight, or of the one that last ended.
     Elapsed,

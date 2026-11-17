@@ -332,9 +332,10 @@ impl Facts {
     }
 }
 
-// The checkout as the `project` field draws it: the branch in front, and the
-// lines its worktree has changed against `HEAD`. Absent outside a repository.
+// The checkout the `project` field draws: the directory's own name, then, in a
+// repository, the branch and the worktree's lines against `HEAD`.
 pub(super) fn project_of(root: &std::path::Path) -> Option<statusline::Project> {
+    let name = root.file_name()?.to_string_lossy().into_owned();
     let git = |args: &[&str]| -> Option<String> {
         let out = std::process::Command::new("git")
             .arg("--no-optional-locks")
@@ -346,18 +347,24 @@ pub(super) fn project_of(root: &std::path::Path) -> Option<statusline::Project> 
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
-    let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+    // `symbolic-ref` still names the branch where `rev-parse` cannot resolve a
+    // `HEAD` with no commit behind it; only a detached head reaches the latter.
+    let branch = git(&["symbolic-ref", "--short", "HEAD"])
+        .or_else(|| git(&["rev-parse", "--abbrev-ref", "HEAD"]));
     let mut added = 0;
     let mut removed = 0;
-    for line in git(&["diff", "--numstat", "HEAD"])
-        .unwrap_or_default()
-        .lines()
-    {
-        let mut cols = line.split('\t');
-        added += cols.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
-        removed += cols.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+    if branch.is_some() {
+        for line in git(&["diff", "--numstat", "HEAD"])
+            .unwrap_or_default()
+            .lines()
+        {
+            let mut cols = line.split('\t');
+            added += cols.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+            removed += cols.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+        }
     }
     Some(statusline::Project {
+        name,
         branch,
         added,
         removed,
@@ -708,13 +715,15 @@ impl Ui {
         (!spans.is_empty() && (parts == 0 || said > 0)).then_some(spans)
     }
 
-    // The checkout: the branch, then what changed, in the diff's own colours.
+    // The checkout: its name and branch, then what changed, in the diff's own
+    // colours.
     fn project_spans(&self, look: &Look) -> Option<Vec<Span<'static>>> {
         let project = self.project.as_ref()?;
-        let mut spans = vec![
-            self.paint
-                .span(self.tone(look).as_ref(), project.branch.clone()),
-        ];
+        let named = match &project.branch {
+            Some(branch) => format!("{} {branch}", project.name),
+            None => project.name.clone(),
+        };
+        let mut spans = vec![self.paint.span(self.tone(look).as_ref(), named)];
         if project.added + project.removed > 0 {
             spans.push(self.paint.span(&self.paint.theme.muted, " "));
             if project.added > 0 {
