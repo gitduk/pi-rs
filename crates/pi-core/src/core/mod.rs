@@ -25,6 +25,7 @@ pub mod resolve;
 pub mod saves;
 pub mod settings;
 pub mod shells;
+pub mod shield;
 mod skill_paths;
 pub mod status;
 pub mod statusline;
@@ -395,6 +396,7 @@ impl Core {
                 Step::Handled(help(self.commands(), &self.lane().agent().brief.registry))
             }
             Builtin::Status => Step::Handled(self.status()),
+            Builtin::Shield => Step::Handled(shield::listing()),
             Builtin::Context(arg) => Step::Handled(self.context(&arg)),
             // Bare, it is asked; with a level, a change the surface shows.
             Builtin::Effort(arg) if arg.trim().is_empty() => {

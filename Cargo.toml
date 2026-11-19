@@ -43,6 +43,7 @@ globset = "0.4"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 clap = { version = "4", features = ["derive", "env"] }
+sha2 = "0.10"
 
 [profile.release]
 strip = true

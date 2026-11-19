@@ -1,8 +1,37 @@
 //! What a surface knows of a tool by its name, so it never names one itself.
 
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+use pi_store::config;
 use tool::Tier;
+
+/// Project directories before pi's own, each with whether it is the checkout's:
+/// what a run reads comes from the checkout first.
+pub fn project_first(project: Option<&PathBuf>, home: Option<PathBuf>) -> Vec<(PathBuf, bool)> {
+    let project = project.map(|dir| (dir.clone(), true));
+    project
+        .into_iter()
+        .chain(home.map(|dir| (dir, false)))
+        .collect()
+}
+
+/// Whether two directories are the one directory, seen from different routes:
+/// a home that is the checkout's own `.pi` would otherwise be read twice.
+pub fn same_dir(a: &Path, b: &Path) -> bool {
+    a.canonicalize()
+        .ok()
+        .is_some_and(|a| b.canonicalize().ok() == Some(a))
+}
+
+/// The directories a named kind of file is read from — tools, skills — each
+/// with whether it is the checkout's own.
+pub fn dirs(workspace: &Path, name: &str) -> Vec<(PathBuf, bool)> {
+    let home = pi_store::dir().map(|root| root.join(name));
+    let project = config::project_dir(workspace, name)
+        .filter(|dir| !home.as_deref().is_some_and(|home| same_dir(dir, home)));
+    project_first(project.as_ref(), home)
+}
 
 /// Whether the tool `name` changes files. What it changed is the result, so
 /// a surface shows it whole rather than in brief.

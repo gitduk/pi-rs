@@ -264,6 +264,11 @@ pub fn resolve(
 ) -> Result<Resolved> {
     let root = workspace.root();
     let mut notes = Vec::new();
+    // A reload reads the files and the scripts again, so what they name is
+    // added to the set the wires mask with from their next request on.
+    if !super::dial::arm(super::shield::find(root, config)) {
+        notes.push("shield off — no key to name values by, so nothing is masked".to_string());
+    }
     // Before any of it is read, so a write landing meanwhile reads as a change.
     let read_from = watched(pinned, root);
 
@@ -271,23 +276,13 @@ pub fn resolve(
     let models = Arc::new(super::models::Models::new(config));
     let mut registry = pi_tools::builtin();
     registry.read(models.clone());
-    // Whether two directories are the one directory, seen from different
-    // routes: a home that is the checkout's own `.pi` would otherwise be read
-    // twice and every skill and script in it reported as colliding with itself.
-    let same = |a: &Path, b: &Path| {
-        a.canonicalize()
-            .ok()
-            .is_some_and(|a| b.canonicalize().ok() == Some(a))
-    };
     // Read live, like the scripts: a skill written while pi runs can be loaded
     // on the next turn, and typed once `Core::refresh_skills` has seen it.
-    let home_skills = pi_store::dir().map(|pi| pi.join("skills"));
-    let project_skills = config::project_dir(root, "skills")
-        .filter(|dir| !home_skills.as_deref().is_some_and(|home| same(dir, home)));
-    let skill_dirs: Vec<PathBuf> = project_first(project_skills.as_ref(), home_skills)
-        .into_iter()
-        .map(|(dir, _)| dir)
-        .collect();
+    let shelf_dirs = super::tools::dirs(root, "skills");
+    let project_skills = (shelf_dirs.iter())
+        .find(|(_, project)| *project)
+        .map(|(dir, _)| dir.clone());
+    let skill_dirs: Vec<PathBuf> = shelf_dirs.into_iter().map(|(dir, _)| dir).collect();
     let shelf = (!pinned.no_skills).then(|| {
         let shelf = skills::Shelf::new(skill_dirs);
         let builtins = [ARCHITECTURE];
@@ -333,17 +328,19 @@ pub fn resolve(
 
     // Read live: a script written while pi runs is a tool from the next turn,
     // the checkout's directory too, though it is not there yet.
-    let home_tools = pi_store::dir().map(|root| root.join("tools"));
-    let project_tools = config::project_dir(root, "tools")
-        .filter(|dir| !home_tools.as_deref().is_some_and(|home| same(dir, home)));
-    let script_dirs: Vec<(Arc<pi_tools::scripts::Dir>, bool)> =
-        project_first(project_tools.as_ref(), home_tools)
-            .into_iter()
-            .map(|(dir, project)| {
-                notes.extend(pi_tools::scripts::env::loose(&dir));
-                (Arc::new(pi_tools::scripts::Dir::new(dir)), project)
-            })
-            .collect();
+    let dirs = super::tools::dirs(root, "tools");
+    // Where a checkout's own tools belong, as the prompt names it: nothing
+    // when that directory is pi's own, which the prompt already says.
+    let project_tools = (dirs.iter())
+        .find(|(_, project)| *project)
+        .map(|(dir, _)| dir.clone());
+    let script_dirs: Vec<(Arc<pi_tools::scripts::Dir>, bool)> = dirs
+        .into_iter()
+        .map(|(dir, project)| {
+            notes.extend(pi_tools::scripts::env::loose(&dir));
+            (Arc::new(pi_tools::scripts::Dir::new(dir)), project)
+        })
+        .collect();
     let mut project_scripts = Vec::new();
     let mut named = std::collections::BTreeSet::new();
     for (scripts, project) in &script_dirs {
@@ -603,20 +600,10 @@ fn pi_usage() -> skills::Skill {
         )
 }
 
-/// The checkout's directories before the home's, so a name both use is the
-/// project's — skill and script alike. The reason to keep something in a
-/// checkout is that it belongs to that tree, and what is general must not
-/// shadow it.
-fn project_first(project: Option<&PathBuf>, home: Option<PathBuf>) -> Vec<(PathBuf, bool)> {
-    let project = project.map(|dir| (dir.clone(), true));
-    project
-        .into_iter()
-        .chain(home.map(|dir| (dir, false)))
-        .collect()
-}
-
-/// The config files a resolve in `root` reads, as they stand now. Missing
-/// ones are left out, so one appearing is a change too.
+/// The files a resolve in `root` reads, as they stand now: missing ones are
+/// left out, so one appearing is a change too. A script's `.env` is here
+/// because its wrapper reads it per call, so an edit takes effect without a
+/// restart — and what it now holds has to reach the shield.
 pub fn watched(pinned: &Pinned, root: &Path) -> Vec<Stamp> {
     let mut paths: Vec<PathBuf> = Vec::new();
     paths.extend(
@@ -627,6 +614,11 @@ pub fn watched(pinned: &Pinned, root: &Path) -> Vec<Stamp> {
             .or_else(config::global_path),
     );
     paths.extend(config::project_file(root));
+    paths.extend(
+        (super::tools::dirs(root, "tools"))
+            .into_iter()
+            .map(|(dir, _)| dir.join(pi_tools::scripts::env::FILE)),
+    );
     paths.into_iter().filter_map(tool::stamp::of).collect()
 }
 
@@ -772,6 +764,21 @@ fn endpoint(pinned: &Pinned) -> Option<String> {
 mod tests {
     use std::path::PathBuf;
 
+    // A script's `.env` is read by its wrapper on every call, so an edit has
+    // to reach the shield the same turn: watching it is what makes a reload
+    // happen at all, and a reload is what arms the new value.
+    #[test]
+    fn a_script_env_file_is_watched() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let env = root.join(".pi/tools/.env");
+        std::fs::create_dir_all(env.parent().unwrap()).unwrap();
+        std::fs::write(&env, "TOKEN=1234567890abcdef\n").unwrap();
+
+        let stamps = super::watched(&crate::args::Pinned::default(), &root);
+        assert!(stamps.iter().any(|(path, ..)| *path == env), "{stamps:?}");
+    }
+
     #[test]
     fn the_prompt_names_the_project_directory_used_for_discovery() {
         let temp = tempfile::tempdir().unwrap();
@@ -856,14 +863,14 @@ mod tests {
         let project = PathBuf::from("/repo/.pi/skills");
         let home = Some(PathBuf::from("/home/u/.pi/skills"));
         assert_eq!(
-            super::project_first(Some(&project), home.clone()),
+            crate::core::tools::project_first(Some(&project), home.clone()),
             [
                 (PathBuf::from("/repo/.pi/skills"), true),
                 (PathBuf::from("/home/u/.pi/skills"), false)
             ]
         );
         assert_eq!(
-            super::project_first(None, home),
+            crate::core::tools::project_first(None, home),
             [(PathBuf::from("/home/u/.pi/skills"), false)],
             "no project directory, the home alone"
         );

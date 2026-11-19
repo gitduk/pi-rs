@@ -236,6 +236,9 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
         true => catalog.enrich(&settings, &pinned, config)?,
         false => config,
     });
+    // Before the first wire is made: what the files and the scripts name is
+    // what no request leaves with. A resolution arms it again on reload.
+    core::dial::arm(core::shield::find(workspace.root(), &config));
     let (named, named_by) = config
         .model(args.model.as_deref(), resume_model, from_project)
         .ok_or_else(|| {
