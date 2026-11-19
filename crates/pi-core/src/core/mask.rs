@@ -34,14 +34,14 @@ pub fn find(workspace: &Path, config: &config::Config) -> Option<Found> {
 
 // A value this short matches more prose than secret: a stub key would cover
 // every word that holds it.
-fn long_enough(value: &str) -> bool {
-    value.chars().count() >= MIN
+fn long_enough(value: &str, floor: usize) -> bool {
+    value.chars().count() >= floor
 }
 
 fn values_of(dirs: &[PathBuf], config: &config::Config) -> Vec<(String, Tier, String)> {
     let mut values: Vec<(String, Tier, String)> = Vec::new();
     for value in config.keys() {
-        if long_enough(&value) {
+        if long_enough(&value, MIN) {
             values.push(("API_KEY".to_string(), Tier::Named, value));
         }
     }
@@ -52,18 +52,28 @@ fn values_of(dirs: &[PathBuf], config: &config::Config) -> Vec<(String, Tier, St
     }
     for dir in dirs {
         for (name, value) in pi_tools::scripts::env::read(dir) {
-            if shapes_a_secret(&value) {
-                values.push((label_of(&name), Tier::Guessed, value));
+            // A name says what a value is, so half the proof a shape needs
+            // will do.
+            if !long_enough(&value, MIN / 2) {
+                continue;
+            }
+            // A variable named for a credential is the owner's word, whatever
+            // its value; the shape rule is for the ones that say nothing.
+            if let Some(kind) = credential_kind(&name) {
+                values.push((kind, Tier::Named, value));
+            } else if shapes_a_secret(&value) {
+                values.push(("SECRET".to_string(), Tier::Guessed, value));
             }
         }
     }
     values
 }
 
-// A `.env` holds settings beside keys, so a value has to look like one: mixed
-// letters and digits, or long enough that no word reaches it.
+// A `.env` holds settings beside keys, so a value whose name says nothing has
+// to look like one: mixed letters and digits, or long enough that no word
+// reaches it.
 fn shapes_a_secret(value: &str) -> bool {
-    if !long_enough(value) {
+    if !long_enough(value, MIN) {
         return false;
     }
     let digit = value.chars().any(|c| c.is_ascii_digit());
@@ -71,12 +81,13 @@ fn shapes_a_secret(value: &str) -> bool {
     (digit && letter) || value.chars().count() >= 16
 }
 
-// The kind a variable's own name says it is, so the token reads `{{PI_TOKEN_…}}`.
-fn label_of(name: &str) -> String {
+// The kind a variable's own name says it is, when it says one: the token then
+// reads `{{PI_TOKEN_…}}`, and the listing knows the owner named it.
+fn credential_kind(name: &str) -> Option<String> {
     let last = name.rsplit('_').next().unwrap_or(name).to_ascii_uppercase();
     match last.as_str() {
-        "KEY" | "TOKEN" | "SECRET" | "PASSWORD" | "PASSWD" | "CREDENTIALS" => last,
-        _ => "SECRET".to_string(),
+        "KEY" | "TOKEN" | "SECRET" | "PASSWORD" | "PASSWD" | "CREDENTIALS" => Some(last),
+        _ => None,
     }
 }
 
@@ -132,7 +143,7 @@ fn rows(prints: Vec<Footprint>) -> Listing {
             Row::new([
                 pi_store::text::pad(print.bare(), widest),
                 match print.tier {
-                    Tier::Named => "config".to_string(),
+                    Tier::Named => "named".to_string(),
                     Tier::Guessed => "shape".to_string(),
                 },
                 print.len.to_string(),
@@ -193,7 +204,6 @@ mod tests {
             let note = row.note.as_deref().expect("a note");
             assert!(!row.cells[0].contains("{{"), "{row:?}");
             assert!(note.starts_with(&print.head), "{row:?}");
-            assert_eq!(row.cells[1], "config", "{row:?}");
             assert_eq!(row.cells[2], print.len.to_string(), "{row:?}");
             assert_eq!(row.cells[3], print.hits.to_string(), "{row:?}");
         }
@@ -281,7 +291,8 @@ mod tests {
         std::fs::create_dir_all(&tools).expect("the tools directory");
         std::fs::write(
             tools.join(".env"),
-            "TELEGRAM_BOT_TOKEN=123456:AAbbCCddEEffGG\nMODE=production\nDEBUG=1\n",
+            "TELEGRAM_BOT_TOKEN=123456:AAbbCCddEEffGG\nPASSWD=123456\nSHORT_KEY=ab\n\
+             MODE=production\nDEBUG=1\n",
         )
         .expect("the env file");
         let config = config(
@@ -298,11 +309,24 @@ mod tests {
             }
         }
         let text = "key sk-up-0123456789 bot 123456:AAbbCCddEEffGG \
-                    pass hunter2-the-password mode production debug 1";
+                    pass hunter2-the-password six 123456 mode production debug 1";
         let covered = mask.cover(text);
         assert!(!covered.contains("sk-up-0123456789"), "{covered}");
         assert!(!covered.contains("AAbbCCddEEffGG"), "{covered}");
         assert!(!covered.contains("hunter2-the-password"), "{covered}");
+        // Six digits are a password when the name says so, and nothing when
+        // it does not.
+        assert!(!covered.contains("six 123456"), "{covered}");
+        let prints = mask.footprints();
+        let named = prints
+            .iter()
+            .find(|print| print.head.starts_with("1234"))
+            .expect("the password's token");
+        assert_eq!(named.tier, Tier::Named, "a named variable is not a guess");
+        assert!(
+            !prints.iter().any(|print| print.head == "ab"),
+            "two characters are left alone: {prints:?}"
+        );
         assert!(covered.contains("mode production"), "{covered}");
         assert!(covered.contains("debug 1"), "{covered}");
         assert_eq!(mask.restore(&covered), text);
