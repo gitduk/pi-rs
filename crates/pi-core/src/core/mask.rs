@@ -32,14 +32,21 @@ pub fn find(workspace: &Path, config: &config::Config) -> Option<Found> {
     })
 }
 
-// What the owner named is taken as given, however short: it is their
-// decision. A `.env` holds settings beside keys, so only what looks like one
-// is taken from there.
+// A value this short matches more prose than secret: a stub key would cover
+// every word that holds it.
+fn long_enough(value: &str) -> bool {
+    value.chars().count() >= MIN
+}
+
 fn values_of(dirs: &[PathBuf], config: &config::Config) -> Vec<(String, Tier, String)> {
     let mut values: Vec<(String, Tier, String)> = Vec::new();
     for value in config.keys() {
-        values.push(("API_KEY".to_string(), Tier::Named, value));
+        if long_enough(&value) {
+            values.push(("API_KEY".to_string(), Tier::Named, value));
+        }
     }
+    // A listed secret is the owner saying it must not leave, whatever it
+    // looks like: the shape rules are why the list exists.
     for value in config.secrets() {
         values.push(("SECRET".to_string(), Tier::Named, value));
     }
@@ -56,12 +63,12 @@ fn values_of(dirs: &[PathBuf], config: &config::Config) -> Vec<(String, Tier, St
 // A `.env` holds settings beside keys, so a value has to look like one: mixed
 // letters and digits, or long enough that no word reaches it.
 fn shapes_a_secret(value: &str) -> bool {
-    if value.len() < MIN {
+    if !long_enough(value) {
         return false;
     }
     let digit = value.chars().any(|c| c.is_ascii_digit());
     let letter = value.chars().any(|c| c.is_ascii_alphabetic());
-    (digit && letter) || value.len() >= 16
+    (digit && letter) || value.chars().count() >= 16
 }
 
 // The kind a variable's own name says it is, so the token reads `{{PI_TOKEN_…}}`.
@@ -85,7 +92,8 @@ fn listing_of(prints: Option<Vec<Footprint>>) -> Listing {
         // read as "the run had nothing to hide".
         None => Listing::say(["masking is off — there is no key to name values by"]),
         Some(prints) if prints.is_empty() => Listing::say([
-            "nothing to mask — no key, no listed secret and no script credential was found",
+            "nothing to mask — no key long enough, no listed secret and no script credential \
+             was found",
         ]),
         Some(prints) => rows(prints),
     }
@@ -222,6 +230,25 @@ mod tests {
         assert!(
             summary.cells[3].starts_with(&sent.to_string()),
             "{summary:?}"
+        );
+    }
+
+    // A connection's stub key is no secret and is left alone; a listed secret
+    // is the owner's word however short it is, and the floor keeps its edge.
+    #[test]
+    fn a_stub_key_is_skipped_while_a_listed_secret_is_taken_as_written() {
+        let kept = "k".repeat(MIN);
+        let config = config(&format!(
+            "secrets = [\"abcd\"]\n\
+             [provider.up]\nbase_url = \":3425/v1\"\nformat = \"chat\"\napi_key = \"z\"\n\
+             [provider.down]\nbase_url = \":3426/v1\"\nformat = \"chat\"\napi_key = \"{kept}\"\n",
+        ));
+        assert_eq!(
+            values_of(&[], &config),
+            vec![
+                ("API_KEY".to_string(), Tier::Named, kept),
+                ("SECRET".to_string(), Tier::Named, "abcd".to_string()),
+            ]
         );
     }
 
