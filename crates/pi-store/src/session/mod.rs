@@ -179,6 +179,7 @@ pub fn key_of(path: &Path) -> String {
 const TRANSCRIPT: &str = file::FILE;
 const LOCK: &str = ".lock";
 const BACKGROUND: &str = "background.json";
+const HISTORY: &str = "history";
 
 /// One session held by this process; the system lets go if pi dies.
 pub struct Claim {
@@ -227,6 +228,7 @@ fn discard_unsaved(dir: &Path) {
     if !dir.join(TRANSCRIPT).exists() {
         let _ = std::fs::remove_file(dir.join(file::WRITE_LOCK));
         let _ = std::fs::remove_file(dir.join(LOCK));
+        let _ = std::fs::remove_file(dir.join(HISTORY));
         if std::fs::remove_dir(dir).is_ok()
             && let Some(workspace) = dir.parent()
         {
@@ -241,7 +243,7 @@ pub(crate) fn held(dir: &Path) -> bool {
     std::fs::File::open(dir.join(LOCK)).is_ok_and(|f| f.try_lock().is_err())
 }
 
-// Each session owns one data file; other bucket entries are diagnostics or history.
+// Each session owns one data file; other bucket entries are diagnostics.
 fn bucket_locations(bucket: &Path) -> Vec<Location> {
     std::fs::read_dir(bucket)
         .into_iter()
@@ -278,13 +280,22 @@ impl Store {
         crate::statusline::Shown::read(&self.session_dir(workspace, id))
     }
 
-    /// What `k` recalls in this workspace, kept beside the transcripts
-    /// since it answers to the same key and expires with them.
-    ///
-    /// Per workspace, not per session: what you're reaching back for is
-    /// usually something typed in an earlier session.
-    pub fn history_path(&self, workspace: &Path) -> PathBuf {
-        self.dir_of(workspace).join("history")
+    /// What `k` recalls in this session, beside its transcript: recall is
+    /// what was said here, and another session in the same checkout is not.
+    pub fn history_path(&self, workspace: &Path, id: &str) -> PathBuf {
+        self.session_dir(workspace, id).join(HISTORY)
+    }
+
+    /// Forget the recall a checkout once kept for all its sessions: recall is
+    /// filed per session now. Delete this once 2026-12 has passed.
+    pub fn drop_stale_history(&self) {
+        if let Some(old) = crate::dir().map(|dir| dir.join(HISTORY)) {
+            let _ = std::fs::remove_file(&old);
+            let _ = std::fs::remove_dir_all(&old);
+        }
+        for bucket in self.buckets() {
+            let _ = std::fs::remove_file(bucket.join(HISTORY));
+        }
     }
 
     /// Where a session's background commands wait for the pi that opens it

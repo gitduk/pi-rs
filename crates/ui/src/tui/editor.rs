@@ -15,6 +15,8 @@ pub struct Editor {
     // Byte offset of the caret. Always on a grapheme boundary.
     cursor: usize,
     history: Vec<String>,
+    // The session this list belongs to; recall is a session's own.
+    owner: Option<String>,
     // Where Up/Down currently sit. `history.len()` means the line being typed.
     at: usize,
     // The line being typed, parked while history is being browsed.
@@ -56,9 +58,9 @@ impl Editor {
         &self.history
     }
 
-    /// Seed recall from `lines`, oldest first; a repeated line keeps only its
-    /// latest place.
-    pub fn seed_history(&mut self, lines: Vec<String>) {
+    /// Seed recall with `lines`, read for the session `owner`: oldest first,
+    /// a repeated line keeping its latest place, and written back there.
+    pub fn seed_history(&mut self, owner: String, lines: Vec<String>) {
         let mut seen = std::collections::HashSet::new();
         let mut kept: Vec<String> = lines
             .into_iter()
@@ -67,7 +69,13 @@ impl Editor {
             .collect();
         kept.reverse();
         self.history = kept;
+        self.owner = Some(owner);
         self.at = self.history.len();
+    }
+
+    /// The session this list belongs to; nothing is filed without one.
+    pub fn owner(&self) -> Option<&str> {
+        self.owner.as_deref()
     }
 
     pub fn clear(&mut self) {
@@ -861,7 +869,10 @@ mod tests {
             e.remember(line);
         }
         assert_eq!(e.history, ["b", "a"]);
-        e.seed_history(vec!["x".into(), "y".into(), "x".into(), "y".into()]);
+        e.seed_history(
+            "s1".into(),
+            vec!["x".into(), "y".into(), "x".into(), "y".into()],
+        );
         assert_eq!(
             e.history,
             ["x", "y"],

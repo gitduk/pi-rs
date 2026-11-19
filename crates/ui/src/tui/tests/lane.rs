@@ -10,37 +10,55 @@ use pi_store::listing::Listing;
 
 use super::harness::*;
 
-// Recall belongs to the checkout, like transcripts and completion lists:
-// one shared file would leak lines from one project into `k` in another.
+// Recall belongs to the session, like its transcript: another session in
+// the same checkout keeps its own lines out of this one's `k`.
 #[tokio::test]
-async fn recall_follows_the_checkout() {
-    let first = tempfile::tempdir().expect("a checkout");
-    let second = tempfile::tempdir().expect("another checkout");
-    let mut tui = surface(first.path());
+async fn recall_belongs_to_the_session() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
 
     let store = tui.core.store.clone();
-    let file = |ws: &std::path::Path, line: &str| {
-        let path = store.history_path(ws);
-        std::fs::create_dir_all(path.parent().expect("a bucket")).expect("the bucket");
-        std::fs::write(path, crate::tui::editor::encode(&[line.to_string()])).expect("written");
-    };
-    file(first.path(), "what the first was asked");
-    file(second.path(), "what the second was asked");
+    filed_recall(&store, dir.path(), "s1", "what the first was asked");
+    filed_recall(&store, dir.path(), "s2", "what the second was asked");
 
     // `on_test_screen` skips the startup seed `Tui::new` does, so this
-    // stands in for it: a switch must replace it, not re-read the old bucket.
+    // stands in for it: a switch must replace it, not re-read the old session.
     tui.ui
         .editor
-        .seed_history(vec!["what the first was asked".to_string()]);
-    switch_to(&mut tui, running_lane(second.path()));
+        .seed_history("s1".into(), vec!["what the first was asked".to_string()]);
+    switch_to(&mut tui, running_lane_as(dir.path(), "s2"));
 
     let landed = tui.ui.editor.history();
     assert_eq!(
         landed.first().map(String::as_str),
         Some("what the second was asked"),
-        "the lane in front is what k recalls"
+        "the session in front is what k recalls"
     );
     assert_eq!(landed.len(), 1, "replaced, not appended: {landed:?}");
+    assert_eq!(tui.ui.editor.owner(), Some("s2"));
+}
+
+// `/new` and `/resume` give the lane in front another session without moving
+// it: recall follows the session, not the switch.
+#[tokio::test]
+async fn recall_follows_a_session_the_lane_stayed_for() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let store = tui.core.store.clone();
+    filed_recall(&store, dir.path(), "s1", "asked in s1");
+    // A list read for a session this lane no longer holds, as `/new` leaves.
+    tui.ui
+        .editor
+        .seed_history("left behind".into(), vec!["asked elsewhere".to_string()]);
+
+    let was = tui.core.lanes.front();
+    tui.reconcile(was);
+
+    assert_eq!(
+        tui.ui.editor.history(),
+        ["asked in s1"],
+        "the lane's own session is what k recalls"
+    );
 }
 
 // A flash belongs to the lane it answered: carried across a switch it
@@ -735,7 +753,7 @@ async fn a_draft_is_parked_on_the_lane_it_was_typed_at_and_comes_back() {
     tui.ui.editor.set_line("half a thought meant for this lane");
 
     let was = tui.core.lanes.front();
-    switch_to(&mut tui, running_lane(second.path()));
+    switch_to(&mut tui, running_lane_as(second.path(), "s2"));
 
     assert_eq!(
         view_at(&mut tui.views, tui.core.lanes[was].token()).draft,
@@ -762,6 +780,29 @@ async fn a_draft_is_parked_on_the_lane_it_was_typed_at_and_comes_back() {
     );
 }
 
+// What a line files is the list's own session, at that session's path, and
+// nothing of another session's.
+#[tokio::test]
+async fn a_typed_line_is_filed_under_the_session_it_belongs_to() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let store = tui.core.store.clone();
+    filed_recall(&store, dir.path(), "s2", "not mine");
+
+    tui.ui.editor.seed_history("s1".into(), Vec::new());
+    tui.ui.editor.remember("half a thought");
+    tui.save_history();
+
+    let mine = std::fs::read_to_string(store.history_path(dir.path(), "s1")).expect("s1's list");
+    assert_eq!(crate::tui::editor::decode(&mine), ["half a thought"]);
+    let other = std::fs::read_to_string(store.history_path(dir.path(), "s2")).expect("s2's list");
+    assert_eq!(
+        crate::tui::editor::decode(&other),
+        ["not mine"],
+        "another session's list is left alone"
+    );
+}
+
 // Up browsing recall puts the composed line aside and shows a recalled
 // one; switching then must park the composed line, not the recall.
 #[tokio::test]
@@ -771,13 +812,14 @@ async fn a_switch_mid_recall_keeps_the_line_being_typed() {
     let mut tui = surface(first.path());
     tui.ui
         .editor
-        .seed_history(vec!["an older prompt".to_string()]);
+        .seed_history("s1".into(), vec!["an older prompt".to_string()]);
     tui.ui.editor.set_line("half a thought meant for this lane");
     tui.ui.editor.up();
     assert_eq!(tui.ui.editor.text(), "an older prompt");
 
     let was = tui.core.lanes.front();
-    switch_to(&mut tui, running_lane(second.path()));
+    // Another session, not just another checkout: the switch must rebind.
+    switch_to(&mut tui, running_lane_as(second.path(), "s2"));
 
     assert_eq!(
         view_at(&mut tui.views, tui.core.lanes[was].token()).draft,

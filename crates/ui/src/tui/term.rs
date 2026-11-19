@@ -166,18 +166,11 @@ pub(super) fn scratch_file(text: &str) -> std::io::Result<std::path::PathBuf> {
     Ok(path)
 }
 
-// What this run recalls in `workspace`, or nothing.
-pub(super) fn history_of(store: &Store, workspace: &std::path::Path) -> Vec<String> {
-    std::fs::read_to_string(store.history_path(workspace))
+// What this session recalls in `workspace`, or nothing.
+pub(super) fn history_of(store: &Store, workspace: &std::path::Path, id: &str) -> Vec<String> {
+    std::fs::read_to_string(store.history_path(workspace, id))
         .map(|prior| super::editor::decode(&prior))
         .unwrap_or_default()
-}
-
-pub(super) fn drop_shared_history() {
-    if let Some(old) = pi_store::dir().map(|d| d.join("history")) {
-        let _ = std::fs::remove_file(&old);
-        let _ = std::fs::remove_dir_all(&old);
-    }
 }
 
 // Enough to recall from without the file growing without bound.

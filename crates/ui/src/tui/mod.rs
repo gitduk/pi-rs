@@ -49,7 +49,7 @@ use std::sync::Arc;
 use crate::theme::following_terminal;
 use menu::Lists;
 use run::Replies;
-use term::{HISTORY_KEEP, Hold, drop_shared_history, history_of, reader};
+use term::{HISTORY_KEEP, Hold, history_of, reader};
 use ui::{Mark, Tab, Ui, lane_name};
 use view::{Pending, Queued, View, Views, front_view, prune_views, view_at};
 
@@ -220,11 +220,7 @@ impl Tui {
         ui.editor.insert_str(&answer.typed);
         ui.at_root = core.lane().root().to_path_buf();
         ui.set_vim(&core.config().vim);
-        drop_shared_history();
-        {
-            let lines = history_of(&core.store, core.lane().root());
-            ui.editor.seed_history(lines);
-        }
+        core.store.drop_stale_history();
         // Every lane, not just the front: a restart carries them all over.
         let mut views = Views::new();
         for lane in core.lanes.all() {
@@ -247,6 +243,7 @@ impl Tui {
         if let Some(line) = last {
             tui.restarted(&line);
         }
+        tui.follow_recall();
         // Before the first frame: the row the last run left behind. The
         // numbers it ended on came with the session, when this pi took it up.
         tui.reload_statusline();
@@ -286,8 +283,12 @@ impl Tui {
     }
 
     // Best effort: losing a recall list is not worth a message on the way out.
+    // Filed under the session the list was read for, not whatever is in front.
     fn save_history(&self) {
-        let path = self.core.store.history_path(self.core.lane().root());
+        let Some(id) = self.ui.editor.owner() else {
+            return;
+        };
+        let path = self.core.store.history_path(self.core.lane().root(), id);
         let all = self.ui.editor.history();
         let keep = &all[all.len().saturating_sub(HISTORY_KEEP)..];
         if let Some(dir) = path.parent() {
@@ -296,25 +297,34 @@ impl Tui {
         let _ = tool::state::write_private(&path, editor::encode(keep).as_bytes());
     }
 
+    // Recall follows the session in front, which can change without the lane
+    // moving: asked here, every time.
+    fn follow_recall(&mut self) {
+        let lane = self.core.lane();
+        if self.ui.editor.owner() == Some(lane.id()) {
+            return;
+        }
+        // The list being replaced is already on disk: `save_history` runs on submit.
+        let lines = history_of(&self.core.store, lane.root(), lane.id());
+        self.ui.editor.seed_history(lane.id().to_string(), lines);
+    }
+
     // What the input keys on the root goes where the lane in front is now.
     fn follow_root(&mut self) {
         let root = self.core.lane().root().to_path_buf();
         self.ui.lists.at(&root);
         self.ui.at_menu = None;
-        // Recall follows the checkout like the lists do; the line just
-        // typed is already filed (`save_history` ran while still in front).
-        self.ui
-            .editor
-            .seed_history(history_of(&self.core.store, &root));
         self.ui.at_root = root;
         // The row's checkout follows the root now, not on the next look.
         self.look_project();
     }
 
-    // Brings the screen into step after a lane switch: parks the old
-    // lane's draft, restores the new one's, follows lists, replays news.
+    // Brings the screen into step after a change: parks the old lane's
+    // draft, restores the new one's, follows lists, replays news.
     fn reconcile(&mut self, was: usize) {
         if was == self.core.lanes.front() {
+            // `/new` and `/resume` hand the lane in front another session.
+            self.follow_recall();
             return;
         }
         self.ui
@@ -322,6 +332,9 @@ impl Tui {
         let parked = std::mem::take(&mut front_view(&mut self.views, self.core.lane()).draft);
         self.ui.editor.set_line(&parked);
         self.follow_root();
+        // Parked first: reseeding `at` makes `take_composing` hand back the
+        // recalled line instead of the one being typed.
+        self.follow_recall();
         self.adopt_view();
         // A newly opened lane has no banner yet. Nothing reads the screen
         // here — the events below ask for it again, in their own lane.

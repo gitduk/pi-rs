@@ -87,6 +87,10 @@ pub(super) fn a_running_lane() -> (tempfile::TempDir, Lane) {
 }
 
 pub(super) fn running_lane(dir: &std::path::Path) -> Lane {
+    running_lane_as(dir, "s1")
+}
+
+pub(super) fn running_lane_as(dir: &std::path::Path, id: &str) -> Lane {
     struct Mute;
     #[async_trait::async_trait]
     impl llm::Transport for Mute {
@@ -121,7 +125,7 @@ pub(super) fn running_lane(dir: &std::path::Path) -> Lane {
     std::sync::Arc::make_mut(&mut resolved).watched =
         pi_core::core::resolve::watched(&pi_core::args::Pinned::default(), dir);
     let mut lane = Lane::opened(pi_core::core::lane::Opening {
-        id: "s1".into(),
+        id: id.into(),
         ..pi_core::core::lane::Opening::new(
             std::sync::Arc::new(agent::Agent::new(std::sync::Arc::new(Mute), spec)),
             resolved,
@@ -132,6 +136,16 @@ pub(super) fn running_lane(dir: &std::path::Path) -> Lane {
     // What every `start_*` leaves behind while its execution runs.
     lane.begin(tokio_util::sync::CancellationToken::new());
     lane
+}
+
+// What an earlier run filed for `k` in this session: one line, at the
+// session's own path.
+pub(super) fn filed_recall(store: &Store, workspace: &std::path::Path, id: &str, line: &str) {
+    let path = store.history_path(workspace, id);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).expect("a session dir");
+    }
+    std::fs::write(path, crate::tui::editor::encode(&[line.to_string()])).expect("written");
 }
 
 pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
