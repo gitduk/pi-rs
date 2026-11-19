@@ -7,6 +7,14 @@ session store or the tool script protocol changed shape.
 
 Releases before 3.0.0 are recorded in the commit history, not here.
 
+## 3.0.3 - 2026-11-19
+
+### Changed
+
+- Recall belongs to the session that typed it, kept beside its transcript:
+  `k` offers this conversation's lines and no other's, a resumed session comes
+  back with them, and `/mv` carries them along. Older lists are dropped.
+
 ## 3.0.0 - 2026-11-17
 
 ### Breaking
