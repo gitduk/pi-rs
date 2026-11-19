@@ -1279,6 +1279,11 @@ async fn an_attempt_given_up_on_is_still_charged() {
     assert_eq!(a.meter.read().usage.input, 500 * attempts);
 }
 
+// How many bytes a request puts on the wire.
+fn wire_bytes(messages: &[Message]) -> usize {
+    serde_json::to_string(messages).unwrap().len()
+}
+
 fn call_message(id: &str) -> Message {
     Message::Assistant {
         content: vec![llm::message::AssistantContent::ToolCall(
@@ -1291,10 +1296,13 @@ fn call_message(id: &str) -> Message {
     }
 }
 
-// Refuses oversized requests until the transcript shrinks below `fits`.
-// `named` is the window the refusal states, when it states one.
+// Refuses oversized requests until the transcript shrinks below `fits` — or,
+// with `fits_bytes`, below a body the estimate cannot see: one image is 1568
+// tokens and several hundred kilobytes of payload. `named` is the window the
+// refusal states, when it states one.
 struct Picky {
     fits: usize,
+    fits_bytes: Option<usize>,
     named: Option<usize>,
     refusals: AtomicUsize,
 }
@@ -1307,7 +1315,11 @@ impl Transport for Picky {
         req: &Request,
     ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
         let size = llm::estimate::tokens(&req.messages, spec);
-        if size > self.fits {
+        let over = size > self.fits
+            || self
+                .fits_bytes
+                .is_some_and(|cap| serde_json::to_string(&req.messages).unwrap().len() > cap);
+        if over {
             self.refusals.fetch_add(1, Ordering::SeqCst);
             // As the providers send it: a window named in a 400's wording, or a
             // bare 413 that names none.
@@ -1365,6 +1377,7 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
         let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
         let picky = Arc::new(Picky {
             fits,
+            fits_bytes: None,
             named,
             refusals: AtomicUsize::new(0),
         });
@@ -1466,8 +1479,8 @@ async fn input_and_output_cap_fit_the_window_together() {
     }
 }
 
-// Refuses three ways in order — unnamed, named, unnamed — so what the second
-// blind squeeze is measured against becomes visible in the warnings.
+// Refuses three ways in order — unnamed, named, unnamed — so what each blind
+// squeeze is measured against becomes visible in the warnings.
 struct Mixed {
     calls: AtomicUsize,
     limit: usize,
@@ -1499,10 +1512,10 @@ impl Transport for Mixed {
     }
 }
 
-// A blind squeeze shrinks the estimate the spec claimed; once the provider
-// names a real window, that baseline — and the discount with it — is gone.
+// A window wider than the cap already applied fits what is about to be sent,
+// so adopting it would only raise the target and resend the same body.
 #[tokio::test]
-async fn a_named_window_supersedes_the_guesswork_that_preceded_it() {
+async fn a_named_window_that_shrinks_nothing_leaves_the_squeeze_standing() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
 
@@ -1531,10 +1544,66 @@ async fn a_named_window_supersedes_the_guesswork_that_preceded_it() {
             _ => None,
         })
         .collect();
-    assert_eq!(blind.len(), 2, "{events:?}");
-    // Both are the first squeeze against their own baseline. Compounding them
-    // would print 36% here, against a window the provider measured.
-    assert!(blind[1].contains("60%"), "{}", blind[1]);
+    assert_eq!(blind.len(), 3, "{events:?}");
+    // Each refusal takes the next rung down from what the last one sent.
+    assert!(blind[1].contains("36%"), "{}", blind[1]);
+    assert!(blind[2].contains("22%"), "{}", blind[2]);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::Refit(w) if w.contains("refitting to it"))),
+        "a window that fits the request must not be refitted to: {events:?}"
+    );
+}
+
+// A refusal the estimate cannot explain still has to shrink the transcript:
+// it steps down from the size that was sent, not from the window it fitted.
+#[tokio::test]
+async fn a_byte_cap_refusal_shrinks_what_the_estimate_called_comfortable() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let picky = Arc::new(Picky {
+        fits: usize::MAX,
+        fits_bytes: Some(1_500_000),
+        named: None,
+        refusals: AtomicUsize::new(0),
+    });
+    let mut a = tooled(picky.clone(), spec());
+    common::compacting(&mut a, None);
+    let mut history = vec![Message::user("the task")];
+    for i in 0..4 {
+        let call = format!("h{i}");
+        history.push(call_message(&call));
+        history.push(Message::tool_results(vec![llm::message::ToolResult {
+            call,
+            name: "read".into(),
+            content: vec![llm::message::ToolResultContent::Image(
+                llm::message::Image::Base64 {
+                    media_type: "image/png".into(),
+                    data: "A".repeat(700_000),
+                },
+            )],
+            is_error: false,
+        }]));
+    }
+    let mut session = Session::from_messages(history);
+    let (tx, _rx) = agent::event::channel();
+    a.run(&mut session, &ctx, &tx, &fast_retry()).await.unwrap();
+    assert!(
+        picky.refusals.load(Ordering::SeqCst) > 0,
+        "the refusal must have happened"
+    );
+    // The images are what outgrew the cap, so they are what had to go — not
+    // the question they were read for.
+    let left = wire_bytes(&session.context());
+    assert!(left <= 1_500_000, "still {left} bytes on the wire");
+    assert!(
+        session
+            .context()
+            .iter()
+            .any(|m| m.text().contains("the task")),
+        "the ask was dropped with the payload"
+    );
 }
 
 // Fails every call with a coded timeout, so the loop's code plumbing can be

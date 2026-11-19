@@ -283,12 +283,21 @@ impl Agent {
             // Kept past the retry loop: the provider's count of the request
             // that ran is paired with that request's bound and window.
             let mut window;
-            let mut bound;
+            // What the turn's last attempt was priced at; 0 before one went.
+            let mut bound = 0usize;
 
             let done = loop {
                 window = named_window.unwrap_or(self.model.spec.context_window as usize);
                 let measured = self.count_of(session);
-                let budget = ((self.budget_within(window, measured) as f64) * scale) as usize;
+                let room = self.budget_within(window, measured);
+                // A refusal means the window is not what the request outgrew,
+                // so a squeeze steps down from the size actually sent.
+                let base = if scale < 1.0 && bound > 0 {
+                    bound.min(room)
+                } else {
+                    room
+                };
+                let budget = (base as f64 * scale) as usize;
                 // Uncounted, the request goes as it is: only a refusal says it
                 // does not fit, and the squeeze that follows fits it.
                 let fit_to = if measured.is_none() && squeezes == 0 {
@@ -363,8 +372,8 @@ impl Agent {
                         });
                         match named {
                             Some((limit, refit)) if refit < budget => {
-                                // Earlier squeezes guessed against the spec's
-                                // window; the provider's replaces that baseline.
+                                // The squeezes stepped down from what they sent;
+                                // the provider's window replaces that baseline.
                                 if named_window.is_none() {
                                     scale = 1.0;
                                 }
@@ -380,7 +389,7 @@ impl Agent {
                                 reporter
                                     .report(Event::Refit(format!(
                                         "the request did not fit and named no limit below the \
-                                     budget; retrying at {}% of the estimated budget",
+                                     budget; retrying at {}% of the budget it fitted to",
                                         (scale * 100.0).round()
                                     )))
                                     .await;
