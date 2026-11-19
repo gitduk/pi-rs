@@ -164,10 +164,10 @@ pub(crate) const BUILTIN: &[Command] = &[
         |_, _| Intent::Builtin(Builtin::Status),
     ),
     Command::builtin(
-        "/shield",
+        "/mask",
         Args::None,
         "what was masked on its way to the model, and how much of each value it shows",
-        |_, _| Intent::Builtin(Builtin::Shield),
+        |_, _| Intent::Builtin(Builtin::Mask),
     ),
     Command::builtin(
         "/context",

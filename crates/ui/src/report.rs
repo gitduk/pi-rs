@@ -11,8 +11,9 @@ const NUMERIC_WIDTH: usize = 6;
 const NUMERIC_GAP: usize = 2;
 // The width a table needs before it draws numeric columns beside its names.
 const WIDE_WIDTH: usize = 28;
-// A name column of the wide width, both numeric columns and their gaps.
-const MIN_COLUMN_WIDTH: usize = WIDE_WIDTH + 2 * (NUMERIC_WIDTH + NUMERIC_GAP);
+// A name column of the wide width, the three columns a table may carry and
+// their gaps.
+const MIN_COLUMN_WIDTH: usize = WIDE_WIDTH + 3 * (NUMERIC_WIDTH + NUMERIC_GAP);
 const COLUMN_GAP: usize = 4;
 
 #[derive(Clone, Copy)]
@@ -61,14 +62,23 @@ pub(crate) fn lines(report: &Listing, width: usize, paint: Option<&Paint>) -> Ve
         }
     }
     let mut out = render(&lead, body_width, paint);
-    if let Some(summary) = sections.first() {
-        out.push(Line::default());
-        out.extend(render(summary, body_width, paint));
-    }
-    let directories = sections.get(1..).unwrap_or_default();
-    let columns = ((body_width + COLUMN_GAP) / (MIN_COLUMN_WIDTH + COLUMN_GAP))
-        .min(directories.len())
-        .max(1);
+    // An odd count leaves one section over, and the first spans the width for
+    // it; an even one puts every section in a column of its own.
+    let directories = match sections.len() % 2 {
+        0 => sections.as_slice(),
+        _ => {
+            if let Some(summary) = sections.first() {
+                out.push(Line::default());
+                out.extend(render(summary, body_width, paint));
+            }
+            sections.get(1..).unwrap_or_default()
+        }
+    };
+    // As many columns as hold a table, then rows of the same length: four
+    // tables that fit in three columns read as two and two, not three and one.
+    let fits = ((body_width + COLUMN_GAP) / (MIN_COLUMN_WIDTH + COLUMN_GAP)).max(1);
+    let rows = directories.len().div_ceil(fits);
+    let columns = directories.len().div_ceil(rows).max(1);
     let column_width = (body_width - COLUMN_GAP * (columns - 1)) / columns;
     for group in directories.chunks(columns) {
         out.push(Line::default());
@@ -103,54 +113,55 @@ pub(crate) fn lines(report: &Listing, width: usize, paint: Option<&Paint>) -> Ve
 
 struct Columns {
     name: usize,
-    tokens: usize,
-    share: usize,
+    // Every cell after the first is a column, right-aligned: most reports
+    // carry two, and a listing that names what a number is may carry three.
+    numeric: Vec<usize>,
 }
 
 impl Columns {
     fn of(rows: &[&Row], width: usize) -> Self {
-        // A section row names the columns under it, so its own cells count
-        // toward the width a heading has to fit in.
-        let numeric = |at: usize| {
-            rows.iter()
-                .filter(|row| matches!(row.role, Role::Budget | Role::Section))
-                .map(|row| text::width(cell(row, at)))
-                .max()
-                .unwrap_or(0)
-                .max(NUMERIC_WIDTH)
-        };
-        let tokens = numeric(1);
-        let share = numeric(2);
+        let cells = rows.iter().map(|row| row.cells.len()).max().unwrap_or(1);
+        let numeric: Vec<usize> = (1..cells)
+            .map(|at| {
+                // A section row names the columns under it, so its own cells
+                // count toward the width a heading has to fit in.
+                rows.iter()
+                    .filter(|row| matches!(row.role, Role::Budget | Role::Section))
+                    .map(|row| text::width(cell(row, at)))
+                    .max()
+                    .unwrap_or(0)
+                    .max(NUMERIC_WIDTH)
+            })
+            .collect();
+        let used: usize = numeric.iter().sum::<usize>() + numeric.len() * NUMERIC_GAP;
         Self {
-            name: width.saturating_sub(tokens + share + 2 * NUMERIC_GAP),
-            tokens,
-            share,
+            name: width.saturating_sub(used),
+            numeric,
         }
     }
 
     fn values(
         &self,
         spans: &mut Vec<Span<'static>>,
-        tokens: &str,
-        share: &str,
+        cells: &[String],
         paint: Option<&Paint>,
         headings: bool,
     ) {
         let gap = " ".repeat(NUMERIC_GAP);
-        spans.push(Span::raw(format!(
-            "{gap}{}",
-            " ".repeat(self.tokens.saturating_sub(text::width(tokens)))
-        )));
-        spans.push(span(
-            paint,
-            if headings { Tone::Muted } else { Tone::Plain },
-            tokens,
-        ));
-        spans.push(Span::raw(format!(
-            "{gap}{}",
-            " ".repeat(self.share.saturating_sub(text::width(share)))
-        )));
-        spans.push(span(paint, Tone::Muted, share));
+        for (at, width) in self.numeric.iter().enumerate() {
+            let value = cells.get(at).map_or("", String::as_str);
+            spans.push(Span::raw(format!(
+                "{gap}{}",
+                " ".repeat(width.saturating_sub(text::width(value)))
+            )));
+            // Only the first column carries the value read against its name;
+            // the rest are asides, and so are all of a heading.
+            let tone = match (at, headings) {
+                (0, false) => Tone::Plain,
+                _ => Tone::Muted,
+            };
+            spans.push(span(paint, tone, value));
+        }
     }
 }
 
@@ -239,7 +250,12 @@ fn render(rows: &[&Row], width: usize, paint: Option<&Paint>) -> Vec<Line<'stati
             }
             Role::Section if width >= WIDE_WIDTH => {
                 let mut spans = label(row, columns.name, paint, true);
-                columns.values(&mut spans, cell(row, 1), cell(row, 2), paint, true);
+                columns.values(
+                    &mut spans,
+                    row.cells.get(1..).unwrap_or_default(),
+                    paint,
+                    true,
+                );
                 Line::from(spans)
             }
             Role::Budget if width >= WIDE_WIDTH => {
@@ -250,7 +266,12 @@ fn render(rows: &[&Row], width: usize, paint: Option<&Paint>) -> Vec<Line<'stati
                 } else {
                     label(row, columns.name, paint, false)
                 };
-                columns.values(&mut spans, cell(row, 1), cell(row, 2), paint, false);
+                columns.values(
+                    &mut spans,
+                    row.cells.get(1..).unwrap_or_default(),
+                    paint,
+                    false,
+                );
                 Line::from(spans)
             }
             Role::Hint | Role::Footer => Line::from(span(paint, Tone::Muted, row.cells.join("  "))),

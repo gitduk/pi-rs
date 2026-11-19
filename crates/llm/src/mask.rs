@@ -32,7 +32,7 @@ const OPEN: &str = "{{PI_";
 const ID_BYTES: usize = 5;
 
 #[derive(Debug)]
-pub struct Shield {
+pub struct Mask {
     key: [u8; 32],
     // In the order they were added; a bucket holds indices into this.
     entries: Vec<Entry>,
@@ -47,6 +47,7 @@ pub struct Shield {
 #[derive(Debug)]
 struct Entry {
     token: String,
+    kind: String,
     tier: Tier,
     value: String,
 }
@@ -85,13 +86,30 @@ pub enum Tier {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Footprint {
     pub token: String,
+    /// The kind the token names: a listing groups by it.
+    pub kind: String,
     pub tier: Tier,
     /// The first characters, which for a key are its scheme rather than its
     /// secret: enough to recognise the value, not enough to use it.
     pub head: String,
+    /// The last characters, by the same rule: together the two ends identify
+    /// a value without spelling it.
+    pub tail: String,
     /// Characters, not bytes.
     pub len: usize,
     pub hits: u64,
+}
+
+impl Footprint {
+    /// The token without the braces that mark it on the wire: what a listing
+    /// shows, since a reader is looking at names rather than at something to
+    /// paste back.
+    pub fn bare(&self) -> &str {
+        self.token
+            .strip_prefix(OPEN)
+            .and_then(|rest| rest.strip_suffix("}}"))
+            .unwrap_or(&self.token)
+    }
 }
 
 /// How much of a value a listing shows: its scheme for a long one, one
@@ -105,8 +123,8 @@ fn head_chars(value: &str) -> usize {
     }
 }
 
-impl Shield {
-    /// A shield keyed by the machine's own secret: the same value gets the
+impl Mask {
+    /// A mask built on the machine's own secret: the same value gets the
     /// same token every run, and no other machine's does.
     pub fn new(key: [u8; 32]) -> Self {
         Self {
@@ -146,6 +164,7 @@ impl Shield {
         self.by_token.insert(token.clone(), value.to_string());
         self.entries.push(Entry {
             token,
+            kind: label.to_string(),
             tier,
             value: value.to_string(),
         });
@@ -295,7 +314,7 @@ impl Shield {
         }
     }
 
-    /// Every token in `text` as its value. A token this shield never issued is
+    /// Every token in `text` as its value. A token this mask never issued is
     /// prose and stays as it was written.
     pub fn restore(&self, text: &str) -> String {
         if self.by_token.is_empty() {
@@ -321,12 +340,21 @@ impl Shield {
     pub fn footprints(&self) -> Vec<Footprint> {
         self.entries
             .iter()
-            .map(|entry| Footprint {
-                token: entry.token.clone(),
-                tier: entry.tier,
-                head: entry.value.chars().take(head_chars(&entry.value)).collect(),
-                len: entry.value.chars().count(),
-                hits: counted(&entry.token),
+            .map(|entry| {
+                let chars: Vec<char> = entry.value.chars().collect();
+                let shown = head_chars(&entry.value);
+                Footprint {
+                    token: entry.token.clone(),
+                    kind: entry.kind.clone(),
+                    tier: entry.tier,
+                    head: chars.iter().take(shown).collect(),
+                    tail: chars
+                        .iter()
+                        .skip(chars.len().saturating_sub(shown))
+                        .collect(),
+                    len: chars.len(),
+                    hits: counted(&entry.token),
+                }
             })
             .collect()
     }
@@ -437,14 +465,14 @@ fn escaped(value: &str) -> String {
 /// token waits for the delta that completes it, kept apart by block index.
 #[derive(Debug)]
 pub struct Restorer {
-    shield: Arc<Shield>,
+    mask: Arc<Mask>,
     held: BTreeMap<usize, String>,
 }
 
 impl Restorer {
-    pub fn new(shield: Arc<Shield>) -> Self {
+    pub fn new(mask: Arc<Mask>) -> Self {
         Self {
-            shield,
+            mask,
             held: BTreeMap::new(),
         }
     }
@@ -476,7 +504,7 @@ impl Restorer {
             // Nothing was left open, which is every delta but a few: written
             // where it lies rather than joined first.
             None => {
-                let held = self.shield.rewrite(delta, json, &mut out);
+                let held = self.mask.rewrite(delta, json, &mut out);
                 if held > 0 {
                     self.held
                         .insert(index, delta[delta.len() - held..].to_string());
@@ -484,7 +512,7 @@ impl Restorer {
             }
             Some(carry) => {
                 let text = format!("{carry}{delta}");
-                let held = self.shield.rewrite(&text, json, &mut out);
+                let held = self.mask.rewrite(&text, json, &mut out);
                 if held > 0 {
                     self.held
                         .insert(index, text[text.len() - held..].to_string());
@@ -500,14 +528,14 @@ impl Restorer {
 /// a value found later is covered from the next request on, and a run with two
 /// checkouts open masks what either of them named.
 #[derive(Debug, Default)]
-pub struct Armed(RwLock<Option<Arc<Shield>>>);
+pub struct Armed(RwLock<Option<Arc<Mask>>>);
 
 impl Armed {
-    pub fn arm(&self, shield: Option<Arc<Shield>>) {
-        *self.0.write().unwrap_or_else(PoisonError::into_inner) = shield;
+    pub fn arm(&self, mask: Option<Arc<Mask>>) {
+        *self.0.write().unwrap_or_else(PoisonError::into_inner) = mask;
     }
 
-    pub fn current(&self) -> Option<Arc<Shield>> {
+    pub fn current(&self) -> Option<Arc<Mask>> {
         self.0
             .read()
             .unwrap_or_else(PoisonError::into_inner)
@@ -517,19 +545,19 @@ impl Armed {
 
 /// A wire whose traffic is covered: what leaves carries tokens, and what
 /// comes back carries the values again.
-pub struct Shielded {
+pub struct Masked {
     inner: Arc<dyn Transport>,
     armed: Arc<Armed>,
 }
 
-impl Shielded {
+impl Masked {
     pub fn new(inner: Arc<dyn Transport>, armed: Arc<Armed>) -> Self {
         Self { inner, armed }
     }
 }
 
 #[async_trait]
-impl Transport for Shielded {
+impl Transport for Masked {
     fn gaps(&self) -> Vec<String> {
         self.inner.gaps()
     }
@@ -539,12 +567,12 @@ impl Transport for Shielded {
         spec: &ModelSpec,
         req: &Request,
     ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
-        let Some(shield) = self.armed.current() else {
+        let Some(mask) = self.armed.current() else {
             return self.inner.stream(spec, req).await;
         };
-        let covered = shield.cover_request(req);
+        let covered = mask.cover_request(req);
         let events = self.inner.stream(spec, &covered).await?;
-        Ok(Restored::new(events, shield).boxed())
+        Ok(Restored::new(events, mask).boxed())
     }
 }
 
@@ -552,7 +580,7 @@ impl Transport for Shielded {
 // handed over first, so nothing the model wrote is dropped between events.
 struct Restored {
     events: BoxStream<'static, Result<StreamEvent>>,
-    shield: Arc<Shield>,
+    mask: Arc<Mask>,
     restorer: Restorer,
     // What each open block is, so a held tail comes back as the kind of delta
     // the block began with.
@@ -562,11 +590,11 @@ struct Restored {
 }
 
 impl Restored {
-    fn new(events: BoxStream<'static, Result<StreamEvent>>, shield: Arc<Shield>) -> Self {
+    fn new(events: BoxStream<'static, Result<StreamEvent>>, mask: Arc<Mask>) -> Self {
         Self {
-            restorer: Restorer::new(Arc::clone(&shield)),
+            restorer: Restorer::new(Arc::clone(&mask)),
             events,
-            shield,
+            mask,
             kinds: BTreeMap::new(),
             queued: VecDeque::new(),
             ended: false,
@@ -647,18 +675,18 @@ impl Restored {
     fn restore_content(&self, content: AssistantContent) -> AssistantContent {
         match content {
             AssistantContent::Text(mut text) => {
-                text.text = self.shield.restore(&text.text);
+                text.text = self.mask.restore(&text.text);
                 AssistantContent::Text(text)
             }
             AssistantContent::ToolCall(mut call) => {
-                self.shield
-                    .map_json(&mut call.args, &|text| self.shield.restore(text));
+                self.mask
+                    .map_json(&mut call.args, &|text| self.mask.restore(text));
                 AssistantContent::ToolCall(call)
             }
             AssistantContent::Reasoning(mut reasoning) => {
                 for part in &mut reasoning.content {
                     if let ReasoningContent::Text { text, .. } = part {
-                        *text = self.shield.restore(text);
+                        *text = self.mask.restore(text);
                     }
                 }
                 AssistantContent::Reasoning(reasoning)
@@ -712,18 +740,18 @@ mod tests {
 
     const KEY: [u8; 32] = [7; 32];
 
-    fn shield(key: [u8; 32], values: &[(&str, &str)]) -> Arc<Shield> {
-        let mut shield = Shield::new(key);
+    fn mask(key: [u8; 32], values: &[(&str, &str)]) -> Arc<Mask> {
+        let mut mask = Mask::new(key);
         for (label, value) in values {
-            shield.add(label, value);
+            mask.add(label, value);
         }
-        Arc::new(shield)
+        Arc::new(mask)
     }
 
     // The whole contract: what leaves is not the value, and what comes back is.
     #[test]
     fn a_value_comes_back_from_its_token() {
-        let s = shield(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
+        let s = mask(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
         let covered = s.cover("export API_KEY=sk-live-9f3a1c2b7d5e");
         assert!(!covered.contains("sk-live"), "{covered}");
         assert_eq!(s.restore(&covered), "export API_KEY=sk-live-9f3a1c2b7d5e");
@@ -732,7 +760,7 @@ mod tests {
     // A prefix of an earlier value must not eat the longer one's head.
     #[test]
     fn the_longer_of_two_overlapping_values_wins() {
-        let s = shield(KEY, &[("TOKEN", "sk-abc"), ("API_KEY", "sk-abcdef")]);
+        let s = mask(KEY, &[("TOKEN", "sk-abc"), ("API_KEY", "sk-abcdef")]);
         let covered = s.cover("sk-abcdef");
         assert_eq!(s.restore(&covered), "sk-abcdef");
         assert_ne!(covered, format!("{}def", s.cover("sk-abc")));
@@ -745,9 +773,9 @@ mod tests {
     #[test]
     fn one_value_gets_one_token_and_the_key_decides_which() {
         let value = "ghp_0123456789abcdefghij";
-        let here = shield(KEY, &[("API_KEY", value)]);
-        let again = shield(KEY, &[("API_KEY", value)]);
-        let elsewhere = shield([9; 32], &[("API_KEY", value)]);
+        let here = mask(KEY, &[("API_KEY", value)]);
+        let again = mask(KEY, &[("API_KEY", value)]);
+        let elsewhere = mask([9; 32], &[("API_KEY", value)]);
         assert_eq!(here.cover(value), again.cover(value));
         assert_ne!(here.cover(value), elsewhere.cover(value));
     }
@@ -756,7 +784,7 @@ mod tests {
     // be forwarded before it is known not to be one.
     #[test]
     fn a_token_split_across_two_deltas_is_restored_by_the_second() {
-        let s = shield(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
+        let s = mask(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
         let token = s.cover("sk-live-9f3a1c2b7d5e");
         let (head, tail) = token.split_at(token.len() / 2);
         let mut r = Restorer::new(Arc::clone(&s));
@@ -770,7 +798,7 @@ mod tests {
     // What the model cut in half is still what it wrote: never swallowed.
     #[test]
     fn a_partial_that_never_completes_is_emitted_when_the_block_ends() {
-        let s = shield(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
+        let s = mask(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
         let token = s.cover("sk-live-9f3a1c2b7d5e");
         let mut r = Restorer::new(Arc::clone(&s));
         assert_eq!(r.push(0, &format!("wait {}", &token[..4])), "wait ");
@@ -782,7 +810,7 @@ mod tests {
     // in is the order they were read, or a reader sees block 3's tail first.
     #[test]
     fn flushing_every_remainder_keeps_the_blocks_in_order() {
-        let s = shield(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
+        let s = mask(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
         let token = s.cover("sk-live-9f3a1c2b7d5e");
         let head = &token[..5];
         let mut r = Restorer::new(Arc::clone(&s));
@@ -797,7 +825,7 @@ mod tests {
     // A token we never issued is prose, not a crash and not a guess.
     #[test]
     fn a_token_that_maps_to_nothing_is_left_as_written() {
-        let s = shield(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
+        let s = mask(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
         assert_eq!(
             s.restore("{{PI_API_KEY_0000000000}}"),
             "{{PI_API_KEY_0000000000}}"
@@ -809,7 +837,7 @@ mod tests {
     #[test]
     fn a_value_with_quotes_comes_back_into_arguments_escaped() {
         let value = "pw\"with\\slashes\nand a newline";
-        let s = shield(KEY, &[("PASSWD", value)]);
+        let s = mask(KEY, &[("PASSWD", value)]);
         let token = s.cover(value);
         let mut r = Restorer::new(Arc::clone(&s));
         let out = r.push_json(0, &format!("{{\"password\":\"{token}\"}}"));
@@ -821,7 +849,7 @@ mod tests {
     // more than once and must not change on the second time.
     #[test]
     fn restoring_twice_changes_nothing() {
-        let s = shield(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
+        let s = mask(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
         let once = s.restore(&s.cover("a sk-live-9f3a1c2b7d5e b"));
         assert_eq!(s.restore(&once), once);
     }
@@ -830,7 +858,7 @@ mod tests {
     // split one secret's history in half, and the first listing is the answer.
     #[test]
     fn a_value_listed_twice_keeps_the_first_label_and_one_token() {
-        let s = shield(
+        let s = mask(
             KEY,
             &[
                 ("EMAIL", "hunter2@corp.example"),
@@ -847,7 +875,7 @@ mod tests {
     // through byte for byte, including a `{{` that opens no token.
     #[test]
     fn text_without_a_token_comes_through_unchanged() {
-        let s = shield(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
+        let s = mask(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
         let text = "a {{PI_ b {{PI_NOT_A_TOKEN}} c";
         assert_eq!(s.cover(text), text);
         assert_eq!(s.restore(text), text);
@@ -857,8 +885,8 @@ mod tests {
     // is shown, and whether the mask rests on a guess: a head of four
     // characters is enough to recognise a value and not enough to use it.
     #[test]
-    fn a_listing_names_each_value_by_its_head_and_counts_the_maskings() {
-        let mut s = Shield::new(KEY);
+    fn a_listing_names_each_value_by_its_kind_and_both_ends() {
+        let mut s = Mask::new(KEY);
         s.add("API_KEY", "sk-listing-0123456789");
         s.add_guessed("TOKEN", "999888777:AAbbCCddEEffGG");
         s.add("PASSWD", "hunter2");
@@ -869,13 +897,16 @@ mod tests {
         assert_eq!(prints.len(), 3);
         assert!(prints[0].token.contains("API_KEY"), "{:?}", prints[0]);
         assert_eq!(prints[0].tier, Tier::Named);
+        assert_eq!(prints[0].kind, "API_KEY");
         assert_eq!(prints[0].head, "sk-l");
+        assert_eq!(prints[0].tail, "6789");
         assert_eq!(prints[0].len, 21);
         assert_eq!(prints[0].hits, 2);
         assert_eq!(prints[1].tier, Tier::Guessed);
         assert_eq!(prints[1].hits, 0);
         // Four of a seven-character value would be more than half of it.
         assert_eq!(prints[2].head, "h");
+        assert_eq!(prints[2].tail, "2");
         assert_eq!(prints[2].len, 7);
         assert!(prints.iter().all(|p| p.head.chars().count() <= 4));
     }
@@ -886,7 +917,7 @@ mod tests {
     #[test]
     fn every_text_a_request_carries_is_covered() {
         let value = "sk-live-9f3a1c2b7d5e";
-        let s = shield(KEY, &[("API_KEY", value)]);
+        let s = mask(KEY, &[("API_KEY", value)]);
         let covered = s.cover_request(&request_carrying(value, false));
         assert_eq!(covered.messages.len(), 3, "the messages stay put");
         assert_eq!(
@@ -903,7 +934,7 @@ mod tests {
     #[test]
     fn a_signature_an_encrypted_payload_and_image_data_go_out_as_they_came() {
         let value = "sk-live-9f3a1c2b7d5e";
-        let s = shield(KEY, &[("API_KEY", value)]);
+        let s = mask(KEY, &[("API_KEY", value)]);
         let wire = wire_json(&s.cover_request(&request_carrying(value, true)));
         assert!(wire.contains(&format!("sig:{value}")), "{wire}");
         assert!(wire.contains(&format!("enc:{value}")), "{wire}");
@@ -916,7 +947,7 @@ mod tests {
     #[test]
     fn a_token_split_across_streamed_deltas_is_restored() {
         let value = "sk-live-9f3a1c2b7d5e";
-        let s = shield(KEY, &[("API_KEY", value)]);
+        let s = mask(KEY, &[("API_KEY", value)]);
         let token = s.cover(value);
         let (head, tail) = token.split_at(6);
         let (events, _) = drain(
@@ -949,7 +980,7 @@ mod tests {
     #[test]
     fn tool_argument_deltas_come_back_escaped() {
         let value = "pw\"with\\slashes";
-        let s = shield(KEY, &[("PASSWD", value)]);
+        let s = mask(KEY, &[("PASSWD", value)]);
         let args = format!("{{\"password\":\"{}\"}}", s.cover(value));
         let (head, tail) = args.split_at(args.len() / 2);
         let (events, _) = drain(
@@ -991,9 +1022,9 @@ mod tests {
     // The covering happens on the far side of the seam: whatever the wire gets
     // to serialize must be the masked request, not the one the loop built.
     #[test]
-    fn the_wire_behind_the_shield_is_never_handed_a_value() {
+    fn the_wire_behind_the_mask_is_never_handed_a_value() {
         let value = "sk-live-9f3a1c2b7d5e";
-        let s = shield(KEY, &[("API_KEY", value)]);
+        let s = mask(KEY, &[("API_KEY", value)]);
         let (_, seen) = drain_with(request_carrying(value, false), Vec::new(), &s);
         let wire = wire_json(&seen.expect("a call"));
         assert!(!wire.contains(value), "{wire}");
@@ -1003,7 +1034,7 @@ mod tests {
     // the model's parting bytes: the held tail is read out before the end.
     #[test]
     fn a_tail_the_stream_never_completes_is_still_read() {
-        let s = shield(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
+        let s = mask(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
         let token = s.cover("sk-live-9f3a1c2b7d5e");
         let head = &token[..4];
         let (events, _) = drain(
@@ -1031,7 +1062,7 @@ mod tests {
     #[test]
     fn a_turn_stated_whole_comes_back_restored() {
         let value = "sk-live-9f3a1c2b7d5e";
-        let s = shield(KEY, &[("API_KEY", value)]);
+        let s = mask(KEY, &[("API_KEY", value)]);
         let token = s.cover(value);
         let (events, _) = drain(
             vec![StreamEvent::Complete {
@@ -1073,21 +1104,21 @@ mod tests {
             seen: Arc::clone(&seen),
         };
         let armed = Arc::new(Armed::default());
-        let shielded = Shielded::new(Arc::new(wire), Arc::clone(&armed));
+        let masked = Masked::new(Arc::new(wire), Arc::clone(&armed));
         let value = "sk-late-0123456789";
         let spec = ModelSpec::test();
         let request = request_carrying(value, false);
         let call = |seen: &Arc<Mutex<Option<Request>>>| {
             // The stream is never polled: what this test reads is the request
             // the wire was handed, which happens before the first event.
-            let _ = block_on(shielded.stream(&spec, &request)).expect("a stream");
+            let _ = block_on(masked.stream(&spec, &request)).expect("a stream");
             wire_json(&seen.lock().expect("unpoisoned").clone().expect("a call"))
         };
 
         // Nothing armed yet: the request goes as it is.
         assert!(call(&seen).contains(value));
 
-        armed.arm(Some(shield(KEY, &[("API_KEY", value)])));
+        armed.arm(Some(mask(KEY, &[("API_KEY", value)])));
         assert!(!call(&seen).contains(value));
     }
 
@@ -1189,17 +1220,14 @@ mod tests {
         }
     }
 
-    fn drain(
-        events: Vec<StreamEvent>,
-        shield: &Arc<Shield>,
-    ) -> (Vec<StreamEvent>, Option<Request>) {
-        drain_with(Request::default(), events, shield)
+    fn drain(events: Vec<StreamEvent>, mask: &Arc<Mask>) -> (Vec<StreamEvent>, Option<Request>) {
+        drain_with(Request::default(), events, mask)
     }
 
     fn drain_with(
         request: Request,
         events: Vec<StreamEvent>,
-        shield: &Arc<Shield>,
+        mask: &Arc<Mask>,
     ) -> (Vec<StreamEvent>, Option<Request>) {
         let seen = Arc::new(Mutex::new(None));
         let wire = Canned {
@@ -1207,11 +1235,11 @@ mod tests {
             seen: Arc::clone(&seen),
         };
         let armed = Arc::new(Armed::default());
-        armed.arm(Some(Arc::clone(shield)));
-        let shielded = Shielded::new(Arc::new(wire), armed);
+        armed.arm(Some(Arc::clone(mask)));
+        let masked = Masked::new(Arc::new(wire), armed);
         let spec = ModelSpec::test();
         let out = block_on(async {
-            let mut stream = shielded.stream(&spec, &request).await.expect("a stream");
+            let mut stream = masked.stream(&spec, &request).await.expect("a stream");
             let mut out = Vec::new();
             while let Some(ev) = stream.next().await {
                 out.push(ev.expect("an event"));

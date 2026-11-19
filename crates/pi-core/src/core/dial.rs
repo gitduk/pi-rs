@@ -4,18 +4,18 @@
 use std::sync::{Arc, LazyLock, PoisonError, RwLock};
 
 use anyhow::{Context, Result};
+use llm::mask::{Armed, Footprint, Mask, Masked, Tier};
 use llm::model::{Format, ModelSpec};
-use llm::shield::{Armed, Footprint, Shield, Shielded, Tier};
 use llm::transport::{Transport, anthropic::Anthropic, chat::ChatCompletions, openai::OpenAi};
 
-use super::shield::Found;
+use super::mask::Found;
 use crate::args::Pinned;
 use pi_store::config;
 
 /// What must not leave the machine: armed by whoever resolved the config, read
 /// by each wire at every request — so a value found later is covered from the
 /// next request on, and a run with two checkouts open masks what either named.
-static SHIELD: LazyLock<Arc<Armed>> = LazyLock::new(|| Arc::new(Armed::default()));
+static MASK: LazyLock<Arc<Armed>> = LazyLock::new(|| Arc::new(Armed::default()));
 
 /// Every value any resolution has named, by kind and tier. Only ever grows: a
 /// reload adds to the set rather than replacing it, and a value that left once
@@ -26,7 +26,7 @@ static VALUES: RwLock<Vec<(String, Tier, String)>> = RwLock::new(Vec::new());
 /// run with no pi directory to keep the key in masks nothing, and says so.
 pub fn arm(found: Option<Found>) -> bool {
     let Some(found) = found else {
-        return SHIELD.current().is_some();
+        return MASK.current().is_some();
     };
     let mut values = VALUES.write().unwrap_or_else(PoisonError::into_inner);
     for value in found.values {
@@ -34,25 +34,25 @@ pub fn arm(found: Option<Found>) -> bool {
             values.push(value);
         }
     }
-    let mut shield = Shield::new(found.key);
+    let mut mask = Mask::new(found.key);
     for (kind, tier, value) in values.iter() {
         match tier {
-            Tier::Named => shield.add(kind, value),
-            Tier::Guessed => shield.add_guessed(kind, value),
+            Tier::Named => mask.add(kind, value),
+            Tier::Guessed => mask.add_guessed(kind, value),
         }
     }
-    tracing::debug!(target: "pi::shield", values = shield.len(), "armed");
-    SHIELD.arm(Some(Arc::new(shield)));
+    tracing::debug!(target: "pi::mask", values = mask.len(), "armed");
+    MASK.arm(Some(Arc::new(mask)));
     true
 }
 
 /// What the armed set has masked so far, or `None` when nothing is armed.
 pub fn footprints() -> Option<Vec<Footprint>> {
-    SHIELD.current().map(|shield| shield.footprints())
+    MASK.current().map(|mask| mask.footprints())
 }
 
-fn shielded(wire: Arc<dyn Transport>) -> Arc<dyn Transport> {
-    Arc::new(Shielded::new(wire, Arc::clone(&SHIELD)))
+fn masked(wire: Arc<dyn Transport>) -> Arc<dyn Transport> {
+    Arc::new(Masked::new(wire, Arc::clone(&MASK)))
 }
 
 fn transport_for(spec: &ModelSpec, configured: Option<String>) -> Arc<dyn Transport> {
@@ -61,7 +61,7 @@ fn transport_for(spec: &ModelSpec, configured: Option<String>) -> Arc<dyn Transp
         Format::OpenAi => Arc::new(OpenAi::new(configured)),
         Format::Chat => Arc::new(ChatCompletions::new(configured)),
     };
-    shielded(wire)
+    masked(wire)
 }
 
 /// One model, ready to talk to: what to send, and the client to send it with.

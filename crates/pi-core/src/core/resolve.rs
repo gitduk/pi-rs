@@ -266,8 +266,8 @@ pub fn resolve(
     let mut notes = Vec::new();
     // A reload reads the files and the scripts again, so what they name is
     // added to the set the wires mask with from their next request on.
-    if !super::dial::arm(super::shield::find(root, config)) {
-        notes.push("shield off — no key to name values by, so nothing is masked".to_string());
+    if !super::dial::arm(super::mask::find(root, config)) {
+        notes.push("mask off — no key to name values by, so nothing is masked".to_string());
     }
     // Before any of it is read, so a write landing meanwhile reads as a change.
     let read_from = watched(pinned, root);
@@ -603,7 +603,7 @@ fn pi_usage() -> skills::Skill {
 /// The files a resolve in `root` reads, as they stand now: missing ones are
 /// left out, so one appearing is a change too. A script's `.env` is here
 /// because its wrapper reads it per call, so an edit takes effect without a
-/// restart — and what it now holds has to reach the shield.
+/// restart — and what it now holds has to reach the mask.
 pub fn watched(pinned: &Pinned, root: &Path) -> Vec<Stamp> {
     let mut paths: Vec<PathBuf> = Vec::new();
     paths.extend(
@@ -765,7 +765,7 @@ mod tests {
     use std::path::PathBuf;
 
     // A script's `.env` is read by its wrapper on every call, so an edit has
-    // to reach the shield the same turn: watching it is what makes a reload
+    // to reach the mask the same turn: watching it is what makes a reload
     // happen at all, and a reload is what arms the new value.
     #[test]
     fn a_script_env_file_is_watched() {

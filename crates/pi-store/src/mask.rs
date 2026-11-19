@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
-const FILE: &str = "shield.key";
+const FILE: &str = "mask.key";
 const BYTES: usize = 32;
 
 // A key this process minted, kept even when it could not be written: a second
