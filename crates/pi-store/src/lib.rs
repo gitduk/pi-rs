@@ -17,6 +17,7 @@ pub mod memory;
 pub mod provider;
 pub mod session;
 pub mod settings;
+pub mod shield;
 pub mod state;
 pub mod status;
 pub mod statusline;

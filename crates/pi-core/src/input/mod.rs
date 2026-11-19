@@ -47,6 +47,8 @@ pub enum Builtin {
     Model(String),
     // The thinking effort to run at, or empty to say the one in force.
     Effort(String),
+    // What has been masked on its way to the model.
+    Shield,
     // The name to work in, or empty to list what there is.
     Worktree(String),
     // The directory this conversation carries on in, or empty to say the one now.
@@ -98,7 +100,8 @@ impl Intent {
                 | Builtin::Context(_)
                 | Builtin::Name(_)
                 | Builtin::Model(_)
-                | Builtin::Effort(_),
+                | Builtin::Effort(_)
+                | Builtin::Shield,
             ) => Fate::Now,
             // A restart drops only the servers' connections, never the run's.
             Intent::Builtin(Builtin::Mcp(_)) => Fate::Now,

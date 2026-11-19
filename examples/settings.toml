@@ -48,6 +48,11 @@ api_key  = "$ANTHROPIC_API_KEY" # `$` reads the environment; anything else is th
 # effort = "medium"               # off | low | medium | high
 # tier   = "exec"                 # read | write | exec | net
 
+# Values that must never leave the machine, whatever they look like. Provider
+# keys, `$NAME` read the way a key is, and the tool `.env` files are found
+# without this: it is for what no rule would recognise.
+# secrets = ["hunter2", "0x0123…"]
+
 # How many times to retry a request the provider could not serve, and how many
 # seconds of silence before a stream counts as wedged. The second is generous
 # on purpose: a reasoning model can legitimately think for minutes before its

@@ -77,6 +77,11 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<Hook>,
 
+    /// Values that must not leave the machine, whatever they look like: for a
+    /// credential no rule would recognise by its shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<String>,
+
     /// How many times to retry a request the provider could not serve. Unset
     /// is `Retry::default()` — the number lives there, not here, so that an
     /// unset field and a missing config agree by construction.
@@ -504,6 +509,29 @@ impl Config {
     /// when the endpoint wants none. The shape is checked at load.
     pub fn key_for(&self, model: &str) -> Option<String> {
         self.written_key(model).and_then(expand_key)
+    }
+
+    /// The values the user listed as never leaving, `$NAME` read the way a
+    /// key is: one contract for what a credential looks like in the file.
+    pub fn secrets(&self) -> Vec<String> {
+        let mut values: Vec<String> = (self.secrets.iter())
+            .filter_map(|raw| expand_key(raw))
+            .collect();
+        values.sort();
+        values.dedup();
+        values
+    }
+
+    /// Every credential the connections name, resolved: what a request must
+    /// not carry, whatever model is in place.
+    pub fn keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = (self.provider.values())
+            .filter_map(|provider| provider.api_key.as_deref())
+            .filter_map(expand_key)
+            .collect();
+        keys.sort();
+        keys.dedup();
+        keys
     }
 
     /// Flag > the files > the built-in default.
