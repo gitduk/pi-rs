@@ -7,6 +7,14 @@ session store or the tool script protocol changed shape.
 
 Releases before 3.0.0 are recorded in the commit history, not here.
 
+## Unreleased
+
+### Changed
+
+- A command reaches the shell as written: a leading `cd` into the workspace
+  is no longer removed before it runs, and the system prompt names the
+  workspace path in prose instead of a `<workspace path="…"/>` tag.
+
 ## 3.0.4 - 2026-11-20
 
 ### Added

@@ -7,6 +7,14 @@ rust-version.workspace = true
 description = "pi: a terminal coding agent"
 
 repository = "https://github.com/gitduk/pi-rs"
+
+# The release note is one file at the repository root, outside this crate's
+# directory; cargo-release reads `file` relative to the crate it bumps.
+[package.metadata.release]
+pre-release-replacements = [
+  { file = "../../CHANGELOG.md", search = "## Unreleased", replace = "## {{version}} - {{date}}", min = 1 },
+]
+
 [[bin]]
 name = "pi"
 path = "src/main.rs"
