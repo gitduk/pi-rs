@@ -6,11 +6,8 @@ use std::path::{Path, PathBuf};
 
 use llm::slice::{head_bytes, tail_bytes};
 
+use crate::limit::MAX_TEXT;
 use crate::{Ctx, ToolError, state};
-
-/// Outputs over this many bytes leave only a head, a tail and a locator in the
-/// transcript.
-pub const MAX_OUTPUT: usize = 30_000;
 
 /// What a spilled output leaves in the transcript: an opaque handle the model
 /// hands back to `read` verbatim, and how big the whole thing was.
@@ -112,7 +109,7 @@ pub(crate) fn persist(ctx: &Ctx, body: &[u8]) -> Result<SpillRef, ToolError> {
 /// Persist `body` under the session's spill directory, or say there was
 /// nothing worth keeping.
 pub fn write(ctx: &Ctx, body: &str) -> Result<Option<SpillRef>, ToolError> {
-    if body.len() <= MAX_OUTPUT {
+    if body.len() <= MAX_TEXT {
         return Ok(None);
     }
     Ok(Some(persist(ctx, body.as_bytes())?))
@@ -130,10 +127,10 @@ pub(crate) fn elided(head: &str, whole: usize, tail: &str) -> String {
 /// Keep both ends of an over-long body: the head says what it was about, the
 /// tail how it ended. Under the threshold the body comes back untouched.
 pub fn prune(body: &str) -> String {
-    if body.len() <= MAX_OUTPUT {
+    if body.len() <= MAX_TEXT {
         return body.to_string();
     }
-    let half = MAX_OUTPUT / 2;
+    let half = MAX_TEXT / 2;
     let (h, t) = (head_bytes(body, half), tail_bytes(body, half));
     elided(h, body.len(), t)
 }
@@ -157,7 +154,7 @@ pub fn fit(ctx: &Ctx, items: &[String], unit: &str, notice: &str) -> Result<Stri
             items.len()
         )
     };
-    let room = MAX_OUTPUT.saturating_sub(say(items.len()).len() + notice.len());
+    let room = MAX_TEXT.saturating_sub(say(items.len()).len() + notice.len());
     let kept = fits(items.iter(), |i: &&String| i.len(), room);
     // What is kept is already the front of `full`, and every item boundary is a
     // character boundary: slice it rather than build the same bytes twice.
@@ -247,7 +244,7 @@ mod tests {
         let child = Ctx::new(ws.clone()).with_session("p-1-subagent-0", root.clone());
         let parent = Ctx::new(ws).with_session("p-1", root);
 
-        let big = "x".repeat(super::MAX_OUTPUT + 1);
+        let big = "x".repeat(crate::limit::MAX_TEXT + 1);
         let spilled = super::write(&child, &big).unwrap().expect("over the cap");
         assert_eq!(
             std::fs::read_to_string(parent.spill_path(&spilled.locator).unwrap()).unwrap(),

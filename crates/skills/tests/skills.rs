@@ -212,13 +212,13 @@ fn a_description_is_folded_and_capped_at_word_boundaries() {
     assert_eq!(described("long"), "x".repeat(1000));
 }
 
-// One past the read limit is reported; exactly at it is read.
+// One past one result's worth is reported, and no larger than that is read.
 #[test]
-fn a_skill_md_over_the_read_limit_is_a_problem() {
+fn a_skill_md_too_big_for_one_result_is_a_problem() {
     let dir = tempfile::tempdir().unwrap();
     for (name, len) in [
-        ("at", tool::limit::MAX_BYTES),
-        ("over", tool::limit::MAX_BYTES + 1),
+        ("at", tool::limit::MAX_TEXT),
+        ("over", tool::limit::MAX_TEXT + 1),
     ] {
         let skill = dir.path().join(name);
         write_skill(&skill, "---\ndescription: d\n---\n");
@@ -226,13 +226,19 @@ fn a_skill_md_over_the_read_limit_is_a_problem() {
             .write(true)
             .open(skill.join("SKILL.md"))
             .unwrap();
-        file.set_len(len).unwrap();
+        file.set_len(len as u64).unwrap();
     }
     let found = discover(&[dir.path().to_path_buf()]);
     let names: Vec<_> = found.skills.iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(names, ["at"]);
-    assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
-    assert!(found.problems[0].contains("over"), "{:?}", found.problems);
+    // The header and the name list ride beside the body, so the one that fills
+    // the limit exactly is already over it.
+    assert!(names.is_empty(), "{names:?}");
+    assert_eq!(found.problems.len(), 2, "{:?}", found.problems);
+    assert!(
+        found.problems.iter().all(|p| p.contains("over the")),
+        "{:?}",
+        found.problems
+    );
 }
 
 // Skills are looked for three directories below each skills directory; the
@@ -300,11 +306,11 @@ async fn a_builtin_skill_serves_only_its_compiled_in_files() {
     );
 }
 
-// The read limit holds when loading, too: a file that grew past it since
-// discovery is refused, one exactly at it is served.
+// What grew since discovery is refused at load rather than carried in halves:
+// a SKILL.md over one result, a referenced file past the read limit.
 #[tokio::test]
-async fn loading_refuses_files_past_the_read_limit() {
-    use tool::limit::MAX_BYTES;
+async fn loading_refuses_files_that_grew_past_the_limits() {
+    use tool::limit::{MAX_BYTES, MAX_TEXT};
     let dir = tempfile::tempdir().unwrap();
     let skill = dir.path().join("big");
     write_skill(&skill, "---\ndescription: d\n---\n");
@@ -316,18 +322,27 @@ async fn loading_refuses_files_past_the_read_limit() {
         file.set_len(len).unwrap();
     };
 
-    for (args, path) in [
-        (json!({ "name": "big" }), skill.join("SKILL.md")),
-        (
-            json!({ "name": "big", "file": "ref.txt" }),
-            skill.join("ref.txt"),
-        ),
-    ] {
-        grow(path.clone(), MAX_BYTES);
-        let at = text_of(&loader.execute(args.clone(), &c).await.unwrap());
-        assert!(!at.contains("read limit"), "{path:?}");
-        grow(path.clone(), MAX_BYTES + 1);
-        let over = text_of(&loader.execute(args, &c).await.unwrap());
-        assert!(over.contains("read limit"), "{path:?}: {over}");
-    }
+    grow(skill.join("SKILL.md"), MAX_TEXT as u64 + 1);
+    let over = loader.execute(json!({ "name": "big" }), &c).await;
+    assert!(
+        matches!(&over, Err(ToolError::Invalid(m)) if m.contains("one result carries")),
+        "{over:?}"
+    );
+
+    grow(skill.join("ref.txt"), MAX_TEXT as u64 + 1);
+    let at = text_of(
+        &loader
+            .execute(json!({ "name": "big", "file": "ref.txt" }), &c)
+            .await
+            .unwrap(),
+    );
+    assert!(!at.contains("read limit"), "{at}");
+    grow(skill.join("ref.txt"), MAX_BYTES + 1);
+    let over = text_of(
+        &loader
+            .execute(json!({ "name": "big", "file": "ref.txt" }), &c)
+            .await
+            .unwrap(),
+    );
+    assert!(over.contains("read limit"), "{over}");
 }

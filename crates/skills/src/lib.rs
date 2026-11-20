@@ -1,7 +1,7 @@
 mod load;
 mod paths;
 
-pub use load::{Load, delivered, included, instructions, source};
+pub use load::{Load, delivered, delivery, included, source};
 pub use paths::Paths;
 
 use llm::slice::head_bytes;
@@ -119,7 +119,7 @@ enum Read {
 }
 
 fn read_one(dir: &Path) -> Read {
-    // Discovery runs before the first turn; a giant SKILL.md is a problem to
+    // Discovery runs before the first turn, and a giant SKILL.md is a problem to
     // report, not a file to hold.
     let path = dir.join("SKILL.md");
     if let Ok(meta) = std::fs::metadata(&path)
@@ -170,14 +170,18 @@ fn read_one(dir: &Path) -> Read {
             "{shown}: `{name}` is not a usable skill name (a-z, 0-9, - and _, up to 64)"
         ));
     }
-    Read::Skill(Box::new(Skill {
+    let skill = Skill {
         name,
         description,
         dir: dir.to_path_buf(),
         paths,
         builtin: None,
         builtin_files: Vec::new(),
-    }))
+    };
+    if let Err(why) = load::compose_fit(&skill, &text) {
+        return Read::Problem(why);
+    }
+    Read::Skill(Box::new(skill))
 }
 
 /// Skills, and what could not be read.
@@ -234,7 +238,7 @@ impl Shelf {
     /// Load named instructions in order from the current catalog, including their sources.
     ///
     /// # Errors
-    /// Returns an error if any name is missing, unreadable, or exceeds the read limit.
+    /// Returns an error if any name is missing, unreadable, or too large for one result.
     pub async fn preload(&self, names: &[String]) -> Result<Vec<String>, tool::ToolError> {
         let (found, _) = self.now();
         let selected = names
@@ -249,8 +253,8 @@ impl Shelf {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        // Every body is read before any is counted: one that fails here must
-        // not leave a count for instructions that never reached the model.
+        // Every body is read and sized before any is counted: a call that fails
+        // must not leave a count for instructions that never reached the model.
         let mut texts = Vec::with_capacity(selected.len());
         for skill in &selected {
             let text = match skill.builtin {
@@ -269,19 +273,18 @@ impl Shelf {
                     tokio::fs::read_to_string(&path).await.map_err(failed)?
                 }
             };
-            if text.len() as u64 > MAX_BYTES {
-                return Err(tool::ToolError::Invalid(over_limit(
-                    &skill.name,
-                    text.len() as u64,
-                )));
-            }
             texts.push(text);
         }
-        Ok(selected
+        let composed = selected
             .iter()
-            .zip(texts)
-            .map(|(skill, text)| instructions(skill, &text))
-            .collect())
+            .zip(&texts)
+            .map(|(skill, text)| load::compose_fit(skill, text))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(tool::ToolError::Invalid)?;
+        for (skill, out) in selected.iter().zip(&composed) {
+            load::count(&skill.name, out.len());
+        }
+        Ok(composed)
     }
 
     fn fresh<T>(&self, read: impl FnOnce(&Seen) -> T) -> T {

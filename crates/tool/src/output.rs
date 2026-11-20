@@ -13,12 +13,13 @@ use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::fold::fold_repeats;
+use crate::limit::MAX_TEXT;
 use crate::spill::{self, SpillRef};
 use crate::{Ctx, Tool, ToolError, ToolOutput};
 
 /// How much of a spilled stream the view keeps of each end — the same two
 /// halves [`spill::prune`] shows of a body it holds whole.
-const VIEW: usize = spill::MAX_OUTPUT / 2;
+const VIEW: usize = MAX_TEXT / 2;
 
 /// The most one stream writes to its spill file. A runaway stream would
 /// otherwise fill the disk; past it the bytes are counted and dropped.
@@ -133,11 +134,11 @@ impl Capture {
                 return;
             }
         }
-        if self.front.len() + chunk.len() <= spill::MAX_OUTPUT {
+        if self.front.len() + chunk.len() <= MAX_TEXT {
             self.front.extend_from_slice(chunk);
             return;
         }
-        let room = spill::MAX_OUTPUT - self.front.len();
+        let room = MAX_TEXT - self.front.len();
         self.front.extend_from_slice(&chunk[..room]);
         let rest = &chunk[room..];
         match self.open_with(rest, ctx).await {
@@ -286,7 +287,7 @@ pub fn bound(mut out: ToolOutput, ctx: &Ctx) -> ToolOutput {
         // bounded as the text it would be sent as.
         if let ToolResultContent::Json { value } = piece {
             let text = value.to_string();
-            if text.len() <= spill::MAX_OUTPUT {
+            if text.len() <= MAX_TEXT {
                 continue;
             }
             *piece = ToolResultContent::Text(llm::message::Text { text });
@@ -352,13 +353,13 @@ mod tests {
         assert_eq!(got.text, "hi there");
         assert!(got.spill.is_none());
 
-        let body = "x".repeat(crate::spill::MAX_OUTPUT);
+        let body = "x".repeat(crate::limit::MAX_TEXT);
         let got = take(body.as_bytes(), &ctx(dir.path())).await.unwrap();
         assert_eq!(got.text, body);
         assert!(got.spill.is_none());
 
         let c = ctx(dir.path());
-        let body = "x".repeat(crate::spill::MAX_OUTPUT + 5_000);
+        let body = "x".repeat(crate::limit::MAX_TEXT + 5_000);
         let got = take(body.as_bytes(), &c).await.unwrap();
         assert_eq!(got.total, body.len());
         let spill = got.spill.as_ref().expect("past the threshold must spill");
@@ -393,7 +394,7 @@ mod tests {
     async fn a_spill_given_up_removes_its_file() {
         let dir = tempfile::tempdir().unwrap();
         let c = ctx(dir.path());
-        let body = "z".repeat(spill::MAX_OUTPUT + 5_000);
+        let body = "z".repeat(MAX_TEXT + 5_000);
         let mut cap = Capture::new();
         cap.drain(&mut body.as_bytes(), &c).await.unwrap();
         let Spill::To { path, .. } = &cap.spill else {
@@ -413,7 +414,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut body = String::new();
         for n in 0.. {
-            if body.len() > crate::spill::MAX_OUTPUT + 10 {
+            if body.len() > crate::limit::MAX_TEXT + 10 {
                 break;
             }
             body.push_str(&format!("line {n}\n"));
@@ -428,7 +429,7 @@ mod tests {
     #[tokio::test]
     async fn bound_spills_what_overflows_and_leaves_the_locator() {
         let dir = tempfile::tempdir().unwrap();
-        let huge = "x".repeat(super::spill::MAX_OUTPUT + 1_000);
+        let huge = "x".repeat(crate::limit::MAX_TEXT + 1_000);
         let got = super::bound(super::ToolOutput::text(huge), &ctx(dir.path()));
         let text = got.flatten();
         assert!(text.contains("full output:"), "{text}");
@@ -458,13 +459,13 @@ mod tests {
                 crate::Tier::Read
             }
             async fn execute(&self, _: Value, _: &Ctx) -> Result<ToolOutput, ToolError> {
-                Err(ToolError::Invalid("x".repeat(spill::MAX_OUTPUT + 1_000)))
+                Err(ToolError::Invalid("x".repeat(MAX_TEXT + 1_000)))
             }
         }
         let dir = tempfile::tempdir().unwrap();
         let ctx = ctx(dir.path());
 
-        let big = Value::String("y".repeat(spill::MAX_OUTPUT + 1_000));
+        let big = Value::String("y".repeat(MAX_TEXT + 1_000));
         let out = ToolOutput {
             content: vec![ToolResultContent::Json { value: big }],
             ..ToolOutput::text("")

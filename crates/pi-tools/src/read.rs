@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use crate::rows::{header, view_hash};
 
-use tool::limit::{MAX_BYTES, over_limit};
+use tool::limit::{MAX_BYTES, MAX_TEXT, over_limit};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput, output, spill};
 
 const DEFAULT_LIMIT: usize = 2_000;
@@ -117,7 +117,7 @@ impl View {
         let last = self.rows.last().map_or(0, |(n, _)| *n);
         let gap = format!("… declarations at lines {last}-{last} omitted.\n");
         let spent = self.head.len() + self.note.len() + gap.len();
-        let room = spill::MAX_OUTPUT.saturating_sub(spent);
+        let room = MAX_TEXT.saturating_sub(spent);
         let total: usize = self.rows.iter().map(|(_, r)| r.len()).sum();
         if total <= room {
             return None;

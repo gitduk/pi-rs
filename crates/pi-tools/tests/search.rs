@@ -77,7 +77,7 @@ async fn an_over_long_grep_drops_whole_sections_and_spills_the_rest() {
     }
 
     let out = run(&pi_tools::grep::Grep, json!({ "pattern": "NEEDLE" }), &c).await;
-    assert!(out.len() <= tool::spill::MAX_OUTPUT, "{} bytes", out.len());
+    assert!(out.len() <= tool::limit::MAX_TEXT, "{} bytes", out.len());
     for line in out.lines().filter(|l| l.starts_with(char::is_numeric)) {
         let (_, text) = line.split_once(':').expect("a row is addressed");
         assert_eq!(text.len(), "NEEDLE ".len() + 2_000, "half a row: {line}");
@@ -97,7 +97,7 @@ async fn an_over_long_grep_drops_whole_sections_and_spills_the_rest() {
     let (_d2, c2) = common::spilling();
     std::fs::write(
         c2.workspace.root().join("min.js"),
-        format!("NEEDLE {}\n", "z".repeat(tool::spill::MAX_OUTPUT)),
+        format!("NEEDLE {}\n", "z".repeat(tool::limit::MAX_TEXT)),
     )
     .unwrap();
     let out = run(&pi_tools::grep::Grep, json!({ "pattern": "NEEDLE" }), &c2).await;

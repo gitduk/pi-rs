@@ -5,6 +5,10 @@ use std::time::Duration;
 /// The size past which no tool reads a file whole.
 pub const MAX_BYTES: u64 = 10 << 20;
 
+/// The most text one tool result carries: past this a result is spilled, and
+/// text that must arrive whole has to fit inside it.
+pub const MAX_TEXT: usize = 30_000;
+
 /// The runtime a call gets when it names none.
 pub const DEFAULT_CALL: Duration = Duration::from_secs(1800);
 

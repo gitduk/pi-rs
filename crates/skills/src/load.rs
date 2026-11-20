@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{Skill, body};
-use tool::limit::{MAX_BYTES, over_limit};
+use tool::limit::{MAX_BYTES, MAX_TEXT, over_limit};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
 const SOURCE_PREFIX: &str = "skill:";
@@ -37,19 +37,14 @@ impl Load {
         if result.name != Self::NAME || result.is_error {
             return None;
         }
-        let llm::message::ToolResultContent::Text(text) = result.content.first()? else {
-            return None;
-        };
         result.content.iter().find_map(|block| {
             let llm::message::ToolResultContent::Json { value } = block else {
                 return None;
             };
-            let context = value.get("loaded_context")?;
-            let source = context.get("source")?.as_str()?;
-            let name = source
+            let source = value.get("loaded_context")?.get("source")?.as_str()?;
+            source
                 .strip_prefix(SOURCE_PREFIX)
-                .filter(|name| crate::usable(name))?;
-            (context.get("bytes")?.as_u64()? == text.text.len() as u64).then_some(name)
+                .filter(|name| crate::usable(name))
         })
     }
 }
@@ -65,14 +60,13 @@ pub fn included(sources: &[String]) -> impl Iterator<Item = &str> {
     })
 }
 
-fn loaded_output(skill: &Skill, text: &str) -> ToolOutput {
-    let text = instructions(skill, text);
-    let context =
-        json!({ "loaded_context": { "source": source(&skill.name), "bytes": text.len() } });
+fn loaded_output(skill: &Skill, text: &str) -> Result<ToolOutput, ToolError> {
+    let text = delivery(skill, text).map_err(ToolError::Invalid)?;
+    let context = json!({ "loaded_context": { "source": source(&skill.name) } });
     let mut out = ToolOutput::text(text).with_screen(skill.name.clone());
     out.content
         .push(llm::message::ToolResultContent::Json { value: context });
-    out
+    Ok(out)
 }
 
 #[derive(Deserialize)]
@@ -170,13 +164,13 @@ fn sibling_files(dir: &std::path::Path) -> (Vec<String>, bool) {
     (out, cut)
 }
 
-/// A skill's body, with the way to reach the files it points at.
+/// A skill's body, with the way to reach the files it points at: the one place
+/// instructions are composed, so what discovery sizes is what is delivered.
 ///
 /// Shared with a surface that runs a skill at the user's word: the model is
 /// given the same instructions either way, and the skill tool is how a skill's
-/// own files are reached. Every delivery is counted here: this is the one call
-/// a load cannot skip.
-pub fn instructions(skill: &Skill, text: &str) -> String {
+/// own files are reached.
+fn compose(skill: &Skill, text: &str) -> String {
     let source = match skill.builtin {
         Some(_) => "built-in".to_string(),
         None => skill.dir.join("SKILL.md").display().to_string(),
@@ -190,26 +184,89 @@ pub fn instructions(skill: &Skill, text: &str) -> String {
     // sibling are useless unless the way to fetch it arrives with them.
     let (siblings, cut) = if skill.builtin.is_some() {
         let names = skill.builtin_files.iter().map(|(name, _)| name.clone());
-        (names.collect(), false)
+        (names.collect::<Vec<_>>(), false)
     } else {
         sibling_files(&skill.dir)
     };
     if !siblings.is_empty() {
-        let mut listed: Vec<String> = siblings.iter().map(|name| format!("- `{name}`")).collect();
-        if cut {
-            listed.push(format!("- (only the first {CAP} are listed)"));
-        }
-        out.push_str(&format!(
-            "\n---\nFiles in this skill:\n{}\n\nRead a file with \
-             `skill(name: \"{}\", file: \"<path>\")`.\n",
-            listed.join("\n"),
-            skill.name
-        ));
-    }
-    if let Some(count) = DELIVERED.get() {
-        count(&skill.name, out.len());
+        let room = MAX_TEXT.saturating_sub(out.len());
+        let dir = (!skill.dir.as_os_str().is_empty()).then(|| skill.dir.display().to_string());
+        out.push_str(&listing(&skill.name, &siblings, cut, dir.as_deref(), room));
     }
     out
+}
+
+/// What [`delivery`] makes, before it is counted: a skill's whole delivery, or
+/// why it cannot arrive whole.
+pub(crate) fn compose_fit(skill: &Skill, text: &str) -> Result<String, String> {
+    let out = compose(skill, text);
+    if out.len() > MAX_TEXT {
+        return Err(over_delivery(&skill.name, out.len()));
+    }
+    Ok(out)
+}
+
+/// What `compose_fit` makes, as the model gets it: the one call a load cannot
+/// skip.
+///
+/// Every delivery is counted here, and only one that fits.
+pub fn delivery(skill: &Skill, text: &str) -> Result<String, String> {
+    let out = compose_fit(skill, text)?;
+    count(&skill.name, out.len());
+    Ok(out)
+}
+
+/// File that `len` bytes of `name` reached the model, for a caller holding the
+/// delivery [`compose_fit`] made.
+pub(crate) fn count(name: &str, len: usize) {
+    if let Some(sink) = DELIVERED.get() {
+        sink(name, len);
+    }
+}
+
+/// What a skill too big for one result is told: where to put the detail, since
+/// refusing is the only alternative to delivering half of it.
+fn over_delivery(name: &str, len: usize) -> String {
+    format!(
+        "{name}: {len} bytes of instructions, over the {MAX_TEXT} bytes one result carries. \
+         Move detail into the skill's own files and name them in `SKILL.md`."
+    )
+}
+
+// The skill's own files, named while the delivery has room left for them: the
+// body is the contract, the list is only a way in.
+fn listing(name: &str, siblings: &[String], cut: bool, dir: Option<&str>, room: usize) -> String {
+    let header = "\n---\nFiles in this skill:\n";
+    let footer = format!("\nRead a file with `skill(name: \"{name}\", file: \"<path>\")`.\n");
+    let more_line = |partial: bool| -> String {
+        if !cut && !partial {
+            return String::new();
+        }
+        let where_ = dir.map_or_else(
+            || "beside `SKILL.md`".to_string(),
+            |dir| format!("in {dir}"),
+        );
+        format!("- …and more {where_}\n")
+    };
+    // The fixed overhead: header, footer, and the worst-case "more" line.
+    let fixed = header.len() + footer.len() + more_line(true).len();
+    if fixed > room {
+        return String::new();
+    }
+    let mut body = String::new();
+    let mut shown = 0;
+    for sib in siblings {
+        let line_len = "- `".len() + sib.len() + "`\n".len();
+        if body.len() + line_len + fixed > room {
+            break;
+        }
+        body.push_str("- `");
+        body.push_str(sib);
+        body.push_str("`\n");
+        shown += 1;
+    }
+    let more = more_line(shown < siblings.len());
+    format!("{header}{body}{more}{footer}")
 }
 
 #[async_trait]
@@ -271,12 +328,12 @@ impl Tool for Load {
                             .join(", ")
                     ))),
                 },
-                None => Ok(loaded_output(skill, text)),
+                None => loaded_output(skill, text),
             };
         }
         let Some(rel) = args.file else {
-            // The instructions go to the transcript whole; a multi-megabyte
-            // SKILL.md is refused, not read.
+            // The instructions go to the transcript whole: one too big to read
+            // is refused here, one that cannot arrive whole by `delivery`.
             let path = skill.dir.join("SKILL.md");
             if let Ok(meta) = tokio::fs::metadata(&path).await
                 && meta.len() > MAX_BYTES
@@ -289,7 +346,7 @@ impl Tool for Load {
             let text = tokio::fs::read_to_string(path)
                 .await
                 .map_err(|e| ToolError::Invalid(format!("{}: {e}", args.name)))?;
-            return Ok(loaded_output(skill, &text));
+            return loaded_output(skill, &text);
         };
 
         // A file argument stays inside the skill's own directory; that is the
@@ -306,7 +363,7 @@ impl Tool for Load {
             return Err(ToolError::Escape(format!("{}/{rel}", args.name)));
         }
 
-        // Same ceiling as SKILL.md: a referenced file rides the transcript too.
+        // A referenced file gets the read limit, not SKILL.md's one-result one.
         if let Ok(meta) = tokio::fs::metadata(&real).await
             && meta.len() > MAX_BYTES
         {

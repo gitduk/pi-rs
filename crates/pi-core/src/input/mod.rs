@@ -175,10 +175,13 @@ fn expanded(skill: &Skill, args: &str) -> Result<agent::session::Prompt, String>
         let why = refused(&skill.name, anyhow::anyhow!("{}: {e}", skill.dir.display()));
         format!("cannot run {} — {why}", skill.name)
     })?;
+    let delivered = skills::delivery(skill, &text).map_err(|why| {
+        let why = refused(&skill.name, anyhow::anyhow!(why));
+        format!("cannot run {} — {why}", skill.name)
+    })?;
     let mut out = format!(
-        "Run the `{}` skill. Its instructions follow.\n\n{}",
-        skill.name,
-        skills::instructions(skill, &text)
+        "Run the `{}` skill. Its instructions follow.\n\n{delivered}",
+        skill.name
     );
     if !args.is_empty() {
         // Below the instructions, so the skill is read as the standing order

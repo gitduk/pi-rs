@@ -148,7 +148,7 @@ mod tests {
         let skill = skills::Skill::builtin(
             "---\nname: rust-style\ndescription: Rust conventions\npaths: ['**/*.rs']\n---\nUse idiomatic Rust.",
         ).unwrap().with_files(vec![("reference.md".into(), "Reference material.")]);
-        let instructions = skills::instructions(&skill, &skill.text().unwrap());
+        let instructions = skills::delivery(&skill, &skill.text().unwrap()).unwrap();
         let source = skills::source(&skill.name);
         let shelf = Arc::new(skills::Shelf::new(Vec::<PathBuf>::new()).with_builtin(skill.clone()));
         let hooks = arm(Arc::new(agent::NoHooks), Some(shelf));
@@ -220,12 +220,17 @@ mod tests {
             panic!("a load must retain its result");
         };
         assert!(
-            !result.flatten_text().contains("Last instruction."),
-            "the output gate must truncate this fixture"
+            result.is_error
+                && result.flatten_text().contains(&format!(
+                    "over the {} bytes one result carries",
+                    tool::limit::MAX_TEXT
+                )),
+            "a skill too big for one result is refused: {}",
+            result.flatten_text()
         );
         assert!(
             reminder(&session).is_some(),
-            "truncated instructions must not silence reminders"
+            "a refused load must not silence reminders"
         );
         let loaded = invoke(&mut session, &load, json!({"name": "rust-style"}), &ctx).await;
         assert!(reminder(&session).is_none());
