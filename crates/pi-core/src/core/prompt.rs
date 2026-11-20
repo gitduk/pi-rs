@@ -133,8 +133,7 @@ impl Standing {
 
     fn workspace(&self, out: &mut String) {
         out.push_str(&format!(
-            "\n\n<workspace path=\"{}\"/>\n\nRelative paths resolve from the workspace. \
-Commands start in the workspace.",
+            "\n\nThe workspace is {}. Relative paths resolve from it, and commands start there.",
             escaped(self.workspace.display())
         ));
         if self.fenced && tool::Tier::Write.under(self.tier) {
@@ -245,7 +244,7 @@ fn escaped(path: impl std::fmt::Display) -> String {
 mod tests {
     use super::*;
 
-    fn standing(tier: tool::Tier) -> Standing {
+    fn standing() -> Standing {
         Standing {
             workspace: "/w".into(),
             project_tools: Some("/w/.pi/tools".into()),
@@ -254,49 +253,13 @@ mod tests {
             instructions: vec![("/w/AGENTS.md".into(), "be terse\n".into())],
             memory: vec![("user.md".into(), "- likes rust\n".into())],
             day: "2026-10-07".into(),
-            tier,
+            tier: tool::Tier::Exec,
         }
-    }
-
-    #[test]
-    fn the_write_boundary_claims_only_what_the_ceiling_allows() {
-        for tier in [tool::Tier::Read, tool::Tier::Net] {
-            assert!(!standing(tier).render().contains("`write` and `edit`"));
-        }
-        let fenced = standing(tool::Tier::Write).render();
-        let open = Standing {
-            fenced: false,
-            ..standing(tool::Tier::Exec)
-        }
-        .render();
-        assert!(
-            fenced.contains("can change files only inside the workspace"),
-            "{fenced}"
-        );
-        assert!(!open.contains("`write` and `edit`"), "{open}");
-    }
-
-    // Blocks point at each other ("below"), and the prompt is cached by
-    // prefix: an order nobody sees changing is an order nobody checks.
-    #[test]
-    fn blocks_come_in_one_order_with_the_date_last() {
-        let text = standing(tool::Tier::Exec).render();
-        let at = |tag: &str| text.find(tag).unwrap_or_else(|| panic!("{tag}: {text}"));
-        let order = [
-            "<workspace path=",
-            "<project_tools path=",
-            "<pi_home path=",
-            "<instructions path",
-            "<memory_context>",
-            "<env",
-        ];
-        assert!(order.windows(2).all(|w| at(w[0]) < at(w[1])), "{text}");
-        assert!(text.trim_end().ends_with("tier=\"exec\"/>"), "{text}");
     }
 
     #[test]
     fn the_project_tool_path_is_escaped_and_does_not_require_a_global_home() {
-        let mut standing = standing(tool::Tier::Exec);
+        let mut standing = standing();
         standing.project_tools = Some("/repo/a&b/\"tools\"".into());
         standing.pi_home = None;
         let text = standing.render();

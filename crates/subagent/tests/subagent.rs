@@ -40,8 +40,9 @@ impl Transport for Scripted {
     }
 }
 
-// What a checkout says to whoever works in it, as `resolve` composes it.
-const STANDING: &str = "\n\n<workspace path=\"/anywhere\"/>\nnever touch infra/\n";
+// What a checkout stands on; these tests check that it is passed on, not
+// what it says.
+const STANDING: &str = "\n\nStanding marker.\nnever touch infra/\n";
 
 fn text_turn(body: &str) -> Vec<StreamEvent> {
     vec![
@@ -617,7 +618,7 @@ async fn the_child_is_told_what_the_checkout_says() {
         .find(|s| s.contains("You are a subagent"))
         .expect("the child asked for a turn");
     assert!(
-        child.contains("<workspace path=\"/anywhere\"/>") && child.contains("never touch infra/"),
+        child.contains("Standing marker.") && child.contains("never touch infra/"),
         "the child stands on the same checkout as its caller: {child}"
     );
     assert!(

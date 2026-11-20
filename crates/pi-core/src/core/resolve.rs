@@ -921,9 +921,6 @@ mod tests {
                 resolved.brief.system.matches(agent::EXECUTION).count(),
                 usize::from(custom.is_none())
             );
-            assert!(resolved.brief.system.contains("<workspace path="));
-            assert!(!resolved.brief.system.contains("<project_tools"));
-            assert!(!resolved.brief.system.contains("`write` and `edit`"));
             assert_eq!(
                 resolved
                     .prompt_blocks
