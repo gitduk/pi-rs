@@ -15,6 +15,12 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   is no longer removed before it runs, and the system prompt names the
   workspace path in prose instead of a `<workspace path="…"/>` tag.
 
+### Fixed
+
+- A skill whose instructions outgrow one tool result is refused instead of
+  truncated: the model no longer runs on half a body with nothing saying so,
+  and the refusal names where the detail should go.
+
 ## 3.0.4 - 2026-11-20
 
 ### Added
