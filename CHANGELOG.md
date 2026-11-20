@@ -7,7 +7,40 @@ session store or the tool script protocol changed shape.
 
 Releases before 3.0.0 are recorded in the commit history, not here.
 
+## 3.0.4 - 2026-11-20
+
+### Added
+
+- A `.env` variable whose last name segment is `KEY`, `TOKEN`, `SECRET`,
+  `PASSWORD`, `PASSWD` or `CREDENTIALS` is masked whatever its value, since
+  its own name already says what it is; four characters is the floor there
+  where the shape rule still asks eight, and `/mask` files such a value as
+  named rather than guessed.
+
+### Changed
+
+- The execution policy says to leave a long-lived command with the host's
+  background execution, never `setsid`, `nohup` or `&`.
+
+### Fixed
+
+- A connection's `api_key` is masked only at eight characters or more: a stub
+  key that a local endpoint ignores used to cover every word that held it, so
+  the model was handed prose cut into tokens and quoted the pieces back.
+- The `.env` shape rule counts characters rather than bytes, so a short
+  multibyte value no longer passes on its byte length.
+
 ## 3.0.3 - 2026-11-19
+
+### Added
+
+- Secrets leave as tokens. Values from the config, a `secrets` list and the
+  tool `.env` files are replaced on the way out — streamed deltas and tool
+  arguments included — and put back on the way in, so a command the model
+  writes still runs with the real key. Signatures, encrypted reasoning and
+  image data go out untouched, and a token nobody issued is left as written.
+  `/mask` lists what was masked, each value's ends while they stay a minority
+  of it, and how often it left.
 
 ### Changed
 
