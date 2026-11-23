@@ -1,7 +1,7 @@
 //! Asynchronous discovery of the model facts described by provider settings.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use futures::future;
@@ -16,7 +16,10 @@ use crate::args::Pinned;
 
 // Discovery is optional: a slow catalog must not hold startup indefinitely.
 pub(super) const TIMEOUT: Duration = Duration::from_secs(5);
-const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+// A round nobody answered is tried again, the wait doubling: a blip costs
+// seconds, a provider that stays down settles at a request a minute.
+const FIRST_RETRY: Duration = Duration::from_secs(2);
+const LONGEST_WAIT: Duration = Duration::from_secs(60);
 
 /// A snapshot of the discovered model facts applied to a resolved configuration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -188,8 +191,12 @@ pub struct Catalog {
     generation: Generation,
     sources: Vec<Source>,
     known: BTreeMap<String, Cached>,
-    /// Last completed attempt; cleared when fresh discovery is requested.
-    checked: Option<std::time::Instant>,
+    /// Whether a round has completed since discovery was last requested.
+    checked: bool,
+    /// When a round nobody answered may be tried again.
+    due: Option<Instant>,
+    /// The wait that led to `due`, doubled for the next one.
+    waited: Duration,
     pending: Option<Pending>,
     errors: Vec<String>,
 }
@@ -208,10 +215,12 @@ impl Catalog {
         use super::models::Discovery;
         if self.sources.is_empty() {
             Discovery::NotConfigured
-        } else if self.pending.is_some() || self.checked.is_none() {
+        } else if self.pending.is_some() {
             Discovery::Pending
         } else if !self.errors.is_empty() {
             Discovery::Failed
+        } else if !self.checked {
+            Discovery::Pending
         } else {
             Discovery::Ready
         }
@@ -250,11 +259,13 @@ impl Catalog {
     /// Ask for another list at the next opportunity, retaining the current
     /// one. What comes back is applied whole: someone is choosing from it.
     pub fn refresh(&mut self) {
-        self.checked = None;
+        self.checked = false;
+        self.due = None;
+        self.waited = Duration::ZERO;
     }
 
     fn accept(&mut self, results: Results) -> Refresh {
-        self.checked = Some(std::time::Instant::now());
+        let asked = results.len();
         let mut changed = false;
         let mut errors = Vec::new();
         for (source, result) in results {
@@ -279,6 +290,7 @@ impl Catalog {
             .map(|e| format!("model discovery unavailable — {e}"))
             .collect();
         self.errors = errors;
+        self.settle(asked);
         if changed {
             self.generation.0 += 1;
         }
@@ -287,13 +299,46 @@ impl Catalog {
 
     fn configure(&mut self, pinned: &Pinned, config: &Config) {
         let sources = Source::configured(pinned, config);
-        if sources != self.sources {
-            self.pending = None;
-            self.known
-                .retain(|name, _| sources.iter().any(|s| &s.name == name));
+        let same = self.sources.len() == sources.len()
+            && self
+                .sources
+                .iter()
+                .zip(&sources)
+                .all(|(was, now)| was.same_connection(now));
+        if same {
+            // A rotated credential names the same host: the facts read from it
+            // still hold, and only what authorizes the next request changed.
             self.sources = sources;
-            self.checked = None;
-            self.errors.clear();
+            return;
+        }
+        self.pending = None;
+        self.known
+            .retain(|name, _| sources.iter().any(|s| &s.name == name));
+        self.sources = sources;
+        self.checked = false;
+        self.due = None;
+        self.waited = Duration::ZERO;
+        self.errors.clear();
+    }
+
+    // A round nobody answered is worth asking again on its own: a start with the
+    // network down recovers without anyone opening the list. One that answered
+    // at least once is not — the facts are in force, and a provider that stays
+    // broken is left to the next request rather than hit on a schedule.
+    fn settle(&mut self, asked: usize) {
+        if asked > 0 && self.errors.len() == asked {
+            let wait = if self.waited.is_zero() {
+                FIRST_RETRY
+            } else {
+                (self.waited * 2).min(LONGEST_WAIT)
+            };
+            self.waited = wait;
+            self.due = Some(Instant::now() + wait);
+            self.checked = false;
+        } else {
+            self.checked = true;
+            self.due = None;
+            self.waited = Duration::ZERO;
         }
     }
 
@@ -306,20 +351,13 @@ impl Catalog {
             Err(oneshot::error::TryRecvError::Empty) => None,
             Err(oneshot::error::TryRecvError::Closed) => {
                 self.pending = None;
-                self.checked = Some(std::time::Instant::now());
+                self.checked = true;
                 Some(Refresh {
                     changed: false,
                     notes: vec!["model discovery ended without a result".into()],
                 })
             }
         }
-    }
-
-    /// Start the lists' fetch without waiting for it: a surface is about to
-    /// paint, and `poll` takes the answer when it comes.
-    pub fn fetch(&mut self, pinned: &Pinned, config: &Config) {
-        self.configure(pinned, config);
-        self.start();
     }
 
     /// A list nobody has answered yet: a surface keeps waking for it, so its
@@ -337,14 +375,13 @@ impl Catalog {
         None
     }
 
-    /// Begin discovery when requested or expired, keeping one attempt in flight.
+    /// Begin discovery when one is requested and no failure is still waiting
+    /// out its retry, keeping one attempt in flight.
     fn start(&mut self) {
-        if self.pending.is_some()
-            || self.sources.is_empty()
-            || self
-                .checked
-                .is_some_and(|at| at.elapsed() < REFRESH_INTERVAL)
-        {
+        if self.pending.is_some() || self.sources.is_empty() || self.checked {
+            return;
+        }
+        if self.due.is_some_and(|due| Instant::now() < due) {
             return;
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
@@ -712,6 +749,40 @@ format = "chat"
         assert!(
             config.names().is_empty(),
             "another connection must not inherit these facts"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_round_nobody_answered_is_asked_again_without_a_request() {
+        use crate::core::models::Discovery;
+
+        let (url, _) = server(vec![
+            (503, json!({"error": "try later"})),
+            (
+                200,
+                json!({"result": {"models": [{"name": "a", "limit": {"context": 222222}}]}}),
+            ),
+        ]);
+        let pinned = Pinned::default();
+        let config = settings(&url).config().unwrap();
+        let mut catalog = Catalog::default();
+        assert_eq!(catalog.load(&pinned, &config).await.len(), 1);
+        assert_eq!(catalog.discovery(), Discovery::Failed);
+        let refresh = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if let Some(refresh) = catalog.poll(&pinned, &config) {
+                    break refresh;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a failed round is tried again on its own");
+        assert!(refresh.changed);
+        assert_eq!(catalog.discovery(), Discovery::Ready);
+        assert!(
+            catalog.poll(&pinned, &config).is_none(),
+            "a round that answered is not asked again"
         );
     }
 

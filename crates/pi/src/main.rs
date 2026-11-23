@@ -219,18 +219,15 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
     let resume_model = prior.as_ref().map(|p| p.model.as_str());
     let mut catalog = core::catalog::Catalog::default();
     // Only a start with no model to name has to wait for the lists: anywhere
-    // else the surface paints first and their facts land through the refresh
-    // every pass runs.
+    // else the surface asks for them as it paints, and their facts land
+    // through the refresh every pass runs.
     let waits = !interactive
         || config
             .model(args.model.as_deref(), resume_model, from_project)
             .is_none();
     let discovery_notes = match waits {
         true => catalog.load(&pinned, &config).await,
-        false => {
-            catalog.fetch(&pinned, &config);
-            Vec::new()
-        }
+        false => Vec::new(),
     };
     let config = Arc::new(match waits {
         true => catalog.enrich(&settings, &pinned, config)?,
