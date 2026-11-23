@@ -21,7 +21,7 @@ struct Snapshot {
     discovery: Discovery,
 }
 
-#[derive(Clone, Copy, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Discovery {
     Pending,

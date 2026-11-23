@@ -470,6 +470,13 @@ impl Tui {
         Some(said)
     }
 
+    // A round that has answered, said at once.
+    fn say_facts(&mut self) {
+        if let Some(said) = self.facts() {
+            self.notice(pi_core::input::notice(said));
+        }
+    }
+
     fn adopt_view(&mut self) {
         let view = front_view(&mut self.views, self.core.lane());
         self.ui.adopt_config(&self.core, view);
@@ -773,6 +780,9 @@ impl Tui {
         // late tick then ordinary cadence avoids a catch-up spin.
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let update = core::update::changed();
+        // The surface about to paint asks for the lists once; `poll` then takes
+        // the answer when it comes.
+        self.say_facts();
         let leaving = loop {
             self.serve_lanes();
             // Before the bar rebuilds, so a vanished tab goes with its lane.
@@ -784,10 +794,8 @@ impl Tui {
             self.drivers.retain(|t| core.position_of(t).is_some());
             // A list that answers is taken up at once rather than at the next
             // walk, so its facts are in force before the first keypress is.
-            if self.core.awaiting_models()
-                && let Some(said) = self.facts()
-            {
-                self.notice(pi_core::input::notice(said));
+            if self.core.awaiting_models() {
+                self.say_facts();
             }
             // What changed on disk is taken up within a second: settings
             // resolve the lane again, a skill's word starts to answer. Not on
