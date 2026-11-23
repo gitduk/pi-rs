@@ -16,6 +16,7 @@ Read this skill's own copy before writing a key it does not already show:
 
 `<pi_home>/settings.toml` applies to every checkout.
 A project's `.pi/settings.toml` adds keys for that checkout alone.
+That file can also name a `$NAME` a checkout would send to its own endpoint, or declare hooks, so read it before running pi in a checkout you did not write.
 Add the section to the file that matches the requested scope.
 Preserve unrelated settings.
 
@@ -28,6 +29,7 @@ Preserve unrelated settings.
 
 Never put a secret in the configuration file.
 Reference an environment variable with `$NAME`.
+pi reads the variable from its own environment first, then from `~/.pi/.env`, so a key can live in that file alone.
 A project that changes a provider's `base_url` or `models_url` must set `api_key` for that target; nothing is inherited from the original connection.
 
 pi reloads within a second of a save.

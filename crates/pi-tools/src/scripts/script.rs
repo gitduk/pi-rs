@@ -9,18 +9,12 @@ use tool::{Concurrency, Ctx, Tier, Tool, ToolError, ToolOutput};
 use crate::bash::Bash;
 use crate::runtime::background::{Environment, Invocation, OutputMode};
 use crate::runtime::channel::Ask;
+use pi_store::envfile::is_identifier;
 
 const TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Past this size an argument value rides on stdin only.
 const MAX_ENV_VALUE: usize = 64 << 10;
-
-/// Whether the name is safe to set as an environment variable.
-pub(super) fn is_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct Arg {
@@ -170,7 +164,7 @@ impl Tool for Script {
         let shared: Vec<_> = self
             .path
             .parent()
-            .map(super::env::read)
+            .map(pi_store::envfile::read)
             .unwrap_or_default()
             .into_iter()
             .filter(|(key, _)| std::env::var_os(key).is_none())

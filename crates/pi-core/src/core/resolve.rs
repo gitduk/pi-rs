@@ -337,7 +337,7 @@ pub fn resolve(
     let script_dirs: Vec<(Arc<pi_tools::scripts::Dir>, bool)> = dirs
         .into_iter()
         .map(|(dir, project)| {
-            notes.extend(pi_tools::scripts::env::loose(&dir));
+            notes.extend(pi_store::envfile::loose(&dir));
             (Arc::new(pi_tools::scripts::Dir::new(dir)), project)
         })
         .collect();
@@ -601,9 +601,9 @@ fn pi_usage() -> skills::Skill {
 }
 
 /// The files a resolve in `root` reads, as they stand now: missing ones are
-/// left out, so one appearing is a change too. A script's `.env` is here
-/// because its wrapper reads it per call, so an edit takes effect without a
-/// restart — and what it now holds has to reach the mask.
+/// left out, so one appearing is a change too. A tools directory's `.env` is
+/// here because what it holds reaches the mask and the scripts per call, so an
+/// edit takes effect without a restart.
 pub fn watched(pinned: &Pinned, root: &Path) -> Vec<Stamp> {
     let mut paths: Vec<PathBuf> = Vec::new();
     paths.extend(
@@ -617,7 +617,7 @@ pub fn watched(pinned: &Pinned, root: &Path) -> Vec<Stamp> {
     paths.extend(
         (super::tools::dirs(root, "tools"))
             .into_iter()
-            .map(|(dir, _)| dir.join(pi_tools::scripts::env::FILE)),
+            .map(|(dir, _)| pi_store::envfile::path(&dir)),
     );
     paths.into_iter().filter_map(tool::stamp::of).collect()
 }
@@ -764,14 +764,14 @@ fn endpoint(pinned: &Pinned) -> Option<String> {
 mod tests {
     use std::path::PathBuf;
 
-    // A script's `.env` is read by its wrapper on every call, so an edit has
-    // to reach the mask the same turn: watching it is what makes a reload
-    // happen at all, and a reload is what arms the new value.
+    // A tools directory's `.env` is read by its wrapper on every call, so an
+    // edit has to reach the mask the same turn: watching it is what makes a
+    // reload happen at all, and a reload is what arms the new value.
     #[test]
-    fn a_script_env_file_is_watched() {
+    fn a_tools_env_file_is_watched() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("repo");
-        let env = root.join(".pi/tools/.env");
+        let env = root.join(".pi/.env");
         std::fs::create_dir_all(env.parent().unwrap()).unwrap();
         std::fs::write(&env, "TOKEN=1234567890abcdef\n").unwrap();
 

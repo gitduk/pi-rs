@@ -149,7 +149,7 @@ printf '%s\n' 'private stderr' >&2
 "#,
     )
     .unwrap();
-    let env = tools.join(".env");
+    let env = pi_store::envfile::path(&tools);
     std::fs::write(&env, "PI_BACKGROUND_TEST_VALUE=from-file\n").unwrap();
     let table = Arc::new(pi_core::driver::background::Table::default());
     let host = Arc::new(pi_core::driver::background::Commands::new(table.clone()));

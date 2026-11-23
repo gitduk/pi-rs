@@ -3,7 +3,7 @@
 # Bump this script's version whenever it changes.
 version = "0.1.11"
 edition = "2024"
-description = "Connect this session to Telegram when the user requests it.\nThe tool submits messages from the user's bot to this session, as model input. Use /stop to stop the current run.\nEach answer returns to the chat.\nSet TELEGRAM_BOT_TOKEN in the tool directory's .env file to a bot token from @BotFather.\n\nThe tool runs in the background until you stop its background command.\nOn first use, the background command provides a link and QR code for account pairing.\nThe pairing persists for later use."
+description = "Connect this session to Telegram when the user requests it.\nThe tool submits messages from the user's bot to this session, as model input. Use /stop to stop the current run.\nEach answer returns to the chat.\nSet TELEGRAM_BOT_TOKEN in ~/.pi/.env to a bot token from @BotFather.\n\nThe tool runs in the background until you stop its background command.\nOn first use, the background command provides a link and QR code for account pairing.\nThe pairing persists for later use."
 
 [package.metadata.pi]
 background = true
@@ -443,7 +443,7 @@ mod bridge {
         if token.is_empty() {
             return Err(
                 "telegram: TELEGRAM_BOT_TOKEN is not set — create a bot with @BotFather \
-                        and put its token in ~/.pi/tools/.env"
+                        and put its token in ~/.pi/.env"
                     .into(),
             );
         }

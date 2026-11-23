@@ -2040,6 +2040,7 @@ dependencies = [
  "libc",
  "llm",
  "message",
+ "pi-store",
  "reqwest",
  "serde",
  "serde_json",

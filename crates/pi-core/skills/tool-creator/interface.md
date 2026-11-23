@@ -43,7 +43,8 @@ Each argument also becomes an environment variable of the same name, except when
 Read stdin when any exception can apply.
 An argument cannot replace an inherited variable such as `PATH`.
 
-Put shared keys and other shared values in `.env` beside the scripts.
+Put shared keys and other shared values in the `.env` of the directory holding
+`tools/`, not inside `tools/` itself.
 Use one `NAME=value` assignment per line.
 Scripts receive these values as environment variables.
 Ordinary `bash` calls do not receive them.

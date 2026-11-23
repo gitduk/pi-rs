@@ -574,12 +574,21 @@ impl Config {
     }
 }
 
-/// `$NAME` reads that environment variable; anything else is the key itself.
+/// `$NAME` reads that environment variable, else what `$PI_HOME/.env` sets;
+/// one set to nothing counts as unset. Anything else is the key itself.
 /// The one spelling of the credential contract, for every key in the file.
 pub(crate) fn expand_key(raw: &str) -> Option<String> {
+    expand_key_from(crate::envfile::home_file().as_deref(), raw)
+}
+
+/// [`expand_key`] with `file` standing in for `$PI_HOME/.env`.
+fn expand_key_from(file: Option<&Path>, raw: &str) -> Option<String> {
     match raw.strip_prefix('$') {
         None => Some(raw.to_string()),
-        Some(name) => std::env::var(name).ok(),
+        Some(name) => std::env::var(name)
+            .ok()
+            .or_else(|| crate::envfile::value(file?, name))
+            .filter(|value| !value.is_empty()),
     }
 }
 
@@ -893,6 +902,27 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{bad}");
         }
+    }
+
+    // The process environment has the last word; the file stands in for a name
+    // it does not set, and a name set to nothing is not a credential.
+    #[test]
+    fn a_dollar_name_reads_the_environment_else_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".env");
+        std::fs::write(
+            &file,
+            "PI_TEST_FILE_KEY=from-file\nPI_TEST_FILE_BLANK=\nPATH=/from-file\n",
+        )
+        .unwrap();
+        let key = |raw: &str| expand_key_from(Some(&file), raw);
+
+        assert_eq!(key("$PI_TEST_FILE_KEY").as_deref(), Some("from-file"));
+        assert_eq!(key("$PATH"), std::env::var("PATH").ok());
+        assert_eq!(key("$PI_TEST_FILE_BLANK"), None);
+        assert_eq!(key("$PI_TEST_FILE_UNSET"), None);
+        assert_eq!(key("sk-literal").as_deref(), Some("sk-literal"));
+        assert_eq!(expand_key_from(None, "$PI_TEST_FILE_KEY"), None);
     }
 
     // A checkout may set what it likes; what reaches past it is said aloud.

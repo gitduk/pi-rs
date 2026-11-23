@@ -49,8 +49,8 @@ api_key  = "$ANTHROPIC_API_KEY" # `$` reads the environment; anything else is th
 # tier   = "exec"                 # read | write | exec | net
 
 # Values that must never leave the machine, whatever they look like. Provider
-# keys, `$NAME` read the way a key is, and the tool `.env` files are found
-# without this: it is for what no rule would recognise.
+# keys, `$NAME` read the way a key is, and the pi directory's `.env` files are
+# found without this: it is for what no rule would recognise.
 # secrets = ["hunter2", "0x0123…"]
 
 # How many times to retry a request the provider could not serve, and how many
@@ -207,7 +207,7 @@ api_key  = "$ANTHROPIC_API_KEY" # `$` reads the environment; anything else is th
 # command = "cargo test -q >/dev/null 2>&1 || { echo 'tests fail'; exit 2; }"
 
 # MCP servers, each one's tools offered as `<name>__<tool>`. A value that is
-# `$NAME` reads pi's environment.
+# `$NAME` reads pi's environment, else `~/.pi/.env`.
 # [mcp.github]
 # command = "github-mcp-server"
 # args    = ["stdio"]

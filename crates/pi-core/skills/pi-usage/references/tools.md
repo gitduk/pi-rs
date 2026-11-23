@@ -153,13 +153,15 @@ Each entry maps a parameter name to its string description.
 If pi cannot read a script's interface, it lists the tool as unusable with the
 reason.
 
-`~/.pi/tools/.env` holds `NAME=value` lines for the scripts' initial
+`~/.pi/.env` holds `NAME=value` lines for the scripts' initial
 environment, such as a service key.
 A background wrapper loads these values only for its subprocess.
 Ordinary `bash` calls do not receive them.
+`$NAME` in `settings.toml` reads this file too, so a provider key needs no
+export in the shell.
 For checkout scripts, use the nearest `.pi/tools/` up to the repository root.
 Outside a repository, use the workspace's `.pi/tools/`.
-This directory has its own `.env`.
+The directory holding that `tools/` keeps its `.env` beside it.
 
 When both directories contain the same name, pi offers the checkout's tool.
 It reports the other tool as skipped.
@@ -209,8 +211,7 @@ A command must be selected alone.
 The repository's `examples/tools/` holds tools to copy:
 
 - `search` searches the web.
-- `judge` asks a judgment model and reads its key from the tool directory's
-  `.env`.
+- `judge` asks a judgment model and reads its key from `.env`.
 - `wechat` connects the session to a WeChat chat.
   Request it, then scan its QR code on first use.
   Phone messages arrive as turns, including `/stop`.

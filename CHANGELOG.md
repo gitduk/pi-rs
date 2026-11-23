@@ -7,6 +7,18 @@ session store or the tool script protocol changed shape.
 
 Releases before 3.0.0 are recorded in the commit history, not here.
 
+## Unreleased
+
+### Changed
+
+- A pi directory's `.env` moved from `tools/` up to the directory holding it:
+  `~/.pi/tools/.env` is now `~/.pi/.env`, and a checkout's `.pi/tools/.env` is
+  now `.pi/.env`. A file left at the old path is read by nothing and masks
+  nothing, so move it. The same file now also answers `$NAME` in the settings,
+  after pi's own environment: a provider key can live there alone, with no
+  `export` in the shell. The settings file's shape for a key changed, so this
+  is a major version.
+
 ## 3.0.5 - 2026-11-20
 
 ### Changed

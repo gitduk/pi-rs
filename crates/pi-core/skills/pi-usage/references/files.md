@@ -13,7 +13,7 @@
 | `.pi/skills/`                            | a project's skills                         |
 | `~/.pi/memory/*.md`                      | memory: global, and one file per project   |
 | `~/.pi/tools/`                           | script tools                               |
-| `~/.pi/tools/.env`                       | initial environment values for scripts, mode `0600` |
+| `~/.pi/.env`                             | script environment and `$NAME` values, mode `0600` |
 | `.pi/tools/`                             | a project's script tools                   |
 | `~/.pi/images/`                          | images pasted with `ctrl+v`                |
 | `~/.pi/statusline.json`                  | the layout of the statusline rows          |

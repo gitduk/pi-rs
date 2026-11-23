@@ -6,7 +6,7 @@ It runs independently of the turn and reports its exit status and output.
 For a named background tool, set `background = true` in its metadata.
 Use the top level of the shebang comment block or `[package.metadata.pi]` in Rust frontmatter.
 The named entry uses the same bash background executor.
-It passes JSON on stdin and loads the tool directory's `.env` for its subprocess.
+It passes JSON on stdin and loads the `.env` beside the tool directory for its subprocess.
 Examples include watchers, crawlers that return batches, and bridges that relay a person's messages to this session.
 
 Metadata declares background mode.
@@ -62,7 +62,7 @@ The command runs until it exits, a stop request ends it, or pi exits.
 There is no timeout.
 A stop request sends SIGTERM, then SIGKILL, to the command's process group.
 Use bash controls to read output, stop, or restart the command.
-Restart reuses the original JSON input and reloads the tool directory’s `.env`.
+Restart reuses the original JSON input and reloads the `.env` beside the tool directory.
 
 Model `message`, `observe`, and runtime controls require background mode.
 Without `serve`, stdout at exit becomes the command's final automatic input.

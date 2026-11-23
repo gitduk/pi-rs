@@ -51,7 +51,7 @@ fn values_of(dirs: &[PathBuf], config: &config::Config) -> Vec<(String, Tier, St
         values.push(("SECRET".to_string(), Tier::Named, value));
     }
     for dir in dirs {
-        for (name, value) in pi_tools::scripts::env::read(dir) {
+        for (name, value) in pi_store::envfile::read(dir) {
             // A name says what a value is, so half the proof a shape needs
             // will do.
             if !long_enough(&value, MIN / 2) {
@@ -290,7 +290,7 @@ mod tests {
         let tools = workspace.path().join(".pi/tools");
         std::fs::create_dir_all(&tools).expect("the tools directory");
         std::fs::write(
-            tools.join(".env"),
+            pi_store::envfile::path(&tools),
             "TELEGRAM_BOT_TOKEN=123456:AAbbCCddEEffGG\nPASSWD=123456\nSHORT_KEY=ab\n\
              MODE=production\nDEBUG=1\n",
         )

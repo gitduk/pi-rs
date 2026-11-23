@@ -607,7 +607,7 @@ fn command(again: &Again) -> Command {
         .environment
         .directory
         .as_deref()
-        .map(crate::scripts::env::read)
+        .map(pi_store::envfile::read)
         .unwrap_or_default()
         .into_iter()
         .filter(|(name, _)| std::env::var_os(name).is_none())

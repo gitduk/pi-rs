@@ -10,6 +10,7 @@ description = "The tools a run acts through"
 execution.workspace = true
 message.workspace = true
 llm.workspace = true
+pi-store.workspace = true
 tool.workspace = true
 async-trait.workspace = true
 serde.workspace = true

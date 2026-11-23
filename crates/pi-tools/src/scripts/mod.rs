@@ -10,7 +10,6 @@
 //! the exit is non-zero. Output runs through the same bounded capture as
 //! bash's, so a runaway script floods neither memory nor transcript.
 
-pub mod env;
 #[cfg(unix)]
 pub(crate) mod fd3;
 pub mod wire;
@@ -671,8 +670,11 @@ mod tests {
         assert!(skipped.is_empty(), "{skipped:?}");
         let names: Vec<_> = found.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["judge", "search", "telegram", "wechat"]);
-        let example = std::fs::read_to_string(dir.join(".env.example")).unwrap();
-        let named: Vec<_> = env::parse(&example).into_iter().map(|(k, _)| k).collect();
+        let example = std::fs::read_to_string(dir.parent().unwrap().join(".env.example")).unwrap();
+        let named: Vec<_> = pi_store::envfile::parse(&example)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
         assert_eq!(
             named,
             ["TYPESAFE_API_KEY", "TELEGRAM_BOT_TOKEN"],
@@ -685,16 +687,18 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_script_starts_with_the_env_file_and_the_model_cannot_swap_it() {
-        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".pi/tools");
+        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
-            dir.path().join("show.sh"),
+            dir.join("show.sh"),
             "#!/bin/sh\n# ---\n# description = \"Show\"\n# [required]\n\
              # PI_TEST_KEY = \"a name the file sets\"\n# ---\necho \"$PI_TEST_KEY\"\n",
         )
         .unwrap();
-        std::fs::write(dir.path().join(env::FILE), "PI_TEST_KEY=from-file\n").unwrap();
-        let (found, _) = discover_in(dir.path());
-        let ctx = tool::Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        std::fs::write(pi_store::envfile::path(&dir), "PI_TEST_KEY=from-file\n").unwrap();
+        let (found, _) = discover_in(&dir);
+        let ctx = tool::Ctx::new(tool::Workspace::new(&dir).unwrap());
         let out = found[0]
             .execute(serde_json::json!({ "PI_TEST_KEY": "from-model" }), &ctx)
             .await

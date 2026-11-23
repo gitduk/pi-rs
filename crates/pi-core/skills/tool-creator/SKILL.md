@@ -67,7 +67,8 @@ Choose one of these formats:
 pi silently skips files in `tools/` that use neither format.
 
 pi also reads the project tool directory during the session.
-That directory has its own `.env`.
+Each tool directory's `.env` sits one level up, beside `tools/`, not inside it.
+The home directory's `.env` also answers `$NAME` in the settings.
 If both directories contain the same tool name, pi offers the checkout's tool.
 It skips the home tool and reports the conflict.
 

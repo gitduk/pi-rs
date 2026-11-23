@@ -10,6 +10,7 @@ use std::path::PathBuf;
 pub mod args;
 pub mod config;
 pub mod diagnostics;
+pub mod envfile;
 pub mod icons;
 pub mod keys;
 pub mod listing;

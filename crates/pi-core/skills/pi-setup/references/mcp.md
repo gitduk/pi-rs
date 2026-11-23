@@ -12,7 +12,7 @@ Read the server's documentation for its command, URL, and required environment v
 [mcp.github]                       # stdio: a program and its arguments
 command = "github-mcp-server"
 args    = ["stdio"]
-env     = { GITHUB_TOKEN = "$GITHUB_TOKEN" }   # $NAME reads pi's environment
+env     = { GITHUB_TOKEN = "$GITHUB_TOKEN" }   # $NAME reads pi's environment, else ~/.pi/.env
 
 [mcp.docs]
 url     = "https://example.com/mcp"            # Streamable HTTP
