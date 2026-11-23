@@ -88,6 +88,12 @@ impl RunTool {
     }
 }
 
+// Whether a call is still on its way — taken into the batch or out running,
+// as opposed to landed and waiting for its entry.
+pub(super) fn running(tools: &[RunTool]) -> bool {
+    tools.iter().any(|t| !matches!(t.run, Run::Landed(_)))
+}
+
 // The call's line in the live block: mark, text, elapsed time. Mark leads,
 // matching the row this call lands as once folded.
 pub(super) fn pending_line(

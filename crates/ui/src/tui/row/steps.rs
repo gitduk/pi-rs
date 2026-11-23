@@ -137,7 +137,8 @@ pub enum StepMark {
     Ended(Outcome),
     /// Out, turning at this spinner tick.
     Out(usize),
-    /// Reasoning still streaming, turning at this spinner tick.
+    /// A model still thinking — reasoning streaming, or yet to answer —
+    /// turning at this spinner tick.
     Thinking(usize),
     /// Waiting its turn: still, since nothing runs yet.
     Queued,

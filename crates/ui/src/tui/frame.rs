@@ -12,12 +12,12 @@ use super::browse::{PageInput, PageLayout};
 use super::call::{self, drawn, pending_line};
 use super::menu::MenuEntry;
 use super::mouse::{Pane, Regions, Target, row_in};
-use super::row::{PendingTool, Row, count};
+use super::row::{PendingTool, Row, StepMark, count};
 use super::screen::{self, Rows};
 use super::scrollback::{Piece, ScrollbackRows, body};
 use super::search::{self, Anchor, Laid, Spot};
 use super::statusline::{Checkout, Facts, Jobs};
-use super::view::{Scroll, StreamKind, View, remember_first_ask};
+use super::view::{Doing, Scroll, StreamKind, View, remember_first_ask};
 use crate::render;
 use crate::render::Paint;
 use pi_core::core::question::{Asker, Question};
@@ -855,6 +855,34 @@ impl Ui {
         }
         for row in content.iter() {
             out.push(row.clone(), None);
+        }
+
+        // Nothing on screen moving — first bytes still to come, or the next
+        // answer due with no call out: one turning line, timed from `quiet`.
+        if let Some(work) = &view.state.work
+            && matches!(work.doing, Doing::Turn { .. })
+            && !work.stopping
+            && work.retry.is_none()
+            && view.surface.stream.text().is_empty()
+            && !call::running(&view.state.tools)
+            && let Some(waited) = crate::status::running_time(work.quiet.elapsed())
+        {
+            if spacing.push(super::spacing::Section::Other) {
+                out.push(Line::default(), None);
+            }
+            let line = Line::from(vec![
+                self.paint.span(
+                    &self.paint.theme.muted,
+                    format!("{} ", StepMark::Thinking(self.spinner).glyph()),
+                ),
+                self.paint.span(
+                    &self.paint.theme.muted,
+                    format!("waiting{}{waited}", icons::PART_SEP),
+                ),
+            ]);
+            for row in screen::fit(&line, width) {
+                out.push(row, None);
+            }
         }
 
         // Typed lines precede execution results to match delivery priority.

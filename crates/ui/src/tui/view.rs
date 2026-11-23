@@ -112,6 +112,9 @@ impl State {
 pub(super) struct Work {
     // When it began, for the `elapsed` part.
     pub(super) since: Instant,
+    // When it last heard anything: a byte, a call starting or landing. The
+    // wait line counts the still stretch from here, not the turn from `since`.
+    pub(super) quiet: Instant,
     pub(super) doing: Doing,
     // It has been asked to stop and is still winding down.
     pub(super) stopping: bool,
@@ -121,8 +124,11 @@ pub(super) struct Work {
 
 impl Work {
     pub(super) fn new(doing: Doing) -> Self {
+        // One clock: a fresh run has been still as long as it has run.
+        let now = Instant::now();
         Self {
-            since: Instant::now(),
+            since: now,
+            quiet: now,
             doing,
             stopping: false,
             retry: None,
@@ -134,6 +140,15 @@ impl Work {
 pub(super) struct Retry {
     pub(super) attempt: usize,
     pub(super) wait: std::time::Duration,
+    // When the wait began: `wait` alone never says how much is left.
+    pub(super) since: Instant,
+}
+
+impl Retry {
+    // Still waiting out the delay, as opposed to sent again already.
+    pub(super) fn waiting_out(&self) -> bool {
+        self.since.elapsed() < self.wait
+    }
 }
 
 pub(super) enum Doing {

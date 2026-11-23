@@ -128,8 +128,11 @@ impl Ui {
             if spent && let Doing::Turn { committed } = &mut work.doing {
                 *committed = true;
             }
+            // A retry's own news is the statusline's; any other event means
+            // the run is alive, so the wait clock starts over and the retry ends.
             if !matches!(event, Event::Retrying { .. }) {
                 work.retry = None;
+                work.quiet = Instant::now();
             }
         }
         // The core has recorded usage; these arms project the event into rows.
@@ -234,6 +237,7 @@ impl Ui {
                     work.retry = Some(Retry {
                         attempt: *attempt,
                         wait: Duration::from_millis(*delay_ms),
+                        since: Instant::now(),
                     });
                 }
                 self.say_notice(view, reason);

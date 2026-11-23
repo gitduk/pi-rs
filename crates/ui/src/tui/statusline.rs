@@ -174,6 +174,7 @@ impl Run {
 fn screen_of(work: Option<&Work>, ended: Option<Ending>) -> (Option<Retry>, Option<Ending>) {
     let retry = work
         .and_then(|work| work.retry.as_ref())
+        .filter(|retry| retry.waiting_out())
         .map(|retry| Retry {
             attempt: retry.attempt,
             wait: retry.wait.as_secs_f64(),
@@ -380,7 +381,7 @@ fn state_of(work: Option<&Work>) -> String {
     match work {
         _ if matches!(work.doing, super::view::Doing::Compact) => "compacting".to_string(),
         _ if work.stopping => "stopping".to_string(),
-        _ if let Some(retry) = &work.retry => {
+        _ if let Some(retry) = work.retry.as_ref().filter(|retry| retry.waiting_out()) => {
             format!(
                 "retry {} in {}",
                 retry.attempt,
