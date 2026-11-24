@@ -7,6 +7,20 @@ session store or the tool script protocol changed shape.
 
 Releases before 3.0.0 are recorded in the commit history, not here.
 
+## Unreleased
+
+### Added
+
+- `/model --refresh` reads each provider's model list. `/model` alone lists
+  what the settings and the last refresh left known.
+
+### Changed
+
+- A start no longer asks a provider for its models before the first frame.
+  With no model to name, pi says to pass `--model <provider/model-id>` or set
+  `model`, instead of running the first discovered name. A list that fails is
+  reported where it was asked for, not retried on a schedule.
+
 ## 3.0.6 - 2026-11-23
 
 ### Changed
