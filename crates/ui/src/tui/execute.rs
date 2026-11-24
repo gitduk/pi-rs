@@ -33,7 +33,10 @@ impl Tui {
         tracing::info!(target: "pi::session", request = request.id, ?origin,
             lane = request.lane, session = self.core.lane().id(), "dispatch");
         let was = self.core.lanes.front();
-        let models = matches!(&intent, Intent::Builtin(Builtin::Model(name)) if name.is_empty());
+        let models = matches!(
+            &intent,
+            Intent::Builtin(Builtin::ListModels | Builtin::RefreshModels)
+        );
         let action = execution::dispatch(&mut self.core, intent);
         self.reconcile(was);
 

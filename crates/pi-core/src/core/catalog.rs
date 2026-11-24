@@ -1,7 +1,7 @@
 //! Asynchronous discovery of the model facts described by provider settings.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use futures::future;
@@ -14,12 +14,8 @@ use tokio::sync::oneshot;
 use super::Core;
 use crate::args::Pinned;
 
-// Discovery is optional: a slow catalog must not hold startup indefinitely.
+// Bound a refresh and the time a tool waits for its result.
 pub(super) const TIMEOUT: Duration = Duration::from_secs(5);
-// A round nobody answered is tried again, the wait doubling: a blip costs
-// seconds, a provider that stays down settles at a request a minute.
-const FIRST_RETRY: Duration = Duration::from_secs(2);
-const LONGEST_WAIT: Duration = Duration::from_secs(60);
 
 /// A snapshot of the discovered model facts applied to a resolved configuration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -191,12 +187,6 @@ pub struct Catalog {
     generation: Generation,
     sources: Vec<Source>,
     known: BTreeMap<String, Cached>,
-    /// Whether a round has completed since discovery was last requested.
-    checked: bool,
-    /// When a round nobody answered may be tried again.
-    due: Option<Instant>,
-    /// The wait that led to `due`, doubled for the next one.
-    waited: Duration,
     pending: Option<Pending>,
     errors: Vec<String>,
 }
@@ -208,7 +198,7 @@ struct Refresh {
 
 impl Catalog {
     /// Publish discovery readiness to the tools of a newly resolved run.
-    pub fn publish_status(&self, resolved: &super::resolve::Resolved) {
+    pub(super) fn publish_status(&self, resolved: &super::resolve::Resolved) {
         resolved.models.discovery(self.discovery());
     }
     fn discovery(&self) -> super::models::Discovery {
@@ -219,8 +209,6 @@ impl Catalog {
             Discovery::Pending
         } else if !self.errors.is_empty() {
             Discovery::Failed
-        } else if !self.checked {
-            Discovery::Pending
         } else {
             Discovery::Ready
         }
@@ -229,13 +217,6 @@ impl Catalog {
     pub fn generation(&self) -> Generation {
         self.generation
     }
-    /// Discover the initial lists concurrently, before selecting a model.
-    pub async fn load(&mut self, pinned: &Pinned, config: &Config) -> Vec<String> {
-        self.sources = Source::configured(pinned, config);
-        let sources = self.sources.clone();
-        self.accept(read(sources).await).notes
-    }
-
     /// Apply only facts belonging to the connections that are still configured.
     pub fn enrich(&self, settings: &Settings, pinned: &Pinned, config: Config) -> Result<Config> {
         let mut models = toml::Table::new();
@@ -256,16 +237,24 @@ impl Catalog {
         settings.config_with_models(&models)
     }
 
-    /// Ask for another list at the next opportunity, retaining the current
-    /// one. What comes back is applied whole: someone is choosing from it.
-    pub fn refresh(&mut self) {
-        self.checked = false;
-        self.due = None;
-        self.waited = Duration::ZERO;
+    /// Start an explicitly requested discovery, retaining the current catalog.
+    pub(super) fn refresh(&mut self, pinned: &Pinned, config: &Config) {
+        self.configure(pinned, config);
+        if self.pending.is_some() || self.sources.is_empty() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let sources = self.sources.clone();
+        let (send, result) = oneshot::channel();
+        let task = runtime.spawn(async move {
+            let _ = send.send(read(sources).await);
+        });
+        self.pending = Some(Pending { task, result });
     }
 
     fn accept(&mut self, results: Results) -> Refresh {
-        let asked = results.len();
         let mut changed = false;
         let mut errors = Vec::new();
         for (source, result) in results {
@@ -290,7 +279,6 @@ impl Catalog {
             .map(|e| format!("model discovery unavailable — {e}"))
             .collect();
         self.errors = errors;
-        self.settle(asked);
         if changed {
             self.generation.0 += 1;
         }
@@ -305,39 +293,14 @@ impl Catalog {
                 .iter()
                 .zip(&sources)
                 .all(|(was, now)| was.same_connection(now));
-        if same {
-            // A rotated credential names the same host: the facts read from it
-            // still hold, and only what authorizes the next request changed.
-            self.sources = sources;
-            return;
+        if !same {
+            self.pending = None;
+            self.known
+                .retain(|name, _| sources.iter().any(|s| &s.name == name));
+            self.errors.clear();
         }
-        self.pending = None;
-        self.known
-            .retain(|name, _| sources.iter().any(|s| &s.name == name));
+        // Keep the latest credentials even if the connection is unchanged.
         self.sources = sources;
-        self.refresh();
-        self.errors.clear();
-    }
-
-    // A round nobody answered is worth asking again on its own: a start with the
-    // network down recovers without anyone opening the list. One that answered
-    // at least once is not — the facts are in force, and a provider that stays
-    // broken is left to the next request rather than hit on a schedule.
-    fn settle(&mut self, asked: usize) {
-        if asked > 0 && self.errors.len() == asked {
-            let wait = if self.waited.is_zero() {
-                FIRST_RETRY
-            } else {
-                (self.waited * 2).min(LONGEST_WAIT)
-            };
-            self.waited = wait;
-            self.due = Some(Instant::now() + wait);
-            self.checked = false;
-        } else {
-            self.checked = true;
-            self.due = None;
-            self.waited = Duration::ZERO;
-        }
     }
 
     fn finish_pending(&mut self) -> Option<Refresh> {
@@ -349,7 +312,6 @@ impl Catalog {
             Err(oneshot::error::TryRecvError::Empty) => None,
             Err(oneshot::error::TryRecvError::Closed) => {
                 self.pending = None;
-                self.checked = true;
                 Some(Refresh {
                     changed: false,
                     notes: vec!["model discovery ended without a result".into()],
@@ -366,31 +328,7 @@ impl Catalog {
 
     fn poll(&mut self, pinned: &Pinned, config: &Config) -> Option<Refresh> {
         self.configure(pinned, config);
-        if self.pending.is_some() {
-            return self.finish_pending();
-        }
-        self.start();
-        None
-    }
-
-    /// Begin discovery when one is requested and no failure is still waiting
-    /// out its retry, keeping one attempt in flight.
-    fn start(&mut self) {
-        if self.pending.is_some() || self.sources.is_empty() || self.checked {
-            return;
-        }
-        if self.due.is_some_and(|due| Instant::now() < due) {
-            return;
-        }
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let sources = self.sources.clone();
-        let (send, result) = oneshot::channel();
-        let task = runtime.spawn(async move {
-            let _ = send.send(read(sources).await);
-        });
-        self.pending = Some(Pending { task, result });
+        self.finish_pending()
     }
 }
 
@@ -403,14 +341,10 @@ impl Core {
     /// Poll discovery without blocking a caller; new facts rebuild the active agent.
     pub fn refresh_models(&mut self) -> Option<Vec<String>> {
         let config = self.config().clone();
-        let refresh = self.catalog.poll(&self.pinned, &config);
-        if refresh.as_ref().is_none_or(|refresh| !refresh.changed) {
-            self.lane()
-                .resolved()
-                .models
-                .discovery(self.catalog.discovery());
-        }
-        let refresh = refresh?;
+        let Some(refresh) = self.catalog.poll(&self.pinned, &config) else {
+            self.catalog.publish_status(self.lane().resolved());
+            return None;
+        };
         let mut notes = refresh.notes;
         for note in &notes {
             tracing::warn!(target: "pi::session", reason = %note, "model discovery failed");
@@ -427,8 +361,6 @@ impl Core {
                 Err(why) => notes.push(why),
             }
         } else if !notes.is_empty() {
-            // No list came, so what the files leave unstated is a guess again;
-            // a start that skipped the wait said nothing about it then.
             let spec = self.lane().agent().spec();
             notes.extend(crate::core::dial::assumed(
                 &self.pinned,
@@ -436,10 +368,7 @@ impl Core {
                 spec,
             ));
         }
-        self.lane()
-            .resolved()
-            .models
-            .discovery(self.catalog.discovery());
+        self.catalog.publish_status(self.lane().resolved());
         (!notes.is_empty()).then_some(notes)
     }
 }
@@ -511,6 +440,7 @@ max_output_tokens = 2048
     }
 
     async fn refreshed(catalog: &mut Catalog, pinned: &Pinned, config: &Config) -> Refresh {
+        catalog.refresh(pinned, config);
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 if let Some(result) = catalog.poll(pinned, config) {
@@ -537,7 +467,12 @@ max_output_tokens = 2048
         let config = settings.config().unwrap();
         let mut catalog = Catalog::default();
         if discover {
-            assert!(catalog.load(&pinned, &config).await.is_empty());
+            assert!(
+                refreshed(&mut catalog, &pinned, &config)
+                    .await
+                    .notes
+                    .is_empty()
+            );
         }
         let config = catalog.enrich(&settings, &pinned, config).unwrap();
         let dialled =
@@ -636,7 +571,9 @@ context_window = 128000
         )
         .unwrap();
         let mut core = two_lanes(dir.path(), &file, true).await;
-        core.catalog.refresh();
+        core.dispatch(crate::input::Intent::Builtin(
+            crate::input::Builtin::RefreshModels,
+        ));
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 if core.refresh_models().is_some() {
@@ -677,9 +614,9 @@ context_window = 128000
         let pinned = Pinned::default();
         let mut catalog = Catalog::default();
         assert!(
-            catalog
-                .load(&pinned, &settings.config().unwrap())
+            refreshed(&mut catalog, &pinned, &settings.config().unwrap())
                 .await
+                .notes
                 .is_empty()
         );
         let config = catalog
@@ -724,9 +661,22 @@ context_window = 128000
         let pinned = Pinned::default();
         let config = settings.config().unwrap();
         let mut catalog = Catalog::default();
-        assert!(catalog.load(&pinned, &config).await.is_empty());
-        assert_eq!(catalog.load(&pinned, &config).await.len(), 1);
-        assert!(catalog.load(&pinned, &config).await.is_empty());
+        assert!(
+            refreshed(&mut catalog, &pinned, &config)
+                .await
+                .notes
+                .is_empty()
+        );
+        assert_eq!(
+            refreshed(&mut catalog, &pinned, &config).await.notes.len(),
+            1
+        );
+        assert!(
+            refreshed(&mut catalog, &pinned, &config)
+                .await
+                .notes
+                .is_empty()
+        );
         let config = catalog.enrich(&settings, &pinned, config).unwrap();
         assert_eq!(config.find("test/a").unwrap().context_window, 222222);
 
@@ -751,7 +701,7 @@ format = "chat"
     }
 
     #[tokio::test]
-    async fn a_round_nobody_answered_is_asked_again_without_a_request() {
+    async fn a_failed_round_waits_for_an_explicit_refresh() {
         use crate::core::models::Discovery;
 
         let (url, _) = server(vec![
@@ -764,24 +714,17 @@ format = "chat"
         let pinned = Pinned::default();
         let config = settings(&url).config().unwrap();
         let mut catalog = Catalog::default();
-        assert_eq!(catalog.load(&pinned, &config).await.len(), 1);
+        assert_eq!(
+            refreshed(&mut catalog, &pinned, &config).await.notes.len(),
+            1
+        );
+        assert!(catalog.poll(&pinned, &config).is_none());
+        assert!(!catalog.awaiting_models());
         assert_eq!(catalog.discovery(), Discovery::Failed);
-        let refresh = tokio::time::timeout(Duration::from_secs(8), async {
-            loop {
-                if let Some(refresh) = catalog.poll(&pinned, &config) {
-                    break refresh;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("a failed round is tried again on its own");
+
+        let refresh = refreshed(&mut catalog, &pinned, &config).await;
         assert!(refresh.changed);
         assert_eq!(catalog.discovery(), Discovery::Ready);
-        assert!(
-            catalog.poll(&pinned, &config).is_none(),
-            "a round that answered is not asked again"
-        );
     }
 
     #[tokio::test]
@@ -800,13 +743,11 @@ format = "chat"
         let pinned = Pinned::default();
         let config = settings.config().unwrap();
         let mut catalog = Catalog::default();
-        catalog.load(&pinned, &config).await;
+        assert!(refreshed(&mut catalog, &pinned, &config).await.changed);
         assert!(
             catalog.poll(&pinned, &config).is_none(),
             "a list is read again only when asked"
         );
-        catalog.refresh();
-        assert!(catalog.poll(&pinned, &config).is_none());
         let refreshed = refreshed(&mut catalog, &pinned, &config).await;
         assert!(refreshed.changed);
         let config = catalog.enrich(&settings, &pinned, config).unwrap();
@@ -842,7 +783,6 @@ format = "chat"
         assert_ne!(catalog.generation(), first);
         let current = catalog.generation();
 
-        catalog.refresh();
         assert!(
             !catalog
                 .accept(vec![answer("test", &[("a", 100000), ("b", 8000)])])
@@ -922,9 +862,7 @@ format = "chat"
         assert!(core.refresh_model_config().is_none());
     }
 
-    // A list nobody answers leaves the files' silences in force: the run says
-    // why it has none and what it assumes instead, since a start that painted
-    // first had no facts to check against.
+    // A failed refresh reports what happened and what facts are still assumed.
     #[tokio::test]
     async fn a_list_that_never_comes_names_what_is_assumed_instead() {
         let dir = tempfile::tempdir().unwrap();
@@ -936,6 +874,9 @@ format = "chat"
         )
         .unwrap();
         let mut core = two_lanes(dir.path(), &file, false).await;
+        core.dispatch(crate::input::Intent::Builtin(
+            crate::input::Builtin::RefreshModels,
+        ));
         let notes = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 if let Some(notes) = core.refresh_models() {

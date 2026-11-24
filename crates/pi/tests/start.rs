@@ -209,9 +209,9 @@ fn a_one_shot_prompt_prints_the_reply_and_files_nothing() {
 }
 
 #[test]
-fn a_provider_only_config_discovers_models_and_sends_the_original_id() {
+fn a_provider_only_config_requires_a_model_and_never_discovers_at_startup() {
     let pi = Pi::new();
-    let (url, requests) = recording_endpoint("discovered reply");
+    let (url, requests) = recording_endpoint("model reply");
     std::fs::write(
         pi.home.path().join("settings.toml"),
         format!(
@@ -224,24 +224,21 @@ api_key = "test-credential"
         ),
     )
     .unwrap();
-    for args in [vec!["hi"], vec!["-m", "local/unlisted", "hi"]] {
-        let out = pi.run(&args);
-        assert!(out.status.success(), "{}", said(&out));
-        assert!(String::from_utf8_lossy(&out.stdout).contains("discovered reply"));
-        let (get, _) = requests
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .unwrap();
-        assert!(get.starts_with("GET /models "), "{get}");
-        let (post, body) = requests
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .unwrap();
-        assert!(post.starts_with("POST /chat/completions "), "{post}");
-        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            body["model"],
-            if args.len() == 1 { "m" } else { "unlisted" }
-        );
-    }
+    let out = pi.run(&["hi"]);
+    assert!(!out.status.success());
+    assert!(said(&out).contains("no model to run"), "{}", said(&out));
+    assert!(requests.try_recv().is_err(), "no request without a model");
+
+    let out = pi.run(&["-m", "local/unlisted", "hi"]);
+    assert!(out.status.success(), "{}", said(&out));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("model reply"));
+    let (post, body) = requests
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    assert!(post.starts_with("POST /chat/completions "), "{post}");
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["model"], "unlisted");
+    assert!(requests.try_recv().is_err(), "only the completion is sent");
     assert_eq!(pi.filed(), Vec::<PathBuf>::new());
 }
 
@@ -272,18 +269,19 @@ format = "chat"
         ),
     )
     .unwrap();
-    let out = pi.run_with_env(&["hi"], &[("OPENAI_API_KEY", "implicit-environment-key")]);
+    let out = pi.run_with_env(
+        &["-m", "local/m", "hi"],
+        &[("OPENAI_API_KEY", "implicit-environment-key")],
+    );
     assert!(out.status.success(), "{}", said(&out));
-    for method in ["GET ", "POST "] {
-        let (request, _) = requests
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .unwrap();
-        assert!(request.starts_with(method), "{request}");
-        assert!(
-            !request.to_ascii_lowercase().contains("authorization:"),
-            "the replacement connection received a credential: {request}"
-        );
-    }
+    let (request, _) = requests
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    assert!(request.starts_with("POST "), "{request}");
+    assert!(
+        !request.to_ascii_lowercase().contains("authorization:"),
+        "the replacement connection received a credential: {request}"
+    );
 }
 
 #[test]

@@ -48,9 +48,11 @@ leaves the binary at `target/release/pi`.
 `pi` alone starts a session; `pi -c` continues the last one in this directory;
 `/help` lists every command. `pi --help` lists the flags.
 
-With no model selected, pi starts on the first discovered name in alphabetical
-order. Name one as `provider/model-id`: `pi -m main/claude-sonnet-5`. Every
-model the configured connections serve appears in `/model`.
+Set a startup model in settings or pass one as `provider/model-id`, for
+example `pi -m main/claude-sonnet-5`. A resumed session can use its saved
+model, and a sole local model entry also works as the default. Use
+`/model --refresh` to discover models from providers and `/model` to see the
+locally known list.
 
 ## What it may reach
 

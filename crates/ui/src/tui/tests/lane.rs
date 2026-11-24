@@ -1148,7 +1148,7 @@ fn a_now_intent_runs_with_the_transcript_a_run_has() {
         },
         Intent::Builtin(Builtin::Status),
         Intent::Builtin(Builtin::Name("n".into())),
-        Intent::Builtin(Builtin::Model(String::new())),
+        Intent::Builtin(Builtin::ListModels),
         Intent::Builtin(Builtin::Resume(String::new())),
         Intent::Builtin(Builtin::Settings("x".into())),
     ] {

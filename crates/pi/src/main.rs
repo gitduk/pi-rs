@@ -217,37 +217,17 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
     pinned.skills = ui::skills::builtins();
     let from_project = settings.project_sets("model").is_some();
     let resume_model = prior.as_ref().map(|p| p.model.as_str());
-    let mut catalog = core::catalog::Catalog::default();
-    // Only a start with no model to name has to wait for the lists: anywhere
-    // else the surface asks for them as it paints, and their facts land
-    // through the refresh every pass runs.
-    let waits = !interactive
-        || config
-            .model(args.model.as_deref(), resume_model, from_project)
-            .is_none();
-    let discovery_notes = match waits {
-        true => catalog.load(&pinned, &config).await,
-        false => Vec::new(),
-    };
-    let config = Arc::new(match waits {
-        true => catalog.enrich(&settings, &pinned, config)?,
-        false => config,
-    });
+    let catalog = core::catalog::Catalog::default();
+    let config = Arc::new(config);
     // Before the first wire is made: what the files and the scripts name is
     // what no request leaves with. A resolution arms it again on reload.
     core::dial::arm(core::mask::find(workspace.root(), &config));
     let (named, named_by) = config
         .model(args.model.as_deref(), resume_model, from_project)
-        .ok_or_else(|| {
-            if discovery_notes.is_empty() {
-                no_model(&args)
-            } else {
-                no_model(&args).context(discovery_notes.join("; "))
-            }
-        })?;
+        .ok_or_else(|| no_model(&args))?;
     // A session's model is a preference, not a fact: the connection it named
     // may be gone since. What `model` selects now stands in, and says so.
-    let (mut dialled, replaced) = match dial(&pinned, &config, &named, named_by) {
+    let (dialled, replaced) = match dial(&pinned, &config, &named, named_by) {
         Err(why) if named_by == pi_store::config::ModelOrigin::Resumed => {
             let (other, by) = config.model(None, None, from_project).ok_or(why)?;
             let dialled = dial(&pinned, &config, &other, by)?;
@@ -256,27 +236,12 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
         }
         picked => (picked?, None),
     };
-    // Facts the catalog is about to state are not guesses yet: naming them so
-    // would be a line the refresh contradicts a second later. A list that never
-    // comes says them then, where the failure is also said.
-    if !waits {
-        dialled.assumed = None;
-    }
-
     // Only the terminal answers its own words; a one-shot run has none.
     let words: &'static [_] = if interactive { tui::WORDS } else { &[] };
     let mcp = core::mcp::Live::default();
     mcp.sync(&config, workspace.root());
     let mut resolved = resolve(&pinned, &workspace, &config, &settings, None, words, &mcp)?;
-    resolved.catalog_generation = catalog.generation();
-    catalog.publish_status(&resolved);
-    resolved.notes.extend(discovery_notes.iter().cloned());
     resolved.notes.extend(replaced.clone());
-    if named_by == pi_store::config::ModelOrigin::Discovered {
-        resolved
-            .notes
-            .push(format!("using {named} from discovered models"));
-    }
     pi_core::core::warm_rtk();
     if interactive {
         // Said under the banner: printed here, they would wait behind the
@@ -311,9 +276,6 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
         workspace.root(),
         prior.as_ref(),
     );
-    for note in &discovery_notes {
-        tracing::warn!(target: "pi::session", session = %id, reason = %note, "model discovery failed");
-    }
     let retry = core::retry(&config);
     // Installed last: the compactor watches its stream by the idle timeout
     // `Config::retry` just settled. Without one the transcript is never shrunk.
@@ -424,7 +386,9 @@ fn no_model(args: &Args) -> anyhow::Error {
         env!("CARGO_PKG_REPOSITORY"),
         "/blob/master/examples/settings.toml"
     );
-    anyhow::anyhow!("no model to run. Define one in {file} — see {example}")
+    anyhow::anyhow!(
+        "no model to run. Pass --model <provider/model-id> or set model in {file} — see {example}"
+    )
 }
 
 async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended> {

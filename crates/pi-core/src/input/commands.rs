@@ -76,6 +76,8 @@ fn hand_on(word: &str, args: String) -> Intent {
     }
 }
 
+const REFRESH_MODELS: &str = "--refresh";
+
 // Every built-in, once: help, completion and reading a line all come from
 // here, so a word landing in only one of them is a bug this table prevents.
 pub(crate) const BUILTIN: &[Command] = &[
@@ -128,9 +130,26 @@ pub(crate) const BUILTIN: &[Command] = &[
     ),
     Command::builtin(
         "/model",
-        Args::optional("name", Values::Models),
-        "list discovered and configured models, or move this session to one",
-        |_, rest| Intent::Builtin(Builtin::Model(rest)),
+        Args::Subcommands {
+            commands: &[Subcommand {
+                word: REFRESH_MODELS,
+                help: "refresh model lists from providers",
+                args: Args::None,
+            }],
+            fallback: Some(Parameter {
+                name: "name",
+                required: false,
+                values: Values::Models,
+            }),
+        },
+        "list known models, switch models, or refresh the provider lists",
+        |_, rest| {
+            Intent::Builtin(match rest.as_str() {
+                "" => Builtin::ListModels,
+                REFRESH_MODELS => Builtin::RefreshModels,
+                _ => Builtin::Model(rest),
+            })
+        },
     ),
     Command::builtin(
         "/compact",

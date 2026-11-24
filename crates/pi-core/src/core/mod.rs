@@ -418,8 +418,11 @@ impl Core {
             Builtin::Rewind(id) => self.rewind_step(id.trim()),
             Builtin::Name(name) => self.name_step(name),
             Builtin::Compact(focus) => Step::Compact(Some(focus).filter(|f| !f.is_empty())),
-            Builtin::Model(name) if name.is_empty() => {
-                self.catalog.refresh();
+            Builtin::ListModels => Step::Handled(self.model_listing()),
+            Builtin::RefreshModels => {
+                let config = self.config().clone();
+                self.catalog.refresh(&self.pinned, &config);
+                self.catalog.publish_status(self.lane().resolved());
                 Step::Handled(self.model_listing())
             }
             Builtin::Model(name) => Step::Notice(notice(self.switch(&name))),
@@ -745,7 +748,7 @@ mod tests {
         for intent in [
             Intent::Builtin(Builtin::Status),
             Intent::Builtin(Builtin::Help),
-            Intent::Builtin(Builtin::Model(String::new())),
+            Intent::Builtin(Builtin::ListModels),
             Intent::Builtin(Builtin::Worktree("tree".into())),
             Intent::Builtin(Builtin::Settings(String::new())),
             Intent::Builtin(Builtin::Edit("AGENTS.md".into())),

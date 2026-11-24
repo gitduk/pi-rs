@@ -36,7 +36,7 @@ api_key  = "$ANTHROPIC_API_KEY" # `$` reads the environment; anything else is th
 # ---------------------------------------------------------------------------
 
 # The startup model. When omitted, a resumed session keeps its model; a new
-# session uses the sole configured model or the first discovered name.
+# session uses the sole configured model, or takes the model from --model.
 # model = "main/claude-sonnet-5"
 
 # Who writes the summary when history is compacted. Big input, small output,

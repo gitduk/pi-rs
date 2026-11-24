@@ -5,6 +5,7 @@
 | `/new`, `/resume [id]`, `/name`    | start, switch, label a session                |
 | `/rewind <said>`, `esc esc`        | go back to something you said                 |
 | `/model [name]`                    | list the models, or move the session to one   |
+| `/model --refresh`                 | refresh model lists from providers           |
 | `/effort [level]`                  | `off` `low` `medium` `high`, from now on      |
 | `/worktree [name]`, `/worktree rm` | work in `<repo>.worktrees/<name>`             |
 | `/mv <dir>`                        | move this session and its background commands to another directory |

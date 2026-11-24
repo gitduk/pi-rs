@@ -52,8 +52,7 @@ A model id that contains `/` keeps it:
 
 ## When a list is read
 
-pi reads each provider's catalog at a start, when `settings.toml` changes, and
-when `/model` is used. `/model` applies the whole list, since it is being
-chosen from; a list read for any other reason is applied when its model names
-change or when a fact moves for a model a lane runs. A price that moved on a
-model nothing runs waits for the next `/model`.
+Run `/model --refresh` to read each provider's model list. Use `/model` to
+show models from the current configuration and the last successful discovery.
+To start from a provider-only configuration, pass `--model <name>/<id>` or
+set `model` in settings.

@@ -99,8 +99,6 @@ impl Snapshot {
             }),
             discovery: if config.provider.is_empty() {
                 Discovery::NotConfigured
-            } else if config.discovered.is_empty() {
-                Discovery::Pending
             } else {
                 Discovery::Ready
             },

@@ -43,8 +43,10 @@ pub enum Builtin {
     Rewind(String),
     // Everything after the word focuses the summary.
     Compact(String),
-    // The name to move to, or empty to list what there is.
+    ListModels,
+    // The name to move to.
     Model(String),
+    RefreshModels,
     // The thinking effort to run at, or empty to say the one in force.
     Effort(String),
     // What has been masked on its way to the model.
@@ -99,7 +101,9 @@ impl Intent {
                 | Builtin::Status
                 | Builtin::Context(_)
                 | Builtin::Name(_)
+                | Builtin::ListModels
                 | Builtin::Model(_)
+                | Builtin::RefreshModels
                 | Builtin::Effort(_)
                 | Builtin::Mask,
             ) => Fate::Now,

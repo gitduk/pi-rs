@@ -780,9 +780,6 @@ impl Tui {
         // late tick then ordinary cadence avoids a catch-up spin.
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let update = core::update::changed();
-        // The surface about to paint asks for the lists once; `poll` then takes
-        // the answer when it comes.
-        self.say_facts();
         let leaving = loop {
             self.serve_lanes();
             // Before the bar rebuilds, so a vanished tab goes with its lane.
@@ -792,8 +789,7 @@ impl Tui {
             }
             let core = &self.core;
             self.drivers.retain(|t| core.position_of(t).is_some());
-            // A list that answers is taken up at once rather than at the next
-            // walk, so its facts are in force before the first keypress is.
+            // Apply the refreshed catalog as soon as it arrives.
             if self.core.awaiting_models() {
                 self.say_facts();
             }
