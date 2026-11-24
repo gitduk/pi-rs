@@ -134,6 +134,13 @@ impl Work {
             retry: None,
         }
     }
+
+    // The retry whose delay is still running.
+    pub(super) fn waiting_retry(&self) -> Option<&Retry> {
+        self.retry
+            .as_ref()
+            .filter(|retry| retry.since.elapsed() < retry.wait)
+    }
 }
 
 // What kind of run it is, with what only that kind carries.
@@ -142,13 +149,6 @@ pub(super) struct Retry {
     pub(super) wait: std::time::Duration,
     // When the wait began: `wait` alone never says how much is left.
     pub(super) since: Instant,
-}
-
-impl Retry {
-    // Still waiting out the delay, as opposed to sent again already.
-    pub(super) fn waiting_out(&self) -> bool {
-        self.since.elapsed() < self.wait
-    }
 }
 
 pub(super) enum Doing {

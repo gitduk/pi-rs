@@ -172,13 +172,10 @@ impl Run {
 // What only the screen knows of the run: the retry it waits out, and how the
 // run that last ended went.
 fn screen_of(work: Option<&Work>, ended: Option<Ending>) -> (Option<Retry>, Option<Ending>) {
-    let retry = work
-        .and_then(|work| work.retry.as_ref())
-        .filter(|retry| retry.waiting_out())
-        .map(|retry| Retry {
-            attempt: retry.attempt,
-            wait: retry.wait.as_secs_f64(),
-        });
+    let retry = work.and_then(Work::waiting_retry).map(|retry| Retry {
+        attempt: retry.attempt,
+        wait: retry.wait.as_secs_f64(),
+    });
     // A run in flight has no outcome yet; the one that ended left its own.
     let outcome = match work {
         Some(_) => None,
@@ -381,7 +378,7 @@ fn state_of(work: Option<&Work>) -> String {
     match work {
         _ if matches!(work.doing, super::view::Doing::Compact) => "compacting".to_string(),
         _ if work.stopping => "stopping".to_string(),
-        _ if let Some(retry) = work.retry.as_ref().filter(|retry| retry.waiting_out()) => {
+        _ if let Some(retry) = work.waiting_retry() => {
             format!(
                 "retry {} in {}",
                 retry.attempt,
