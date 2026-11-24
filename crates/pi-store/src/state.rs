@@ -6,16 +6,18 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const FILE: &str = ".pi.json";
 
-/// The document, beside the other state in the pi root.
+/// The shared state document for the default or custom pi root.
 pub fn path() -> Option<PathBuf> {
-    crate::dir().map(|dir| dir.join(FILE))
+    match std::env::var_os("PI_HOME") {
+        Some(root) => Some(PathBuf::from(root).join(".pi").join(FILE)),
+        None => crate::dir().map(|dir| dir.join(FILE)),
+    }
 }
 
 /// Every section, as one document.
@@ -24,6 +26,13 @@ pub struct State {
     /// How often each skill's instructions reached the model, across sessions.
     #[serde(default)]
     pub skills: BTreeMap<String, SkillLoad>,
+    /// Last successful model catalogs grouped by provider name.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::model_cache::deserialize_catalogs"
+    )]
+    pub models: Option<BTreeMap<String, crate::model_cache::Catalogs>>,
     /// Sections this run has no field for: writing must not drop them.
     #[serde(flatten)]
     pub rest: BTreeMap<String, Value>,
@@ -59,30 +68,35 @@ pub fn read() -> State {
     }
 }
 
-/// One writer at a time: a batch of tool calls runs at once, on several
-/// worker threads.
-static UPDATE: Mutex<()> = Mutex::new(());
-
 /// Read, change, write back whole. A document that does not parse is refused,
 /// not replaced: it may hold sections written by a newer run.
 ///
-/// Writers are serialized within this process only: two runs loading at the
-/// same instant can still drop one count. A section that must not lose one
-/// takes a lock file, as `memory` does.
+/// A separate lock file serializes updates across processes and threads.
 pub fn update(change: impl FnOnce(&mut State)) -> std::io::Result<()> {
-    // A panic mid-change leaves the document as it was: it is replaced whole.
-    let _held = UPDATE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = path().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "no pi root to write in")
     })?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    // Keep the lock on a stable file while the JSON document is replaced.
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_extension("json.lock"))?;
+    lock.lock()?;
     let mut state = load(&path)?;
     change(&mut state);
     let text = serde_json::to_string_pretty(&state)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+    let checked: State = serde_json::from_str(&text)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if checked.models != state.models {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "model catalog does not round-trip through JSON",
+        ));
     }
     tool::state::write_private(&path, text.as_bytes())
         .map_err(|error| std::io::Error::new(error.kind(), format!("{}: {error}", path.display())))
@@ -90,14 +104,26 @@ pub fn update(change: impl FnOnce(&mut State)) -> std::io::Result<()> {
 
 // No file yet is an empty document, not a failure to read one.
 fn load(path: &std::path::Path) -> std::io::Result<State> {
+    if let Some(state) = load_existing(path)? {
+        return Ok(state);
+    }
+    // A custom pi root previously kept its state directly under PI_HOME.
+    let legacy = std::env::var_os("PI_HOME").map(|root| PathBuf::from(root).join(FILE));
+    Ok(match legacy {
+        Some(old) => load_existing(&old)?.unwrap_or_default(),
+        None => State::default(),
+    })
+}
+
+fn load_existing(path: &std::path::Path) -> std::io::Result<Option<State>> {
     match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).map_err(|error| {
+        Ok(text) => serde_json::from_str(&text).map(Some).map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("{}: {error}", path.display()),
             )
         }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
 }

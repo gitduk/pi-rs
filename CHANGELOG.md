@@ -11,8 +11,12 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 
 ### Added
 
-- `/model --refresh` reads each provider's model list. `/model` alone lists
-  what the settings and the last refresh left known.
+- `/model --refresh` reads each provider's model list and saves it. `/model`
+  alone lists what the settings and the last refresh left known.
+
+- The saved list is applied at the next start without contacting a provider.
+  It belongs to one connection and its credentials, so a rotated key or a new
+  auth header means the facts are read again rather than inherited.
 
 ### Changed
 
@@ -27,9 +31,31 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   `model`, instead of running the first discovered name. A list that fails is
   reported where it was asked for, not retried on a schedule.
 
+- A bare `model` name in settings matches the locally known models: an exact
+  endpoint ID first, then the first full ID in alphabetical order whose last
+  segment matches. It used to be taken as written, so it matched nothing.
+
+- With no `model` set, the sole configured model wins only when it is the only
+  model written in the settings; discovered ones no longer count toward it.
+
+- Model lists are saved in the `models` section of the shared state document.
+  Under `PI_HOME` that document moved from `$PI_HOME/.pi.json` to
+  `$PI_HOME/.pi/.pi.json`; a file left at the old path is read and rewritten.
+
 ### Fixed
 
 - The status line shows the current checkout on the first frame.
+
+- Two runs updating the shared state at the same instant no longer drop one of
+  the two writes: the update holds a lock file beside the document.
+
+- A private file is created only by its owner and written whole: the temporary
+  file is 0600 from the start and removed when the rename fails.
+
+- A discovered model ID carrying a control character, and a price that
+  overflows, are left out instead of being written into the configuration.
+
+- Notes printed at startup are cut to one screen line each.
 
 ## 3.0.6 - 2026-11-23
 

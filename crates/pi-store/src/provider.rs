@@ -175,6 +175,10 @@ fn rate(value: &Value) -> Option<f64> {
     (rate.is_finite() && rate >= 0.0).then_some(rate)
 }
 
+pub(crate) fn valid_model_id(id: &str) -> bool {
+    !id.trim().is_empty() && !id.chars().any(char::is_control)
+}
+
 impl Provider {
     /// The protocol this connection speaks; independent of a model's name.
     pub fn wire_format(&self) -> Format {
@@ -282,7 +286,7 @@ impl Provider {
         for row in rows {
             let Some(id) = at(row, &self.id)
                 .and_then(Value::as_str)
-                .filter(|id| !id.trim().is_empty())
+                .filter(|id| valid_model_id(id))
             else {
                 continue;
             };
@@ -344,13 +348,12 @@ impl Provider {
                 .as_deref()
                 .and_then(|path| at(row, path))
                 .and_then(rate)
+                .map(|quoted| self.pricing.unit.per_mtok(quoted))
+                .filter(|normalized| normalized.is_finite())
             else {
                 continue;
             };
-            pricing.insert(
-                field.into(),
-                toml::Value::Float(self.pricing.unit.per_mtok(quoted)),
-            );
+            pricing.insert(field.into(), toml::Value::Float(quoted));
         }
         if !pricing.is_empty() {
             facts.insert("pricing".into(), toml::Value::Table(pricing));
@@ -417,7 +420,8 @@ mod tests {
             .read_models(&json!({"data": [
                 {"id": "a", "context_window": 12345},
                 {"id": "b"},
-                {"id": "c", "max_output_tokens": "2048"}
+                {"id": "c", "max_output_tokens": "2048"},
+                {"id": "invalid\nmodel"}
             ]}))
             .unwrap();
         assert_eq!(found.len(), 3);
@@ -515,10 +519,14 @@ mod tests {
     fn per_token_rates_arrive_per_million() {
         let p = provider("[pricing]\nunit = \"token\"\ninput_per_mtok = \"pricing.prompt\"\n");
         let found = p
-            .read_models(&json!({"data": [{"id": "a", "pricing": {"prompt": "0.00000015"}}]}))
+            .read_models(&json!({"data": [
+                {"id": "a", "pricing": {"prompt": "0.00000015"}},
+                {"id": "b", "pricing": {"prompt": "1e308"}}
+            ]}))
             .unwrap();
         let rate = found["a"]["pricing"]["input_per_mtok"].as_float().unwrap();
         assert!((rate - 0.15).abs() < 1e-9, "{rate}");
+        assert!(found["b"].get("pricing").is_none());
     }
 
     #[test]

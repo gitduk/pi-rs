@@ -93,7 +93,11 @@ impl Settings {
             }
         }
         let models = models.clone();
-        let discovered = models.keys().cloned().collect();
+        let discovered = models
+            .keys()
+            .filter(|name| !config.models.contains_key(*name))
+            .cloned()
+            .collect();
         let mut tree = toml::Value::Table(toml::Table::from_iter([(
             "models".to_string(),
             toml::Value::Table(models),
@@ -359,6 +363,10 @@ context_window = 300000
         assert!(a.vision);
         assert_eq!(c.find("local/b").unwrap().context_window, 300000);
         assert_eq!(c.names(), ["local/a", "local/b"]);
+        assert_eq!(
+            c.model(None, None, false),
+            Some(("local/a".into(), crate::config::ModelOrigin::OnlyModel))
+        );
         assert_eq!(
             s.config().unwrap().names(),
             ["local/a"],

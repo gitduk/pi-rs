@@ -52,7 +52,10 @@ A model id that contains `/` keeps it:
 
 ## When a list is read
 
-Run `/model --refresh` to read each provider's model list. Use `/model` to
-show models from the current configuration and the last successful discovery.
-To start from a provider-only configuration, pass `--model <name>/<id>` or
-set `model` in settings.
+Run `/model --refresh` to replace the saved catalog with lists for the
+currently configured providers. If a request fails, pi keeps the last
+successful list for that connection. Lists are saved in the `models` field
+of `~/.pi/.pi.json`, or `$PI_HOME/.pi/.pi.json` when `PI_HOME` is set, and
+appear in `/model` after restarting with the same connection and credentials.
+If a provider-only configuration has no matching saved list, pass
+`--model <name>/<id>` or set `model` in settings.

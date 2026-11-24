@@ -16,6 +16,7 @@ pub mod keys;
 pub mod listing;
 pub mod mask;
 pub mod memory;
+pub mod model_cache;
 pub mod provider;
 pub mod session;
 pub mod settings;

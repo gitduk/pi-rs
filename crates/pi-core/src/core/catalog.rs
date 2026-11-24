@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use futures::future;
 use llm::model::Format;
 use pi_store::config::{self, Config};
+use pi_store::model_cache;
 use pi_store::provider::Provider;
 use pi_store::settings::Settings;
 use tokio::sync::oneshot;
@@ -24,8 +25,7 @@ pub struct Generation(u64);
 #[derive(Clone, PartialEq)]
 struct Source {
     name: String,
-    /// The connection, without what only authorizes it: a rotated key or a new
-    /// header still names the same host, and the facts read from it still hold.
+    /// Connection settings with request credentials kept separately.
     provider: Provider,
     key: Option<String>,
     headers: Vec<(String, String)>,
@@ -55,9 +55,13 @@ impl Source {
             .collect()
     }
 
-    /// Whether both name the same connection; the credential is not part of it.
-    fn same_connection(&self, other: &Source) -> bool {
-        self.name == other.name && self.provider == other.provider
+    fn fingerprint(&self, cache: &model_cache::Cache) -> Result<String> {
+        cache.fingerprint(
+            &self.name,
+            &self.provider,
+            self.key.as_deref(),
+            &self.headers,
+        )
     }
 
     fn url(&self) -> String {
@@ -177,10 +181,12 @@ impl Drop for Pending {
 /// Last successful catalogs, retained while refreshes run or fail.
 #[derive(Default)]
 pub struct Catalog {
+    cache: Option<model_cache::Cache>,
     generation: Generation,
     sources: Vec<Source>,
     known: BTreeMap<String, Cached>,
     pending: Option<Pending>,
+    saving: Option<oneshot::Receiver<Result<(), String>>>,
     errors: Vec<String>,
 }
 
@@ -190,6 +196,14 @@ struct Refresh {
 }
 
 impl Catalog {
+    /// Reuse local model lists across invocations without contacting providers.
+    pub fn persistent() -> Self {
+        Self {
+            cache: model_cache::Cache::local(),
+            ..Self::default()
+        }
+    }
+
     /// Publish discovery readiness to the tools of a newly resolved run.
     pub(super) fn publish_status(&self, resolved: &super::resolve::Resolved) {
         resolved.models.discovery(self.discovery());
@@ -213,27 +227,68 @@ impl Catalog {
     /// Apply only facts belonging to the connections that are still configured.
     pub fn enrich(&self, settings: &Settings, pinned: &Pinned, config: Config) -> Result<Config> {
         let mut models = toml::Table::new();
+        let mut used_disk = false;
+        let mut snapshot = None;
         for source in Source::configured(pinned, &config) {
-            if let Some(cached) = self
+            let saved;
+            let facts = if let Some(cached) = self
                 .known
                 .get(&source.name)
-                .filter(|cached| cached.source.same_connection(&source))
+                .filter(|cached| cached.source == source)
             {
-                for (id, facts) in &cached.models {
-                    models.insert(format!("{}/{id}", source.name), facts.clone());
-                }
-            }
+                &cached.models
+            } else if let Some(found) = self.cache.as_ref().and_then(|cache| {
+                let identity = source.fingerprint(cache).ok()?;
+                snapshot
+                    .get_or_insert_with(|| cache.snapshot())
+                    .get(&source.name, &identity)
+            }) {
+                used_disk = true;
+                saved = found;
+                &saved
+            } else {
+                continue;
+            };
+            models.extend(
+                facts
+                    .iter()
+                    .map(|(id, facts)| (format!("{}/{id}", source.name), facts.clone())),
+            );
         }
         if models.is_empty() {
             return Ok(config);
         }
-        settings.config_with_models(&models)
+        match settings.config_with_models(&models) {
+            Err(error) if used_disk => {
+                tracing::warn!(%error, "could not apply cached model catalogs");
+                let mut live = toml::Table::new();
+                for source in Source::configured(pinned, &config) {
+                    if let Some(cached) = self
+                        .known
+                        .get(&source.name)
+                        .filter(|cached| cached.source == source)
+                    {
+                        live.extend(
+                            cached.models.iter().map(|(id, facts)| {
+                                (format!("{}/{id}", source.name), facts.clone())
+                            }),
+                        );
+                    }
+                }
+                if live.is_empty() {
+                    Ok(config)
+                } else {
+                    settings.config_with_models(&live)
+                }
+            }
+            result => result,
+        }
     }
 
     /// Start an explicitly requested discovery, retaining the current catalog.
     pub(super) fn refresh(&mut self, pinned: &Pinned, config: &Config) {
         self.configure(pinned, config);
-        if self.pending.is_some() || self.sources.is_empty() {
+        if self.awaiting_models() {
             return;
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
@@ -250,13 +305,14 @@ impl Catalog {
     fn accept(&mut self, results: Results) -> Refresh {
         let mut changed = false;
         let mut errors = Vec::new();
+        self.save(&results);
         for (source, result) in results {
             match result {
                 Ok(models) => {
-                    let moved = self.known.get(&source.name).is_none_or(|cached| {
-                        // A new credential re-dials as much as a new fact does.
-                        cached.source != source || cached.models != models
-                    });
+                    let moved = self
+                        .known
+                        .get(&source.name)
+                        .is_none_or(|cached| cached.source != source || cached.models != models);
                     if moved {
                         changed = true;
                         self.known
@@ -278,21 +334,50 @@ impl Catalog {
         Refresh { changed, notes }
     }
 
+    fn save(&mut self, results: &Results) {
+        let Some(cache) = self.cache.clone() else {
+            return;
+        };
+        let lists: Vec<_> = results
+            .iter()
+            .map(|(source, result)| {
+                let models = result.as_ref().ok().or_else(|| {
+                    self.known
+                        .get(&source.name)
+                        .filter(|cached| cached.source == *source)
+                        .map(|cached| &cached.models)
+                });
+                (source.clone(), models.cloned())
+            })
+            .collect();
+        let (send, result) = oneshot::channel();
+        tokio::task::spawn_blocking(move || {
+            let save = || -> Result<()> {
+                let lists = lists
+                    .iter()
+                    .map(|(source, models)| {
+                        Ok((
+                            source.name.clone(),
+                            source.fingerprint(&cache)?,
+                            models.as_ref(),
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                cache.write(lists)
+            };
+            let _ = send.send(save().map_err(|error| format!("{error:#}")));
+        });
+        self.saving = Some(result);
+    }
+
     fn configure(&mut self, pinned: &Pinned, config: &Config) {
         let sources = Source::configured(pinned, config);
-        let same = self.sources.len() == sources.len()
-            && self
-                .sources
-                .iter()
-                .zip(&sources)
-                .all(|(was, now)| was.same_connection(now));
-        if !same {
+        if self.sources != sources {
             self.pending = None;
             self.known
-                .retain(|name, _| sources.iter().any(|s| &s.name == name));
+                .retain(|_, cached| sources.contains(&cached.source));
             self.errors.clear();
         }
-        // Keep the latest credentials even if the connection is unchanged.
         self.sources = sources;
     }
 
@@ -316,11 +401,25 @@ impl Catalog {
     /// A list nobody has answered yet: a surface keeps waking for it, so its
     /// facts land when they arrive rather than at the next keypress.
     pub fn awaiting_models(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || self.saving.is_some()
     }
 
     fn poll(&mut self, pinned: &Pinned, config: &Config) -> Option<Refresh> {
         self.configure(pinned, config);
+        if let Some(saving) = &mut self.saving {
+            let error = match saving.try_recv() {
+                Ok(result) => result.err(),
+                Err(oneshot::error::TryRecvError::Empty) => return None,
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    Some("the write ended without a result".into())
+                }
+            };
+            self.saving = None;
+            return error.map(|error| Refresh {
+                changed: false,
+                notes: vec![format!("model catalog cache could not be saved — {error}")],
+            });
+        }
         self.finish_pending()
     }
 }
@@ -803,7 +902,7 @@ format = "chat"
     }
 
     #[tokio::test]
-    async fn a_rotated_credential_keeps_the_facts_read_from_the_same_host() {
+    async fn a_rotated_credential_invalidates_the_previous_catalog() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.toml");
         let (url, _) = server(vec![(
@@ -824,8 +923,8 @@ format = "chat"
         core.try_reload().unwrap();
         assert_eq!(
             core.lane().agent().spec().context_window,
-            200000,
-            "a new key is not a new connection"
+            128000,
+            "the new credential cannot inherit facts read under the old credential"
         );
     }
 

@@ -49,10 +49,12 @@ leaves the binary at `target/release/pi`.
 `/help` lists every command. `pi --help` lists the flags.
 
 Set a startup model in settings or pass one as `provider/model-id`, for
-example `pi -m main/claude-sonnet-5`. A resumed session can use its saved
-model, and a sole local model entry also works as the default. Use
-`/model --refresh` to discover models from providers and `/model` to see the
-locally known list.
+example `pi -m main/claude-sonnet-5`. In settings, a bare `model` name matches
+an exact endpoint ID first. Otherwise, pi picks the first full ID in
+alphabetical order whose last segment matches. A resumed session can use its
+saved model. With no model named, pi uses the sole local model entry or a
+model from its saved catalog. Use `/model --refresh` to fetch and save model lists
+from providers, and `/model` to see the locally known list.
 
 ## What it may reach
 

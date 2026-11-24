@@ -217,8 +217,8 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
     pinned.skills = ui::skills::builtins();
     let from_project = settings.project_sets("model").is_some();
     let resume_model = prior.as_ref().map(|p| p.model.as_str());
-    let catalog = core::catalog::Catalog::default();
-    let config = Arc::new(config);
+    let catalog = core::catalog::Catalog::persistent();
+    let config = Arc::new(catalog.enrich(&settings, &pinned, config)?);
     // Before the first wire is made: what the files and the scripts name is
     // what no request leaves with. A resolution arms it again on reload.
     core::dial::arm(core::mask::find(workspace.root(), &config));
@@ -290,6 +290,11 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
     let resolved = lane::arm(&mut ag, Arc::new(resolved), archive, retry, None);
     if !interactive && !args.quiet {
         for note in dialled.assumed.iter().chain(&resolved.notes) {
+            let note: String = note
+                .lines()
+                .map(pi_store::text::screen_line)
+                .collect::<Vec<_>>()
+                .join("\n");
             eprintln!("\x1b[{}m{note}\x1b[0m", config.theme.muted.codes());
         }
     }

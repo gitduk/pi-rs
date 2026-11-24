@@ -3,3 +3,4 @@
 - 下层不写上层的知识。写代码、注释、错误信息或工具描述时，一旦提到某样东西（按键、面板、slash 命令名、屏幕、`/jobs` 这类入口、别的 crate 的类型或常量），先看本 crate 的 `Cargo.toml` 有没有依赖它的定义者；没依赖就是隐性耦合，对方一改，这里的文字或逻辑悄悄失效，编译器抓不到。改法：用本层自己的词说（"stop the run"，不说 "press esc"）；或者把这段知识挪到知道它的那层，由上层通过参数、trait、回调注入；跨 crate 共用的数值引用同一个定义，不各抄一份。只有 ui 和 pi 可以知道 TUI
 - 改完不用构建，`cargo clippy` 通过后直接运行：cargo install --path crates/pi
 - 不要轻易加测试
+- 提交前记得更新 CHANGELOG.md

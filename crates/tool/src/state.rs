@@ -5,9 +5,7 @@ use std::path::Path;
 
 /// Write bytes where only this user can read them, whole or not at all.
 ///
-/// Under a temp name and renamed, so the final path never carries the wrong
-/// permissions: a crash between the write and the chmod would leave the
-/// contents world-readable at the name everything else reads.
+/// Create a private temporary file before writing, then replace the destination.
 pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     // The pid keeps a resumed run's fresh counter from landing on the earlier
     // process's temp file; the count keeps two writers of one path in this
@@ -20,13 +18,21 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         Some(had) => format!("{had}.{pid}.{nth}.tmp"),
         None => format!("{pid}.{nth}.tmp"),
     });
-    std::fs::write(&tmp, bytes)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    std::fs::rename(&tmp, path)
+    let mut file = options.open(&tmp)?;
+    let written = std::io::Write::write_all(&mut file, bytes);
+    drop(file);
+    let replaced = written.and_then(|()| std::fs::rename(&tmp, path));
+    if replaced.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    replaced
 }
 
 /// An id as a file or directory name, with everything that could leave the

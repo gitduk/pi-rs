@@ -60,13 +60,12 @@ impl Models {
 impl Snapshot {
     fn new(config: &Config) -> Self {
         let mut names = config.names();
-        if let Some(name) = &config.model
+        if let Some(name) = config.default_model_name()
             && let Ok(spec) = config.find(name)
+            && let Err(index) = names.binary_search(&spec.model)
         {
-            names.push(spec.model);
+            names.insert(index, spec.model);
         }
-        names.sort();
-        names.dedup();
         let models: Vec<Value> = names
             .into_iter()
             .map(|id| {

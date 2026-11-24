@@ -48,7 +48,7 @@ pub struct Config {
     /// it differs — and needs none at all to be usable.
     #[serde(default)]
     pub models: BTreeMap<String, ModelEntry>,
-    /// Endpoint-supplied entries; never persisted as user configuration.
+    /// Entries supplied solely by discovery, outside user configuration.
     #[serde(skip)]
     pub discovered: BTreeSet<String>,
     /// Key actions, each mapped to the presses that trigger it. An entry
@@ -500,6 +500,30 @@ impl Config {
         self.models.keys().cloned().collect()
     }
 
+    /// Resolve the configured startup model against the locally known model IDs.
+    /// For a bare name, prefer an exact endpoint ID, then the first matching
+    /// final segment in alphabetical order by full ID.
+    pub fn default_model_name(&self) -> Option<&str> {
+        let name = self.model.as_deref()?;
+        if name.contains('/') {
+            return Some(name);
+        }
+
+        let mut first_suffix = None;
+        for full_id in self.models.keys() {
+            let Some((_, endpoint_id)) = full_id.split_once('/') else {
+                continue;
+            };
+            if endpoint_id == name {
+                return Some(full_id);
+            }
+            if endpoint_id.rsplit('/').next() == Some(name) {
+                first_suffix.get_or_insert(full_id.as_str());
+            }
+        }
+        Some(first_suffix.unwrap_or(name))
+    }
+
     /// The selected provider's credential as written, before environment expansion.
     pub fn written_key(&self, model: &str) -> Option<&str> {
         self.locate(model).ok()?.1.api_key.as_deref()
@@ -558,14 +582,18 @@ impl Config {
         if let Some(m) = prior {
             return Some((m.to_string(), ModelOrigin::Resumed));
         }
-        if let Some(m) = &self.model {
+        if let Some(m) = self.default_model_name() {
             let origin = match from_project {
                 true => ModelOrigin::Project,
                 false => ModelOrigin::Global,
             };
-            return Some((m.clone(), origin));
+            return Some((m.to_string(), origin));
         }
-        if let [only] = self.names().as_slice() {
+        let mut names = self
+            .models
+            .keys()
+            .filter(|id| !self.discovered.contains(*id));
+        if let (Some(only), None) = (names.next(), names.next()) {
             return Some((only.clone(), ModelOrigin::OnlyModel));
         }
         self.discovered
@@ -1150,6 +1178,33 @@ api_key = "local-key"
             c.model(None, None, true),
             Some(("local/flash".into(), ModelOrigin::Project))
         );
+    }
+
+    #[test]
+    fn a_bare_default_model_prefers_an_exact_id_then_the_first_matching_suffix() {
+        let mut config = parse(
+            r#"
+model = "flash"
+[provider.local]
+base_url = ":1/v1"
+format = "chat"
+[models."local/z/flash"]
+[models."local/a/flash"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.model(None, None, false),
+            Some(("local/a/flash".into(), ModelOrigin::Global))
+        );
+        config
+            .models
+            .insert("local/flash".into(), ModelEntry::default());
+        assert_eq!(config.default_model_name(), Some("local/flash"));
+        config.model = Some("local/z/flash".into());
+        assert_eq!(config.default_model_name(), Some("local/z/flash"));
+        config.model = Some("unlisted".into());
+        assert_eq!(config.default_model_name(), Some("unlisted"));
     }
 
     #[test]
