@@ -27,6 +27,10 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   `model`, instead of running the first discovered name. A list that fails is
   reported where it was asked for, not retried on a schedule.
 
+### Fixed
+
+- The status line shows the current checkout on the first frame.
+
 ## 3.0.6 - 2026-11-23
 
 ### Changed
