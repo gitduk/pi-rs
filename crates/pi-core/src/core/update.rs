@@ -104,7 +104,7 @@ pub fn check(repo: &str) {
 // API would cost a rate-limited call and a JSON body for the same name.
 async fn latest_tag(url: &str) -> anyhow::Result<String> {
     let client = reqwest::Client::builder()
-        .user_agent(concat!("pi/", env!("CARGO_PKG_VERSION")))
+        .user_agent(pi_store::USER_AGENT)
         .redirect(reqwest::redirect::Policy::none())
         .timeout(ASK_RELEASE)
         .build()?;

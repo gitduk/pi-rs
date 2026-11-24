@@ -30,9 +30,9 @@ pub struct ChatCompletions {
 }
 
 impl ChatCompletions {
-    pub fn new(api_key: Option<String>) -> Self {
+    pub fn new(api_key: Option<String>, http: reqwest::Client) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http,
             api_key,
             gaps: Shared::new("chat"),
             without_thinking: Mutex::default(),

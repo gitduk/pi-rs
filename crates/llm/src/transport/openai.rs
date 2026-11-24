@@ -23,9 +23,9 @@ pub struct OpenAi {
 }
 
 impl OpenAi {
-    pub fn new(api_key: Option<String>) -> Self {
+    pub fn new(api_key: Option<String>, http: reqwest::Client) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http,
             api_key,
             gaps: Shared::new("openai"),
         }

@@ -25,6 +25,10 @@ pub mod statusline;
 pub mod text;
 pub mod theme;
 
+/// How pi names itself to whatever it talks to over HTTP: a proxy's log reads
+/// this, so it is one value rather than a `name/version` written per client.
+pub const USER_AGENT: &str = concat!("pi/", env!("CARGO_PKG_VERSION"));
+
 /// The pi root: `$PI_HOME` when set, else `~/.pi`.
 pub fn dir() -> Option<PathBuf> {
     std::env::var_os("PI_HOME")

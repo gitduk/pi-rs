@@ -43,8 +43,7 @@ impl Fetch {
         if let Some(client) = self.client.get() {
             return Ok(client);
         }
-        let built =
-            reqwest::Client::builder().user_agent(concat!("pi/", env!("CARGO_PKG_VERSION")));
+        let built = reqwest::Client::builder().user_agent(pi_store::USER_AGENT);
         let built = if self.allow_private {
             built
         } else {

@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod memory;
 pub mod meter;
 mod models;
+mod net;
 pub mod prompt;
 pub mod question;
 pub mod resolve;

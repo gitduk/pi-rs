@@ -16,6 +16,12 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 
 ### Changed
 
+- Every request pi makes now names it the same way, `pi/<version>`, in its
+  `User-Agent`: chat, model discovery, the fetch tool and the update check.
+  Chat traffic used to arrive unnamed — a proxy or gateway in front of a
+  provider showed it as an unknown client — while discovery named itself
+  `pi-core/<version>`.
+
 - A start no longer asks a provider for its models before the first frame.
   With no model to name, pi says to pass `--model <provider/model-id>` or set
   `model`, instead of running the first discovered name. A list that fails is

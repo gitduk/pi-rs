@@ -115,14 +115,7 @@ impl Source {
     }
 
     async fn pages(&self) -> Result<toml::Table> {
-        let client = reqwest::Client::builder()
-            .timeout(TIMEOUT)
-            .user_agent(concat!(
-                env!("CARGO_PKG_NAME"),
-                "/",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .build()?;
+        let client = super::net::client()?;
         let mut models = toml::Table::new();
         let mut cursor: Option<String> = None;
         let mut seen = BTreeSet::new();
