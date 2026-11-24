@@ -247,6 +247,9 @@ impl Tui {
         // Before the first frame: the row the last run left behind. The
         // numbers it ended on came with the session, when this pi took it up.
         tui.reload_statusline();
+        // The row's checkout, before the first frame: the 1 s walk in
+        // `run` comes too late for it.
+        tui.look_project();
         Ok(tui)
     }
 
