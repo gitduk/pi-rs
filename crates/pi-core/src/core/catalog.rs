@@ -315,9 +315,7 @@ impl Catalog {
         self.known
             .retain(|name, _| sources.iter().any(|s| &s.name == name));
         self.sources = sources;
-        self.checked = false;
-        self.due = None;
-        self.waited = Duration::ZERO;
+        self.refresh();
         self.errors.clear();
     }
 
