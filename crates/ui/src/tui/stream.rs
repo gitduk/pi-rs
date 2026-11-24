@@ -3,7 +3,7 @@
 use super::Ui;
 use super::call::{Run, RunTool, push_tool_row};
 use super::row::{Call, Row};
-use super::scrollback::{call_of, f_entry};
+use super::scrollback::{attached_skill, call_of, entry_rows};
 use super::search::Spot;
 use super::view::{Doing, Retry, StreamKind, Surface, View};
 use crate::render;
@@ -219,8 +219,7 @@ impl Ui {
                     t.open = false;
                 }
             }
-            // New entries: derive rows via `f_entry`, check them against
-            // pending live-region lines, and file — never draw directly.
+            // New entries settle pending live-region lines into scrollback.
             Event::Committed { entries } => {
                 self.close(view);
                 self.adopt(view, entries);
@@ -307,12 +306,11 @@ impl Ui {
         }
     }
 
-    // Folds freshly committed entries into rows — a tool's through `call_of`,
-    // the rest through `f_entry` — retiring the pending live-region lines they
-    // supersede, checked for drift.
+    // Projects freshly committed entries into scrollback and checks that the
+    // settled tool rows match the pending live-region lines they replace.
     pub(super) fn adopt(&self, view: &mut View, entries: &[LogEntry]) {
         for entry in entries {
-            if view.surface.tail.is_some_and(|t| entry.id() <= t) {
+            if view.surface.tail.is_some_and(|tail| entry.id() <= tail) {
                 continue;
             }
             if let LogEntry::Tool {
@@ -336,7 +334,11 @@ impl Ui {
                     self.check_pending(view, &result.call, &call);
                     push_tool_row(&mut view.surface.scrollback, &mut view.surface.folds, call);
                 }
-            } else if let Some(rows) = f_entry(entry, &self.paint) {
+            } else if let Some(name) = attached_skill(entry) {
+                view.surface
+                    .scrollback
+                    .push_attached_skill(name, entry.id(), &self.paint);
+            } else if let Some(rows) = entry_rows(entry, &self.paint) {
                 if matches!(entry, LogEntry::Ask { .. }) {
                     self.submit_rows(view, rows);
                 } else {

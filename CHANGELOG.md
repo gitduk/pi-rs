@@ -20,6 +20,9 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 
 ### Changed
 
+- The TUI shows consecutive automatic skill attachments on one `✔ skills`
+  line, both during a run and when a saved conversation is reopened.
+
 - `/edit` lists and completes project and user settings alongside prompts,
   instructions, and memory. The list shows filenames with scope labels, and
   groups related files with existing ones first. New settings files are edited

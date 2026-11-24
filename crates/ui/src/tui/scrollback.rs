@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use agent::session::Entry as LogEntry;
+use agent::session::{Entry as LogEntry, EntryId};
 use llm::message::{AssistantContent, ReasoningContent};
 use ratatui::text::Line;
 
@@ -22,6 +22,17 @@ pub(super) struct Scrollback(Vec<Row>);
 impl Scrollback {
     pub(super) fn push(&mut self, row: Row) {
         self.0.push(row);
+    }
+
+    pub(super) fn push_attached_skill(&mut self, name: &str, id: EntryId, paint: &Paint) {
+        if self
+            .0
+            .last_mut()
+            .is_some_and(|row| row.extend_skills(name, id, paint))
+        {
+            return;
+        }
+        self.push(Row::attached_skill(name, id, paint));
     }
 
     // Only a single notice folds. Multiline blocks keep their rows intact.
@@ -562,13 +573,13 @@ pub(super) fn scrollback_from(
         .collect();
 
     let mut out = Scrollback::default();
-    // History, not the view: compaction is the model losing sight of the
-    // conversation, not the user. What it dropped is marked and kept.
+    // Keep the whole history and mark what the model lost to compaction.
     let mut hidden = false;
     let unseen = session.out_of_view();
     for entry in session.history() {
         let gone = unseen.contains(&entry.id());
-        if gone != hidden && !matches!(entry, LogEntry::Compaction { .. }) {
+        let visibility_changed = gone != hidden;
+        if visibility_changed && !matches!(entry, LogEntry::Compaction { .. }) {
             hidden = gone;
             if gone {
                 out.push(Row::notice(Line::from(paint.span(
@@ -623,8 +634,16 @@ pub(super) fn scrollback_from(
                     }
                 }
             }
-            // Neither is anything the screen shows.
             LogEntry::Compaction { .. } => {}
+            LogEntry::Context { .. } => {
+                if let Some(name) = attached_skill(entry) {
+                    if visibility_changed {
+                        out.push(Row::attached_skill(name, entry.id(), paint));
+                    } else {
+                        out.push_attached_skill(name, entry.id(), paint);
+                    }
+                }
+            }
             // A tool's row is the call itself, built where the argument it
             // was made with is still at hand.
             LogEntry::Tool {
@@ -638,10 +657,10 @@ pub(super) fn scrollback_from(
                     push_tool_row(&mut out, folds, call);
                 }
             }
-            // Everything else `f_entry` covers, the rebuild and a fresh
+            // Everything else `entry_rows` covers, the rebuild and a fresh
             // adoption draw from one place.
-            other => {
-                if let Some(rows) = f_entry(other, paint) {
+            _ => {
+                if let Some(rows) = entry_rows(entry, paint) {
                     out.append(rows);
                 }
             }
@@ -682,11 +701,18 @@ pub(super) fn call_of(
     )
 }
 
+pub(super) fn attached_skill(entry: &LogEntry) -> Option<&str> {
+    match entry {
+        LogEntry::Context { context, .. } => skills::source_name(&context.source),
+        _ => None,
+    }
+}
+
 /// One entry's rows, as both the rebuild and a fresh adoption draw them. A
 /// tool's row is not one of these: it is the call itself, built where the
 /// argument it was made with is still held (`call_of`).
 /// Answers don't pass through here — their rows stream directly.
-pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
+pub(super) fn entry_rows(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
     let mut rows = match entry {
         LogEntry::Ask { ask, at, .. } if ask.relayed.is_some() => {
             Some(vec![Row::relayed(ask.shown_text(), &ask.text, *at, paint)])

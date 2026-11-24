@@ -9,6 +9,59 @@ use pi_store::icons;
 
 use super::harness::*;
 
+#[test]
+fn automatic_skills_share_one_row_live_and_on_rebuild() {
+    use agent::session::{Context, Session};
+
+    let mut session = Session::new();
+    for name in ["rust-best-practices", "rust-port", "rust-review"] {
+        session.push_context(Context {
+            source: skills::source(name),
+            text: "instructions for the model".into(),
+        });
+    }
+
+    let mut ui = test_ui(80, 24);
+    let (_dir, mut lane) = a_running_lane();
+    let mut view = View::default();
+    let (first, rest) = session.entries().split_at(1);
+    ui.on_event(
+        &mut lane,
+        &mut view,
+        agent::Event::Committed {
+            entries: first.to_vec(),
+        },
+    );
+    let paint = Paint::new(false);
+    let width = 28;
+    assert_eq!(view.surface.scrollback[0].line_height(0, &paint, width), 1);
+    let event = agent::Event::Committed {
+        entries: rest.to_vec(),
+    };
+    ui.on_event(&mut lane, &mut view, event.clone());
+    ui.on_event(&mut lane, &mut view, event);
+
+    let rebuilt = scrollback_from(
+        &session,
+        &paint,
+        &mut Folds::default(),
+        std::path::Path::new("/w/pi"),
+    );
+    for rows in [&view.surface.scrollback[..], &rebuilt[..]] {
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].line_height(0, &paint, width) > 1);
+        let (body, mark) = rows[0].line(0, &paint, 80);
+        assert_eq!(
+            plain(&mark.expect("skill marker")),
+            format!("{} ", icons::DONE_MARK)
+        );
+        assert_eq!(
+            plain(&body),
+            "skills rust-best-practices, rust-port, rust-review"
+        );
+    }
+}
+
 // Both `streaming_row` and `stream_fold` draw block ids from one counter;
 // sharing a number would make the two blocks indistinguishable to lookup.
 #[test]

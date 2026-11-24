@@ -212,6 +212,10 @@ enum Kind {
     Banner(Banner),
     // An empty group marks a removed row.
     Lines(Vec<(Line<'static>, Option<Line<'static>>)>),
+    AttachedSkills {
+        line: Line<'static>,
+        last: agent::session::EntryId,
+    },
     Call(Call),
     Relayed(Relayed),
     Steps(Group),
@@ -815,6 +819,37 @@ impl Row {
         row
     }
 
+    pub(super) fn attached_skill(name: &str, id: agent::session::EntryId, paint: &Paint) -> Self {
+        let mark = StepMark::Ended(agent::Outcome::Done);
+        let border = Line::from(mark.spans(false, paint));
+        let line = Line::from(vec![
+            paint.span(&paint.theme.prompt.color, "skills"),
+            paint.span(&paint.theme.code, format!(" {name}")),
+        ]);
+        let mut row = Self::new(Kind::AttachedSkills { line, last: id });
+        row.2 = Some(Box::new(render::Prefix::hanging(border)));
+        row
+    }
+
+    pub(super) fn extend_skills(
+        &mut self,
+        name: &str,
+        id: agent::session::EntryId,
+        paint: &Paint,
+    ) -> bool {
+        // An intervening entry can leave no row or no committed event.
+        if let Kind::AttachedSkills { line, last } = &mut self.0
+            && last.0.checked_add(1) == Some(id.0)
+        {
+            line.spans
+                .push(paint.span(&paint.theme.code, format!(", {name}")));
+            *last = id;
+            self.1.clear();
+            return true;
+        }
+        false
+    }
+
     fn said(border: Line<'static>, body: Line<'static>, at: Option<u64>, hangs: bool) -> Self {
         Self::new(Kind::Said {
             border,
@@ -882,6 +917,7 @@ impl Row {
             | Kind::Code(_)
             | Kind::Block(_)
             | Kind::Notice { .. }
+            | Kind::AttachedSkills { .. }
             | Kind::Said { .. } => 1,
             Kind::Banner(banner) => banner.len(),
             Kind::Lines(lines) => lines.len(),
@@ -1018,6 +1054,7 @@ impl Row {
             Kind::Answer(text, _) => (text.clone(), None),
             Kind::Banner(banner) => (banner.line(i, paint, width), None),
             Kind::Lines(lines) => lines[i].clone(),
+            Kind::AttachedSkills { line, .. } => (line.clone(), None),
             Kind::CodeLine(line) => (line.clone(), Some(Line::from(CODE_INDENT))),
             Kind::Code(c) => (c.line(paint), None),
             Kind::Block(b) => (b.line(paint, width), None),
