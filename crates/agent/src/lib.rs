@@ -29,7 +29,7 @@ pub use compaction::Summarizing;
 pub use compaction::ladder::{Policy, Report};
 use event::Reporter;
 pub use event::{Event, Outcome, Totals};
-pub use hooks::{GatesOnly, Hooks, NoHooks};
+pub use hooks::{ContextRequest, GatesOnly, Hooks, NoHooks};
 pub use retry::Retry;
 pub use seams::{
     Approver, Archive, ArchiveWriter, Compactor, Decision, Fitted, Untouched, Working,
@@ -264,7 +264,19 @@ impl Agent {
         for turn in 1.. {
             receive(session, ctx, reporter, input).await;
             heed(session, reporter, input).await;
-            self.remind(session, ctx, reporter).await;
+            // Fitting appends compaction records without changing this batch.
+            let end = session.entries().len();
+            let start = session
+                .entries()
+                .iter()
+                .rposition(|entry| {
+                    matches!(
+                        entry,
+                        session::Entry::Answer { .. } | session::Entry::Compaction { .. }
+                    )
+                })
+                .map_or(0, |at| at + 1);
+            let recent = start..end;
             reporter.report(Event::TurnStart { turn }).await;
             // Entered around each await, not held across it — a guard spanning
             // an await labels whatever else the runtime polls meanwhile.
@@ -319,15 +331,23 @@ impl Agent {
                 if fitted.changed {
                     compactions += 1;
                     held = None;
-                    if self.remind(session, ctx, reporter).await {
-                        continue;
-                    }
                 }
                 if receive(session, ctx, reporter, input).await {
                     continue;
                 }
                 sent = as_sent(fitted.context, &self.model.spec);
-                bound = self.overhead() + llm::estimate::tokens(&sent, &self.model.spec);
+                let mut used = llm::estimate::tokens(&sent, &self.model.spec);
+                // Leave most of the window for the task and its own history.
+                let attachment_budget = budget.saturating_sub(used).min(budget / 4);
+                if attachment_budget > 0
+                    && self
+                        .attach_context(session, ctx, reporter, recent.clone(), attachment_budget)
+                        .await?
+                {
+                    sent = as_sent(session.context(), &self.model.spec);
+                    used = llm::estimate::tokens(&sent, &self.model.spec);
+                }
+                bound = self.overhead() + used;
                 tracing::debug!(
                     target: "pi::loop",
                     parent: &span,
@@ -566,16 +586,36 @@ impl Agent {
         unreachable!("an unlimited run can only leave by returning inside the loop")
     }
 
-    async fn remind(&self, session: &mut Session, ctx: &Ctx, reporter: &Reporter) -> bool {
-        let Some(note) = self.brief.hooks.remind(session, ctx, &self.brief.registry) else {
-            return false;
+    async fn attach_context(
+        &self,
+        session: &mut Session,
+        ctx: &Ctx,
+        reporter: &Reporter,
+        recent: std::ops::Range<usize>,
+        budget: usize,
+    ) -> Result<bool, AgentError> {
+        let request = ContextRequest {
+            session,
+            recent: &session.entries()[recent],
+            ctx,
+            tools: &self.brief.registry,
+            approver: &*self.brief.approver,
+            budget,
         };
-        if matches!(session.view().last(), Some(session::Seen::As(session::Entry::Note { note: current, .. })) if *current == note)
-        {
-            return false;
+        let attachments = tokio::select! {
+            biased;
+            _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
+            attachments = self.brief.hooks.context(request) => attachments,
+        };
+        let ids: Vec<_> = attachments
+            .into_iter()
+            .map(|context| session.push_context(context))
+            .collect();
+        if ids.is_empty() {
+            return Ok(false);
         }
-        report_note(session, reporter, note).await;
-        true
+        report_committed(session, reporter, &ids).await;
+        Ok(true)
     }
 
     /// What a manual compaction leaves alone, against this agent's window: the

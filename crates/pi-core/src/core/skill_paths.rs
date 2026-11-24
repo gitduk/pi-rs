@@ -1,55 +1,31 @@
-//! File-scoped skill reminders derived from retained session facts.
+//! Attach skill instructions when a tool batch reads matching files.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use agent::session::{Entry, Session};
-use agent::{Event, Hooks};
+use agent::session::{Context, Entry, Seen, Session};
+use agent::{ContextRequest, Decision, Event, Hooks};
 use async_trait::async_trait;
-use serde_json::Value;
-use tool::{Ctx, Registry, ToolOutput};
+use llm::estimate;
+use serde_json::{Value, json};
+use skills::{Load, Shelf};
+use tool::{Ctx, ToolOutput};
 
-pub(super) fn arm(inner: Arc<dyn Hooks>, shelf: Option<Arc<skills::Shelf>>) -> Arc<dyn Hooks> {
+pub(super) fn arm(inner: Arc<dyn Hooks>, shelf: Option<Arc<Shelf>>) -> Arc<dyn Hooks> {
     match shelf {
-        Some(shelf) => Arc::new(Reminders { inner, shelf }),
+        Some(shelf) => Arc::new(PathSkills { inner, shelf }),
         None => inner,
     }
 }
 
-struct Reminders {
+struct PathSkills {
     inner: Arc<dyn Hooks>,
-    shelf: Arc<skills::Shelf>,
+    shelf: Arc<Shelf>,
 }
 
-fn loaded(session: &Session) -> HashSet<&str> {
-    let mut loaded = HashSet::new();
-    let entries = session.entries();
-    let start = entries
-        .iter()
-        .rposition(|entry| matches!(entry, Entry::Compaction { .. }))
-        .map_or(0, |at| at + 1);
-    for entry in &entries[start..] {
-        match entry {
-            Entry::Ask { ask, .. } => loaded.extend(skills::included(&ask.context)),
-            Entry::Tool { result, .. } => loaded.extend(skills::Load::loaded(result)),
-            _ => {}
-        }
-    }
-    loaded
-}
-
-fn reminder(session: &Session, skills: &[skills::Skill], root: &Path) -> Option<String> {
-    let loaded = loaded(session);
-    let pending: Vec<_> = skills
-        .iter()
-        .filter(|skill| !skill.paths.is_empty() && !loaded.contains(skill.name.as_str()))
-        .collect();
-    if pending.is_empty() {
-        return None;
-    }
-    let paths: HashSet<_> = session
-        .entries()
+fn recent_reads<'a>(recent: &'a [Entry], root: &Path) -> HashSet<&'a Path> {
+    recent
         .iter()
         .filter_map(|entry| {
             let Entry::Tool { result, .. } = entry else {
@@ -57,37 +33,108 @@ fn reminder(session: &Session, skills: &[skills::Skill], root: &Path) -> Option<
             };
             pi_tools::read::Read::file(result)?.strip_prefix(root).ok()
         })
-        .collect();
-    let names: Vec<_> = pending
-        .into_iter()
-        .filter(|skill| paths.iter().any(|path| skill.paths.matches(path)))
-        .map(|skill| format!("`{}`", skill.name))
-        .collect();
-    (!names.is_empty()).then(|| format!(
-        "Files read in this session match these skills: {}. Load them with the `{}` tool before making changes. These instructions have not been loaded since the last context compaction.",
-        names.join(", "), skills::Load::NAME,
-    ))
+        .collect()
+}
+
+fn visible_skills(session: &Session) -> HashSet<&str> {
+    let mut names = HashSet::new();
+    let mut calls = HashMap::new();
+    for seen in session.view() {
+        let Seen::As(entry) = seen else { continue };
+        match entry {
+            Entry::Ask { ask, .. } => names.extend(skills::included(&ask.context)),
+            Entry::Context { context, .. } => {
+                names.extend(skills::source_name(&context.source));
+            }
+            Entry::Answer { .. } => {
+                calls.clear();
+                calls.extend(entry.tool_calls().filter_map(|call| {
+                    Load::instruction_name(call).map(|name| (call.id.as_str(), name))
+                }));
+            }
+            Entry::Tool { result, .. } if result.name == Load::NAME => {
+                names.extend(
+                    calls
+                        .remove(result.call.as_str())
+                        .filter(|_| !result.is_error),
+                );
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 #[async_trait]
-impl Hooks for Reminders {
-    fn remind(&self, session: &Session, ctx: &Ctx, tools: &Registry) -> Option<String> {
-        let inherited = self.inner.remind(session, ctx, tools);
-        let own = tools.get(skills::Load::NAME).and_then(|_| {
-            let (found, _) = self.shelf.now();
-            if found.skills.iter().all(|skill| skill.paths.is_empty()) {
-                return None;
-            }
-            reminder(session, &found.skills, ctx.workspace.root())
-        });
-        match (inherited, own) {
-            (Some(mut note), Some(own)) => {
-                note.push('\n');
-                note.push_str(&own);
-                Some(note)
-            }
-            (inherited, own) => inherited.or(own),
+impl Hooks for PathSkills {
+    async fn context(&self, request: ContextRequest<'_>) -> Vec<Context> {
+        let mut attachments = self.inner.context(request).await;
+        let paths = recent_reads(request.recent, request.ctx.workspace.root());
+        let mut room = request.budget.saturating_sub(
+            attachments
+                .iter()
+                .map(|entry| attachment_tokens(&entry.text))
+                .sum(),
+        );
+        if paths.is_empty() || room == 0 {
+            return attachments;
         }
+        let shelf = self.shelf.clone();
+        let tools = request.tools.clone();
+        let Ok(Some((tool, found))) = tokio::task::spawn_blocking(move || {
+            let tool = tools.get(Load::NAME)?;
+            Some((tool, shelf.now().0))
+        })
+        .await
+        else {
+            return attachments;
+        };
+        let matching: Vec<_> = found
+            .skills
+            .iter()
+            .filter(|skill| paths.iter().any(|path| skill.paths.matches(path)))
+            .collect();
+        if matching.is_empty() {
+            return attachments;
+        }
+        let visible = visible_skills(request.session);
+        for skill in matching {
+            if room == 0 {
+                break;
+            }
+            if visible.contains(skill.name.as_str()) {
+                continue;
+            }
+            let args = json!({ "name": skill.name });
+            if !matches!(
+                request.approver.approve(Load::NAME, tool.tier(), &args),
+                Decision::Allow
+            ) || self.before(Load::NAME, &args, request.ctx).await.is_err()
+            {
+                continue;
+            }
+            match skill.read_instructions().await {
+                Ok(text) => {
+                    let bytes = text.len();
+                    let text = format!(
+                        "Automatically attached skill instructions for the current task:\n\n{text}"
+                    );
+                    let Some(left) = room.checked_sub(attachment_tokens(&text)) else {
+                        continue;
+                    };
+                    room = left;
+                    skill.record_delivery(bytes).await;
+                    attachments.push(Context {
+                        source: skills::source(&skill.name),
+                        text,
+                    });
+                }
+                Err(error) => {
+                    tracing::warn!(target: "pi::skills", skill = %skill.name, %error, "could not attach skill instructions")
+                }
+            }
+        }
+        attachments
     }
 
     async fn before(&self, name: &str, args: &Value, ctx: &Ctx) -> Result<(), String> {
@@ -111,185 +158,242 @@ impl Hooks for Reminders {
     }
 }
 
+fn attachment_tokens(text: &str) -> usize {
+    estimate::MESSAGE_OVERHEAD + estimate::text(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent::session::{Compaction, EntryId, Omission};
+    use agent::session::{Compaction, Omission};
     use llm::message::{AssistantContent, ToolCall, ToolResult};
-    use serde_json::json;
+    use pi_store::session::{Header, Store};
     use std::path::PathBuf;
-    use tool::Tool;
+    use tool::{Registry, Tier, Tool};
 
-    async fn invoke(session: &mut Session, tool: &dyn Tool, args: Value, ctx: &Ctx) -> EntryId {
-        let call = ToolCall {
-            id: format!("call-{}", session.next_id()),
-            name: tool.name().into(),
-            args,
-        };
-        session.push_assistant(vec![AssistantContent::ToolCall(call.clone())]);
-        let result = match tool::output::gated(tool, call.args, ctx).await {
-            Ok(output) => ToolResult {
-                call: call.id,
-                name: call.name,
-                content: output.content,
-                is_error: false,
-            },
-            Err(error) => ToolResult::error(call.id, call.name, error.to_string()),
-        };
-        session.push_results(vec![result])[0]
+    struct Reject;
+
+    impl agent::Approver for Reject {
+        fn approve(&self, _: &str, _: Tier, _: &Value) -> Decision {
+            Decision::Deny("denied by policy".into())
+        }
+    }
+
+    #[async_trait]
+    impl Hooks for Reject {
+        async fn before(&self, name: &str, args: &Value, _: &Ctx) -> Result<(), String> {
+            assert_eq!(name, Load::NAME);
+            assert_eq!(*args, json!({"name": "rust-style"}));
+            Err("denied by hook".into())
+        }
+    }
+
+    fn request<'a>(session: &'a Session, ctx: &'a Ctx, tools: &'a Registry) -> ContextRequest<'a> {
+        let start = session
+            .entries()
+            .iter()
+            .rposition(|entry| matches!(entry, Entry::Answer { .. } | Entry::Compaction { .. }))
+            .map_or(0, |at| at + 1);
+        ContextRequest {
+            session,
+            recent: &session.entries()[start..],
+            ctx,
+            tools,
+            approver: &agent::Ceiling(Tier::Read),
+            budget: 2_000,
+        }
+    }
+
+    async fn batch(session: &mut Session, calls: &[(&dyn Tool, Value)], ctx: &Ctx) {
+        let calls: Vec<_> = calls
+            .iter()
+            .enumerate()
+            .map(|(i, (tool, args))| {
+                (
+                    *tool,
+                    ToolCall {
+                        id: format!("call-{i}"),
+                        name: tool.name().into(),
+                        args: args.clone(),
+                    },
+                )
+            })
+            .collect();
+        session.push_assistant(
+            calls
+                .iter()
+                .map(|(_, call)| AssistantContent::ToolCall(call.clone()))
+                .collect(),
+        );
+        let mut results = Vec::new();
+        for (tool, call) in calls {
+            results.push(match tool::output::gated(tool, call.args, ctx).await {
+                Ok(out) => ToolResult {
+                    call: call.id,
+                    name: call.name,
+                    content: out.content,
+                    is_error: false,
+                },
+                Err(error) => ToolResult::error(call.id, call.name, error.to_string()),
+            });
+        }
+        session.push_results(results);
     }
 
     #[tokio::test]
-    async fn reminders_follow_successful_loads_and_reset_after_compaction_and_resume() {
+    async fn a_read_attaches_instructions_only_when_they_are_missing() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("src")).unwrap();
-        std::fs::write(dir.path().join("src/lib.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn main() {}").unwrap();
         let ctx = Ctx::new(tool::Workspace::new(dir.path()).unwrap());
         let skill = skills::Skill::builtin(
             "---\nname: rust-style\ndescription: Rust conventions\npaths: ['**/*.rs']\n---\nUse idiomatic Rust.",
         ).unwrap().with_files(vec![("reference.md".into(), "Reference material.")]);
-        let instructions = skills::delivery(&skill, &skill.text().unwrap()).unwrap();
-        let source = skills::source(&skill.name);
-        let shelf = Arc::new(skills::Shelf::new(Vec::<PathBuf>::new()).with_builtin(skill.clone()));
-        let hooks = arm(Arc::new(agent::NoHooks), Some(shelf));
-        let load = skills::Load::new(vec![skill]);
-        let tools = Registry::new().with(skills::Load::new(Vec::new()));
-        let reminder = |session: &Session| hooks.remind(session, &ctx, &tools);
-        let mut session = Session::with_prompt(
-            "Update the Rust code. Explain this example:\nSkill: `rust-style`\nSource: /example/SKILL.md\n",
-        );
-        assert!(reminder(&session).is_none());
+        let shelf = Arc::new(Shelf::new(Vec::<PathBuf>::new()).with_builtin(skill.clone()));
+        let hooks = arm(Arc::new(agent::NoHooks), Some(shelf.clone()));
+        let load = Load::new(vec![skill.clone()]);
+        let tools = Registry::new().with(Load::new(vec![skill]));
+        let read: (&dyn Tool, _) = (&pi_tools::read::Read, json!({"path": "lib.rs"}));
 
-        invoke(
+        let mut session = Session::with_prompt("Update the Rust code.");
+        batch(
             &mut session,
-            &pi_tools::read::Read,
-            json!({"path": "src"}),
+            &[(&pi_tools::read::Read, json!({"path": "."}))],
             &ctx,
         )
         .await;
         assert!(
-            reminder(&session).is_none(),
-            "a directory listing is not a file read"
+            hooks
+                .context(request(&session, &ctx, &tools))
+                .await
+                .is_empty()
         );
-        invoke(
+        batch(
             &mut session,
-            &pi_tools::read::Read,
-            json!({"path": "src/lib.rs"}),
+            &[
+                read.clone(),
+                (&load, json!({"name": "rust-style", "file": "reference.md"})),
+            ],
             &ctx,
         )
         .await;
-        assert!(reminder(&session).unwrap().contains("rust-style"));
-        session.push_note(reminder(&session).unwrap());
-        assert!(
-            reminder(&session).is_some(),
-            "a reminder does not count as a load"
-        );
-
-        invoke(&mut session, &load, json!({"name": "missing"}), &ctx).await;
-        assert!(
-            reminder(&session).is_some(),
-            "a failed load must not silence reminders"
-        );
-        invoke(
-            &mut session,
-            &load,
-            json!({"name": "rust-style", "file": "reference.md"}),
-            &ctx,
-        )
-        .await;
-        assert!(
-            reminder(&session).is_some(),
-            "a reference is not the skill's instructions"
-        );
-        let oversized = skills::Skill::builtin(Box::leak(
-            format!(
-                "---\nname: rust-style\ndescription: Rust conventions\n---\n{}\nLast instruction.",
-                "Use idiomatic Rust.\n".repeat(2_000),
+        let mut attachments = hooks.context(request(&session, &ctx, &tools)).await;
+        assert_eq!(attachments.len(), 1);
+        let attachment = attachments.pop().unwrap();
+        assert!(attachment.text.contains("Use idiomatic Rust."));
+        let id = session.push_context(attachment);
+        let store = Store::new(dir.path().join("sessions"));
+        let location = store
+            .save(
+                dir.path(),
+                Header {
+                    id: "path-skills",
+                    model: "test",
+                    name: None,
+                    created: 0,
+                    spent: Default::default(),
+                },
+                &session,
             )
-            .into_boxed_str(),
-        ))
-        .unwrap();
-        let truncated = invoke(
-            &mut session,
-            &skills::Load::new(vec![oversized]),
-            json!({"name": "rust-style"}),
-            &ctx,
-        )
-        .await;
-        let Entry::Tool { result, .. } = session.entries_for(&[truncated])[0] else {
-            panic!("a load must retain its result");
-        };
-        assert!(
-            result.is_error
-                && result.flatten_text().contains(&format!(
-                    "over the {} bytes one result carries",
-                    tool::limit::MAX_TEXT
-                )),
-            "a skill too big for one result is refused: {}",
-            result.flatten_text()
-        );
-        assert!(
-            reminder(&session).is_some(),
-            "a refused load must not silence reminders"
-        );
-        let loaded = invoke(&mut session, &load, json!({"name": "rust-style"}), &ctx).await;
-        assert!(reminder(&session).is_none());
-        let resumed: Session =
-            serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
-        assert!(
-            reminder(&resumed).is_none(),
-            "resuming must retain successful loads"
-        );
+            .unwrap();
+        let mut resumed = Store::read(&location).unwrap().into_session();
+        assert_eq!(resumed.context(), session.context());
 
-        session.record(Compaction {
+        batch(&mut resumed, std::slice::from_ref(&read), &ctx).await;
+        assert!(
+            hooks
+                .context(request(&resumed, &ctx, &tools))
+                .await
+                .is_empty(),
+            "the attachment survived resume"
+        );
+        let before_fit = resumed.entries().len() - 1;
+        resumed.record(Compaction {
             omissions: vec![Omission {
-                entry: loaded,
+                entry: id,
                 block: None,
                 notice: "instructions removed".into(),
             }],
             ..Default::default()
         });
         assert!(
-            reminder(&session).is_some(),
-            "compaction must reset successful loads"
+            hooks
+                .context(request(&resumed, &ctx, &tools))
+                .await
+                .is_empty(),
+            "compaction does not trigger a load"
         );
-        let mut resumed: Session =
-            serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
+        let mut fitted = request(&resumed, &ctx, &tools);
+        fitted.recent = &resumed.entries()[before_fit..before_fit + 1];
+        assert_eq!(
+            hooks.context(fitted).await.len(),
+            1,
+            "a read that triggered the current request survives fitting"
+        );
         assert!(
-            reminder(&resumed).is_some(),
-            "resuming must not revive pre-compaction loads"
+            hooks
+                .context(ContextRequest {
+                    budget: 1,
+                    ..fitted
+                })
+                .await
+                .is_empty()
         );
-        invoke(&mut resumed, &load, json!({"name": "rust-style"}), &ctx).await;
-        assert!(reminder(&resumed).is_none());
+        assert!(
+            hooks
+                .context(ContextRequest {
+                    approver: &Reject,
+                    ..fitted
+                })
+                .await
+                .is_empty()
+        );
+        assert!(
+            arm(Arc::new(Reject), Some(shelf))
+                .context(fitted)
+                .await
+                .is_empty()
+        );
+        batch(&mut resumed, std::slice::from_ref(&read), &ctx).await;
+        assert_eq!(
+            hooks.context(request(&resumed, &ctx, &tools)).await.len(),
+            1
+        );
 
-        let mut preloaded = Session::new();
-        preloaded.send(agent::session::Prompt {
-            text: instructions,
-            context: vec![source],
-            ..Default::default()
-        });
-        let record = agent::session::archive::Record::from_entry(&preloaded.entries()[0]);
-        let restored = serde_json::from_slice::<agent::session::archive::Record>(
-            &serde_json::to_vec(&record).unwrap(),
-        )
-        .unwrap()
-        .into_entry()
-        .unwrap();
-        let mut preloaded = Session::from_parts(vec![restored], preloaded.next_id(), None);
-        invoke(
-            &mut preloaded,
-            &pi_tools::read::Read,
-            json!({"path": "src/lib.rs"}),
+        batch(
+            &mut resumed,
+            &[read.clone(), (&load, json!({"name": "rust-style"}))],
             &ctx,
         )
         .await;
         assert!(
-            reminder(&preloaded).is_none(),
-            "instructions supplied with the task are already loaded"
+            hooks
+                .context(request(&resumed, &ctx, &tools))
+                .await
+                .is_empty(),
+            "a successful manual load in the same batch suffices"
         );
-        assert!(
-            hooks.remind(&session, &ctx, &Registry::new()).is_none(),
-            "do not request an unavailable loading tool"
+        let manual_body = resumed.entries().last().unwrap().id();
+        resumed.record(Compaction {
+            omissions: vec![Omission {
+                entry: manual_body,
+                block: None,
+                notice: "body removed".into(),
+            }],
+            ..Default::default()
+        });
+        batch(
+            &mut resumed,
+            &[
+                read,
+                (&load, json!({"name": "rust-style", "file": "reference.md"})),
+            ],
+            &ctx,
+        )
+        .await;
+        assert_eq!(
+            hooks.context(request(&resumed, &ctx, &tools)).await.len(),
+            1,
+            "a later reference result with the same call id is not the omitted body"
         );
     }
 }

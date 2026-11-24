@@ -156,6 +156,7 @@ pub(super) fn user_blocks(entry: &Entry) -> Vec<UserContent<'_>> {
         }
         Entry::Bash { run, .. } => vec![UserContent::Text(Cow::Borrowed(&run.text))],
         Entry::Note { note, .. } => vec![UserContent::Text(Cow::Borrowed(note))],
+        Entry::Context { context, .. } => vec![UserContent::Text(Cow::Borrowed(&context.text))],
         Entry::Tool { result, .. } => vec![UserContent::ToolResult(Cow::Borrowed(result))],
         Entry::Answer { .. }
         | Entry::Compaction { .. }

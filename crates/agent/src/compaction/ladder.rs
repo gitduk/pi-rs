@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
 use llm::estimate;
 use llm::model::ModelSpec;
@@ -118,35 +118,16 @@ impl<'a> Item<'a> {
         }
     }
 
-    // The text an omission would stand in for: a tool's result or the output
-    // of a shell command the user ran — the two things on the user's side
-    // nobody is waiting on.
-    fn prunable(&self) -> Option<String> {
+    // Only results, shell output, and attachments can age out individually.
+    fn prunable(&self) -> Option<Cow<'_, str>> {
         if self.notice().is_some() {
             return None;
         }
         match self.entry {
-            Entry::Tool { result: r, .. } => Some(r.flatten_text()),
-            Entry::Bash { run, .. } => Some(run.text.clone()),
+            Entry::Tool { result: r, .. } => Some(Cow::Owned(r.flatten_text())),
+            Entry::Bash { run, .. } => Some(Cow::Borrowed(&run.text)),
+            Entry::Context { context, .. } => Some(Cow::Borrowed(&context.text)),
             _ => None,
-        }
-    }
-
-    // Assistant turns are never taken: a `tool_use` with no answering
-    // `tool_result` makes the next request invalid on both formats.
-    fn omittable(&self) -> bool {
-        match self.entry {
-            Entry::Tool { .. } => true,
-            // A user's shell command output is the other half of a question — bulk
-            // nothing downstream waits on.
-            Entry::Bash { .. } => true,
-            // A note is the same half: machine prose nothing downstream waits
-            // on once the run it explains is past.
-            Entry::Note { .. } => true,
-            // A question stays whatever the budget says: what someone asked is
-            // not the answer's spare context.
-            Entry::Ask { .. } => false,
-            _ => false,
         }
     }
 
@@ -344,21 +325,18 @@ fn repeated<'a>(items: &mut [Item<'a>], _: &Frame<'_>, report: &mut Report) {
     }
 }
 
-// Results and the user's shell command output, oldest first, never inside the tail the
-// agent is working from. Both carry bulk nothing downstream waits on.
+// Prune eligible content oldest first, outside the tail the agent is working from.
 fn age_out(items: &mut [Item<'_>], f: &Frame<'_>, report: &mut Report) {
     let suffix = suffixes(items);
     for n in 0..items.len() {
         if total(items) <= f.budget || suffix[n] < f.policy.protect_tail {
             break;
         }
-        if !items[n].omittable() {
-            continue;
-        }
         let Some(body) = items[n].prunable() else {
             continue;
         };
-        items[n].omit(pruned(AGED_OUT, &body, f.policy));
+        let notice = pruned(AGED_OUT, &body, f.policy);
+        items[n].omit(notice);
         report.aged_out += 1;
     }
 }

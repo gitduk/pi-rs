@@ -142,6 +142,105 @@ async fn drive_retrying(
     (session, out, events)
 }
 
+#[tokio::test]
+async fn a_read_batch_can_attach_context_after_fitting_the_request() {
+    use agent::session::{Compaction, Context, Entry, EntryId, Omission, Seen};
+
+    struct OmitOld(EntryId);
+    #[async_trait]
+    impl agent::Compactor for OmitOld {
+        async fn compact(
+            &self,
+            session: &mut Session,
+            _: agent::Working<'_>,
+            _: usize,
+            _: bool,
+            _: &agent::event::Reporter,
+        ) -> agent::Fitted {
+            session.record(Compaction {
+                omissions: vec![Omission {
+                    entry: self.0,
+                    block: None,
+                    notice: "old context omitted".into(),
+                }],
+                ..Default::default()
+            });
+            agent::Fitted {
+                context: session.context(),
+                changed: true,
+                spent: Usage::default(),
+            }
+        }
+    }
+
+    struct Attach;
+    #[async_trait]
+    impl agent::Hooks for Attach {
+        async fn context(&self, request: agent::ContextRequest<'_>) -> Vec<Context> {
+            let visible = request.session.view().into_iter().any(|entry| {
+                matches!(entry, Seen::As(Entry::Context { context, .. }) if context.source == "example")
+            });
+            if visible
+                || !request
+                    .recent
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Tool { .. }))
+            {
+                return Vec::new();
+            }
+            vec![Context {
+                source: "example".into(),
+                text: "fresh context".into(),
+            }]
+        }
+    }
+
+    struct Check;
+    #[async_trait]
+    impl Transport for Check {
+        async fn stream(
+            &self,
+            _: &ModelSpec,
+            req: &Request,
+        ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
+            assert!(
+                req.messages
+                    .iter()
+                    .any(|message| message.text() == "fresh context")
+            );
+            Ok(futures::stream::iter(text_turn("done").into_iter().map(Ok)).boxed())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let mut session = Session::with_prompt("read a file");
+    let old = session.push_context(Context {
+        source: "example".into(),
+        text: "old context".into(),
+    });
+    let call = llm::message::ToolCall {
+        id: "read-1".into(),
+        name: "read".into(),
+        args: json!({"path": "lib.rs"}),
+    };
+    session.push_assistant(vec![llm::message::AssistantContent::ToolCall(call.clone())]);
+    session.push_results(vec![llm::message::ToolResult {
+        call: call.id,
+        name: call.name,
+        content: Vec::new(),
+        is_error: false,
+    }]);
+    let mut agent = tooled(Arc::new(Check), spec());
+    agent.compactor = Arc::new(OmitOld(old));
+    brief(&mut agent).hooks = Arc::new(Attach);
+    let (tx, _rx) = agent::event::channel();
+    agent
+        .run(&mut session, &ctx, &tx, &Retry::default())
+        .await
+        .unwrap();
+}
+
 // Every result in the view, in order: one entry is one message, spread
 // across several rather than packed into one — joining is the wire's business.
 fn tool_results(msgs: &[Message]) -> Vec<&llm::message::ToolResult> {

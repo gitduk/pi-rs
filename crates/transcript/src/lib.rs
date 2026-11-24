@@ -170,6 +170,13 @@ impl Prompt {
     }
 }
 
+/// Model context attached by the application, with an opaque source identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Context {
+    pub source: String,
+    pub text: String,
+}
+
 /// Who said or did a thing. Derived from the entry's variant, never stored:
 /// the variant is the author, and a stored field could disagree with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,6 +295,12 @@ pub enum Entry {
         at: u64,
         note: String,
     },
+    /// Automatically attached context, retained separately from user input.
+    Context {
+        id: EntryId,
+        at: u64,
+        context: Context,
+    },
     // The session's own mechanism: one compaction pass's record. Input to the
     // view, never content on the wire.
     Compaction {
@@ -323,6 +336,7 @@ impl Entry {
             | Entry::Answer { id, .. }
             | Entry::Tool { id, .. }
             | Entry::Note { id, .. }
+            | Entry::Context { id, .. }
             | Entry::Compaction { id, .. }
             | Entry::Plain { id, .. }
             | Entry::Notice { id, .. }
@@ -337,6 +351,7 @@ impl Entry {
             | Entry::Answer { at, .. }
             | Entry::Tool { at, .. }
             | Entry::Note { at, .. }
+            | Entry::Context { at, .. }
             | Entry::Compaction { at, .. }
             | Entry::Plain { at, .. }
             | Entry::Notice { at, .. }
@@ -352,6 +367,7 @@ impl Entry {
             Entry::Answer { .. } => Author::Assistant,
             Entry::Tool { .. }
             | Entry::Note { .. }
+            | Entry::Context { .. }
             | Entry::Compaction { .. }
             | Entry::Plain { .. }
             | Entry::Notice { .. }
@@ -684,6 +700,13 @@ impl Session {
             at,
             note: text.into(),
         });
+        id
+    }
+
+    /// Retain an attachment as model context.
+    pub fn push_context(&mut self, context: Context) -> EntryId {
+        let (id, at) = self.mint();
+        Arc::make_mut(&mut self.entries).push(Entry::Context { id, at, context });
         id
     }
 

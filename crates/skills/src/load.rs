@@ -23,29 +23,29 @@ pub fn delivered(sink: impl Fn(&str, usize) + Send + Sync + 'static) {
     let _ = DELIVERED.set(Box::new(sink));
 }
 
-/// Identifies instructions explicitly supplied as context.
+/// Identifies skill instructions supplied as context.
 pub fn source(name: &str) -> String {
     format!("{SOURCE_PREFIX}{name}")
+}
+
+/// The skill name recorded by a context source.
+pub fn source_name(source: &str) -> Option<&str> {
+    source
+        .strip_prefix(SOURCE_PREFIX)
+        .filter(|name| crate::usable(name))
 }
 
 impl Load {
     /// The name the tool answers to.
     pub const NAME: &'static str = "skill";
 
-    /// The instructions successfully loaded by this call, excluding reference files.
-    pub fn loaded(result: &llm::message::ToolResult) -> Option<&str> {
-        if result.name != Self::NAME || result.is_error {
+    /// The skill whose instructions a successful call delivers.
+    pub fn instruction_name(call: &llm::message::ToolCall) -> Option<&str> {
+        if call.name != Self::NAME {
             return None;
         }
-        result.content.iter().find_map(|block| {
-            let llm::message::ToolResultContent::Json { value } = block else {
-                return None;
-            };
-            let source = value.get("loaded_context")?.get("source")?.as_str()?;
-            source
-                .strip_prefix(SOURCE_PREFIX)
-                .filter(|name| crate::usable(name))
-        })
+        let args = Args::<&str>::deserialize(&call.args).ok()?;
+        (args.file.is_none() && crate::usable(args.name)).then_some(args.name)
     }
 }
 
@@ -53,28 +53,15 @@ const NAME: &str = Load::NAME;
 
 /// Instruction names from explicitly recorded context sources.
 pub fn included(sources: &[String]) -> impl Iterator<Item = &str> {
-    sources.iter().filter_map(|source| {
-        source
-            .strip_prefix(SOURCE_PREFIX)
-            .filter(|name| crate::usable(name))
-    })
-}
-
-fn loaded_output(skill: &Skill, text: &str) -> Result<ToolOutput, ToolError> {
-    let text = delivery(skill, text).map_err(ToolError::Invalid)?;
-    let context = json!({ "loaded_context": { "source": source(&skill.name) } });
-    let mut out = ToolOutput::text(text).with_screen(skill.name.clone());
-    out.content
-        .push(llm::message::ToolResultContent::Json { value: context });
-    Ok(out)
+    sources.iter().map(String::as_str).filter_map(source_name)
 }
 
 #[derive(Deserialize)]
-struct Args {
-    name: String,
+struct Args<T> {
+    name: T,
     // A file inside the skill's own directory, when the body points at one.
     #[serde(default)]
-    file: Option<String>,
+    file: Option<T>,
 }
 
 /// Loads a skill's instructions on demand.
@@ -164,13 +151,8 @@ fn sibling_files(dir: &std::path::Path) -> (Vec<String>, bool) {
     (out, cut)
 }
 
-/// A skill's body, with the way to reach the files it points at: the one place
-/// instructions are composed, so what discovery sizes is what is delivered.
-///
-/// Shared with a surface that runs a skill at the user's word: the model is
-/// given the same instructions either way, and the skill tool is how a skill's
-/// own files are reached.
-fn compose(skill: &Skill, text: &str) -> String {
+/// Compose a complete delivery before counting it, including how to reach references.
+pub(crate) fn compose_fit(skill: &Skill, text: &str) -> Result<String, String> {
     let source = match skill.builtin {
         Some(_) => "built-in".to_string(),
         None => skill.dir.join("SKILL.md").display().to_string(),
@@ -180,6 +162,13 @@ fn compose(skill: &Skill, text: &str) -> String {
         skill.name,
         body(text)
     );
+    let Some(room) = MAX_TEXT.checked_sub(out.len()) else {
+        return Err(over_delivery(&skill.name, out.len()));
+    };
+    if room == 0 {
+        return Ok(out);
+    }
+
     // Skills usually live outside the workspace; instructions that point at a
     // sibling are useless unless the way to fetch it arrives with them.
     let (siblings, cut) = if skill.builtin.is_some() {
@@ -189,19 +178,8 @@ fn compose(skill: &Skill, text: &str) -> String {
         sibling_files(&skill.dir)
     };
     if !siblings.is_empty() {
-        let room = MAX_TEXT.saturating_sub(out.len());
         let dir = (!skill.dir.as_os_str().is_empty()).then(|| skill.dir.display().to_string());
         out.push_str(&listing(&skill.name, &siblings, cut, dir.as_deref(), room));
-    }
-    out
-}
-
-/// What [`delivery`] makes, before it is counted: a skill's whole delivery, or
-/// why it cannot arrive whole.
-pub(crate) fn compose_fit(skill: &Skill, text: &str) -> Result<String, String> {
-    let out = compose(skill, text);
-    if out.len() > MAX_TEXT {
-        return Err(over_delivery(&skill.name, out.len()));
     }
     Ok(out)
 }
@@ -304,50 +282,34 @@ impl Tool for Load {
     }
 
     async fn execute(&self, args: Value, _ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let args: Args = tool::parse_args(args)?;
+        let args: Args<String> = tool::parse_args(args)?;
         let skill = self.find(&args.name)?;
+        let Some(rel) = args.file else {
+            let text = skill.instructions().await?;
+            return Ok(ToolOutput::text(text).with_screen(args.name));
+        };
 
-        if let Some(text) = skill.builtin {
-            return match args.file {
-                Some(rel) => match skill.builtin_files.iter().find(|(name, _)| name == &rel) {
-                    Some((_, text)) => {
-                        Ok(ToolOutput::text(*text).with_screen(format!("{}/{rel}", args.name)))
-                    }
-                    None if skill.builtin_files.is_empty() => Err(ToolError::Invalid(format!(
-                        "{}/{rel}: a built-in skill has no files",
-                        args.name
-                    ))),
-                    None => Err(ToolError::Invalid(format!(
-                        "{}/{rel}: no such built-in file. Available: {}",
-                        args.name,
-                        skill
-                            .builtin_files
-                            .iter()
-                            .map(|(name, _)| name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ))),
-                },
-                None => loaded_output(skill, text),
+        if skill.builtin.is_some() {
+            return match skill.builtin_files.iter().find(|(name, _)| name == &rel) {
+                Some((_, text)) => {
+                    Ok(ToolOutput::text(*text).with_screen(format!("{}/{rel}", args.name)))
+                }
+                None if skill.builtin_files.is_empty() => Err(ToolError::Invalid(format!(
+                    "{}/{rel}: a built-in skill has no files",
+                    args.name
+                ))),
+                None => Err(ToolError::Invalid(format!(
+                    "{}/{rel}: no such built-in file. Available: {}",
+                    args.name,
+                    skill
+                        .builtin_files
+                        .iter()
+                        .map(|(name, _)| name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))),
             };
         }
-        let Some(rel) = args.file else {
-            // The instructions go to the transcript whole: one too big to read
-            // is refused here, one that cannot arrive whole by `delivery`.
-            let path = skill.dir.join("SKILL.md");
-            if let Ok(meta) = tokio::fs::metadata(&path).await
-                && meta.len() > MAX_BYTES
-            {
-                return Ok(ToolOutput::text(over_limit(
-                    &format!("{}: SKILL.md", args.name),
-                    meta.len(),
-                )));
-            }
-            let text = tokio::fs::read_to_string(path)
-                .await
-                .map_err(|e| ToolError::Invalid(format!("{}: {e}", args.name)))?;
-            return loaded_output(skill, &text);
-        };
 
         // A file argument stays inside the skill's own directory; that is the
         // boundary, not the workspace.

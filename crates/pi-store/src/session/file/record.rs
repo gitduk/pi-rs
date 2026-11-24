@@ -383,7 +383,9 @@ fn context_content(
     use message::conversation::Content;
     let blocks = body.as_array().context("invalid context body")?;
     match kind {
-        "ask" | "bash" | "note" => Ok(vec![Content::User(Vec::<Block>::deserialize(body)?)]),
+        "ask" | "bash" | "note" | "context" => {
+            Ok(vec![Content::User(Vec::<Block>::deserialize(body)?)])
+        }
         "answer" => answer_content(blocks),
         "tool" => {
             ensure!(blocks.len() == 1, "invalid tool result body");

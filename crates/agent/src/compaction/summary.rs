@@ -49,9 +49,8 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
             Entry::Bash { run, .. } => {
                 lines.push(format!("[user ran] {}", clip_bytes(&run.text, BLOCK_BYTES)))
             }
-            // A note is a directive for the one turn it opened; by the
-            // time a summary carries it, it is stale.
-            Entry::Note { .. } => {}
+            // Notes and attachments give instructions for their original context.
+            Entry::Note { .. } | Entry::Context { .. } => {}
             Entry::Tool { result: r, .. } => {
                 let mark = if r.is_error { " error" } else { "" };
                 lines.push(format!(

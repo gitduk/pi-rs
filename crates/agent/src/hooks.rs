@@ -8,13 +8,28 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tool::{Ctx, ToolOutput};
 
-use crate::{Event, session::Session};
+use crate::{
+    Approver, Event,
+    session::{Context, Entry, Session},
+};
+
+/// The fitted session and the tool batch that prompted the next request.
+#[derive(Clone, Copy)]
+pub struct ContextRequest<'a> {
+    pub session: &'a Session,
+    pub recent: &'a [Entry],
+    pub ctx: &'a Ctx,
+    pub tools: &'a tool::Registry,
+    pub approver: &'a dyn Approver,
+    /// Maximum estimated tokens for new attachments, including message framing.
+    pub budget: usize,
+}
 
 #[async_trait]
 pub trait Hooks: Send + Sync {
-    /// Context-dependent instructions to file before the next model request.
-    fn remind(&self, _session: &Session, _ctx: &Ctx, _tools: &tool::Registry) -> Option<String> {
-        None
+    /// Attachments to retain for the next model request.
+    async fn context(&self, _request: ContextRequest<'_>) -> Vec<Context> {
+        Vec::new()
     }
 
     /// `Err` refuses the call, carrying what the model is told instead.
@@ -56,8 +71,8 @@ pub struct GatesOnly(pub Arc<dyn Hooks>);
 
 #[async_trait]
 impl Hooks for GatesOnly {
-    fn remind(&self, session: &Session, ctx: &Ctx, tools: &tool::Registry) -> Option<String> {
-        self.0.remind(session, ctx, tools)
+    async fn context(&self, request: ContextRequest<'_>) -> Vec<Context> {
+        self.0.context(request).await
     }
 
     async fn before(&self, tool: &str, args: &Value, ctx: &Ctx) -> Result<(), String> {

@@ -1,7 +1,7 @@
 mod load;
 mod paths;
 
-pub use load::{Load, delivered, delivery, included, source};
+pub use load::{Load, delivered, delivery, included, source, source_name};
 pub use paths::Paths;
 
 use llm::slice::head_bytes;
@@ -62,6 +62,61 @@ impl Skill {
             Some(text) => Ok(text.to_string()),
             None => std::fs::read_to_string(self.dir.join("SKILL.md")),
         }
+    }
+
+    /// Load the complete instructions and count the delivery.
+    ///
+    /// # Errors
+    /// Returns an error if the instructions cannot be read or delivered whole.
+    pub async fn instructions(&self) -> Result<String, tool::ToolError> {
+        let text = self.read_instructions().await?;
+        self.record_delivery(text.len()).await;
+        Ok(text)
+    }
+
+    /// Prepare complete instructions without counting a delivery.
+    ///
+    /// # Errors
+    /// Returns an error if the instructions cannot be read or delivered whole.
+    pub async fn read_instructions(&self) -> Result<String, tool::ToolError> {
+        let skill = self.clone();
+        tokio::task::spawn_blocking(move || skill.compose_instructions())
+            .await
+            .map_err(|error| tool::ToolError::Invalid(format!("{}: {error}", self.name)))?
+    }
+
+    /// Count instructions accepted for delivery.
+    pub async fn record_delivery(&self, bytes: usize) {
+        let name = self.name.clone();
+        let _ = tokio::task::spawn_blocking(move || load::count(&name, bytes)).await;
+    }
+
+    fn compose_instructions(&self) -> Result<String, tool::ToolError> {
+        let text;
+        let raw = match self.builtin {
+            Some(raw) => raw,
+            None => {
+                let path = self.dir.join("SKILL.md");
+                let failed =
+                    |error| tool::ToolError::Invalid(format!("{}: {error}", path.display()));
+                let meta = std::fs::metadata(&path).map_err(failed)?;
+                if !meta.is_file() {
+                    return Err(tool::ToolError::Invalid(format!(
+                        "{} is not a regular file",
+                        path.display()
+                    )));
+                }
+                if meta.len() > MAX_BYTES {
+                    return Err(tool::ToolError::Invalid(over_limit(
+                        &path.display().to_string(),
+                        meta.len(),
+                    )));
+                }
+                text = std::fs::read_to_string(&path).map_err(failed)?;
+                &text
+            }
+        };
+        load::compose_fit(self, raw).map_err(tool::ToolError::Invalid)
     }
 }
 
@@ -255,32 +310,10 @@ impl Shelf {
             .collect::<Result<Vec<_>, _>>()?;
         // Every body is read and sized before any is counted: a call that fails
         // must not leave a count for instructions that never reached the model.
-        let mut texts = Vec::with_capacity(selected.len());
+        let mut composed = Vec::with_capacity(selected.len());
         for skill in &selected {
-            let text = match skill.builtin {
-                Some(text) => text.to_string(),
-                None => {
-                    let path = skill.dir.join("SKILL.md");
-                    let failed =
-                        |error| tool::ToolError::Invalid(format!("{}: {error}", path.display()));
-                    let meta = tokio::fs::metadata(&path).await.map_err(failed)?;
-                    if meta.len() > MAX_BYTES {
-                        return Err(tool::ToolError::Invalid(over_limit(
-                            &skill.name,
-                            meta.len(),
-                        )));
-                    }
-                    tokio::fs::read_to_string(&path).await.map_err(failed)?
-                }
-            };
-            texts.push(text);
+            composed.push(skill.read_instructions().await?);
         }
-        let composed = selected
-            .iter()
-            .zip(&texts)
-            .map(|(skill, text)| load::compose_fit(skill, text))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(tool::ToolError::Invalid)?;
         for (skill, out) in selected.iter().zip(&composed) {
             load::count(&skill.name, out.len());
         }

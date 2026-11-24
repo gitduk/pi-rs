@@ -4,7 +4,7 @@ use message::Block;
 use message::conversation::Content;
 use serde::{Deserialize, Serialize};
 
-use crate::{AssistantContent, Compaction, Drawn, Entry, EntryId, Prompt, Text};
+use crate::{AssistantContent, Compaction, Context, Drawn, Entry, EntryId, Prompt, Text};
 
 /// Entry annotations contain no duplicate conversation bodies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +38,11 @@ pub enum Annotation {
     Note {
         id: EntryId,
         at: u64,
+    },
+    Context {
+        id: EntryId,
+        at: u64,
+        source: String,
     },
     Compaction {
         id: EntryId,
@@ -135,6 +140,14 @@ impl Record {
                 Annotation::Note { id, at },
                 vec![Content::User(vec![Block::Text(note.clone())])],
             ),
+            Entry::Context { context, .. } => (
+                Annotation::Context {
+                    id,
+                    at,
+                    source: context.source.clone(),
+                },
+                vec![Content::User(vec![Block::Text(context.text.clone())])],
+            ),
             Entry::Compaction { record, .. } => (
                 Annotation::Compaction {
                     id,
@@ -218,17 +231,19 @@ impl Record {
                     took: drawn.took,
                 }
             }
-            Annotation::Note { id, at } => {
-                let prompt = read_prompt(messages, None, None, Vec::new())?;
-                if !prompt.images.is_empty() {
-                    return Err(invalid("image in context note"));
-                }
-                Entry::Note {
-                    id,
-                    at,
-                    note: prompt.text,
-                }
-            }
+            Annotation::Note { id, at } => Entry::Note {
+                id,
+                at,
+                note: read_text(messages, "image in context note")?,
+            },
+            Annotation::Context { id, at, source } => Entry::Context {
+                id,
+                at,
+                context: Context {
+                    source,
+                    text: read_text(messages, "image in context attachment")?,
+                },
+            },
             Annotation::Compaction { id, at, record } => {
                 no_content(&messages)?;
                 Entry::Compaction { id, at, record }
@@ -305,6 +320,14 @@ fn read_prompt(
         relayed,
         context,
     })
+}
+
+fn read_text(messages: Vec<Content>, unexpected_image: &str) -> Result<String, serde_json::Error> {
+    let Prompt { text, images, .. } = read_prompt(messages, None, None, Vec::new())?;
+    if !images.is_empty() {
+        return Err(invalid(unexpected_image));
+    }
+    Ok(text)
 }
 
 fn no_content(messages: &[Content]) -> Result<(), serde_json::Error> {
