@@ -881,7 +881,7 @@ fn normal_capitals_step_the_checkouts_and_the_window() {
     );
 }
 
-// Once `/settings` closes, the project file is read back and reaches the
+// After editing, the project file is read back and reaches the
 // surface; a key a flag still outranks is named, not silently ignored.
 #[tokio::test]
 async fn an_edited_project_file_reaches_the_surface_and_names_what_outranks_it() {
@@ -903,6 +903,57 @@ async fn an_edited_project_file_reaches_the_surface_and_names_what_outranks_it()
         "{said:?}"
     );
     tui.land_lines(Listing::say(said));
+}
+
+#[tokio::test]
+async fn a_turn_that_adopts_project_settings_refreshes_edit_completion() {
+    use pi_store::config::PROJECT_FILE;
+    use std::fs;
+
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    fs::create_dir_all(workspace.join(".pi")).unwrap();
+    let user = dir.path().join("user.toml");
+    fs::write(&user, "").unwrap();
+    let mut tui = surface(&workspace);
+    tui.core.pinned.config = Some(user.display().to_string());
+    tui.ui.lists.pinned = tui.core.pinned.clone();
+    tui.refresh_files();
+    assert!(
+        !tui.ui
+            .lists
+            .editable()
+            .iter()
+            .any(|file| file.name == PROJECT_FILE)
+    );
+
+    tui.settle(crate::tui::run::Done {
+        request: pi_core::execution::Request::new(
+            crate::tui::Origin::Typed,
+            tui.core.lane().token(),
+        ),
+        kind: crate::tui::run::Kind::Turn,
+        ran: Some((
+            agent::session::Session::new(),
+            Ok(llm::stream::Usage::default()),
+        )),
+    })
+    .await;
+    fs::write(workspace.join(PROJECT_FILE), "effort = \"low\"\n").unwrap();
+    tui.start_turn(crate::tui::clipboard::prompt("hello".into(), None, &[]));
+    assert_eq!(
+        tui.core.refresh_config(),
+        None,
+        "the turn read the new file"
+    );
+    assert!(
+        tui.ui
+            .lists
+            .editable()
+            .iter()
+            .any(|file| file.name == PROJECT_FILE)
+    );
 }
 
 // File changes must not add transcript rows or repeat a refusal on every look.
@@ -1150,7 +1201,7 @@ fn a_now_intent_runs_with_the_transcript_a_run_has() {
         Intent::Builtin(Builtin::Name("n".into())),
         Intent::Builtin(Builtin::ListModels),
         Intent::Builtin(Builtin::Resume(String::new())),
-        Intent::Builtin(Builtin::Settings("x".into())),
+        Intent::Builtin(Builtin::Edit(String::new())),
     ] {
         assert!(
             matches!(intent.fate(), pi_core::input::Fate::Now),

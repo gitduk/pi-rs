@@ -9,7 +9,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use super::Tui;
-use super::term::{Deafened, EXIT_GRACE, external_editor, scratch_file};
+use super::term::{ConfigDraft, Deafened, EXIT_GRACE, external_editor, scratch_file};
 use super::view::{Doing, Ending, Work, front_view, tail_of, view_at};
 use ::execution::channel::Outcome;
 use pi_core::driver::Origin;
@@ -169,8 +169,7 @@ impl Tui {
         };
         if at == self.core.lanes.front() {
             if started.reconfigured {
-                let view = front_view(&mut self.views, self.core.lane());
-                self.ui.adopt_config(&self.core, view);
+                self.adopt_reloaded_config();
             }
             for notice in &started.notices {
                 self.notice(notice.clone());
@@ -477,41 +476,57 @@ impl Tui {
 
     // A config or prompt file in `$EDITOR`, then the reload that makes it
     // count. A non-zero exit (`:cq`) is "forget it": nothing is reloaded.
-    pub(super) async fn edit_file(&mut self, path: std::path::PathBuf) -> Output {
-        let (ran, resumed) = self.in_editor(&path).await;
-        let unchanged = pi_core::core::resolve::unseed(&path);
+    pub(super) async fn edit_file(&mut self, file: pi_core::core::resolve::Editable) -> Output {
+        let name = &file.name;
+        let draft = if file.is_prompt() {
+            None
+        } else {
+            match ConfigDraft::for_missing(&file.path) {
+                Ok(draft) => draft,
+                Err(e) => return Output::Notice(format!("could not prepare {name}: {e}")),
+            }
+        };
+        let path = draft.as_ref().map_or(file.path.as_path(), |d| &d.path);
+        let (ran, resumed) = self.in_editor(path).await;
+        let unchanged = file.unseed();
         if let Err(e) = resumed {
             self.say_notice_of(
                 self.core.lanes.front(),
                 &format!("the screen did not come back: {e}"),
             );
         }
-        let said = match ran {
-            Err(why) => vec![why],
-            Ok(s) if !s.success() => vec![format!("editor exited {s} — nothing reloaded")],
-            Ok(_) if unchanged => {
-                let name = pi_core::core::instructions::short(&path, self.core.lane().root());
-                vec![format!("{name} unchanged — the built-in stays")]
-            }
-            Ok(_) => match self.core.config_edited() {
-                // The file edited first: what else the reload says follows it.
-                Ok(notes) => {
-                    let root = self.core.lane().root();
-                    let name = pi_core::core::instructions::short(&path, root);
-                    let prompt = pi_core::core::resolve::editable(&self.core.pinned, root)
-                        .iter()
-                        .any(|f| f.path == path);
-                    let when = if prompt {
-                        "the next session or compaction"
-                    } else {
-                        "the next turn"
-                    };
-                    let line = format!("{name} — in force from {when}");
-                    std::iter::once(line).chain(notes).collect()
-                }
-                Err(why) => vec![why],
-            },
+        let edited = match ran {
+            Err(why) => Err(why),
+            Ok(s) if !s.success() => Err(format!("editor exited {s} — nothing reloaded")),
+            Ok(_) => Ok(()),
         };
+        if let Some(draft) = draft {
+            let saved = edited.and_then(|()| {
+                draft
+                    .publish(&file.path)
+                    .map_err(|e| format!("could not save {name}: {e}"))
+            });
+            match saved {
+                Ok(true) => {}
+                Ok(false) => return Output::Notice(format!("{name} unchanged")),
+                Err(why) => return Output::Notice(draft.report_failure(why)),
+            }
+        } else if let Err(why) = edited {
+            return Output::Notice(why);
+        }
+        if unchanged {
+            return Output::Notice(format!("{name} unchanged — the built-in stays"));
+        }
+        let notes = match self.core.config_edited() {
+            Ok(notes) => notes,
+            Err(why) => return Output::Notice(why),
+        };
+        let when = if file.is_prompt() {
+            "the next session or compaction"
+        } else {
+            "the next turn"
+        };
+        let said = std::iter::once(format!("{name} — in force from {when}")).chain(notes);
         Output::Notice(pi_core::input::notice(said))
     }
 

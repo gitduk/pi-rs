@@ -3,6 +3,8 @@
 //! works in.
 use crossterm::event::Event as TermEvent;
 use pi_store::session::Store;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -164,6 +166,75 @@ pub(super) fn scratch_file(text: &str) -> std::io::Result<std::path::PathBuf> {
     let mut file = open.open(&path)?;
     std::io::Write::write_all(&mut file, text.as_bytes())?;
     Ok(path)
+}
+
+// Keep an editor's replacements, backups and swap files private too.
+pub(super) struct ConfigDraft {
+    dir: tempfile::TempDir,
+    pub(super) path: PathBuf,
+}
+
+impl ConfigDraft {
+    pub(super) fn for_missing(path: &Path) -> io::Result<Option<Self>> {
+        match path.metadata() {
+            Ok(_) => return Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(".pi-edit-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let dir = builder.tempdir_in(parent)?;
+        let draft = dir.path().join(path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the settings path needs a filename",
+            )
+        })?);
+        tool::state::write_private(&draft, b"")?;
+        Ok(Some(Self { dir, path: draft }))
+    }
+
+    // Publish the whole draft without replacing a file created during the edit.
+    pub(super) fn publish(&self, target: &Path) -> io::Result<bool> {
+        let meta = match self.path.symlink_metadata() {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        if !meta.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the editor did not leave a regular file",
+            ));
+        }
+        if meta.len() == 0 {
+            return Ok(false);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::hard_link(&self.path, target)?;
+        Ok(true)
+    }
+
+    pub(super) fn report_failure(self, why: String) -> String {
+        match self.path.symlink_metadata() {
+            Ok(meta) if meta.is_file() && meta.len() == 0 => return why,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return why,
+            _ => {}
+        }
+        let _ = self.dir.keep();
+        format!("{why} — draft saved at {}", self.path.display())
+    }
 }
 
 // What this session recalls in `workspace`, or nothing.

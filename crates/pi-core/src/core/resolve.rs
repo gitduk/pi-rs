@@ -12,6 +12,7 @@ use tool::stamp::Stamp;
 
 use crate::args::Pinned;
 use crate::core::instructions;
+use crate::core::prompt::{DefaultPrompt, REPLACEABLE};
 use crate::input::commands::{Command, commands};
 use pi_store::args::EffortArg;
 use pi_store::settings::Settings;
@@ -114,7 +115,7 @@ impl PromptFiles {
             None => crate::core::prompt::default_system(),
         };
         let prompts = replacements()
-            .map(|(path, _)| path)
+            .map(|(path, _, _)| path)
             .filter(|path| path.is_file())
             .map(|path| {
                 let text = std::fs::read_to_string(&path)
@@ -152,10 +153,10 @@ impl PromptFiles {
             .find(|(p, _)| Some(p) == path.as_ref())
             .map(|(_, text)| Cow::Borrowed(text.as_str()))
             .or_else(|| {
-                crate::core::prompt::REPLACEABLE
+                REPLACEABLE
                     .iter()
-                    .find(|(n, _)| *n == name)
-                    .map(|(_, text)| Cow::Owned(text()))
+                    .find(|(n, _, _)| *n == name)
+                    .map(|(_, _, text)| Cow::Owned(text()))
             })
             .unwrap_or_default()
     }
@@ -622,121 +623,213 @@ pub fn watched(pinned: &Pinned, root: &Path) -> Vec<Stamp> {
     paths.into_iter().filter_map(tool::stamp::of).collect()
 }
 
-/// A file `/edit` offers: where it is, the name it is offered under, and
-/// what it is to the model.
+/// A file `/edit` offers and how its changes take effect.
+#[derive(Debug)]
 pub struct Editable {
     pub path: PathBuf,
     pub name: String,
     pub note: String,
+    prompt: bool,
 }
 
-impl From<Editable> for crate::input::commands::Choice {
+impl Editable {
+    /// The filename displayed when choosing among editable files.
+    pub fn basename(&self) -> Cow<'_, str> {
+        self.path
+            .file_name()
+            .unwrap_or(self.path.as_os_str())
+            .to_string_lossy()
+    }
+
+    /// Whether changes affect the prompt at a new session or compaction.
+    pub fn is_prompt(&self) -> bool {
+        self.prompt
+    }
+
+    // Open a missing replacement on the built-in text it would replace.
+    pub(super) fn seed(&self) -> std::io::Result<()> {
+        if self.prompt
+            && !self.path.exists()
+            && let Some(default) = builtin_of(&self.path)
+        {
+            if let Some(dir) = self.path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&self.path, default())?;
+        }
+        Ok(())
+    }
+
+    /// Remove a prompt replacement that still matches the built-in text.
+    pub fn unseed(&self) -> bool {
+        self.prompt
+            && builtin_of(&self.path).is_some_and(|default| {
+                std::fs::read_to_string(&self.path).is_ok_and(|now| now == default())
+                    && std::fs::remove_file(&self.path).is_ok()
+            })
+    }
+}
+
+impl From<Editable> for crate::input::commands::EditChoice {
     fn from(e: Editable) -> Self {
         Self {
+            basename: e.basename().into_owned(),
             name: e.name,
             note: e.note,
         }
     }
 }
 
-/// What the model is given from files in `root`, to edit: the system prompt
-/// and this checkout's `AGENTS.md` even before they exist, since saving one
-/// is how it starts; every other instructions file and memory as they stand.
-/// This checkout's own files come first, then those every checkout shares.
+/// Settings and prompt files to edit in `root`. Settings, the system prompt,
+/// and this checkout's `AGENTS.md` can be offered before they exist.
+/// Related files stay together, with existing files first in each group.
 pub fn editable(pinned: &Pinned, root: &Path) -> Vec<Editable> {
-    let mut files: Vec<(PathBuf, &str)> = Vec::new();
-    let mut shared: Vec<(PathBuf, &str)> = Vec::new();
+    const BUILT: &str = "[BUILT]";
+
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum Group {
+        Settings,
+        Instructions,
+        Memory,
+        Prompts,
+    }
+
+    let project = config::project_target(root);
+    let user = pinned
+        .config
+        .as_deref()
+        .map(PathBuf::from)
+        .or_else(config::global_path)
+        .map(|path| std::path::absolute(&path).unwrap_or(path));
+    let shared_settings =
+        matches!((&project, &user), (Some(project), Some(user)) if same_path(project, user));
+    let user_settings = if pinned.config.is_some() {
+        "Settings from --config"
+    } else {
+        "Defaults for all projects"
+    };
+    let settings = if shared_settings {
+        [
+            (project, "[USER+PROJ]", "Used as both settings files"),
+            (None, "", ""),
+        ]
+    } else {
+        [
+            (project, "[PROJ]", "Overrides user settings"),
+            (user, "[USER]", user_settings),
+        ]
+    };
+    let mut files: Vec<(_, _, _, Cow<'_, str>)> = settings
+        .into_iter()
+        .filter_map(|(path, scope, about)| Some((path?, Group::Settings, scope, about.into())))
+        .collect();
     if !pinned.no_context_files {
         let pi = pi_store::dir();
-        let personal = pi.as_ref().map(|d| d.join("AGENTS.md"));
+        let personal = pi.as_ref().map(|p| p.join("AGENTS.md"));
+        let personal_is_here = pi.as_deref().is_some_and(|pi| same_path(pi, root));
         let here = root.join("AGENTS.md");
-        files.push((here.clone(), "instructions"));
+        let user_instructions = ("[USER]", "Instructions for all projects");
+        let (scope, about) = if personal_is_here {
+            user_instructions
+        } else {
+            ("[PROJ]", "Workspace instructions")
+        };
+        files.push((here.clone(), Group::Instructions, scope, about.into()));
         // Innermost first: the nearer a file, the likelier it is the one edited.
-        for path in instructions::paths(root, instructions::home().as_deref(), pi.as_deref())
-            .into_iter()
-            .rev()
-            .filter(|p| *p != here)
-        {
-            let to = if personal.as_ref() == Some(&path) {
-                &mut shared
-            } else {
-                &mut files
-            };
-            to.push((path, "instructions"));
-        }
+        files.extend(
+            instructions::paths(root, instructions::home().as_deref(), pi.as_deref())
+                .into_iter()
+                .rev()
+                .filter(|p| *p != here)
+                .filter(|p| !personal_is_here || Some(p) != personal.as_ref())
+                .map(|path| {
+                    let (scope, about) = if personal.as_ref() == Some(&path) {
+                        (user_instructions.0, user_instructions.1.into())
+                    } else {
+                        let inherited = path.parent().and_then(Path::file_name).map_or_else(
+                            || "parent directory".into(),
+                            |name| name.to_string_lossy(),
+                        );
+                        ("[PROJ]", format!("Inherited from {inherited}").into())
+                    };
+                    (path, Group::Instructions, scope, about)
+                }),
+        );
         let memory = pi_store::memory::Memory::default();
         let main = crate::core::worktree::main_root(root);
         let project = memory.project_path(&main);
-        for path in memory.paths(&main).into_iter().filter(|p| p.is_file()) {
-            let to = if path == project {
-                &mut files
+        let mut paths = memory.paths(&main);
+        paths.sort_by_key(|p| *p != project);
+        files.extend(paths.into_iter().map(|path| {
+            let about = if path == project {
+                "Project memory"
             } else {
-                &mut shared
+                "Shared across projects"
             };
-            to.push((path, "memory"));
-        }
+            (path, Group::Memory, "[MEM]", about.into())
+        }));
     }
-    shared.extend(system_file(pinned).map(|p| (p, "replaces the system prompt")));
-    shared.extend(replacements().map(|(p, _)| (p, "replaces a built-in prompt")));
-    files.extend(shared);
+    files.extend(system_file(pinned).map(|path| {
+        let (scope, about) = if pinned.system.is_some() {
+            ("[USER]", "System prompt from --system")
+        } else {
+            (BUILT, "System prompt")
+        };
+        (path, Group::Prompts, scope, about.into())
+    }));
     files
+        .extend(replacements().map(|(path, about, _)| (path, Group::Prompts, BUILT, about.into())));
+    let mut ranked: Vec<_> = files
         .into_iter()
-        .map(|(path, what)| {
-            let note = match std::fs::metadata(&path) {
-                Ok(meta) => format!("{what} · {}", pi_store::text::size(meta.len())),
-                Err(_) if builtin_of(&path).is_some() => {
-                    format!("{what} · new, opens on the built-in")
+        .filter_map(|(path, group, scope, about)| {
+            let prompt = group != Group::Settings;
+            let meta = std::fs::metadata(&path);
+            if group == Group::Memory && !meta.as_ref().is_ok_and(|meta| meta.is_file()) {
+                return None;
+            }
+            let missing = meta.is_err();
+            let state = match meta {
+                Ok(meta) if scope == BUILT => {
+                    format!("override · {}", pi_store::text::size(meta.len()))
                 }
-                Err(_) => format!("{what} · new, saving creates it"),
+                Ok(meta) => pi_store::text::size(meta.len()),
+                Err(_) if scope == BUILT => "starts from default".into(),
+                Err(_) => "new on save".into(),
             };
-            Editable {
+            let file = Editable {
                 name: instructions::short(&path, root),
                 path,
-                note,
-            }
+                note: format!("{scope} {about} · {state}"),
+                prompt,
+            };
+            Some(((group, missing), file))
         })
-        .collect()
+        .collect();
+    ranked.sort_by_key(|(rank, _)| *rank);
+    ranked.into_iter().map(|(_, file)| file).collect()
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    left == right
+        || matches!((left.canonicalize(), right.canonicalize()), (Ok(left), Ok(right)) if left == right)
 }
 
 // Where each replaceable prompt's file would be, with the text it replaces.
-fn replacements() -> impl Iterator<Item = (PathBuf, String)> {
-    crate::core::prompt::REPLACEABLE
+fn replacements() -> impl Iterator<Item = (PathBuf, &'static str, DefaultPrompt)> {
+    REPLACEABLE
         .iter()
-        .filter_map(|(name, text)| Some((config::prompt_file(name)?, text())))
+        .filter_map(|(name, about, text)| Some((config::prompt_file(name)?, *about, *text)))
 }
 
 // The built-in text the file at `path` replaces, when it replaces one. A
 // `--system` file is not one: the flag needs it there, so it is never removed.
-fn builtin_of(path: &Path) -> Option<String> {
-    std::iter::once((config::system_file(), crate::core::prompt::default_system()))
-        .filter_map(|(p, text)| Some((p?, text)))
-        .chain(replacements())
-        .find(|(p, _)| p == path)
-        .map(|(_, text)| text)
-}
-
-/// Before `/edit` opens a replacement not written yet: start it as the
-/// built-in reads, so the change is made to that rather than to nothing.
-pub fn seed(path: &Path) -> std::io::Result<()> {
-    match builtin_of(path) {
-        Some(text) if !path.exists() => {
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
-            std::fs::write(path, text)
-        }
-        _ => Ok(()),
+fn builtin_of(path: &Path) -> Option<DefaultPrompt> {
+    if config::system_file().as_deref() == Some(path) {
+        return Some(crate::core::prompt::default_system);
     }
-}
-
-/// After the editor: a replacement still reading as the built-in replaces
-/// nothing, and kept, it would hold the built-in back at this version.
-/// True when it went.
-pub fn unseed(path: &Path) -> bool {
-    builtin_of(path).is_some_and(|text| {
-        std::fs::read_to_string(path).is_ok_and(|now| now == text)
-            && std::fs::remove_file(path).is_ok()
-    })
+    replacements()
+        .find(|(p, _, _)| p == path)
+        .map(|(_, _, default)| default)
 }
 
 // The servers in force the project file does not name: those it does are
@@ -881,7 +974,7 @@ mod tests {
     #[test]
     fn every_replaceable_prompt_falls_back_to_its_built_in() {
         let files = super::PromptFiles::default();
-        for (name, text) in crate::core::prompt::REPLACEABLE {
+        for (name, _, text) in crate::core::prompt::REPLACEABLE {
             let text = text();
             assert!(!text.trim().is_empty(), "{name}");
             assert_eq!(files.prompt(name), text, "{name}");

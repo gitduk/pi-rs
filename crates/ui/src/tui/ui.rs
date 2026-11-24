@@ -425,7 +425,7 @@ impl Ui {
     }
 
     // Every copy of the config the surface keeps, brought up to date — the one
-    // landing a reload and `/settings` share.
+    // landing a reload and `/edit` share.
     pub(super) fn adopt_config(&mut self, core: &Core, view: &mut View) {
         // The key map lives in two places; a reload has to reach both or the
         // screen keeps answering to the old bindings.

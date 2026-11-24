@@ -20,10 +20,16 @@ pub fn default_system() -> String {
 pub type DefaultPrompt = fn() -> String;
 
 /// The built-in prompts a file of the same name under pi's `prompts/`
-/// replaces whole, each with its built-in text.
-pub const REPLACEABLE: [(&str, DefaultPrompt); 2] = [
-    ("summarize", || agent::compaction::SUMMARIZE.to_string()),
-    ("subagent", subagent::default_prompt),
+/// replaces whole, each with a description and its built-in text.
+pub const REPLACEABLE: [(&str, &str, DefaultPrompt); 2] = [
+    ("summarize", "Context compaction", || {
+        agent::compaction::SUMMARIZE.to_string()
+    }),
+    (
+        "subagent",
+        "Subagent instructions",
+        subagent::default_prompt,
+    ),
 ];
 
 /// A rendered system block, without another copy of its text.

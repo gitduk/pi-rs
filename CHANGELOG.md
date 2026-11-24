@@ -20,6 +20,12 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 
 ### Changed
 
+- `/edit` lists and completes project and user settings alongside prompts,
+  instructions, and memory. The list shows filenames with scope labels, and
+  groups related files with existing ones first. New settings files are edited
+  privately before saving. Updated settings reload after the editor closes.
+  The separate `/settings` command has been removed.
+
 - Every request pi makes now names it the same way, `pi/<version>`, in its
   `User-Agent`: chat, model discovery, the fetch tool and the update check.
   Chat traffic used to arrive unnamed — a proxy or gateway in front of a

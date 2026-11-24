@@ -103,7 +103,7 @@ impl Tui {
                     let output = self.edit_file(file).await;
                     self.complete(request, output, Outcome::Done);
                 }
-                self.ui.lists.forget();
+                self.ui.lists.forget_editable();
             }
             Action::Surface { word, args: _ } => {
                 let output = if word == keys::KEYS {

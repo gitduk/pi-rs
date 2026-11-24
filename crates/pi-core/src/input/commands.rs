@@ -200,14 +200,8 @@ pub(crate) const BUILTIN: &[Command] = &[
     Command::builtin(
         "/edit",
         Args::optional("file", Values::Editable),
-        "list what the model is given from files — SYSTEM.md, AGENTS.md, memory — or edit one",
-        |_, rest| Intent::Builtin(Builtin::Edit(rest)),
-    ),
-    Command::builtin(
-        "/settings",
-        Args::None,
-        "edit the project's .pi/settings.toml, then reload",
-        |_, rest| Intent::Builtin(Builtin::Settings(rest)),
+        "list or edit settings, prompts, AGENTS.md and memory",
+        |_, rest| Intent::Builtin(Builtin::Edit(serde_json::from_str(&rest).unwrap_or(rest))),
     ),
     Command::builtin("/exit", Args::None, "leave", |_, _| {
         Intent::Builtin(Builtin::Quit)
@@ -340,15 +334,16 @@ pub struct Choice {
 
 impl Choice {
     fn candidate(&self, head: &str) -> Candidate {
-        Candidate {
-            show: self.name.clone(),
-            line: format!("{head}{}", self.name),
-            help: self.note.clone(),
-            accept: Acceptance::Run,
-            more: false,
-            picked_only: false,
-        }
+        Candidate::argument(head, &self.name, &self.name, &self.note)
     }
+}
+
+/// An editable file's command argument, basename, and description.
+#[derive(Debug)]
+pub struct EditChoice {
+    pub name: String,
+    pub basename: String,
+    pub note: String,
 }
 
 /// One thing the line could still become.
@@ -368,6 +363,19 @@ pub struct Candidate {
     /// Taken only when picked; the line submitted as it stands runs what was
     /// typed, which this would turn into something else.
     pub picked_only: bool,
+}
+
+impl Candidate {
+    fn argument(head: &str, value: &str, label: &str, note: &str) -> Self {
+        Self {
+            show: label.to_owned(),
+            line: format!("{head}{value}"),
+            help: note.to_owned(),
+            accept: Acceptance::Run,
+            more: false,
+            picked_only: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

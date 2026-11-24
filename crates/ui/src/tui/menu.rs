@@ -6,7 +6,7 @@ use super::search::{Place, Spot};
 use super::view::View;
 use pi_core::core;
 use pi_core::core::question::Question;
-use pi_core::input::commands::{Candidate, Choice, Input, Sources};
+use pi_core::input::commands::{Candidate, Choice, EditChoice, Input, Sources};
 use pi_store::keys::Action;
 use pi_store::session::ResumeChoice;
 use pi_store::session::Store;
@@ -40,11 +40,15 @@ impl Ui {
         // Directory names can contain spaces.
         // @ and ~/ complete only the token under the caret.
         use pi_core::input::complete as path;
-        let found = input
-            .directory()
-            .map(|t| (t, Path::Directory))
-            .or_else(|| path::at_prefix(text, cursor).map(|t| (t, Path::At)))
-            .or_else(|| path::home_prefix(text, cursor).map(|t| (t, Path::Home)));
+        let found = if input.edits_file() {
+            None
+        } else {
+            input
+                .directory()
+                .map(|t| (t, Path::Directory))
+                .or_else(|| path::at_prefix(text, cursor).map(|t| (t, Path::At)))
+                .or_else(|| path::home_prefix(text, cursor).map(|t| (t, Path::Home)))
+        };
         if let Some(((start, end, query), kind)) = found {
             let token = &text[start..end];
             if self
@@ -494,8 +498,8 @@ pub(super) struct Lists {
     // The store's version `sessions` was read at.
     pub(super) sessions_at: u64,
     pub(super) worktrees: std::cell::OnceCell<Vec<Choice>>,
-    pub(super) editable: std::cell::OnceCell<Vec<Choice>>,
-    // The flags `/edit`'s list depends on: `--system`, `--no-context-files`.
+    pub(super) editable: std::cell::OnceCell<Vec<EditChoice>>,
+    // The flags that choose which files `/edit` offers.
     pub(super) pinned: pi_core::args::Pinned,
 }
 
@@ -513,11 +517,11 @@ impl Lists {
     }
 
     // The files `/edit` offers in this workspace.
-    pub(super) fn editable(&self) -> &[Choice] {
+    pub(super) fn editable(&self) -> &[EditChoice] {
         self.editable.get_or_init(|| {
             core::resolve::editable(&self.pinned, &self.workspace)
                 .into_iter()
-                .map(Choice::from)
+                .map(EditChoice::from)
                 .collect()
         })
     }
@@ -561,12 +565,16 @@ impl Lists {
         self.worktrees.get().map(Vec::as_slice)
     }
 
-    // A switch, a checkout gone or a file `/edit` made changes them. Dropped,
-    // not recomputed — whoever asks next pays, and usually nobody does.
+    // Settings or files offered by `/edit` changed.
+    pub(super) fn forget_editable(&mut self) {
+        self.editable.take();
+    }
+
+    // A switch or a removed checkout can change every workspace list.
     pub(super) fn forget(&mut self) {
         self.sessions.take();
         self.worktrees.take();
-        self.editable.take();
+        self.forget_editable();
     }
 
     // Points at a workspace, dropping the last one's answers — both

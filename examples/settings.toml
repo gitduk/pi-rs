@@ -84,7 +84,7 @@ api_key  = "$ANTHROPIC_API_KEY" # `$` reads the environment; anything else is th
 #   ctx        ctx 9.6k/1m, the request against the model's window
 #   compacted  compacted / compacted ×2, left out when the run never shrank the transcript
 #   queued     2 queued — waiting work not drawn as a line: a background command's input,
-#              a command like /settings typed while the run worked
+#              a prompt typed while the run worked
 #   model      deepseek-v4-flash
 #   worktree   feature-one, left out in the repository's own checkout
 #

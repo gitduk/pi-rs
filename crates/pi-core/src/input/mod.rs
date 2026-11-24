@@ -55,11 +55,7 @@ pub enum Builtin {
     Worktree(String),
     // The directory this conversation carries on in, or empty to say the one now.
     Mv(String),
-    // Bare `/settings`: the project's `.pi/settings.toml` in `$EDITOR`. An argument
-    // after the word is refused.
-    Settings(String),
-    // A file the model is given, by the name `/edit` lists it under, or
-    // empty to list them.
+    // An editable file by its listed name, or empty to list them.
     Edit(String),
     // Bare, the MCP servers and their tools; `restart [name]` reconnects.
     Mcp(String),
@@ -133,7 +129,7 @@ impl Intent {
             ),
             // The editor takes the terminal while the run carries on, and the
             // reload re-arms through `Arc::make_mut`, as a file watched does.
-            Intent::Builtin(Builtin::Settings(_) | Builtin::Edit(_)) => Fate::Now,
+            Intent::Builtin(Builtin::Edit(_)) => Fate::Now,
             Intent::Other { .. } | Intent::Prompt(_) => Fate::Queued,
             // The surface answers it from what it holds, not from the run.
             Intent::Surface { .. } => Fate::Now,
@@ -420,7 +416,7 @@ pub enum Step {
     },
     // A file to open in `$EDITOR`, everything it feeds rebuilt after: the
     // editor takes the terminal, which only the surface can give away.
-    Edit(std::path::PathBuf),
+    Edit(crate::core::resolve::Editable),
     // Dealt with here; this is what there is to show for it. Returned rather
     // than laid out: the surface decides how wide the columns are.
     Handled(Listing),

@@ -12,8 +12,7 @@
 | `/compact [focus]`                 | summarize everything but the working tail     |
 | `/<tool> [key=value…]`             | run a named tool. Background tools return immediately |
 | `/mcp`, `/mcp restart [name]`      | list MCP servers and tools, or reconnect      |
-| `/settings`                        | edit the project's config                     |
-| `/edit [file]`                     | edit a prompt, an `AGENTS.md`, or memory      |
+| `/edit [file]`                     | list or edit settings, prompts, `AGENTS.md`, and memory |
 | `/keys`, `/help`                  | show bindings or commands |
 | `/exit`                            | exit pi, as with `ctrl+d`                     |
 | `/status`                         | runtime configuration, spending, diagnostics and session paths |

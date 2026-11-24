@@ -87,6 +87,11 @@ Only one pi can open a session at a time.
 key bindings, and colours. [`examples/settings.toml`](examples/settings.toml)
 is the field reference — every key, what it does, and the defaults.
 
+Use `/edit` to list editable files, including the project settings and your
+user settings (or the file passed with `--config`). Complete `/edit <file>`
+by filename or path to open it in your editor. Saving and closing it
+reloads settings.
+
 To add or repair a provider or an MCP server, ask pi: its built-in `pi-setup`
 skill reads that same file, so the model writes the shape you will later read.
 That skill lives in

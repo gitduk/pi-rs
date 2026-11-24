@@ -2,8 +2,8 @@
 //! candidates and placeholders all read the same declaration.
 
 use super::{
-    Acceptance, Candidate, Choice, Command, offer, params, session_facts, slash_tools, tool_args,
-    tool_help,
+    Acceptance, Candidate, Choice, Command, EditChoice, offer, params, session_facts, slash_tools,
+    tool_args, tool_help,
 };
 use pi_store::session::ResumeChoice;
 use std::sync::Arc;
@@ -140,7 +140,7 @@ pub struct Sources<'a> {
     pub sessions: Option<&'a dyn Fn() -> &'a [ResumeChoice]>,
     /// All checkouts, with the main checkout first.
     pub worktrees: Option<&'a dyn Fn() -> &'a [Choice]>,
-    pub editable: Option<&'a dyn Fn() -> &'a [Choice]>,
+    pub editable: Option<&'a dyn Fn() -> &'a [EditChoice]>,
     pub servers: Option<&'a dyn Fn() -> Vec<Choice>>,
     pub prompt_blocks: &'a [Choice],
 }
@@ -243,6 +243,20 @@ impl<'a> Input<'a> {
         }
     }
 
+    /// Whether this argument selects one of the editable files.
+    pub fn edits_file(&self) -> bool {
+        matches!(
+            self.target,
+            Target::Argument {
+                args: Args::Value(Parameter {
+                    values: Values::Editable,
+                    ..
+                }),
+                ..
+            }
+        )
+    }
+
     pub fn complete(&self, sources: &Sources<'_>) -> Vec<Candidate> {
         match &self.target {
             Target::None => Vec::new(),
@@ -343,7 +357,6 @@ fn values(
         Values::Models
         | Values::Worktrees
         | Values::LinkedWorktrees
-        | Values::Editable
         | Values::Servers
         | Values::Context
             if typed.contains(char::is_whitespace) =>
@@ -372,7 +385,7 @@ fn values(
             let trees: &[Choice] = sources.worktrees.map_or(&[], |f| f());
             explicit_choices(trees.get(1..).unwrap_or_default(), head, typed)
         }
-        Values::Editable => offer(sources.editable.map_or(&[], |f| f()), head, typed),
+        Values::Editable => edit_choices(sources.editable.map_or(&[], |f| f()), head, typed),
         Values::Context => {
             let choices: Vec<_> = super::context::items(sources.prompt_blocks, tools)
                 .into_iter()
@@ -446,6 +459,29 @@ fn explicit_choices(choices: &[Choice], head: &str, typed: &str) -> Vec<Candidat
         }
     }
     offered
+}
+
+fn edit_choices(files: &[EditChoice], head: &str, typed: &str) -> Vec<Candidate> {
+    if files.iter().any(|file| file.name == typed) {
+        // Preserve a fully typed path even when another file shares its basename.
+        return Vec::new();
+    }
+    files
+        .iter()
+        .filter(|file| file.name.starts_with(typed) || file.basename.starts_with(typed))
+        .map(|file| {
+            let name = &file.name;
+            // Keep the exact path when Enter or Tab sends it back through the parser.
+            let value = if name.trim() != name || name.starts_with('"') {
+                std::borrow::Cow::Owned(
+                    serde_json::to_string(name).expect("serializing a filename cannot fail"),
+                )
+            } else {
+                std::borrow::Cow::Borrowed(name.as_str())
+            };
+            Candidate::argument(head, &value, &file.basename, &file.note)
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -389,7 +389,7 @@ impl Tui {
         let mut notes = Vec::new();
         if let Some(said) = self.core.refresh_config() {
             notes.extend(said);
-            self.adopt_view();
+            self.adopt_reloaded_config();
         }
         if let Some(said) = self.facts() {
             notes.extend(said);
@@ -478,6 +478,11 @@ impl Tui {
         if let Some(said) = self.facts() {
             self.notice(pi_core::input::notice(said));
         }
+    }
+
+    fn adopt_reloaded_config(&mut self) {
+        self.ui.lists.forget_editable();
+        self.adopt_view();
     }
 
     fn adopt_view(&mut self) {

@@ -432,8 +432,7 @@ impl Core {
                 dir => self.move_to(dir).unwrap_or_else(Step::Notice),
             },
             Builtin::Worktree(name) => self.worktree_step(&name),
-            Builtin::Settings(rest) => self.settings_step(rest.trim()),
-            Builtin::Edit(name) => self.edit(name.trim()),
+            Builtin::Edit(name) => self.edit(&name),
         }
     }
 
@@ -476,24 +475,12 @@ impl Core {
         };
         step.unwrap_or_else(Step::Notice)
     }
-
-    // Only the bare word opens the file; an argument is refused
-    // rather than half-remembered as a verb.
-    fn settings_step(&self, rest: &str) -> Step {
-        if !rest.is_empty() {
-            return Step::Notice("bare /settings opens the project's .pi/settings.toml".into());
-        }
-        match pi_store::config::project_target(self.lane().root()) {
-            Some(file) => Step::Edit(file),
-            None => Step::Notice("no project here: $HOME is not a project directory".into()),
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
 
-    use crate::input::commands::{BUILTIN, Choice, Input, Source, Sources, commands};
+    use crate::input::commands::{BUILTIN, Choice, EditChoice, Input, Source, Sources, commands};
     use crate::input::{Builtin, Fate, Intent, read};
     use agent::session::{Entry, Prompt, Session};
     use skills::Skill;
@@ -509,7 +496,7 @@ mod tests {
             asked.borrow_mut().push("worktrees");
             &[]
         };
-        let editable = || -> &[Choice] {
+        let editable = || -> &[EditChoice] {
             asked.borrow_mut().push("editable");
             &[]
         };
@@ -751,7 +738,6 @@ mod tests {
             Intent::Builtin(Builtin::Help),
             Intent::Builtin(Builtin::ListModels),
             Intent::Builtin(Builtin::Worktree("tree".into())),
-            Intent::Builtin(Builtin::Settings(String::new())),
             Intent::Builtin(Builtin::Edit("AGENTS.md".into())),
             Intent::Tool {
                 name: "wechat".into(),
@@ -807,7 +793,7 @@ mod tests {
         );
     }
 
-    // One lane that has spent nothing, enough for `/settings` to answer.
+    // One lane that has spent nothing.
     pub(super) fn a_lane(name: &str) -> crate::core::lane::Lane {
         let dir = std::env::temp_dir();
         let ws = tool::Workspace::new(&dir).expect("a workspace");
@@ -1028,26 +1014,80 @@ output_per_mtok = 5.0
         assert!(prices.iter().all(|at| *at == prices[0]), "{prices:?}");
     }
 
-    // Only the bare word opens the project's file; an argument is refused
-    // rather than read as a verb.
     #[test]
-    fn settings_opens_the_projects_file_and_takes_no_argument() {
+    fn edit_lists_and_opens_project_and_user_settings() {
         use crate::input::Step;
-        let dir = tempfile::tempdir().unwrap();
-        let mut core = a_repl(dir.path(), std::sync::Arc::new(Recording::default()), "m");
-        let mut settings =
-            |rest: &str| core.dispatch(Intent::Builtin(Builtin::Settings(rest.into())));
+        use pi_store::config::PROJECT_FILE;
 
-        match settings(" ") {
-            Step::Edit(file) => {
-                assert_eq!(
-                    file,
-                    dir.path().canonicalize().unwrap().join(".pi/settings.toml")
-                )
-            }
-            step => panic!("bare, it opens the file: {step:?}"),
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let mut core = a_repl(&root, std::sync::Arc::new(Recording::default()), "m");
+        let user = "personal config.toml ";
+        std::fs::write(root.join(user), "").unwrap();
+        core.pinned.config = Some(root.join(user).display().to_string());
+        let system = root.join("system.md");
+        std::fs::write(&system, "Test prompt").unwrap();
+        core.pinned.system = Some(system.display().to_string());
+        core.pinned.no_context_files = true;
+        let commands = commands(&[], &[], &mut Vec::new());
+        let edit = |core: &mut super::Core, name: &str| {
+            let line = format!("/edit {name}");
+            let intent = read(&line, &commands, None);
+            core.dispatch(intent)
+        };
+
+        let Step::Handled(list) = edit(&mut core, "") else {
+            panic!("bare /edit should list its files");
+        };
+        let choices: Vec<EditChoice> = super::resolve::editable(&core.pinned, &root)
+            .into_iter()
+            .map(EditChoice::from)
+            .collect();
+        assert_eq!(choices[0].name, user);
+        assert_eq!(choices[1].name, PROJECT_FILE);
+        assert_eq!(
+            choices[1].note,
+            "[PROJ] Overrides user settings · new on save"
+        );
+        assert_eq!(choices[2].name, "system.md");
+        let editable = || choices.as_slice();
+        let sources = Sources {
+            editable: Some(&editable),
+            ..Default::default()
+        };
+        for (prefix, name) in [
+            (".pi/set", PROJECT_FILE),
+            ("set", PROJECT_FILE),
+            ("personal ", user),
+        ] {
+            let line = format!("/edit {prefix}");
+            let offered = Input::new(&line, line.len(), &commands, None).complete(&sources);
+            assert!(
+                offered.iter().any(|c| read(&c.line, &commands, None)
+                    == Intent::Builtin(Builtin::Edit(name.into()))),
+                "{line:?} offered {offered:?} from {choices:?}"
+            );
         }
-        let step = settings("reset");
+        assert_eq!(list.rows[1].cells, ["settings.toml", &choices[1].note]);
+        for (argument, name) in [
+            (PROJECT_FILE, PROJECT_FILE),
+            ("\"personal config.toml \"", user),
+        ] {
+            let Step::Edit(file) = edit(&mut core, argument) else {
+                panic!("/edit should open {name}");
+            };
+            assert_eq!(file.path, root.join(name));
+            assert!(!file.is_prompt());
+        }
+        let step = edit(&mut core, "reset");
         assert!(matches!(step, Step::Notice(_)), "{step:?}");
+        assert!(!commands.iter().any(|c| c.word == "/settings"));
+
+        core.pinned.config = Some(root.join(PROJECT_FILE).display().to_string());
+        let files = super::resolve::editable(&core.pinned, &root);
+        let mut shared = files.iter().filter(|f| f.name == PROJECT_FILE);
+        assert!(shared.next().unwrap().note.starts_with("[USER+PROJ]"));
+        assert!(shared.next().is_none());
     }
 }

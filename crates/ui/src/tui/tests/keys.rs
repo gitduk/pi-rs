@@ -543,6 +543,45 @@ fn argument_completion_hides_the_hint_until_the_menu_is_dismissed() {
 }
 
 #[test]
+fn edit_completes_home_relative_files_as_command_arguments() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use pi_core::input::commands::EditChoice;
+
+    let mut ui = test_ui(80, 24);
+    let name = "~/.pi/settings.toml";
+    let project = pi_store::config::PROJECT_FILE;
+    ui.lists
+        .editable
+        .set(vec![
+            EditChoice {
+                name: name.into(),
+                basename: "settings.toml".into(),
+                note: "[USER] Defaults for all projects".into(),
+            },
+            EditChoice {
+                name: project.into(),
+                basename: "settings.toml".into(),
+                note: "[PROJ] Overrides user settings".into(),
+            },
+        ])
+        .unwrap();
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    ui.editor.set_line("/edit settings");
+    let menu = ui.menu();
+    assert_eq!(menu.len(), 2);
+    assert!(menu.iter().all(|entry| entry.show() == "settings.toml"));
+    assert!(menu[0].help().starts_with("[PROJ]"));
+    assert!(menu[1].help().starts_with("[USER]"));
+
+    ui.editor.set_line("/edit ~/");
+
+    let enter = crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let asked = ui.key(&lane, &mut view, enter, false);
+    assert!(matches!(asked, Asked::Core(Intent::Builtin(Builtin::Edit(file))) if file == name));
+}
+
+#[test]
 fn accepting_a_subcommand_or_tool_key_continues_into_its_arguments() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use pi_store::keys::Action;

@@ -21,6 +21,32 @@ fn the_scratch_file_is_private() {
     std::fs::remove_file(&path).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn a_new_config_draft_stays_private_and_does_not_replace_another_save() {
+    use crate::tui::term::ConfigDraft;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("settings.toml");
+    let draft = ConfigDraft::for_missing(&target).unwrap().unwrap();
+    let mode = |p: &std::path::Path| p.metadata().unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(draft.path.parent().unwrap()), 0o700);
+    assert_eq!(mode(&draft.path), 0o600);
+    assert!(!draft.publish(&target).unwrap());
+    assert!(!target.exists());
+
+    std::fs::write(&draft.path, "effort = \"low\"\n").unwrap();
+    std::fs::set_permissions(&draft.path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(draft.publish(&target).unwrap());
+    assert_eq!(mode(&target), 0o600);
+    assert!(ConfigDraft::for_missing(&target).unwrap().is_none());
+    assert_eq!(
+        draft.publish(&target).unwrap_err().kind(),
+        std::io::ErrorKind::AlreadyExists,
+    );
+}
+
 // Directory browsing shows each path once and can reach every choice.
 #[test]
 fn mv_browses_every_sibling_as_a_single_path_and_completes_the_selection() {

@@ -1,4 +1,4 @@
-//! What a reload, `/settings` and `/model` do to the Core.
+//! What a reload, `/edit` and `/model` do to the Core.
 //!
 //! The value itself is `pi_store::settings`; this is what the Core does to it.
 
@@ -234,22 +234,22 @@ impl Core {
         let files = resolve::editable(&self.pinned, self.lane().root());
         if name.is_empty() {
             let mut rows: Vec<Row> = files
-                .iter()
-                .map(|f| Row::new([f.name.clone(), f.note.clone()]))
+                .into_iter()
+                .map(|f| Row::new([f.basename().into_owned(), f.note]))
                 .collect();
-            rows.push(Row::new(["/edit <file> opens one in $EDITOR"]));
+            rows.push(Row::new(["Complete /edit <file> to open it in $EDITOR"]));
             return Step::Handled(Listing::of(rows));
         }
         match files.into_iter().find(|f| f.name == name) {
-            Some(file) => match resolve::seed(&file.path) {
-                Ok(()) => Step::Edit(file.path),
+            Some(file) => match file.seed() {
+                Ok(()) => Step::Edit(file),
                 Err(e) => Step::Notice(format!("cannot start {name} from the built-in: {e}")),
             },
             None => Step::Notice(format!("`{name}` is not a file /edit offers")),
         }
     }
 
-    /// After `/settings` or `/edit` closed the editor: reload, and name what
+    /// After `/edit` closes the editor: reload, and name what
     /// the files now say that a flag still outranks.
     /// `Err` is why nothing was reloaded.
     pub fn config_edited(&mut self) -> Result<Vec<String>, String> {

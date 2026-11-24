@@ -76,7 +76,7 @@ pub enum Action {
         args: String,
         typed: String,
     },
-    Edit(std::path::PathBuf),
+    Edit(crate::core::resolve::Editable),
     // Checkouts to remove: git and the disk take the time, so the surface
     // runs them off the loop and brings the result back.
     Removal(crate::input::Removal),
@@ -114,7 +114,7 @@ pub fn dispatch(core: &mut Core, intent: Intent) -> Action {
                 typed,
             };
         }
-        Step::Edit(path) => return Action::Edit(path),
+        Step::Edit(file) => return Action::Edit(file),
         Step::Removal(removal) => return Action::Removal(removal),
         Step::Surface { word, args } => return Action::Surface { word, args },
         Step::Quit => return Action::Quit,
