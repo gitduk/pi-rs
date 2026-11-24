@@ -50,6 +50,10 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 
 ### Fixed
 
+- A status line script that prints no visible text clears its cell. A timeout,
+  start failure, read error, or truncation before any visible text keeps the
+  previous answer.
+
 - The status line shows the current checkout on the first frame.
 
 - Two runs updating the shared state at the same instant no longer drop one of

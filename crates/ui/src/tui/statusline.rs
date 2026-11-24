@@ -2,7 +2,7 @@
 //! `~/.pi/statusline.json`, whose scripts the frame never waits on.
 
 use std::time::Instant;
-use tokio::io::AsyncBufReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
 use llm::request::Effort;
 use ratatui::layout::{Constraint, Layout as RowLayout, Rect};
@@ -704,7 +704,7 @@ impl Ui {
         let (mut spans, mut parts, mut said) = (Vec::new(), 0, 0);
         for item in &g.group {
             let got = self.spans(item, facts, session);
-            if matches!(item, Item::Field(_) | Item::Styled(_)) {
+            if matches!(item, Item::Field(_) | Item::Styled(_) | Item::Script(_)) {
                 parts += 1;
                 said += usize::from(got.is_some());
             }
@@ -960,7 +960,7 @@ const SCRIPT_RUNS: usize = 4;
 
 /// What a script is told about where it runs: the session the row draws for,
 /// the room that row has, and the facts it cannot read for itself.
-pub(super) struct ScriptEnv {
+struct ScriptEnv {
     session: std::path::PathBuf,
     width: usize,
     facts: String,
@@ -1028,16 +1028,16 @@ impl Scripts {
         }
     }
 
-    /// A finished run into its slot: the answer, or the last good one kept.
+    /// An empty answer clears the cell. Without an answer, keep its last line.
     pub(super) fn land(&mut self, key: String, said: Option<String>) {
-        let answer = self.answers.entry(key.clone()).or_default();
+        if said.is_none() {
+            tracing::warn!(target: "pi::statusline", script = %key, "no answer");
+        }
+        let answer = self.answers.entry(key).or_default();
         answer.running = false;
         answer.ran = Some(Instant::now());
-        match said {
-            Some(text) => answer.text = Some(text),
-            // Nothing said: killed, failed to start, or exited non-zero. The
-            // cell keeps its last answer, and the log says which script.
-            None => tracing::warn!(target: "pi::statusline", script = %key, "no answer"),
+        if let Some(text) = said {
+            answer.text = Some(text);
         }
     }
 
@@ -1051,7 +1051,7 @@ impl Scripts {
     }
 }
 
-// One run: the shell's line, or the named file. Killed at its own deadline.
+// A successful read supplies the first line, even when it is blank.
 async fn run_once(
     run: statusline::Runnable,
     timeout: std::time::Duration,
@@ -1077,20 +1077,27 @@ async fn run_once(
     let stdout = child.stdout.take()?;
     // One line is all that shows: a script that floods costs a few KiB, not
     // the heap, and the deadline still holds over the read.
-    let mut reader = tokio::io::BufReader::new(tokio::io::AsyncReadExt::take(stdout, ANSWER_CAP));
-    let mut printed = String::new();
-    match tokio::time::timeout(timeout, reader.read_line(&mut printed)).await {
-        Ok(Ok(0)) | Err(_) | Ok(Err(_)) => {
-            let _ = child.start_kill();
-            return None;
+    let mut reader = tokio::io::BufReader::new(stdout);
+    let answer = async {
+        let mut printed = String::new();
+        let read = (&mut reader)
+            .take(ANSWER_CAP)
+            .read_line(&mut printed)
+            .await
+            .ok()?;
+        if let Some(line) = spoken_line(&printed) {
+            return Some(line);
         }
-        Ok(Ok(_)) => {}
-    }
-    let _ = child.start_kill();
-    let first = printed.lines().next().unwrap_or_default();
-    // A program's answer is text to draw, never an escape to obey: its SGR
-    // runs are read when the row draws it, and every other escape stays out.
-    spoken_line(first)
+        // A blank prefix at the cap only clears the cell if the line ends here.
+        if read as u64 == ANSWER_CAP && !printed.ends_with('\n') {
+            let rest = reader.fill_buf().await.ok()?;
+            if !matches!(rest.first(), None | Some(b'\n')) {
+                return None;
+            }
+        }
+        Some(String::new())
+    };
+    tokio::time::timeout(timeout, answer).await.ok().flatten()
 }
 
 // The one line a script printed, or none when it said nothing but colour and
@@ -1124,4 +1131,86 @@ fn key_of(script: &statusline::Script, session: &std::path::Path) -> String {
     // A script's answer belongs to the session it answered for: a lane switch
     // must not pair one session's env with another's output.
     format!("{}|{label}", session.display())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A script that stopped printing blanks its cell: its condition went away, and
+    // the word it said before would otherwise stand there for the rest of the
+    // session. Only a run that never answered keeps what it said last time.
+    #[test]
+    fn a_silent_script_clears_its_cell() {
+        use pi_store::statusline::{Item, parse};
+
+        let layout =
+            parse(r#"{"lines":[{"left":[{"script":{"command":"printf '%swt' 2","every":30}}]}]}"#)
+                .expect("a layout");
+        let session = std::path::Path::new("/nowhere");
+        let script = match &layout.lines[0].left[0] {
+            Item::Script(s) => s,
+            other => panic!("not a script: {other:?}"),
+        };
+        let key = key_of(script, session);
+        let mut scripts = Scripts::new();
+
+        assert_eq!(
+            scripts.shown(script, session),
+            script.waiting(),
+            "no answer yet is the placeholder"
+        );
+        scripts.land(key.clone(), Some("2wt".into()));
+        assert_eq!(scripts.shown(script, session), "2wt");
+
+        scripts.land(key.clone(), Some(String::new()));
+        assert_eq!(scripts.shown(script, session), "", "the stale count went");
+
+        scripts.land(key.clone(), Some("3wt".into()));
+        scripts.land(key, None);
+        assert_eq!(scripts.shown(script, session), "3wt", "a lost run keeps it");
+    }
+
+    // The three outcomes a run can land in, read off the shell that produces them:
+    // a line is drawn, printing nothing blanks the cell whatever the exit status,
+    // and a run that reaches its deadline keeps its previous answer.
+    #[tokio::test]
+    async fn a_run_reads_its_silence_as_nothing_to_say() {
+        use pi_store::statusline::Runnable;
+        use std::time::Duration;
+
+        let env = || ScriptEnv {
+            session: "/nowhere".into(),
+            width: 80,
+            facts: "{}".into(),
+        };
+        let run = |line: &str| Runnable::Shell(line.to_string());
+        let deadline = Duration::from_secs(10);
+
+        assert_eq!(
+            run_once(run("printf 2wt"), deadline, env())
+                .await
+                .as_deref(),
+            Some("2wt")
+        );
+        let blank_at_cap = format!("printf '%{ANSWER_CAP}s' ''");
+        let newline_after_cap = format!("printf '%{ANSWER_CAP}s\\n' ''");
+        for silent in [
+            "false",
+            r"printf '\033[31m '",
+            &blank_at_cap,
+            &newline_after_cap,
+        ] {
+            assert_eq!(
+                run_once(run(silent), deadline, env()).await.as_deref(),
+                Some("")
+            );
+        }
+        let text_after_cap = format!("printf '%{ANSWER_CAP}sOK\\n' ''");
+        assert_eq!(run_once(run(&text_after_cap), deadline, env()).await, None);
+        assert_eq!(
+            run_once(run("exec sleep 30"), Duration::from_millis(200), env()).await,
+            None
+        );
+    }
 }

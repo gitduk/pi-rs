@@ -103,8 +103,9 @@ A script item carries exactly one of `command` or `name`.
 - Only the first line of output shows. SGR runs (`ESC[31m…ESC[0m`, a real byte 0x1b) colour it —
   the same vocabulary a theme writes, applied over `style` — and every other
   escape and control character is dropped.
-- A failing script keeps its last answer; one that never answered keeps the
-  placeholder.
+- A blank or missing first line clears the cell regardless of the exit code.
+  A script that cannot start, cannot be read, reaches its timeout, or exceeds
+  the output limit before any visible text keeps its previous answer or placeholder.
 - At most four scripts run at once, each one alone, and none of them blocks the
   row.
 - A script is told `PI_SESSION_DIR`, the directory of the session it draws for,
