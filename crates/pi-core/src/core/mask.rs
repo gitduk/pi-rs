@@ -116,14 +116,35 @@ fn values_of(dirs: &[PathBuf], config: &config::Config) -> Vec<Secret> {
 
 // A `.env` holds settings beside keys, so a value whose name says nothing has
 // to look like one: mixed letters and digits, or long enough that no word
-// reaches it.
+// reaches it. A `scheme://` value is a URL instead — a base URL is long, says
+// nothing, and the model needs to read it, so whatever scheme it carries it
+// is not a secret.
 fn shapes_a_secret(value: &str) -> bool {
     if !long_enough(value, MIN) {
         return false;
     }
-    let digit = value.chars().any(|c| c.is_ascii_digit());
-    let letter = value.chars().any(|c| c.is_ascii_alphabetic());
-    (digit && letter) || value.chars().count() >= 16
+    let Some(after) = value.split_once("://").map(|(_, after)| after) else {
+        // No scheme, so the rule stands on its shape alone.
+        return {
+            let digit = value.chars().any(|c| c.is_ascii_digit());
+            let letter = value.chars().any(|c| c.is_ascii_alphabetic());
+            (digit && letter) || value.chars().count() >= 16
+        };
+    };
+    // A URL is not a secret: the rule only holds for what is left over.
+    !is_scheme(&value.as_bytes()[..value.len() - after.len() - "://".len()])
+}
+
+// Whether `head` is a scheme: RFC 3986's letters, digits, `+`, `-` or `.`,
+// led by a letter — the one shape every `://` value shares. A colon inside
+// prose ("ratio 2:1") has no scheme and is not a URL.
+fn is_scheme(head: &[u8]) -> bool {
+    match head.split_first() {
+        Some((first, rest)) if first.is_ascii_alphabetic() => rest
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || b"+-.".contains(c)),
+        _ => false,
+    }
 }
 
 // The kind a variable's own name says it is, when it says one: the token then
@@ -222,6 +243,7 @@ fn ends(print: &Footprint) -> String {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn config(body: &str) -> config::Config {
@@ -325,6 +347,20 @@ mod tests {
             summary.cells[3].starts_with(&total.to_string()),
             "{summary:?}"
         );
+    }
+
+    // A URL of any scheme is read by the model, not sent as a secret; a
+    // value that opens with a colon is prose and keeps the shape rule.
+    #[test]
+    fn a_url_of_any_scheme_is_not_a_secret_but_prose_is_not_excused() {
+        assert!(!shapes_a_secret("https://api.example.com/v1"));
+        assert!(!shapes_a_secret("postgres://user:pass@host:5432/db"));
+        assert!(!shapes_a_secret("git+ssh://git@host/repo.git"));
+        assert!(!shapes_a_secret("rfc2396://id/hello"));
+        // A colon in prose is no scheme: the 16 characters still catch this.
+        assert!(shapes_a_secret("ratio 2:1 in the mix 100%"));
+        // A `://` that opens with no scheme is not a URL.
+        assert!(shapes_a_secret("://not-a-scheme-0123"));
     }
 
     // A connection's stub key is no secret and is left alone; a listed secret

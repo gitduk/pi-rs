@@ -15,6 +15,10 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   name or its shape said so, its length, how often it was masked, and the
   ends it shows — instead of one table per kind.
 
+- A `scheme://` value in a `.env` is a URL and is left alone, whatever the
+  scheme; the shape rule no longer masks every base URL of sixteen
+  characters or more.
+
 ## 3.0.8 - 2026-11-25
 
 ### Added
