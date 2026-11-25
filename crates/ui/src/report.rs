@@ -15,6 +15,7 @@ const WIDE_WIDTH: usize = 28;
 // their gaps.
 const MIN_COLUMN_WIDTH: usize = WIDE_WIDTH + 3 * (NUMERIC_WIDTH + NUMERIC_GAP);
 const COLUMN_GAP: usize = 4;
+const MARGIN: &str = "  ";
 
 #[derive(Clone, Copy)]
 enum Tone {
@@ -46,8 +47,8 @@ pub(crate) fn lines(report: &Listing, width: usize, paint: Option<&Paint>) -> Ve
     if width == 0 {
         return Vec::new();
     }
-    let body_width = width.saturating_sub(if width >= 16 { 4 } else { 0 });
-    let margin = (width - body_width) / 2;
+    let margin = if width >= 16 { MARGIN } else { "" };
+    let body_width = width - 2 * margin.len();
     let mut lead = Vec::new();
     let mut sections: Vec<Vec<&Row>> = Vec::new();
     let mut footer = Vec::new();
@@ -117,9 +118,9 @@ pub(crate) fn lines(report: &Listing, width: usize, paint: Option<&Paint>) -> Ve
 
 // Every line starts at the same margin, so a narrow terminal keeps its text
 // off both edges.
-fn indent(out: &mut [Line<'static>], margin: usize) {
+fn indent(out: &mut [Line<'static>], margin: &'static str) {
     for line in out {
-        line.spans.insert(0, Span::raw(" ".repeat(margin)));
+        line.spans.insert(0, Span::raw(margin));
     }
 }
 
