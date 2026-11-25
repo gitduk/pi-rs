@@ -70,6 +70,11 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 
 - Notes printed at startup are cut to one screen line each.
 
+- A tool call's line shows a fetch's URL as the URL itself, not as `url="…"`.
+  A subagent's progress line and a background execution's label name a call
+  from its leading argument rather than every one, leaving the tool's name out
+  when the call was made with a command of its own.
+
 ## 3.0.6 - 2026-11-23
 
 ### Changed

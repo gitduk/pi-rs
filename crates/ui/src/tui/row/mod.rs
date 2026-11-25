@@ -8,7 +8,6 @@ use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
 
 use crate::block;
-use crate::render::named;
 use crate::render::{self, Paint};
 use crate::tui::browse::PageLine;
 use crate::tui::screen;
@@ -812,7 +811,7 @@ impl Row {
             Line::from(paint.span(&paint.theme.muted, format!("{} ", icons::STOPPED_MARK)));
         let mut row = Self::notice(Line::from(paint.tool_call(
             name,
-            &named(name, summary),
+            &tool::label(name, summary),
             false,
         )));
         row.2 = Some(Box::new(render::Prefix::hanging(border)));

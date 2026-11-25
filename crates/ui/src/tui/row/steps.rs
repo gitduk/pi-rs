@@ -238,7 +238,7 @@ impl Head {
 fn pending_head(p: &PendingTool, tick: usize) -> Head {
     Head {
         mark: p.stage.mark(tick),
-        text: render::named(&p.name, &p.summary),
+        text: tool::label(&p.name, &p.summary),
         tool: Some(p.name.clone()),
         tail: render::tail(p.cwd.as_deref(), &out_for(p.stage.progress(), p.secs)),
         more: false,

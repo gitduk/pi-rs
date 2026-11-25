@@ -12,7 +12,7 @@ use super::mouse::Target;
 use super::row::{self, Call, PendingTool, Row, Stage, StepMark};
 use super::scrollback::{Folds, Scrollback};
 use super::ui::OpenCommand;
-use crate::render::{Paint, named, tail};
+use crate::render::{Paint, tail};
 use pi_core::core::tools::modifies;
 use pi_core::driver::background::{BackgroundCommand, Invocation, State};
 use pi_store::icons;
@@ -103,7 +103,7 @@ pub(super) fn pending_line(
     paint: &Paint,
 ) -> (Line<'static>, Line<'static>) {
     let stage = t.stage();
-    let named = named(&t.name, &t.summary);
+    let named = tool::label(&t.name, &t.summary);
     let (mark, out) = match &t.run {
         // A modifying call never folds, so it stays drawn here, still
         // turning, after it ends: a time beside it would read as finished.

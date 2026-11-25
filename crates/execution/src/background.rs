@@ -38,10 +38,7 @@ impl Invocation {
     pub fn title(&self) -> Cow<'_, str> {
         match self {
             Self::Shell { command } => Cow::Borrowed(command.lines().next().unwrap_or_default()),
-            Self::Tool { name, args } if args.as_object().is_some_and(|args| args.is_empty()) => {
-                Cow::Borrowed(name)
-            }
-            Self::Tool { name, args } => Cow::Owned(format!("{name} {}", tool::arguments(args))),
+            Self::Tool { name, args } => tool::title(name, args),
             Self::Task { name, description } => Cow::Owned(format!("{name}: {description}")),
         }
     }

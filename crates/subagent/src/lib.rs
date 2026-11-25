@@ -251,15 +251,6 @@ fn tell(caller: &Ctx, heard: &Heard, said: &mut String, prefix: &str) {
     }
 }
 
-// `read src/lib.rs`: the call's name and the one argument worth showing,
-// cut to its first line since progress is a single line.
-fn call_line(name: &str, args: &Value) -> String {
-    match tool::summary(args).lines().next().map(str::trim) {
-        Some(asked) if !asked.is_empty() => format!("{name} {asked}"),
-        _ => name.to_string(),
-    }
-}
-
 #[async_trait]
 impl Tool for Subagent {
     fn name(&self) -> &str {
@@ -561,7 +552,8 @@ impl Prepared {
                         heard.turn = Default::default();
                     }
                     Event::ToolQueued { name, args, .. } => {
-                        heard.doing.want(call_line(&name, &args), now)
+                        let text = tool::title(&name, &args).into_owned();
+                        heard.doing.want(text, now)
                     }
                     _ => {}
                 }

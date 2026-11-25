@@ -670,7 +670,7 @@ pub(crate) fn result_parts(
     let end = tail(call.cwd, &ran_for(call.took));
     let fits = title_room(room, Line::raw(format!("{}  ", call.name)).width(), &end);
     let border = Line::from(vec![p.span(mark_style, mark), Span::raw(" ")]);
-    let named = named(call.name, &clip(head, fits));
+    let named = tool::label(call.name, &clip(head, fits));
     let mut spans = p.tool_call(call.name, &named, hovered);
     spans.push(p.span_hovered(hovered, &p.theme.muted, end));
     let mut out = vec![(Line::from(spans), Some(border))];
@@ -755,7 +755,7 @@ pub fn describe(
         // spell a tool differently.
         Event::ToolQueued { name, args, .. } => {
             let mut spans = vec![p.span(&p.theme.muted, icons::PENDING_MARK), Span::raw(" ")];
-            spans.extend(p.tool_call(name, &named(name, &summarize(args)), false));
+            spans.extend(p.tool_call(name, &tool::label(name, &summarize(args)), false));
             Line::from(spans)
         }
         Event::ToolEnd {
@@ -936,17 +936,6 @@ impl Renderer {
     pub fn finish(&mut self) {
         self.end_thinking();
         self.settle();
-    }
-}
-
-/// A tool's line as every row that shows one writes it: its name, then what
-/// the call was made with — the name dropped when the text opens with it.
-/// The caller draws the prefix (spinner, queued mark, finished mark) itself.
-pub fn named(name: &str, text: &str) -> String {
-    match (text.is_empty(), text.starts_with(name)) {
-        (true, _) => name.to_string(),
-        (false, true) if text[name.len()..].starts_with(char::is_whitespace) => text.to_string(),
-        (false, _) => format!("{name} {text}"),
     }
 }
 

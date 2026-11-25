@@ -203,7 +203,7 @@ impl Call {
         Self {
             outcome,
             name: name.to_string(),
-            text: render::named(name, head),
+            text: tool::label(name, head),
             body,
             glimpse: Glimpse { lead, block: shown },
             cwd: None,
