@@ -4,6 +4,7 @@
 //! the way in, so a run that reads a key out of a file and pastes it into a
 //! command still works while the vendor only ever sees the token.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError, RwLock};
@@ -23,25 +24,18 @@ use crate::request::Request;
 use crate::stream::{BlockKind, StreamEvent};
 use crate::transport::Transport;
 
-/// Where every token begins: the scan looks for this before it looks for a
-/// token, so text full of `{{` costs one pass.
-const OPEN: &str = "{{PI_";
+/// An opaque identifier uses 128 bits to make accidental matches unlikely.
+const ID_BYTES: usize = 16;
 
-/// 40 bits of a keyed digest: enough to tell a handful of values apart, and
-/// keyed so a token seen on the wire cannot be checked against a guess.
-const ID_BYTES: usize = 5;
+type Buckets = [Vec<usize>; 256];
 
 #[derive(Debug)]
 pub struct Mask {
     key: [u8; 32],
     // In the order they were added; a bucket holds indices into this.
     entries: Vec<Entry>,
-    by_value: HashMap<String, usize>,
-    by_token: HashMap<String, String>,
-    // Which first bytes a value can start with, so a megabyte body is one pass.
-    starts: [bool; 256],
-    buckets: [Vec<usize>; 256],
-    longest_token: usize,
+    token_buckets: Buckets,
+    value_buckets: Buckets,
 }
 
 #[derive(Debug)]
@@ -66,11 +60,12 @@ fn counted(token: &str) -> u64 {
 }
 
 fn count(token: &str) {
-    *HITS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .entry(token.to_string())
-        .or_default() += 1;
+    let mut hits = HITS.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(count) = hits.get_mut(token) {
+        *count += 1;
+    } else {
+        hits.insert(token.to_owned(), 1);
+    }
 }
 
 /// How a value came to be masked: the owner named it, or a shape rule only
@@ -79,17 +74,6 @@ fn count(token: &str) {
 pub enum Tier {
     Named,
     Guessed,
-}
-
-/// How a value was introduced: the word its token carries, and the name a
-/// person reads in place of the value.
-#[derive(Debug, Clone, Copy)]
-pub struct Naming<'a> {
-    /// The short label inside the token, such as `TOKEN`.
-    pub kind: &'a str,
-    /// What introduced the value: a `.env` variable, a config field. A value
-    /// only a `secrets` list holds is named by nothing.
-    pub name: Option<&'a str>,
 }
 
 /// One value as a listing shows it: the token the vendor sees, the name that
@@ -114,8 +98,8 @@ pub struct Footprint {
 /// character for a value short enough that four would be half of it.
 const HEAD: usize = 4;
 
-fn head_chars(value: &str) -> usize {
-    match value.chars().count() {
+fn head_chars(len: usize) -> usize {
+    match len {
         0..12 => 1,
         _ => HEAD,
     }
@@ -128,40 +112,36 @@ impl Mask {
         Self {
             key,
             entries: Vec::new(),
-            by_value: HashMap::new(),
-            by_token: HashMap::new(),
-            starts: [false; 256],
-            buckets: std::array::from_fn(|_| Vec::new()),
-            longest_token: 0,
+            token_buckets: std::array::from_fn(|_| Vec::new()),
+            value_buckets: std::array::from_fn(|_| Vec::new()),
         }
     }
 
     /// Register a value the owner named. A value already listed keeps its
-    /// first token, its first kind and its first name.
-    pub fn add(&mut self, naming: Naming<'_>, value: &str) {
-        self.insert(naming, Tier::Named, value);
+    /// first token and its first name.
+    pub fn add(&mut self, name: Option<&str>, value: &str) {
+        self.insert(name, Tier::Named, value);
     }
 
-    /// Register a value a shape rule guessed at: the kind is what the rule
-    /// said it was, and the listing says the mask rests on a guess.
-    pub fn add_guessed(&mut self, naming: Naming<'_>, value: &str) {
-        self.insert(naming, Tier::Guessed, value);
+    /// Register a value matched by a shape rule.
+    pub fn add_guessed(&mut self, name: Option<&str>, value: &str) {
+        self.insert(name, Tier::Guessed, value);
     }
 
-    fn insert(&mut self, naming: Naming<'_>, tier: Tier, value: &str) {
-        if value.is_empty() || self.by_value.contains_key(value) {
+    fn insert(&mut self, name: Option<&str>, tier: Tier, value: &str) {
+        let Some(&first) = value.as_bytes().first() else {
+            return;
+        };
+        if self.contains_value(value, first) {
             return;
         }
-        let token = self.allocate(naming.kind, value);
-        let first = value.as_bytes()[0] as usize;
-        self.starts[first] = true;
-        self.buckets[first].push(self.entries.len());
-        self.longest_token = self.longest_token.max(token.len());
-        self.by_value.insert(value.to_string(), self.entries.len());
-        self.by_token.insert(token.clone(), value.to_string());
+        let token = self.allocate(value);
+        let index = self.entries.len();
+        self.token_buckets[token.as_bytes()[0] as usize].push(index);
+        self.value_buckets[first as usize].push(index);
         self.entries.push(Entry {
             token,
-            name: naming.name.map(str::to_string),
+            name: name.map(str::to_string),
             tier,
             value: value.to_string(),
         });
@@ -169,46 +149,35 @@ impl Mask {
 
     /// Every value in `text` as its token. Nothing else is touched.
     pub fn cover(&self, text: &str) -> String {
-        if !self.might_match(text) {
-            return text.to_string();
-        }
-        let bytes = text.as_bytes();
-        let mut out = String::with_capacity(text.len());
-        let mut at = 0;
-        while at < bytes.len() {
-            let Some(off) = bytes[at..].iter().position(|b| self.starts[*b as usize]) else {
-                out.push_str(&text[at..]);
-                break;
+        self.covered(text).into_owned()
+    }
+
+    fn covered<'a>(&self, text: &'a str) -> Cow<'a, str> {
+        let mut out = None;
+        let mut copied = 0;
+        let mut from = 0;
+        while let Some(start) = next_candidate(text, from, &self.value_buckets) {
+            let rest = &text[start..];
+            let entry = self
+                .entries_in(&self.value_buckets[text.as_bytes()[start] as usize])
+                .filter(|entry| rest.starts_with(&entry.value))
+                .max_by_key(|entry| entry.value.len());
+            let Some(entry) = entry else {
+                from = start + 1;
+                continue;
             };
-            let pos = at + off;
-            out.push_str(&text[at..pos]);
-            match self.longest_at(text, pos) {
-                Some(entry) => {
-                    count(&entry.token);
-                    out.push_str(&entry.token);
-                    at = pos + entry.value.len();
-                }
-                None => {
-                    let c = text[pos..].chars().next().expect("a char boundary");
-                    out.push(c);
-                    at = pos + c.len_utf8();
-                }
-            }
+            count(&entry.token);
+            let out = out.get_or_insert_with(|| String::with_capacity(text.len()));
+            out.push_str(&text[copied..start]);
+            out.push_str(&entry.token);
+            copied = start + entry.value.len();
+            from = copied;
         }
-        out
+        finish_rewrite(text, out, copied)
     }
 
-    // A field with no value in it is most of a request: it stays where it is
-    // rather than being copied and put back.
     fn cover_field(&self, text: &mut String) {
-        if !self.might_match(text) {
-            return;
-        }
-        *text = self.cover(text);
-    }
-
-    fn might_match(&self, text: &str) -> bool {
-        text.as_bytes().iter().any(|b| self.starts[*b as usize])
+        rewrite_field(text, |text| self.covered(text));
     }
 
     /// The same request with every text it carries covered: this is what a
@@ -227,14 +196,14 @@ impl Mask {
         }
         for tool in &mut out.tools {
             self.cover_field(&mut tool.description);
-            self.map_json(&mut tool.input_schema, &|text| self.cover(text));
+            map_json(&mut tool.input_schema, &|text| self.covered(text));
         }
         out
     }
 
     fn cover_message(&self, message: &mut Message) {
         match message {
-            Message::System { content } => *content = self.cover(content),
+            Message::System { content } => self.cover_field(content),
             Message::User { content } => {
                 for part in content {
                     match part {
@@ -246,14 +215,14 @@ impl Mask {
                                         self.cover_field(&mut text.text);
                                     }
                                     ToolResultContent::Json { value } => {
-                                        self.map_json(value, &|text| self.cover(text));
+                                        map_json(value, &|text| self.covered(text));
                                     }
                                     ToolResultContent::Image(_) => {}
                                 }
                             }
                         }
                         // A URL is text; the encoded bytes beside it are not.
-                        UserContent::Image(Image::Url { url }) => *url = self.cover(url),
+                        UserContent::Image(Image::Url { url }) => self.cover_field(url),
                         UserContent::Image(Image::Base64 { .. }) => {}
                     }
                 }
@@ -263,14 +232,14 @@ impl Mask {
                     match part {
                         AssistantContent::Text(text) => self.cover_field(&mut text.text),
                         AssistantContent::ToolCall(call) => {
-                            self.map_json(&mut call.args, &|text| self.cover(text));
+                            map_json(&mut call.args, &|text| self.covered(text));
                         }
                         AssistantContent::Reasoning(reasoning) => {
                             for part in &mut reasoning.content {
                                 // The prose is covered; a signature is not, so
                                 // replaying it lands on the bytes it was made for.
                                 if let ReasoningContent::Text { text, .. } = part {
-                                    *text = self.cover(text);
+                                    self.cover_field(text);
                                 }
                             }
                         }
@@ -280,47 +249,21 @@ impl Mask {
         }
     }
 
-    // Every string a JSON tree holds. Keys are structure and stay as they are.
-    fn map_json(&self, value: &mut Value, f: &dyn Fn(&str) -> String) {
-        match value {
-            Value::String(text) => *text = f(text),
-            Value::Array(items) => {
-                for item in items {
-                    self.map_json(item, f);
-                }
-            }
-            Value::Object(map) => {
-                // Structure is normally left alone, but a key that holds a
-                // value is a leak in the one place the model never looks.
-                let rewritten: Vec<(String, String)> = (map.keys())
-                    .filter(|key| self.might_match(key))
-                    .map(|key| (key.clone(), f(key)))
-                    .collect();
-                for (was, now) in rewritten {
-                    if was != now
-                        && let Some(item) = map.remove(&was)
-                    {
-                        map.insert(now, item);
-                    }
-                }
-                for item in map.values_mut() {
-                    self.map_json(item, f);
-                }
-            }
-            _ => {}
-        }
-    }
-
     /// Every token in `text` as its value. A token this mask never issued is
     /// prose and stays as it was written.
     pub fn restore(&self, text: &str) -> String {
-        if self.by_token.is_empty() {
-            return text.to_string();
+        self.restored(text).into_owned()
+    }
+
+    fn restored<'a>(&self, text: &'a str) -> Cow<'a, str> {
+        let (out, tail) = self.restore_chunk(text, false);
+        match out {
+            Cow::Borrowed(_) => Cow::Borrowed(text),
+            Cow::Owned(mut out) => {
+                out.push_str(tail);
+                Cow::Owned(out)
+            }
         }
-        let mut out = String::with_capacity(text.len());
-        let held = self.rewrite(text, false, &mut out);
-        out.push_str(&text[text.len() - held..]);
-        out
     }
 
     /// How many values are masked. What a diagnostic may say without saying
@@ -338,123 +281,164 @@ impl Mask {
         self.entries
             .iter()
             .map(|entry| {
-                let chars: Vec<char> = entry.value.chars().collect();
-                let shown = head_chars(&entry.value);
+                let len = entry.value.chars().count();
+                let shown = head_chars(len);
                 Footprint {
                     name: entry.name.clone(),
                     tier: entry.tier,
-                    head: chars.iter().take(shown).collect(),
-                    tail: chars
-                        .iter()
-                        .skip(chars.len().saturating_sub(shown))
-                        .collect(),
-                    len: chars.len(),
+                    head: crate::slice::head_chars(&entry.value, shown).to_owned(),
+                    tail: crate::slice::tail_chars(&entry.value, shown).to_owned(),
+                    len,
                     hits: counted(&entry.token),
                 }
             })
             .collect()
     }
 
-    /// Write `text` into `out`, restoring what is whole, and answer how many
-    /// trailing bytes were held back as a token the caller may still complete.
-    fn rewrite(&self, text: &str, json: bool, out: &mut String) -> usize {
-        let mut at = 0;
-        loop {
-            let Some(found) = text[at..].find(OPEN) else {
-                let held = self.hold(&text[at..]);
-                out.push_str(&text[at..text.len() - held]);
-                return held;
-            };
-            let start = at + found;
+    /// Restore complete tokens and hold a trailing prefix for the next delta.
+    fn restore_chunk<'a>(&self, text: &'a str, json: bool) -> (Cow<'a, str>, &'a str) {
+        if self.is_empty() {
+            return (Cow::Borrowed(text), "");
+        }
+        let mut out = None;
+        let mut copied = 0;
+        let mut from = 0;
+        let mut end = text.len();
+        while let Some(start) = next_candidate(text, from, &self.token_buckets) {
             let rest = &text[start..];
-            match self.token_at(rest) {
-                Some((token, value)) => {
-                    out.push_str(&text[at..start]);
-                    match json {
-                        true => out.push_str(&escaped(value)),
-                        false => out.push_str(value),
+            let mut partial = false;
+            let entry = self
+                .entries_in(&self.token_buckets[text.as_bytes()[start] as usize])
+                .find(|entry| {
+                    if rest.len() < entry.token.len() {
+                        partial |= entry.token.starts_with(rest);
+                        false
+                    } else {
+                        rest.starts_with(&entry.token)
                     }
-                    at = start + token.len();
+                });
+            if let Some(entry) = entry {
+                let out = out.get_or_insert_with(|| String::with_capacity(text.len()));
+                out.push_str(&text[copied..start]);
+                if json {
+                    let quoted = serde_json::to_string(&entry.value).expect("a string serialises");
+                    out.push_str(&quoted[1..quoted.len() - 1]);
+                } else {
+                    out.push_str(&entry.value);
                 }
-                // The buffer ends inside a token: the caller's next delta may
-                // finish it, so the tail waits rather than being spent.
-                None => {
-                    let held = self.hold(rest);
-                    if held > 0 {
-                        out.push_str(&text[at..text.len() - held]);
-                        return held;
-                    }
-                    out.push_str(&text[at..start + OPEN.len()]);
-                    at = start + OPEN.len();
-                }
+                copied = start + entry.token.len();
+                from = copied;
+            } else if partial {
+                end = start;
+                break;
+            } else {
+                from = start + 1;
             }
         }
+        (finish_rewrite(&text[..end], out, copied), &text[end..])
     }
 
-    fn token_at(&self, rest: &str) -> Option<(&str, &str)> {
-        self.by_token
-            .iter()
-            .filter(|(token, _)| rest.starts_with(token.as_str()))
-            .max_by_key(|(token, _)| token.len())
-            .map(|(token, value)| (token.as_str(), value.as_str()))
+    fn entries_in<'a>(&'a self, bucket: &'a [usize]) -> impl Iterator<Item = &'a Entry> {
+        bucket.iter().map(|&index| &self.entries[index])
     }
 
-    // The longest tail of `tail` that could still become a token. Every token
-    // opens on `{`, so only those byte offsets can start one.
-    fn hold(&self, tail: &str) -> usize {
-        if self.by_token.is_empty() || tail.len() >= self.longest_token {
-            return 0;
-        }
-        let bytes = tail.as_bytes();
-        let begin = bytes.len().saturating_sub(self.longest_token - 1);
-        for pos in begin..bytes.len() {
-            if bytes[pos] != b'{' {
-                continue;
-            }
-            let piece = &tail[pos..];
-            if self.by_token.keys().any(|t| t.starts_with(piece)) {
-                return bytes.len() - pos;
-            }
-        }
-        0
+    fn contains_value(&self, value: &str, first: u8) -> bool {
+        self.entries_in(&self.value_buckets[first as usize])
+            .any(|entry| entry.value == value)
     }
 
-    fn longest_at(&self, text: &str, pos: usize) -> Option<&Entry> {
-        self.buckets[text.as_bytes()[pos] as usize]
-            .iter()
-            .filter_map(|i| self.entries.get(*i))
-            .filter(|e| text[pos..].starts_with(&e.value))
-            .max_by_key(|e| e.value.len())
-    }
-
-    // The digest covers the value alone: one value is one secret, whichever
-    // kind it was first listed under, and a second kind must not split it.
-    fn allocate(&self, label: &str, value: &str) -> String {
+    fn allocate(&self, value: &str) -> String {
         let mut salt = 0u64;
         loop {
-            let token = self.token(label, value, salt);
-            match self.by_token.get(&token) {
-                Some(taken) if taken != value => salt += 1,
-                _ => return token,
+            let token = self.token(value, salt);
+            let first = token.as_bytes()[0];
+            let taken = self
+                .entries_in(&self.token_buckets[first as usize])
+                .any(|entry| entry.token == token);
+            if !taken && value != token && !self.contains_value(&token, first) {
+                return token;
             }
+            salt += 1;
         }
     }
 
-    fn token(&self, label: &str, value: &str, salt: u64) -> String {
+    fn token(&self, value: &str, salt: u64) -> String {
         let mut digest = Sha256::new();
         digest.update(self.key);
         digest.update(salt.to_le_bytes());
         digest.update(value.as_bytes());
         let sum = digest.finalize();
-        let id: String = sum[..ID_BYTES].iter().map(|b| format!("{b:02x}")).collect();
-        format!("{{{{PI_{label}_{id}}}}}")
+        let body = value.strip_prefix("Bearer ").unwrap_or(value);
+        let body = body.strip_prefix("sk-").unwrap_or(body);
+        let prefix = if body.is_empty() {
+            ""
+        } else {
+            &value[..value.len() - body.len()]
+        };
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut token = String::with_capacity(prefix.len() + ID_BYTES * 2);
+        token.push_str(prefix);
+        for &byte in &sum[..ID_BYTES] {
+            token.push(char::from(HEX[usize::from(byte >> 4)]));
+            token.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+        token
     }
 }
 
-// A value landing inside a JSON string has to carry that string's escapes.
-fn escaped(value: &str) -> String {
-    let quoted = serde_json::to_string(value).expect("a string serialises");
-    quoted[1..quoted.len() - 1].to_string()
+fn next_candidate(text: &str, from: usize, buckets: &Buckets) -> Option<usize> {
+    // A bucket starts with the first byte of a UTF-8 string, so every match
+    // is at a character boundary even though the search walks bytes.
+    text.as_bytes()[from..]
+        .iter()
+        .position(|&byte| !buckets[byte as usize].is_empty())
+        .map(|offset| from + offset)
+}
+
+fn finish_rewrite(text: &str, out: Option<String>, copied: usize) -> Cow<'_, str> {
+    match out {
+        Some(mut out) => {
+            out.push_str(&text[copied..]);
+            Cow::Owned(out)
+        }
+        None => Cow::Borrowed(text),
+    }
+}
+
+fn rewrite_field(text: &mut String, rewrite: impl FnOnce(&str) -> Cow<'_, str>) {
+    if let Cow::Owned(changed) = rewrite(text) {
+        *text = changed;
+    }
+}
+
+// Object keys can carry secrets too. Rebuild only those that matched.
+fn map_json(value: &mut Value, rewrite: &impl Fn(&str) -> Cow<'_, str>) {
+    match value {
+        Value::String(text) => rewrite_field(text, rewrite),
+        Value::Array(items) => {
+            for item in items {
+                map_json(item, rewrite);
+            }
+        }
+        Value::Object(map) => {
+            let rewritten: Vec<_> = map
+                .keys()
+                .filter_map(|key| match rewrite(key) {
+                    Cow::Owned(changed) if key != &changed => Some((key.clone(), changed)),
+                    _ => None,
+                })
+                .collect();
+            for (was, now) in rewritten {
+                if let Some(item) = map.remove(&was) {
+                    map.insert(now, item);
+                }
+            }
+            for item in map.values_mut() {
+                map_json(item, rewrite);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// What turns a stream of deltas back into prose: text that ends inside a
@@ -495,27 +479,18 @@ impl Restorer {
     }
 
     fn write(&mut self, index: usize, delta: &str, json: bool) -> String {
-        let mut out = String::with_capacity(delta.len() + 4);
-        match self.held.remove(&index) {
-            // Nothing was left open, which is every delta but a few: written
-            // where it lies rather than joined first.
-            None => {
-                let held = self.mask.rewrite(delta, json, &mut out);
-                if held > 0 {
-                    self.held
-                        .insert(index, delta[delta.len() - held..].to_string());
-                }
-            }
-            Some(carry) => {
-                let text = format!("{carry}{delta}");
-                let held = self.mask.rewrite(&text, json, &mut out);
-                if held > 0 {
-                    self.held
-                        .insert(index, text[text.len() - held..].to_string());
-                }
-            }
+        let mut carry = self.held.remove(&index);
+        let text: &str = if let Some(carry) = &mut carry {
+            carry.push_str(delta);
+            carry
+        } else {
+            delta
+        };
+        let (out, tail) = self.mask.restore_chunk(text, json);
+        if !tail.is_empty() {
+            self.held.insert(index, tail.to_owned());
         }
-        out
+        out.into_owned()
     }
 }
 
@@ -563,7 +538,7 @@ impl Transport for Masked {
         spec: &ModelSpec,
         req: &Request,
     ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
-        let Some(mask) = self.armed.current() else {
+        let Some(mask) = self.armed.current().filter(|mask| !mask.is_empty()) else {
             return self.inner.stream(spec, req).await;
         };
         let covered = mask.cover_request(req);
@@ -634,8 +609,6 @@ impl Restored {
                     .into_iter()
                     .map(|part| self.restore_content(part))
                     .collect();
-                // `invalid` is raw argument text, which only ever goes back
-                // out; its tokens are covered again on the way.
                 self.queued
                     .push_back(StreamEvent::Complete { content, invalid });
             }
@@ -671,18 +644,17 @@ impl Restored {
     fn restore_content(&self, content: AssistantContent) -> AssistantContent {
         match content {
             AssistantContent::Text(mut text) => {
-                text.text = self.mask.restore(&text.text);
+                rewrite_field(&mut text.text, |text| self.mask.restored(text));
                 AssistantContent::Text(text)
             }
             AssistantContent::ToolCall(mut call) => {
-                self.mask
-                    .map_json(&mut call.args, &|text| self.mask.restore(text));
+                map_json(&mut call.args, &|text| self.mask.restored(text));
                 AssistantContent::ToolCall(call)
             }
             AssistantContent::Reasoning(mut reasoning) => {
                 for part in &mut reasoning.content {
                     if let ReasoningContent::Text { text, .. } = part {
-                        *text = self.mask.restore(text);
+                        rewrite_field(text, |text| self.mask.restored(text));
                     }
                 }
                 AssistantContent::Reasoning(reasoning)
@@ -736,10 +708,10 @@ mod tests {
 
     const KEY: [u8; 32] = [7; 32];
 
-    fn mask(key: [u8; 32], values: &[(&str, &str)]) -> Arc<Mask> {
+    fn mask(key: [u8; 32], values: &[&str]) -> Arc<Mask> {
         let mut mask = Mask::new(key);
-        for (kind, value) in values {
-            mask.add(Naming { kind, name: None }, value);
+        for value in values {
+            mask.add(None, value);
         }
         Arc::new(mask)
     }
@@ -747,16 +719,23 @@ mod tests {
     // The whole contract: what leaves is not the value, and what comes back is.
     #[test]
     fn a_value_comes_back_from_its_token() {
-        let s = mask(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
-        let covered = s.cover("export API_KEY=sk-live-9f3a1c2b7d5e");
-        assert!(!covered.contains("sk-live"), "{covered}");
-        assert_eq!(s.restore(&covered), "export API_KEY=sk-live-9f3a1c2b7d5e");
+        let value = "Bearer sk-live-9f3a1c2b7d5e";
+        let s = mask(KEY, &[value]);
+        let token = s.cover(value);
+        let id = token.strip_prefix("Bearer sk-").expect("public prefix");
+        assert_eq!(id.len(), 2 * ID_BYTES);
+        assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(token, value);
+        assert_eq!(
+            s.restore(&format!("header: {token}")),
+            format!("header: {value}")
+        );
     }
 
     // A prefix of an earlier value must not eat the longer one's head.
     #[test]
     fn the_longer_of_two_overlapping_values_wins() {
-        let s = mask(KEY, &[("TOKEN", "sk-abc"), ("API_KEY", "sk-abcdef")]);
+        let s = mask(KEY, &["sk-abc", "sk-abcdef"]);
         let covered = s.cover("sk-abcdef");
         assert_eq!(s.restore(&covered), "sk-abcdef");
         assert_ne!(covered, format!("{}def", s.cover("sk-abc")));
@@ -769,9 +748,9 @@ mod tests {
     #[test]
     fn one_value_gets_one_token_and_the_key_decides_which() {
         let value = "ghp_0123456789abcdefghij";
-        let here = mask(KEY, &[("API_KEY", value)]);
-        let again = mask(KEY, &[("API_KEY", value)]);
-        let elsewhere = mask([9; 32], &[("API_KEY", value)]);
+        let here = mask(KEY, &[value]);
+        let again = mask(KEY, &[value]);
+        let elsewhere = mask([9; 32], &[value]);
         assert_eq!(here.cover(value), again.cover(value));
         assert_ne!(here.cover(value), elsewhere.cover(value));
     }
@@ -780,7 +759,7 @@ mod tests {
     // be forwarded before it is known not to be one.
     #[test]
     fn a_token_split_across_two_deltas_is_restored_by_the_second() {
-        let s = mask(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
+        let s = mask(KEY, &["sk-live-9f3a1c2b7d5e"]);
         let token = s.cover("sk-live-9f3a1c2b7d5e");
         let (head, tail) = token.split_at(token.len() / 2);
         let mut r = Restorer::new(Arc::clone(&s));
@@ -794,7 +773,7 @@ mod tests {
     // What the model cut in half is still what it wrote: never swallowed.
     #[test]
     fn a_partial_that_never_completes_is_emitted_when_the_block_ends() {
-        let s = mask(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
+        let s = mask(KEY, &["sk-live-9f3a1c2b7d5e"]);
         let token = s.cover("sk-live-9f3a1c2b7d5e");
         let mut r = Restorer::new(Arc::clone(&s));
         assert_eq!(r.push(0, &format!("wait {}", &token[..4])), "wait ");
@@ -806,7 +785,7 @@ mod tests {
     // in is the order they were read, or a reader sees block 3's tail first.
     #[test]
     fn flushing_every_remainder_keeps_the_blocks_in_order() {
-        let s = mask(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
+        let s = mask(KEY, &["sk-live-9f3a1c2b7d5e"]);
         let token = s.cover("sk-live-9f3a1c2b7d5e");
         let head = &token[..5];
         let mut r = Restorer::new(Arc::clone(&s));
@@ -821,7 +800,7 @@ mod tests {
     // A token we never issued is prose, not a crash and not a guess.
     #[test]
     fn a_token_that_maps_to_nothing_is_left_as_written() {
-        let s = mask(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
+        let s = mask(KEY, &["sk-live-9f3a1c2b7d5e"]);
         assert_eq!(
             s.restore("{{PI_API_KEY_0000000000}}"),
             "{{PI_API_KEY_0000000000}}"
@@ -833,7 +812,7 @@ mod tests {
     #[test]
     fn a_value_with_quotes_comes_back_into_arguments_escaped() {
         let value = "pw\"with\\slashes\nand a newline";
-        let s = mask(KEY, &[("PASSWD", value)]);
+        let s = mask(KEY, &[value]);
         let token = s.cover(value);
         let mut r = Restorer::new(Arc::clone(&s));
         let out = r.push_json(0, &format!("{{\"password\":\"{token}\"}}"));
@@ -845,33 +824,29 @@ mod tests {
     // more than once and must not change on the second time.
     #[test]
     fn restoring_twice_changes_nothing() {
-        let s = mask(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
+        let s = mask(KEY, &["sk-live-9f3a1c2b7d5e"]);
         let once = s.restore(&s.cover("a sk-live-9f3a1c2b7d5e b"));
         assert_eq!(s.restore(&once), once);
     }
 
-    // One value listed under two kinds is still one value: two tokens would
-    // split one secret's history in half, and the first listing is the answer.
     #[test]
-    fn a_value_listed_twice_keeps_the_first_label_and_one_token() {
-        let s = mask(
-            KEY,
-            &[
-                ("EMAIL", "hunter2@corp.example"),
-                ("PASSWD", "hunter2@corp.example"),
-            ],
-        );
-        let covered = s.cover("hunter2@corp.example");
-        assert_eq!(covered.matches("{{PI_").count(), 1, "{covered}");
-        assert!(covered.contains("EMAIL"), "{covered}");
-        assert_eq!(s.restore(&covered), "hunter2@corp.example");
+    fn a_value_listed_twice_keeps_the_first_name_and_one_token() {
+        let mut s = Mask::new(KEY);
+        let value = "hunter2@corp.example";
+        s.add(Some("FIRST_PASSWORD"), value);
+        let token = s.cover(value);
+        s.add(Some("SECOND_PASSWORD"), value);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.footprints()[0].name.as_deref(), Some("FIRST_PASSWORD"));
+        assert_eq!(s.cover(value), token);
+        assert_eq!(s.restore(&token), value);
     }
 
     // Text with nothing to cover is the common case by far: it must come
     // through byte for byte, including a `{{` that opens no token.
     #[test]
     fn text_without_a_token_comes_through_unchanged() {
-        let s = mask(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
+        let s = mask(KEY, &["sk-live-9f3a1c2b7d5e"]);
         let text = "a {{PI_ b {{PI_NOT_A_TOKEN}} c";
         assert_eq!(s.cover(text), text);
         assert_eq!(s.restore(text), text);
@@ -883,32 +858,11 @@ mod tests {
     #[test]
     fn a_listing_names_each_value_and_shows_both_ends() {
         let mut s = Mask::new(KEY);
-        s.add(
-            Naming {
-                kind: "API_KEY",
-                name: Some("TYPESAFE_API_KEY"),
-            },
-            "sk-listing-0123456789",
-        );
-        s.add_guessed(
-            Naming {
-                kind: "TOKEN",
-                name: None,
-            },
-            "999888777:AAbbCCddEEffGG",
-        );
-        s.add(
-            Naming {
-                kind: "PASSWD",
-                name: None,
-            },
-            "hunter2",
-        );
+        s.add(Some("TYPESAFE_API_KEY"), "sk-listing-0123456789");
+        s.add_guessed(None, "999888777:AAbbCCddEEffGG");
+        s.add(None, "hunter2");
         let text = "sk-listing-0123456789 twice: sk-listing-0123456789";
-        let covered = s.cover(text);
-
-        // The kind the value was named by is what its token carries.
-        assert!(covered.contains("{{PI_API_KEY_"), "{covered}");
+        let _ = s.cover(text);
         let prints = s.footprints();
         assert_eq!(prints.len(), 3);
         assert_eq!(prints[0].tier, Tier::Named);
@@ -933,7 +887,7 @@ mod tests {
     #[test]
     fn every_text_a_request_carries_is_covered() {
         let value = "sk-live-9f3a1c2b7d5e";
-        let s = mask(KEY, &[("API_KEY", value)]);
+        let s = mask(KEY, &[value]);
         let covered = s.cover_request(&request_carrying(value, false));
         assert_eq!(covered.messages.len(), 3, "the messages stay put");
         assert_eq!(
@@ -950,7 +904,7 @@ mod tests {
     #[test]
     fn a_signature_an_encrypted_payload_and_image_data_go_out_as_they_came() {
         let value = "sk-live-9f3a1c2b7d5e";
-        let s = mask(KEY, &[("API_KEY", value)]);
+        let s = mask(KEY, &[value]);
         let wire = wire_json(&s.cover_request(&request_carrying(value, true)));
         assert!(wire.contains(&format!("sig:{value}")), "{wire}");
         assert!(wire.contains(&format!("enc:{value}")), "{wire}");
@@ -963,7 +917,7 @@ mod tests {
     #[test]
     fn a_token_split_across_streamed_deltas_is_restored() {
         let value = "sk-live-9f3a1c2b7d5e";
-        let s = mask(KEY, &[("API_KEY", value)]);
+        let s = mask(KEY, &[value]);
         let token = s.cover(value);
         let (head, tail) = token.split_at(6);
         let (events, _) = drain(
@@ -996,7 +950,7 @@ mod tests {
     #[test]
     fn tool_argument_deltas_come_back_escaped() {
         let value = "pw\"with\\slashes";
-        let s = mask(KEY, &[("PASSWD", value)]);
+        let s = mask(KEY, &[value]);
         let args = format!("{{\"password\":\"{}\"}}", s.cover(value));
         let (head, tail) = args.split_at(args.len() / 2);
         let (events, _) = drain(
@@ -1040,7 +994,7 @@ mod tests {
     #[test]
     fn the_wire_behind_the_mask_is_never_handed_a_value() {
         let value = "sk-live-9f3a1c2b7d5e";
-        let s = mask(KEY, &[("API_KEY", value)]);
+        let s = mask(KEY, &[value]);
         let (_, seen) = drain_with(request_carrying(value, false), Vec::new(), &s);
         let wire = wire_json(&seen.expect("a call"));
         assert!(!wire.contains(value), "{wire}");
@@ -1050,7 +1004,7 @@ mod tests {
     // the model's parting bytes: the held tail is read out before the end.
     #[test]
     fn a_tail_the_stream_never_completes_is_still_read() {
-        let s = mask(KEY, &[("API_KEY", "sk-live-9f3a1c2b7d5e")]);
+        let s = mask(KEY, &["sk-live-9f3a1c2b7d5e"]);
         let token = s.cover("sk-live-9f3a1c2b7d5e");
         let head = &token[..4];
         let (events, _) = drain(
@@ -1077,8 +1031,8 @@ mod tests {
     // it from deltas, so this path needs the restore a second time.
     #[test]
     fn a_turn_stated_whole_comes_back_restored() {
-        let value = "sk-live-9f3a1c2b7d5e";
-        let s = mask(KEY, &[("API_KEY", value)]);
+        let value = "transport-secret-9f3a1c2b7d5e";
+        let s = mask(KEY, &[value]);
         let token = s.cover(value);
         let (events, _) = drain(
             vec![StreamEvent::Complete {
@@ -1089,7 +1043,15 @@ mod tests {
                     AssistantContent::ToolCall(ToolCall {
                         id: "c".into(),
                         name: "bash".into(),
-                        args: json!({ "command": format!("echo {token}") }),
+                        args: json!({ "command": format!("echo {token}"), (token.as_str()): 1 }),
+                    }),
+                    AssistantContent::Reasoning(Reasoning {
+                        id: None,
+                        by: None,
+                        content: vec![ReasoningContent::Text {
+                            text: format!("thinking of {token}"),
+                            signature: Some("original-signature".into()),
+                        }],
                     }),
                 ],
                 invalid: Vec::new(),
@@ -1107,6 +1069,27 @@ mod tests {
             panic!("{content:?}")
         };
         assert_eq!(call.args["command"], format!("echo {value}"));
+        assert_eq!(call.args[value], 1);
+        let AssistantContent::Reasoning(reasoning) = &content[2] else {
+            panic!("{content:?}");
+        };
+        assert_eq!(reasoning.text(), format!("thinking of {value}"));
+
+        let message = Message::Assistant {
+            content: content.clone(),
+        };
+        let saved = serde_json::to_string(&message).expect("serializable assistant message");
+        assert!(saved.contains(value), "{saved}");
+        assert!(!saved.contains(&token), "{saved}");
+        let replay = Request {
+            messages: vec![message],
+            ..Request::default()
+        };
+        let (_, seen) = drain_with(replay, Vec::new(), &s);
+        let wire = wire_json(&seen.expect("replayed message"));
+        assert_eq!(wire.matches(&token).count(), 4, "{wire}");
+        assert!(!wire.contains(value), "{wire}");
+        assert!(wire.contains("original-signature"), "{wire}");
     }
 
     // A value found after the wire was made — a script's `.env` edited
@@ -1134,7 +1117,7 @@ mod tests {
         // Nothing armed yet: the request goes as it is.
         assert!(call(&seen).contains(value));
 
-        armed.arm(Some(mask(KEY, &[("API_KEY", value)])));
+        armed.arm(Some(mask(KEY, &[value])));
         assert!(!call(&seen).contains(value));
     }
 

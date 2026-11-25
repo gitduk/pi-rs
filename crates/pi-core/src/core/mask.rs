@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use llm::mask::{Footprint, Mask, Naming, Tier};
+use llm::mask::{Footprint, Mask, Tier};
 use pi_store::config;
 use pi_store::listing::{Listing, Role, Row};
 use pi_store::text::{clip, pad, widest};
@@ -12,16 +12,17 @@ use pi_store::text::{clip, pad, widest};
 /// more than the leak it prevents.
 const MIN: usize = 8;
 
+/// Length at which the shape heuristic accepts a value without mixed letters and digits.
+const LONG_SECRET_MIN: usize = 16;
+
 /// Widest a name column gets before it is cut: room for
 /// `provider.<name>.api_key`, short enough that the value still fits on the
 /// line beside it.
 const NAME_MAX: usize = 22;
 
-/// One value this run must not send: the word its token carries, the name a
-/// listing shows for it, and how it was recognised.
+/// One value this run must not send, how it was named, and how it was recognised.
 #[derive(Debug, PartialEq)]
 pub struct Secret {
-    pub kind: String,
     pub name: Option<String>,
     pub tier: Tier,
     pub value: String,
@@ -30,13 +31,9 @@ pub struct Secret {
 impl Secret {
     /// Register this value with `mask`, under the name that introduced it.
     pub(super) fn cover_into(&self, mask: &mut Mask) {
-        let naming = Naming {
-            kind: &self.kind,
-            name: self.name.as_deref(),
-        };
         match self.tier {
-            Tier::Named => mask.add(naming, &self.value),
-            Tier::Guessed => mask.add_guessed(naming, &self.value),
+            Tier::Named => mask.add(self.name.as_deref(), &self.value),
+            Tier::Guessed => mask.add_guessed(self.name.as_deref(), &self.value),
         }
     }
 }
@@ -51,28 +48,27 @@ pub struct Found {
 /// Everything this workspace and configuration name, or `None` when there is
 /// no pi directory to keep the key in.
 pub fn find(workspace: &Path, config: &config::Config) -> Option<Found> {
-    let dirs: Vec<PathBuf> = (super::tools::dirs(workspace, "tools"))
+    let key = pi_store::mask::key()?;
+    let dirs = super::tools::dirs(workspace, "tools")
         .into_iter()
-        .map(|(dir, _)| dir)
-        .collect();
+        .map(|(dir, _)| dir);
     Some(Found {
-        key: pi_store::mask::key()?,
-        values: values_of(&dirs, config),
+        key,
+        values: values_of(dirs, config),
     })
 }
 
 // A value this short matches more prose than secret: a stub key would cover
 // every word that holds it.
 fn long_enough(value: &str, floor: usize) -> bool {
-    value.chars().count() >= floor
+    value.chars().take(floor).count() == floor
 }
 
-fn values_of(dirs: &[PathBuf], config: &config::Config) -> Vec<Secret> {
+fn values_of(dirs: impl IntoIterator<Item = PathBuf>, config: &config::Config) -> Vec<Secret> {
     let mut values: Vec<Secret> = Vec::new();
     for credential in config.keys() {
         if long_enough(&credential.value, MIN) {
             values.push(Secret {
-                kind: "API_KEY".to_string(),
                 name: Some(credential.name),
                 tier: Tier::Named,
                 value: credential.value,
@@ -83,78 +79,68 @@ fn values_of(dirs: &[PathBuf], config: &config::Config) -> Vec<Secret> {
     // looks like: the shape rules are why the list exists.
     for value in config.secrets() {
         values.push(Secret {
-            kind: "SECRET".to_string(),
             name: None,
             tier: Tier::Named,
             value,
         });
     }
-    for dir in dirs {
-        for (name, value) in pi_store::envfile::read(dir) {
-            // A name says what a value is, so half the proof a shape needs
-            // will do.
-            if !long_enough(&value, MIN / 2) {
-                continue;
-            }
-            // A variable named for a credential is the owner's word, whatever
-            // its value; the shape rule is for the ones that say nothing.
-            let (kind, tier) = match credential_kind(&name) {
-                Some(kind) => (kind, Tier::Named),
-                None if shapes_a_secret(&value) => ("SECRET".to_string(), Tier::Guessed),
-                None => continue,
-            };
-            values.push(Secret {
-                kind,
-                name: Some(name),
-                tier,
-                value,
-            });
+    let env_values = dirs
+        .into_iter()
+        .flat_map(|dir| pi_store::envfile::read(&dir));
+    for (name, value) in env_values {
+        // An explicit name halves the minimum length needed for masking.
+        if !long_enough(&value, MIN / 2) {
+            continue;
         }
+        let tier = if names_a_credential(&name) {
+            Tier::Named
+        } else if shapes_a_secret(&value) {
+            Tier::Guessed
+        } else {
+            continue;
+        };
+        values.push(Secret {
+            name: Some(name),
+            tier,
+            value,
+        });
     }
     values
 }
 
-// A `.env` holds settings beside keys, so a value whose name says nothing has
-// to look like one: mixed letters and digits, or long enough that no word
-// reaches it. A `scheme://` value is a URL instead — a base URL is long, says
-// nothing, and the model needs to read it, so whatever scheme it carries it
-// is not a secret.
 fn shapes_a_secret(value: &str) -> bool {
-    if !long_enough(value, MIN) {
-        return false;
+    if let Some((scheme, _)) = value.split_once("://")
+        && let Ok(url) = reqwest::Url::parse(value)
+        && url.scheme().eq_ignore_ascii_case(scheme)
+    {
+        // Keep ordinary base URLs visible. Userinfo, queries, and fragments
+        // can carry credentials even when the variable name is generic.
+        return !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some();
     }
-    let Some(after) = value.split_once("://").map(|(_, after)| after) else {
-        // No scheme, so the rule stands on its shape alone.
-        return {
-            let digit = value.chars().any(|c| c.is_ascii_digit());
-            let letter = value.chars().any(|c| c.is_ascii_alphabetic());
-            (digit && letter) || value.chars().count() >= 16
-        };
-    };
-    // A URL is not a secret: the rule only holds for what is left over.
-    !is_scheme(&value.as_bytes()[..value.len() - after.len() - "://".len()])
+
+    let length = value.chars().take(LONG_SECRET_MIN).count();
+    length >= LONG_SECRET_MIN
+        || (length >= MIN
+            && value.bytes().any(|byte| byte.is_ascii_digit())
+            && value.bytes().any(|byte| byte.is_ascii_alphabetic()))
 }
 
-// Whether `head` is a scheme: RFC 3986's letters, digits, `+`, `-` or `.`,
-// led by a letter — the one shape every `://` value shares. A colon inside
-// prose ("ratio 2:1") has no scheme and is not a URL.
-fn is_scheme(head: &[u8]) -> bool {
-    match head.split_first() {
-        Some((first, rest)) if first.is_ascii_alphabetic() => rest
-            .iter()
-            .all(|c| c.is_ascii_alphanumeric() || b"+-.".contains(c)),
-        _ => false,
-    }
-}
-
-// The kind a variable's own name says it is, when it says one: the token then
-// reads `{{PI_TOKEN_…}}`, and the listing knows the owner named it.
-fn credential_kind(name: &str) -> Option<String> {
-    let last = name.rsplit('_').next().unwrap_or(name).to_ascii_uppercase();
-    match last.as_str() {
-        "KEY" | "TOKEN" | "SECRET" | "PASSWORD" | "PASSWD" | "CREDENTIALS" => Some(last),
-        _ => None,
-    }
+// Credential suffixes count as explicit naming in a `.env` file.
+fn names_a_credential(name: &str) -> bool {
+    let suffix = name.rsplit_once('_').map_or(name, |(_, suffix)| suffix);
+    [
+        "KEY",
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIALS",
+    ]
+    .iter()
+    .any(|word| suffix.eq_ignore_ascii_case(word))
 }
 
 /// What this run has masked, as the surface shows it: the name that introduced
@@ -203,13 +189,13 @@ fn rows(mut prints: Vec<Footprint>) -> Listing {
         ])
         .with_role(Role::Section),
     ];
-    rows.extend(prints.iter().zip(&shown).map(|(print, ends)| {
+    rows.extend(prints.iter().zip(shown).map(|(print, ends)| {
         Row::new([
             clip(label(print), NAME_MAX),
             reason(print).to_string(),
             print.len.to_string(),
             print.hits.to_string(),
-            pad(ends, shown_w),
+            pad(&ends, shown_w),
         ])
         .with_role(Role::Budget)
     }));
@@ -235,15 +221,15 @@ fn ends(print: &Footprint) -> String {
     let shown = print.head.chars().count() + print.tail.chars().count();
     // Both ends only while they stay a minority of the value: two thirds of a
     // short secret is enough to guess the rest of it.
-    match shown * 2 <= print.len {
-        true => format!("{}…{}", print.head, print.tail),
-        false => print.head.clone(),
+    if shown * 2 <= print.len {
+        format!("{}…{}", print.head, print.tail)
+    } else {
+        print.head.clone()
     }
 }
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
 
     fn config(body: &str) -> config::Config {
@@ -256,28 +242,10 @@ mod tests {
     #[test]
     fn the_listing_shows_name_ends_why_and_how_often_it_left() {
         let mut mask = Mask::new([7; 32]);
-        mask.add(
-            Naming {
-                kind: "SECRET",
-                name: Some("OLD_PASSWORD"),
-            },
-            "hunter2-the-password",
-        );
-        mask.add(
-            Naming {
-                kind: "API_KEY",
-                name: Some("provider.up.api_key"),
-            },
-            "short-key",
-        );
+        mask.add(Some("OLD_PASSWORD"), "hunter2-the-password");
+        mask.add(Some("provider.up.api_key"), "short-key");
         // Twelve characters: its two ends would be two thirds of it.
-        mask.add(
-            Naming {
-                kind: "SECRET",
-                name: None,
-            },
-            "abcdefghijkl",
-        );
+        mask.add(None, "abcdefghijkl");
         let _ = mask.cover("hunter2-the-password");
 
         let prints = mask.footprints();
@@ -349,18 +317,18 @@ mod tests {
         );
     }
 
-    // A URL of any scheme is read by the model, not sent as a secret; a
-    // value that opens with a colon is prose and keeps the shape rule.
     #[test]
-    fn a_url_of_any_scheme_is_not_a_secret_but_prose_is_not_excused() {
+    fn the_shape_rule_exempts_plain_urls() {
         assert!(!shapes_a_secret("https://api.example.com/v1"));
-        assert!(!shapes_a_secret("postgres://user:pass@host:5432/db"));
-        assert!(!shapes_a_secret("git+ssh://git@host/repo.git"));
+        assert!(!shapes_a_secret("git+ssh://host/repo.git"));
         assert!(!shapes_a_secret("rfc2396://id/hello"));
-        // A colon in prose is no scheme: the 16 characters still catch this.
+        assert!(shapes_a_secret("postgres://user:pass@host:5432/db"));
+        assert!(shapes_a_secret("git+ssh://git@host/repo.git"));
+        assert!(shapes_a_secret("https://host/v1?token=example"));
+        assert!(shapes_a_secret("https://host/v1#token=example"));
         assert!(shapes_a_secret("ratio 2:1 in the mix 100%"));
-        // A `://` that opens with no scheme is not a URL.
         assert!(shapes_a_secret("://not-a-scheme-0123"));
+        assert!(!shapes_a_secret("plain text://"));
     }
 
     // A connection's stub key is no secret and is left alone; a listed secret
@@ -374,16 +342,14 @@ mod tests {
              [provider.down]\nbase_url = \":3426/v1\"\nformat = \"chat\"\napi_key = \"{kept}\"\n",
         ));
         assert_eq!(
-            values_of(&[], &config),
+            values_of([], &config),
             vec![
                 Secret {
-                    kind: "API_KEY".to_string(),
                     name: Some("provider.down.api_key".to_string()),
                     tier: Tier::Named,
                     value: kept,
                 },
                 Secret {
-                    kind: "SECRET".to_string(),
                     name: None,
                     tier: Tier::Named,
                     value: "abcd".to_string(),
@@ -432,7 +398,7 @@ mod tests {
         );
 
         let mut mask = Mask::new([7; 32]);
-        for secret in values_of(std::slice::from_ref(&tools), &config) {
+        for secret in values_of([tools], &config) {
             secret.cover_into(&mut mask);
         }
         let text = "key sk-up-0123456789 bot 123456:AAbbCCddEEffGG \

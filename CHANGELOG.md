@@ -11,13 +11,14 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 
 ### Changed
 
-- `/mask` is one table — the name that introduced each value, whether its
-  name or its shape said so, its length, how often it was masked, and the
-  ends it shows — instead of one table per kind.
+- `/mask` shows one table with each value's name, detection method, length,
+  mask count, and visible ends.
 
-- A `scheme://` value in a `.env` is a URL and is left alone, whatever the
-  scheme; the shape rule no longer masks every base URL of sixteen
-  characters or more.
+- The `.env` shape heuristic leaves plain base URLs visible to the model.
+  URLs with userinfo, a query, or a fragment are masked.
+
+- Model requests use stable, key-like replacements for secrets. Pi restores
+  the originals before displaying or saving responses and running tool calls.
 
 ## 3.0.8 - 2026-11-25
 

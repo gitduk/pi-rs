@@ -1,7 +1,7 @@
 //! A model name turned into something that can be talked to: its spec and the
 //! client for its wire. Startup, `/model` and a reload all come through here.
 
-use std::sync::{Arc, LazyLock, PoisonError, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use anyhow::{Context, Result};
 use llm::mask::{Armed, Footprint, Mask, Masked};
@@ -17,10 +17,16 @@ use pi_store::config;
 /// next request on, and a run with two checkouts open masks what either named.
 static MASK: LazyLock<Arc<Armed>> = LazyLock::new(|| Arc::new(Armed::default()));
 
-/// Every value any resolution has named, by kind and tier. Only ever grows: a
-/// reload adds to the set rather than replacing it, and a value that left once
-/// stays masked.
-static VALUES: RwLock<Vec<Secret>> = RwLock::new(Vec::new());
+struct KnownSecrets {
+    armed_key: Option<[u8; 32]>,
+    values: Vec<Secret>,
+}
+
+// Keep values from earlier resolutions so they stay masked after a reload.
+static KNOWN: Mutex<KnownSecrets> = Mutex::new(KnownSecrets {
+    armed_key: None,
+    values: Vec::new(),
+});
 
 /// Arm what this resolution found. Answers whether anything is masked now: a
 /// run with no pi directory to keep the key in masks nothing, and says so.
@@ -28,18 +34,23 @@ pub fn arm(found: Option<Found>) -> bool {
     let Some(found) = found else {
         return MASK.current().is_some();
     };
-    let mut values = VALUES.write().unwrap_or_else(PoisonError::into_inner);
+    let mut known = KNOWN.lock().unwrap_or_else(PoisonError::into_inner);
     for secret in found.values {
-        if !values.iter().any(|known| known.value == secret.value) {
-            values.push(secret);
+        if !known.values.iter().any(|entry| entry.value == secret.value) {
+            known.armed_key = None;
+            known.values.push(secret);
         }
     }
+    if known.armed_key == Some(found.key) {
+        return true;
+    }
     let mut mask = Mask::new(found.key);
-    for secret in values.iter() {
+    for secret in &known.values {
         secret.cover_into(&mut mask);
     }
     tracing::debug!(target: "pi::mask", values = mask.len(), "armed");
     MASK.arm(Some(Arc::new(mask)));
+    known.armed_key = Some(found.key);
     true
 }
 
