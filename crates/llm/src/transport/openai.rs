@@ -346,7 +346,6 @@ fn read_output(
                         invalid.push(InvalidToolArgs {
                             call: id.clone(),
                             name: name.clone(),
-                            raw: raw.to_string(),
                             error: e.to_string(),
                         });
                         json!({})

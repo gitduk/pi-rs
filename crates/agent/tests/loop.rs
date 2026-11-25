@@ -402,13 +402,9 @@ async fn every_call_gets_a_result_even_when_nothing_runs() {
         "{:?}",
         results[2]
     );
-    // The model's own text rides back in the rejection, or it can only guess
-    // at what failed to parse from the column number.
-    assert!(
-        results[2].flatten_text().contains(r#"You sent: {"path": "#),
-        "{:?}",
-        results[2]
-    );
+    let rejection = results[2].flatten_text();
+    assert!(rejection.contains("line 1 column"), "{rejection}");
+    assert!(!rejection.contains(r#"{"path":"#), "{rejection}");
 
     let calls: Vec<_> = view[1].tool_calls().collect();
     assert_eq!(calls.len(), 3);

@@ -133,7 +133,6 @@ pub enum StreamEvent {
 pub struct InvalidToolArgs {
     pub call: String,
     pub name: String,
-    pub raw: String,
     pub error: String,
 }
 
@@ -294,7 +293,6 @@ impl Accumulator {
                             invalid.push(InvalidToolArgs {
                                 call: id.clone(),
                                 name: name.clone(),
-                                raw: b.text.clone(),
                                 error: e.to_string(),
                             });
                             json!({})

@@ -15,10 +15,6 @@ use crate::event::Reporter;
 use crate::session::{Drawn, Session};
 use crate::{Agent, AgentError, Decision, Event, replies, seams::Input};
 
-// How much of a failed argument blob rides back to the model and log; past
-// it, show a window around serde's column rather than the head.
-const MAX_INVALID_ARGS_SHOWN: usize = 400;
-
 // What a streamed call resolves to before anything runs. Deciding first keeps
 // the result list aligned with the call list even when nothing executes.
 enum Action {
@@ -41,17 +37,15 @@ impl Agent {
             .iter()
             .map(|c| {
                 if let Some(invalid) = bad.get(&c.id) {
-                    let snippet = invalid_args_snippet(&invalid.raw, &invalid.error);
                     tracing::warn!(
                         target: "pi::wire",
                         call = %c.id,
                         name = %c.name,
                         error = %invalid.error,
-                        raw = %snippet,
                         "tool arguments were not valid JSON"
                     );
                     return Action::Reject(format!(
-                        "arguments were not valid JSON ({}). You sent: {snippet}. \
+                        "arguments were not valid JSON ({}). \
                          Send the complete JSON object again.",
                         invalid.error,
                     ));
@@ -303,32 +297,4 @@ fn landed(
 
 fn ran(call: &ToolCall) -> tracing::Span {
     tracing::info_span!(target: "pi::tool", "tool", name = %call.name, call = %call.id)
-}
-
-// Shown whole when it fits, else windowed around serde's 1-indexed column
-// (chars, not bytes — close enough); no column falls back to the tail.
-fn invalid_args_snippet(raw: &str, err: &str) -> String {
-    let chars: Vec<char> = raw.chars().collect();
-    if chars.len() <= MAX_INVALID_ARGS_SHOWN {
-        return raw.to_string();
-    }
-    let column = err
-        .rsplit_once("column ")
-        .and_then(|(_, n)| n.trim().parse::<usize>().ok())
-        .unwrap_or(chars.len())
-        .saturating_sub(1)
-        .min(chars.len());
-    let half = MAX_INVALID_ARGS_SHOWN / 2;
-    let to = (column.saturating_sub(half) + MAX_INVALID_ARGS_SHOWN).min(chars.len());
-    let from = to - MAX_INVALID_ARGS_SHOWN;
-
-    let mut out = String::new();
-    if from > 0 {
-        out.push('…');
-    }
-    out.extend(chars[from..to].iter());
-    if to < chars.len() {
-        out.push('…');
-    }
-    out
 }

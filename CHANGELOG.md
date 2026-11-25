@@ -20,6 +20,11 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 - Model requests use stable, key-like replacements for secrets. Pi restores
   the originals before displaying or saving responses and running tool calls.
 
+### Fixed
+
+- Invalid tool calls report the JSON parse error and its location without
+  echoing the arguments into diagnostics or retry messages.
+
 ## 3.0.8 - 2026-11-25
 
 ### Added
