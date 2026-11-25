@@ -47,7 +47,7 @@ pub struct Mask {
 #[derive(Debug)]
 struct Entry {
     token: String,
-    kind: String,
+    name: Option<String>,
     tier: Tier,
     value: String,
 }
@@ -81,13 +81,23 @@ pub enum Tier {
     Guessed,
 }
 
-/// One value as a listing shows it: the token the vendor sees, the kind it
-/// names, and how much of the value a person may be told.
+/// How a value was introduced: the word its token carries, and the name a
+/// person reads in place of the value.
+#[derive(Debug, Clone, Copy)]
+pub struct Naming<'a> {
+    /// The short label inside the token, such as `TOKEN`.
+    pub kind: &'a str,
+    /// What introduced the value: a `.env` variable, a config field. A value
+    /// only a `secrets` list holds is named by nothing.
+    pub name: Option<&'a str>,
+}
+
+/// One value as a listing shows it: the token the vendor sees, the name that
+/// introduced it, and how much of the value a person may be told.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Footprint {
-    pub token: String,
-    /// The kind the token names: a listing groups by it.
-    pub kind: String,
+    /// What introduced the value; `None` when nothing did.
+    pub name: Option<String>,
     pub tier: Tier,
     /// The first characters, which for a key are its scheme rather than its
     /// secret: enough to recognise the value, not enough to use it.
@@ -98,18 +108,6 @@ pub struct Footprint {
     /// Characters, not bytes.
     pub len: usize,
     pub hits: u64,
-}
-
-impl Footprint {
-    /// The token without the braces that mark it on the wire: what a listing
-    /// shows, since a reader is looking at names rather than at something to
-    /// paste back.
-    pub fn bare(&self) -> &str {
-        self.token
-            .strip_prefix(OPEN)
-            .and_then(|rest| rest.strip_suffix("}}"))
-            .unwrap_or(&self.token)
-    }
 }
 
 /// How much of a value a listing shows: its scheme for a long one, one
@@ -138,24 +136,23 @@ impl Mask {
         }
     }
 
-    /// Register a value the owner named, under the kind it is — which the
-    /// token then names. A value already listed keeps its first token and its
-    /// first kind.
-    pub fn add(&mut self, kind: &str, value: &str) {
-        self.insert(kind, Tier::Named, value);
+    /// Register a value the owner named. A value already listed keeps its
+    /// first token, its first kind and its first name.
+    pub fn add(&mut self, naming: Naming<'_>, value: &str) {
+        self.insert(naming, Tier::Named, value);
     }
 
     /// Register a value a shape rule guessed at: the kind is what the rule
     /// said it was, and the listing says the mask rests on a guess.
-    pub fn add_guessed(&mut self, kind: &str, value: &str) {
-        self.insert(kind, Tier::Guessed, value);
+    pub fn add_guessed(&mut self, naming: Naming<'_>, value: &str) {
+        self.insert(naming, Tier::Guessed, value);
     }
 
-    fn insert(&mut self, label: &str, tier: Tier, value: &str) {
+    fn insert(&mut self, naming: Naming<'_>, tier: Tier, value: &str) {
         if value.is_empty() || self.by_value.contains_key(value) {
             return;
         }
-        let token = self.allocate(label, value);
+        let token = self.allocate(naming.kind, value);
         let first = value.as_bytes()[0] as usize;
         self.starts[first] = true;
         self.buckets[first].push(self.entries.len());
@@ -164,7 +161,7 @@ impl Mask {
         self.by_token.insert(token.clone(), value.to_string());
         self.entries.push(Entry {
             token,
-            kind: label.to_string(),
+            name: naming.name.map(str::to_string),
             tier,
             value: value.to_string(),
         });
@@ -344,8 +341,7 @@ impl Mask {
                 let chars: Vec<char> = entry.value.chars().collect();
                 let shown = head_chars(&entry.value);
                 Footprint {
-                    token: entry.token.clone(),
-                    kind: entry.kind.clone(),
+                    name: entry.name.clone(),
                     tier: entry.tier,
                     head: chars.iter().take(shown).collect(),
                     tail: chars
@@ -742,8 +738,8 @@ mod tests {
 
     fn mask(key: [u8; 32], values: &[(&str, &str)]) -> Arc<Mask> {
         let mut mask = Mask::new(key);
-        for (label, value) in values {
-            mask.add(label, value);
+        for (kind, value) in values {
+            mask.add(Naming { kind, name: None }, value);
         }
         Arc::new(mask)
     }
@@ -885,24 +881,44 @@ mod tests {
     // is shown, and whether the mask rests on a guess: a head of four
     // characters is enough to recognise a value and not enough to use it.
     #[test]
-    fn a_listing_names_each_value_by_its_kind_and_both_ends() {
+    fn a_listing_names_each_value_and_shows_both_ends() {
         let mut s = Mask::new(KEY);
-        s.add("API_KEY", "sk-listing-0123456789");
-        s.add_guessed("TOKEN", "999888777:AAbbCCddEEffGG");
-        s.add("PASSWD", "hunter2");
+        s.add(
+            Naming {
+                kind: "API_KEY",
+                name: Some("TYPESAFE_API_KEY"),
+            },
+            "sk-listing-0123456789",
+        );
+        s.add_guessed(
+            Naming {
+                kind: "TOKEN",
+                name: None,
+            },
+            "999888777:AAbbCCddEEffGG",
+        );
+        s.add(
+            Naming {
+                kind: "PASSWD",
+                name: None,
+            },
+            "hunter2",
+        );
         let text = "sk-listing-0123456789 twice: sk-listing-0123456789";
-        let _ = s.cover(text);
+        let covered = s.cover(text);
 
+        // The kind the value was named by is what its token carries.
+        assert!(covered.contains("{{PI_API_KEY_"), "{covered}");
         let prints = s.footprints();
         assert_eq!(prints.len(), 3);
-        assert!(prints[0].token.contains("API_KEY"), "{:?}", prints[0]);
         assert_eq!(prints[0].tier, Tier::Named);
-        assert_eq!(prints[0].kind, "API_KEY");
+        assert_eq!(prints[0].name.as_deref(), Some("TYPESAFE_API_KEY"));
         assert_eq!(prints[0].head, "sk-l");
         assert_eq!(prints[0].tail, "6789");
         assert_eq!(prints[0].len, 21);
         assert_eq!(prints[0].hits, 2);
         assert_eq!(prints[1].tier, Tier::Guessed);
+        assert_eq!(prints[1].name, None);
         assert_eq!(prints[1].hits, 0);
         // Four of a seven-character value would be more than half of it.
         assert_eq!(prints[2].head, "h");

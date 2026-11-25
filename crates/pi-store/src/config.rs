@@ -101,6 +101,14 @@ pub struct Config {
     pub keep_days: Option<u32>,
 }
 
+/// A credential one connection names: the field holding it and its value, so a
+/// listing can say where the value came from.
+#[derive(Debug)]
+pub struct Credential {
+    pub name: String,
+    pub value: String,
+}
+
 /// The modal keys, and the sequence that leaves Insert for Normal.
 ///
 /// On by default, which is payable because the layer is additive: the Normal
@@ -547,14 +555,21 @@ impl Config {
     }
 
     /// Every credential the connections name, resolved: what a request must
-    /// not carry, whatever model is in place.
-    pub fn keys(&self) -> Vec<String> {
-        let mut keys: Vec<String> = (self.provider.values())
-            .filter_map(|provider| provider.api_key.as_deref())
-            .filter_map(expand_key)
-            .collect();
-        keys.sort();
-        keys.dedup();
+    /// not carry, whatever model is in place. One entry per value, under the
+    /// first connection that holds it.
+    pub fn keys(&self) -> Vec<Credential> {
+        let mut keys: Vec<Credential> = Vec::new();
+        for (provider, entry) in &self.provider {
+            let Some(value) = entry.api_key.as_deref().and_then(expand_key) else {
+                continue;
+            };
+            if !keys.iter().any(|known| known.value == value) {
+                keys.push(Credential {
+                    name: format!("provider.{provider}.api_key"),
+                    value,
+                });
+            }
+        }
         keys
     }
 

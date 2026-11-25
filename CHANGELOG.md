@@ -7,6 +7,14 @@ session store or the tool script protocol changed shape.
 
 Releases before 3.0.0 are recorded in the commit history, not here.
 
+## Unreleased
+
+### Changed
+
+- `/mask` is one table — the name that introduced each value, whether its
+  name or its shape said so, its length, how often it was masked, and the
+  ends it shows — instead of one table per kind.
+
 ## 3.0.8 - 2026-11-25
 
 ### Added

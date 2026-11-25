@@ -74,6 +74,12 @@ pub(crate) fn lines(report: &Listing, width: usize, paint: Option<&Paint>) -> Ve
             sections.get(1..).unwrap_or_default()
         }
     };
+    // A report whose one table was taken as the summary has no columns left
+    // to lay out.
+    if directories.is_empty() {
+        indent(&mut out, margin);
+        return out;
+    }
     // As many columns as hold a table, then rows of the same length: four
     // tables that fit in three columns read as two and two, not three and one.
     let fits = ((body_width + COLUMN_GAP) / (MIN_COLUMN_WIDTH + COLUMN_GAP)).max(1);
@@ -105,10 +111,16 @@ pub(crate) fn lines(report: &Listing, width: usize, paint: Option<&Paint>) -> Ve
         out.push(Line::default());
         out.extend(render(&footer, body_width, paint));
     }
-    for line in &mut out {
+    indent(&mut out, margin);
+    out
+}
+
+// Every line starts at the same margin, so a narrow terminal keeps its text
+// off both edges.
+fn indent(out: &mut [Line<'static>], margin: usize) {
+    for line in out {
         line.spans.insert(0, Span::raw(" ".repeat(margin)));
     }
-    out
 }
 
 struct Columns {
@@ -290,4 +302,36 @@ fn render(rows: &[&Row], width: usize, paint: Option<&Paint>) -> Vec<Line<'stati
         out.extend(wrap::fit(&line, width));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A report carrying one table has it taken as the summary, which leaves
+    // the column layout nothing to arrange: the lines must still be said.
+    #[test]
+    fn a_report_with_one_table_keeps_its_lines_and_its_margin() {
+        let listing = Listing::report([
+            Row::new(["Mask"]).with_role(Role::Title),
+            Row::new(["NAME", "BY", "CHARS", "MASKED", "VALUE"]).with_role(Role::Section),
+            Row::new(["TELEGRAM_BOT_TOKEN", "named", "46", "2", "7341…gH30"])
+                .with_role(Role::Budget),
+        ]);
+        let out: Vec<String> = lines(&listing, 80, None)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(
+            out.iter().any(|line| line.contains("TELEGRAM_BOT_TOKEN")),
+            "{out:?}"
+        );
+        let margin = |line: &String| line.len() - line.trim_start().len();
+        assert!(
+            out.iter()
+                .filter(|line| !line.trim().is_empty())
+                .all(|line| margin(line) == margin(&out[0])),
+            "{out:?}"
+        );
+    }
 }

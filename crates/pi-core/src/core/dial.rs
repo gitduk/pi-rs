@@ -4,11 +4,11 @@
 use std::sync::{Arc, LazyLock, PoisonError, RwLock};
 
 use anyhow::{Context, Result};
-use llm::mask::{Armed, Footprint, Mask, Masked, Tier};
+use llm::mask::{Armed, Footprint, Mask, Masked};
 use llm::model::{Format, ModelSpec};
 use llm::transport::{Transport, anthropic::Anthropic, chat::ChatCompletions, openai::OpenAi};
 
-use super::mask::Found;
+use super::mask::{Found, Secret};
 use crate::args::Pinned;
 use pi_store::config;
 
@@ -20,7 +20,7 @@ static MASK: LazyLock<Arc<Armed>> = LazyLock::new(|| Arc::new(Armed::default()))
 /// Every value any resolution has named, by kind and tier. Only ever grows: a
 /// reload adds to the set rather than replacing it, and a value that left once
 /// stays masked.
-static VALUES: RwLock<Vec<(String, Tier, String)>> = RwLock::new(Vec::new());
+static VALUES: RwLock<Vec<Secret>> = RwLock::new(Vec::new());
 
 /// Arm what this resolution found. Answers whether anything is masked now: a
 /// run with no pi directory to keep the key in masks nothing, and says so.
@@ -29,17 +29,14 @@ pub fn arm(found: Option<Found>) -> bool {
         return MASK.current().is_some();
     };
     let mut values = VALUES.write().unwrap_or_else(PoisonError::into_inner);
-    for value in found.values {
-        if !values.contains(&value) {
-            values.push(value);
+    for secret in found.values {
+        if !values.iter().any(|known| known.value == secret.value) {
+            values.push(secret);
         }
     }
     let mut mask = Mask::new(found.key);
-    for (kind, tier, value) in values.iter() {
-        match tier {
-            Tier::Named => mask.add(kind, value),
-            Tier::Guessed => mask.add_guessed(kind, value),
-        }
+    for secret in values.iter() {
+        secret.cover_into(&mut mask);
     }
     tracing::debug!(target: "pi::mask", values = mask.len(), "armed");
     MASK.arm(Some(Arc::new(mask)));

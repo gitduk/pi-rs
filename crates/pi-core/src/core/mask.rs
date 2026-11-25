@@ -3,20 +3,49 @@
 
 use std::path::{Path, PathBuf};
 
-use llm::mask::{Footprint, Tier};
+use llm::mask::{Footprint, Mask, Naming, Tier};
 use pi_store::config;
 use pi_store::listing::{Listing, Role, Row};
-use std::collections::BTreeMap;
+use pi_store::text::{clip, pad, widest};
 
 /// Below this a value matches so much of a transcript that masking it costs
 /// more than the leak it prevents.
 const MIN: usize = 8;
 
+/// Widest a name column gets before it is cut: room for
+/// `provider.<name>.api_key`, short enough that the value still fits on the
+/// line beside it.
+const NAME_MAX: usize = 22;
+
+/// One value this run must not send: the word its token carries, the name a
+/// listing shows for it, and how it was recognised.
+#[derive(Debug, PartialEq)]
+pub struct Secret {
+    pub kind: String,
+    pub name: Option<String>,
+    pub tier: Tier,
+    pub value: String,
+}
+
+impl Secret {
+    /// Register this value with `mask`, under the name that introduced it.
+    pub(super) fn cover_into(&self, mask: &mut Mask) {
+        let naming = Naming {
+            kind: &self.kind,
+            name: self.name.as_deref(),
+        };
+        match self.tier {
+            Tier::Named => mask.add(naming, &self.value),
+            Tier::Guessed => mask.add_guessed(naming, &self.value),
+        }
+    }
+}
+
 /// What one resolution found: the key that names the values, and the values
-/// themselves as `(kind, tier, value)`.
+/// themselves.
 pub struct Found {
     pub key: [u8; 32],
-    pub values: Vec<(String, Tier, String)>,
+    pub values: Vec<Secret>,
 }
 
 /// Everything this workspace and configuration name, or `None` when there is
@@ -38,17 +67,27 @@ fn long_enough(value: &str, floor: usize) -> bool {
     value.chars().count() >= floor
 }
 
-fn values_of(dirs: &[PathBuf], config: &config::Config) -> Vec<(String, Tier, String)> {
-    let mut values: Vec<(String, Tier, String)> = Vec::new();
-    for value in config.keys() {
-        if long_enough(&value, MIN) {
-            values.push(("API_KEY".to_string(), Tier::Named, value));
+fn values_of(dirs: &[PathBuf], config: &config::Config) -> Vec<Secret> {
+    let mut values: Vec<Secret> = Vec::new();
+    for credential in config.keys() {
+        if long_enough(&credential.value, MIN) {
+            values.push(Secret {
+                kind: "API_KEY".to_string(),
+                name: Some(credential.name),
+                tier: Tier::Named,
+                value: credential.value,
+            });
         }
     }
     // A listed secret is the owner saying it must not leave, whatever it
     // looks like: the shape rules are why the list exists.
     for value in config.secrets() {
-        values.push(("SECRET".to_string(), Tier::Named, value));
+        values.push(Secret {
+            kind: "SECRET".to_string(),
+            name: None,
+            tier: Tier::Named,
+            value,
+        });
     }
     for dir in dirs {
         for (name, value) in pi_store::envfile::read(dir) {
@@ -59,11 +98,17 @@ fn values_of(dirs: &[PathBuf], config: &config::Config) -> Vec<(String, Tier, St
             }
             // A variable named for a credential is the owner's word, whatever
             // its value; the shape rule is for the ones that say nothing.
-            if let Some(kind) = credential_kind(&name) {
-                values.push((kind, Tier::Named, value));
-            } else if shapes_a_secret(&value) {
-                values.push(("SECRET".to_string(), Tier::Guessed, value));
-            }
+            let (kind, tier) = match credential_kind(&name) {
+                Some(kind) => (kind, Tier::Named),
+                None if shapes_a_secret(&value) => ("SECRET".to_string(), Tier::Guessed),
+                None => continue,
+            };
+            values.push(Secret {
+                kind,
+                name: Some(name),
+                tier,
+                value,
+            });
         }
     }
     values
@@ -91,8 +136,8 @@ fn credential_kind(name: &str) -> Option<String> {
     }
 }
 
-/// What this run has masked, as the surface shows it: the token the vendor
-/// saw, the two ends of the value, and whether the mask rested on a guess.
+/// What this run has masked, as the surface shows it: the name that introduced
+/// each value, why it was taken, how much of it is shown, and how often it left.
 pub fn listing() -> Listing {
     listing_of(super::dial::footprints())
 }
@@ -110,50 +155,58 @@ fn listing_of(prints: Option<Vec<Footprint>>) -> Listing {
     }
 }
 
-fn rows(prints: Vec<Footprint>) -> Listing {
-    let sent: u64 = prints.iter().map(|print| print.hits).sum();
+fn rows(mut prints: Vec<Footprint>) -> Listing {
+    let total: u64 = prints.iter().map(|print| print.hits).sum();
     let values = prints.len();
-    // One table per kind: a run's keys, its secrets and its script tokens are
-    // read for different reasons, and each group stays small enough to sit in
-    // a column of its own.
-    let mut kinds: BTreeMap<String, Vec<Footprint>> = BTreeMap::new();
-    for print in prints {
-        kinds.entry(print.kind.clone()).or_default().push(print);
-    }
-    let mut kinds: Vec<_> = kinds.into_iter().collect();
-    kinds.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+    // What left most stands first: that is what a reader came to see.
+    prints.sort_by(|a, b| b.hits.cmp(&a.hits).then_with(|| label(a).cmp(label(b))));
+    // The report lines up every column but the last; the ends are padded so
+    // they read left to right under their heading instead of flush right.
+    let shown: Vec<String> = prints.iter().map(ends).collect();
+    let shown_w = widest(shown.iter().map(String::as_str)).max("VALUE".len());
     let mut rows = vec![
         Row::new(["Mask"]).with_role(Role::Title),
         Row::new([
             "values".into(),
             values.to_string(),
             "masked".into(),
-            format!("{sent}× sent"),
+            format!("{total}× total"),
         ])
         .with_role(Role::Metric),
+        Row::new([
+            "NAME".into(),
+            "BY".into(),
+            "CHARS".into(),
+            "MASKED".into(),
+            pad("VALUE", shown_w),
+        ])
+        .with_role(Role::Section),
     ];
-    for (kind, mut prints) in kinds {
-        // What left most stands first: that is what a reader came to see.
-        prints.sort_by(|a, b| b.hits.cmp(&a.hits).then_with(|| a.token.cmp(&b.token)));
-        // A token's length follows the kind it names, so the column is padded
-        // here and the ends behind it start at one column across rows.
-        let widest = pi_store::text::widest(prints.iter().map(Footprint::bare));
-        rows.push(Row::new([kind.as_str(), "BY", "CHARS", "SENT"]).with_role(Role::Section));
-        rows.extend(prints.into_iter().map(|print| {
-            Row::new([
-                pi_store::text::pad(print.bare(), widest),
-                match print.tier {
-                    Tier::Named => "named".to_string(),
-                    Tier::Guessed => "shape".to_string(),
-                },
-                print.len.to_string(),
-                print.hits.to_string(),
-            ])
-            .noting(ends(&print))
-            .with_role(Role::Budget)
-        }));
-    }
+    rows.extend(prints.iter().zip(&shown).map(|(print, ends)| {
+        Row::new([
+            clip(label(print), NAME_MAX),
+            reason(print).to_string(),
+            print.len.to_string(),
+            print.hits.to_string(),
+            pad(ends, shown_w),
+        ])
+        .with_role(Role::Budget)
+    }));
     Listing::report(rows)
+}
+
+// What a listing calls a value: the name that introduced it, or a dash when
+// only a `secrets` list holds it.
+fn label(print: &Footprint) -> &str {
+    print.name.as_deref().unwrap_or("—")
+}
+
+// Why the mask took it: the owner's word, or a shape rule's guess.
+fn reason(print: &Footprint) -> &'static str {
+    match print.tier {
+        Tier::Named => "named",
+        Tier::Guessed => "shape",
+    }
 }
 
 // The two ends of a value, marked as cut when there is more of it than shown.
@@ -170,65 +223,96 @@ fn ends(print: &Footprint) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm::mask::Mask;
 
     fn config(body: &str) -> config::Config {
         config::Config::in_force(toml::from_str(body).expect("a tree")).expect("a config")
     }
 
-    // The listing is the only place a person sees what was masked: the two
-    // ends of each value, marked only when there is more of it than is shown,
-    // why it was taken and how often it left.
+    // The listing is the only place a person sees what was masked: the name
+    // that introduced each value, the two ends of it, marked only when there
+    // is more of it than is shown, why it was taken and how often it left.
     #[test]
-    fn the_listing_shows_both_ends_why_and_how_often_it_left() {
+    fn the_listing_shows_name_ends_why_and_how_often_it_left() {
         let mut mask = Mask::new([7; 32]);
-        mask.add("SECRET", "hunter2-the-password");
-        mask.add("API_KEY", "short-key");
+        mask.add(
+            Naming {
+                kind: "SECRET",
+                name: Some("OLD_PASSWORD"),
+            },
+            "hunter2-the-password",
+        );
+        mask.add(
+            Naming {
+                kind: "API_KEY",
+                name: Some("provider.up.api_key"),
+            },
+            "short-key",
+        );
         // Twelve characters: its two ends would be two thirds of it.
-        mask.add("SECRET", "abcdefghijkl");
+        mask.add(
+            Naming {
+                kind: "SECRET",
+                name: None,
+            },
+            "abcdefghijkl",
+        );
         let _ = mask.cover("hunter2-the-password");
 
         let prints = mask.footprints();
         let listing = rows(prints.clone());
-        let cells: Vec<&Row> = listing
+        // The ends identify a value here; its name need not, since a `secrets`
+        // list leaves every one of its values unnamed.
+        let row_of = |print: &Footprint| {
+            listing
+                .rows
+                .iter()
+                .find(|row| row.role == Role::Budget && row.cells[4].trim_end() == ends(print))
+                .expect("a row per value")
+        };
+        let table: Vec<&Row> = listing
             .rows
             .iter()
             .filter(|row| row.role == Role::Budget)
             .collect();
-        assert_eq!(cells.len(), prints.len());
+        assert_eq!(table.len(), prints.len());
+        // The column set is the listing's whole shape: a row of another width
+        // would put the ends under the wrong heading.
+        let header = listing
+            .rows
+            .iter()
+            .find(|row| row.role == Role::Section)
+            .expect("a header");
+        assert_eq!(header.cells.len(), table[0].cells.len(), "{header:?}");
         for print in &prints {
-            let row = cells
-                .iter()
-                .find(|row| row.cells[0].trim_end() == print.bare())
-                .expect("a row per value");
-            let note = row.note.as_deref().expect("a note");
+            let row = row_of(print);
+            assert_eq!(
+                row.cells[0].trim_end(),
+                clip(label(print), NAME_MAX),
+                "{row:?}"
+            );
+            assert!(row.cells[0].trim_end().len() <= NAME_MAX, "{row:?}");
             assert!(!row.cells[0].contains("{{"), "{row:?}");
-            assert!(note.starts_with(&print.head), "{row:?}");
-            assert_eq!(row.cells[2], print.len.to_string(), "{row:?}");
-            assert_eq!(row.cells[3], print.hits.to_string(), "{row:?}");
+            assert!(row.cells[4].trim_end().starts_with(&print.head), "{row:?}");
+            assert_eq!(row.cells[2].trim(), print.len.to_string(), "{row:?}");
+            assert_eq!(row.cells[3].trim(), print.hits.to_string(), "{row:?}");
         }
+        // A value only a `secrets` list holds is named by nothing, and says so.
+        assert_eq!(row_of(&prints[2]).cells[0].trim_end(), "—");
         let long = prints
             .iter()
             .find(|print| print.len > print.head.chars().count() + print.tail.chars().count())
             .expect("a value longer than its ends");
-        let row = cells
-            .iter()
-            .find(|row| row.cells[0].trim_end() == long.bare())
-            .expect("its row");
-        let note = row.note.as_deref().unwrap();
-        assert!(note.contains('\u{2026}'), "{row:?}");
+        let row = row_of(long);
+        assert!(row.cells[4].contains('\u{2026}'), "{row:?}");
         // Both ends while the hidden middle is the longer half of the value.
-        assert!(note.ends_with(&long.tail), "{row:?}");
+        assert!(row.cells[4].trim_end().ends_with(&long.tail), "{row:?}");
         // A value those two ends would give away shows its head alone.
         let short = prints
             .iter()
             .find(|print| print.len < 2 * (print.head.chars().count() + print.tail.chars().count()))
             .expect("a value shorter than twice its ends");
-        let row = cells
-            .iter()
-            .find(|row| row.cells[0].trim_end() == short.bare())
-            .expect("its row");
-        assert_eq!(row.note.as_deref(), Some(short.head.as_str()), "{row:?}");
+        let row = row_of(short);
+        assert_eq!(row.cells[4].trim_end(), short.head, "{row:?}");
 
         let summary = listing
             .rows
@@ -236,9 +320,9 @@ mod tests {
             .find(|row| row.role == Role::Metric)
             .expect("a summary");
         assert_eq!(summary.cells[1], prints.len().to_string(), "{summary:?}");
-        let sent: u64 = prints.iter().map(|print| print.hits).sum();
+        let total: u64 = prints.iter().map(|print| print.hits).sum();
         assert!(
-            summary.cells[3].starts_with(&sent.to_string()),
+            summary.cells[3].starts_with(&total.to_string()),
             "{summary:?}"
         );
     }
@@ -256,8 +340,18 @@ mod tests {
         assert_eq!(
             values_of(&[], &config),
             vec![
-                ("API_KEY".to_string(), Tier::Named, kept),
-                ("SECRET".to_string(), Tier::Named, "abcd".to_string()),
+                Secret {
+                    kind: "API_KEY".to_string(),
+                    name: Some("provider.down.api_key".to_string()),
+                    tier: Tier::Named,
+                    value: kept,
+                },
+                Secret {
+                    kind: "SECRET".to_string(),
+                    name: None,
+                    tier: Tier::Named,
+                    value: "abcd".to_string(),
+                },
             ]
         );
     }
@@ -302,11 +396,8 @@ mod tests {
         );
 
         let mut mask = Mask::new([7; 32]);
-        for (kind, tier, value) in values_of(std::slice::from_ref(&tools), &config) {
-            match tier {
-                Tier::Named => mask.add(&kind, &value),
-                Tier::Guessed => mask.add_guessed(&kind, &value),
-            }
+        for secret in values_of(std::slice::from_ref(&tools), &config) {
+            secret.cover_into(&mut mask);
         }
         let text = "key sk-up-0123456789 bot 123456:AAbbCCddEEffGG \
                     pass hunter2-the-password six 123456 mode production debug 1";
@@ -323,6 +414,13 @@ mod tests {
             .find(|print| print.head.starts_with("1234"))
             .expect("the password's token");
         assert_eq!(named.tier, Tier::Named, "a named variable is not a guess");
+        // The listing says which variable the value came from.
+        assert!(
+            prints
+                .iter()
+                .any(|print| print.name.as_deref() == Some("TELEGRAM_BOT_TOKEN")),
+            "{prints:?}"
+        );
         assert!(
             !prints.iter().any(|print| print.head == "ab"),
             "two characters are left alone: {prints:?}"
