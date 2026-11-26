@@ -38,6 +38,12 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   Pi restores the originals before displaying or saving responses and
   running tool calls.
 
+- The status line's `tabs` draws nothing while there is only one checkout:
+  `workspace` and `git` already name it.
+
+- The checkout in front wears the heading colour, so the one you are in
+  stands apart from the settled and the unopened.
+
 ### Removed
 
 - The `secrets` setting and the scans of provider keys and `.env` files that

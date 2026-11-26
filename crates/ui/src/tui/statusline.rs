@@ -438,7 +438,8 @@ impl Ui {
             .iter()
             .map(|tab| {
                 let (sign, style) = match tab.mark {
-                    Mark::Front => ("", &theme.input),
+                    // The one you are in reads as the current thing.
+                    Mark::Front => ("", &theme.heading),
                     // Settled lanes are their colour alone: a glyph would repeat
                     // what `Done`/`Failed` already say.
                     Mark::Done => ("", &theme.status.ok),
@@ -649,11 +650,11 @@ impl Ui {
             .collect()
     }
 
-    // No checkout in front draws nothing, and a separator before nothing
-    // would dangle.
+    // A lone checkout draws nothing: `workspace` and `git` already name it,
+    // and a strip of one says no more than they do.
     fn tabs_piece(&self) -> Option<Piece> {
         let front = self.tabs.iter().any(|t| t.mark == Mark::Front);
-        front.then_some(Piece::Tabs)
+        (front && self.tabs.len() > 1).then_some(Piece::Tabs)
     }
 
     // One item other than the checkouts or a group, None when it has nothing

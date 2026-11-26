@@ -57,7 +57,8 @@ A missing `style` is muted.
 | `{"script": {"command": "…", "every": 30}}` | a value an outside command prints |
 | `{"script": "weather"}` | a value `<pi_home>/statusline.d/weather` prints |
 
-`tabs` cannot sit inside a group: it folds when the row runs out of width.
+`tabs` cannot sit inside a group: it folds when the row runs out of width, and
+it draws nothing while the one checkout is all there is.
 
 ## Fields
 

@@ -347,7 +347,8 @@ pub enum Item {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Field {
-    /// The checkouts, folded to the room the rest of the row leaves.
+    /// The checkouts, folded to the room the rest of the row leaves; a lone
+    /// checkout draws nothing.
     Tabs,
     /// The answer to the last keypress, for a second.
     Flash,
