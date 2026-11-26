@@ -376,11 +376,12 @@ async fn what_a_hook_says_ahead_reaches_the_first_request() {
 
 #[tokio::test]
 async fn every_call_gets_a_result_even_when_nothing_runs() {
+    let malformed = r#"{"path": "#;
     let (_d, a, ctx) = harness(vec![
         call_turn(&[
             ("t1", "read", r#"{"path":"missing.txt"}"#),
             ("t2", "nosuchtool", "{}"),
-            ("t3", "read", r#"{"path": "#),
+            ("t3", "read", malformed),
         ]),
         text_turn("ok"),
     ]);
@@ -397,14 +398,10 @@ async fn every_call_gets_a_result_even_when_nothing_runs() {
         "{:?}",
         results[1]
     );
-    assert!(
-        results[2].flatten_text().contains("not valid JSON"),
-        "{:?}",
-        results[2]
-    );
     let rejection = results[2].flatten_text();
+    assert!(rejection.contains("not valid JSON"), "{rejection}");
     assert!(rejection.contains("line 1 column"), "{rejection}");
-    assert!(!rejection.contains(r#"{"path":"#), "{rejection}");
+    assert!(!rejection.contains(malformed.trim()), "{rejection}");
 
     let calls: Vec<_> = view[1].tool_calls().collect();
     assert_eq!(calls.len(), 3);

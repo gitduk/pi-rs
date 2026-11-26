@@ -358,15 +358,14 @@ impl Ui {
             }
             None => rows,
         };
-        let plain = |l: &Line<'_>| l.spans.iter().map(|s| s.content.as_ref()).collect();
         // Each readable stretch's rows are selected under the one above, at
         // its full height.
         let [_, (_, commands_base), (_, bar_base)] = regions.readable();
-        self.drawn = rows.iter().map(plain).collect();
+        self.drawn = rows.iter().map(screen::plain).collect();
         self.drawn.resize(commands_base, String::new());
-        self.drawn.extend(executions.iter().map(plain));
+        self.drawn.extend(executions.iter().map(screen::plain));
         self.drawn.resize(bar_base, String::new());
-        self.drawn.extend(bar.iter().map(plain));
+        self.drawn.extend(bar.iter().map(screen::plain));
         self.regions = regions;
         self.reflow_selection(view, width);
         self.drawn_width = width;

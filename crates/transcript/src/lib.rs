@@ -273,9 +273,7 @@ impl ArchivedPath {
     }
 }
 
-/// What the screen drew for a result, kept beside it so a rebuild draws the
-/// same row: the rows it drew, whether the result asked for a look, and how
-/// long the call ran.
+/// Presentation and file metadata kept beside a tool result for session rebuilds.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Drawn {
     // Archives written before this was named `screen` hold it as `preview`.

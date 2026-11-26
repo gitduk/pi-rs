@@ -76,8 +76,7 @@ pub enum Tier {
     Guessed,
 }
 
-/// One value as a listing shows it: the token the vendor sees, the name that
-/// introduced it, and how much of the value a person may be told.
+/// A masked value's source, abbreviated display, and replacement count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Footprint {
     /// What introduced the value; `None` when nothing did.
@@ -303,7 +302,6 @@ impl Mask {
         let mut out = None;
         let mut copied = 0;
         let mut from = 0;
-        let mut end = text.len();
         while let Some(start) = next_candidate(text, from, &self.token_buckets) {
             let rest = &text[start..];
             let mut partial = false;
@@ -329,13 +327,12 @@ impl Mask {
                 copied = start + entry.token.len();
                 from = copied;
             } else if partial {
-                end = start;
-                break;
+                return (finish_rewrite(&text[..start], out, copied), rest);
             } else {
                 from = start + 1;
             }
         }
-        (finish_rewrite(&text[..end], out, copied), &text[end..])
+        (finish_rewrite(text, out, copied), "")
     }
 
     fn entries_in<'a>(&'a self, bucket: &'a [usize]) -> impl Iterator<Item = &'a Entry> {
@@ -551,7 +548,6 @@ impl Transport for Masked {
 // handed over first, so nothing the model wrote is dropped between events.
 struct Restored {
     events: BoxStream<'static, Result<StreamEvent>>,
-    mask: Arc<Mask>,
     restorer: Restorer,
     // What each open block is, so a held tail comes back as the kind of delta
     // the block began with.
@@ -563,9 +559,8 @@ struct Restored {
 impl Restored {
     fn new(events: BoxStream<'static, Result<StreamEvent>>, mask: Arc<Mask>) -> Self {
         Self {
-            restorer: Restorer::new(Arc::clone(&mask)),
+            restorer: Restorer::new(mask),
             events,
-            mask,
             kinds: BTreeMap::new(),
             queued: VecDeque::new(),
             ended: false,
@@ -603,12 +598,14 @@ impl Restored {
                 self.release_all();
                 self.queued.push_back(StreamEvent::Done { stop, usage });
             }
-            StreamEvent::Complete { content, invalid } => {
+            StreamEvent::Complete {
+                mut content,
+                invalid,
+            } => {
                 self.release_all();
-                let content = content
-                    .into_iter()
-                    .map(|part| self.restore_content(part))
-                    .collect();
+                for part in &mut content {
+                    self.restore_content(part);
+                }
                 self.queued
                     .push_back(StreamEvent::Complete { content, invalid });
             }
@@ -641,23 +638,21 @@ impl Restored {
         }
     }
 
-    fn restore_content(&self, content: AssistantContent) -> AssistantContent {
+    fn restore_content(&self, content: &mut AssistantContent) {
+        let mask = &self.restorer.mask;
         match content {
-            AssistantContent::Text(mut text) => {
-                rewrite_field(&mut text.text, |text| self.mask.restored(text));
-                AssistantContent::Text(text)
+            AssistantContent::Text(text) => {
+                rewrite_field(&mut text.text, |text| mask.restored(text));
             }
-            AssistantContent::ToolCall(mut call) => {
-                map_json(&mut call.args, &|text| self.mask.restored(text));
-                AssistantContent::ToolCall(call)
+            AssistantContent::ToolCall(call) => {
+                map_json(&mut call.args, &|text| mask.restored(text));
             }
-            AssistantContent::Reasoning(mut reasoning) => {
+            AssistantContent::Reasoning(reasoning) => {
                 for part in &mut reasoning.content {
                     if let ReasoningContent::Text { text, .. } = part {
-                        rewrite_field(text, |text| self.mask.restored(text));
+                        rewrite_field(text, |text| mask.restored(text));
                     }
                 }
-                AssistantContent::Reasoning(reasoning)
             }
         }
     }

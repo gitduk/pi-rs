@@ -75,16 +75,10 @@ pub(crate) fn lines(report: &Listing, width: usize, paint: Option<&Paint>) -> Ve
             sections.get(1..).unwrap_or_default()
         }
     };
-    // A report whose one table was taken as the summary has no columns left
-    // to lay out.
-    if directories.is_empty() {
-        indent(&mut out, margin);
-        return out;
-    }
     // As many columns as hold a table, then rows of the same length: four
     // tables that fit in three columns read as two and two, not three and one.
     let fits = ((body_width + COLUMN_GAP) / (MIN_COLUMN_WIDTH + COLUMN_GAP)).max(1);
-    let rows = directories.len().div_ceil(fits);
+    let rows = directories.len().div_ceil(fits).max(1);
     let columns = directories.len().div_ceil(rows).max(1);
     let column_width = (body_width - COLUMN_GAP * (columns - 1)) / columns;
     for group in directories.chunks(columns) {
@@ -112,16 +106,10 @@ pub(crate) fn lines(report: &Listing, width: usize, paint: Option<&Paint>) -> Ve
         out.push(Line::default());
         out.extend(render(&footer, body_width, paint));
     }
-    indent(&mut out, margin);
-    out
-}
-
-// Every line starts at the same margin, so a narrow terminal keeps its text
-// off both edges.
-fn indent(out: &mut [Line<'static>], margin: &'static str) {
-    for line in out {
+    for line in &mut out {
         line.spans.insert(0, Span::raw(margin));
     }
+    out
 }
 
 struct Columns {
