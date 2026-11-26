@@ -14,6 +14,7 @@ use super::row::{self, Call, PendingTool, Row, Stage, StepMark};
 use super::scrollback::{Folds, Scrollback};
 use super::ui::OpenCommand;
 use crate::render::{Paint, tail};
+use crate::status;
 use pi_core::core::tools::modifies;
 use pi_core::driver::background::{BackgroundCommand, Invocation, State};
 use pi_store::icons;
@@ -181,7 +182,7 @@ fn background_text(execution: &BackgroundCommand) -> (String, String) {
         progress => format!("#{} {}{}{progress}", execution.id, title, icons::PART_SEP),
     };
     let state = match execution.state {
-        State::Running => crate::status::running_time(execution.started.elapsed())
+        State::Running => status::running_time(execution.started.elapsed(), status::CLOCK_AFTER)
             .map_or_else(String::new, |time| format!("{}{time}", icons::PART_SEP)),
         State::Back => format!("{}done, back when idle", icons::PART_SEP),
         State::Stopped => format!("{}stopped", icons::PART_SEP),

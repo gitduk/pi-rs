@@ -20,6 +20,7 @@ use super::statusline::{Checkout, Facts, Jobs};
 use super::view::{Doing, Scroll, StreamKind, View, remember_first_ask};
 use crate::render;
 use crate::render::Paint;
+use crate::status;
 use pi_core::core::question::{Asker, Question};
 use pi_store::icons;
 use pi_store::keys::{Action, Layers};
@@ -879,7 +880,7 @@ impl Ui {
             && work.retry.is_none()
             && view.surface.stream.text().is_empty()
             && !call::running(&view.state.tools)
-            && let Some(waited) = crate::status::running_time(work.quiet.elapsed())
+            && let Some(waited) = status::running_time(work.quiet.elapsed(), status::CLOCK_AFTER)
         {
             if spacing.push(super::spacing::Section::Other) {
                 out.push(Line::default(), None);

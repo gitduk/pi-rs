@@ -219,7 +219,7 @@ impl Facts {
             Field::Elapsed => {
                 let seconds = std::time::Duration::from_secs_f64(run.elapsed?);
                 return match self.running {
-                    true => crate::status::running_time(seconds),
+                    true => crate::status::running_time(seconds, crate::status::CLOCK_AFTER),
                     false => Some(llm::figures::elapsed(seconds)),
                 };
             }

@@ -48,9 +48,12 @@ pub fn line(fields: &[Field], snap: &Snapshot) -> String {
     settled(&parts(fields, &Facts::from_snapshot(snap.clone())))
 }
 
-/// A running clock starts at one second and advances in whole seconds.
-pub fn running_time(d: Duration) -> Option<String> {
-    (d.as_secs() > 0).then(|| llm::figures::elapsed(d))
+/// How long into a run its clock starts; before this the line shows no time.
+pub const CLOCK_AFTER: Duration = Duration::from_secs(1);
+
+/// A running clock starts at `after` and advances in whole seconds.
+pub fn running_time(d: Duration, after: Duration) -> Option<String> {
+    (d.as_secs() >= after.as_secs()).then(|| llm::figures::elapsed(d))
 }
 
 /// The static mark replaces the live spinner without shifting the figures.
