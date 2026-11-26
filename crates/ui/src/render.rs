@@ -14,6 +14,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 
 mod diff;
+pub(crate) use diff::receipt as receipt_changes;
 
 use crate::markdown::FENCE;
 use crate::sgr::{band_to_ratatui, style_to_ratatui};

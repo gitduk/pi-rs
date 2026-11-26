@@ -40,6 +40,11 @@ line with `memory`.
 The line goes to `~/.pi/memory/`, and pi shows it as the model writes it.
 The next session or compaction includes that memory.
 
+Write one line per entry with a short `[type]` prefix and a natural-language
+note. A measured result uses `[type YYYY-MM-DD]` and names the environment.
+Say when to recheck a result that may change. For conditional behavior, state
+when it applies and what to do.
+
 Memory has a total limit of 16 KiB.
 pi refuses a change that would increase memory beyond this limit until the model
 combines or removes lines. The files are plain Markdown.

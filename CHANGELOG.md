@@ -7,6 +7,17 @@ session store or the tool script protocol changed shape.
 
 Releases before 3.0.0 are recorded in the commit history, not here.
 
+## Unreleased
+
+### Changed
+
+- New long-term memory entries have a short type prefix. Measured results
+  include the measurement date and environment.
+
+- The TUI shows memory additions and removals with the same change
+  highlighting as edits, plus the reasons for skipped entries. The call's
+  JSON is available in its details.
+
 ## 3.0.9 - 2026-11-26
 
 ### Added

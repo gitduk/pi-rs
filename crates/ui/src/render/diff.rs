@@ -51,6 +51,16 @@ impl<'a> Source<'a> {
             mark: sign.mark(),
         })
     }
+
+    fn receipt(text: &'a str) -> Option<Self> {
+        let mark = match text.as_bytes() {
+            [b'+', b' ', ..] => '+',
+            [b'-', b' ', ..] => '-',
+            _ => return None,
+        };
+        let (head, body) = text.split_at(2);
+        Some(Self { head, body, mark })
+    }
 }
 
 /// Terminal escapes are display noise, not source token offsets.
@@ -99,6 +109,31 @@ pub(super) fn content(
             }
             let tokens = streams.line(row.source, &path, p.theme.syntax);
             draw(row, tokens, p, room)
+        })
+        .collect()
+}
+
+/// A receipt uses the same change styles, with unnumbered rows that can wrap.
+pub(crate) fn receipt(text: &[&str], p: &Paint) -> Vec<Line<'static>> {
+    if !p.color {
+        return text
+            .iter()
+            .map(|line| Line::raw((*line).to_owned()))
+            .collect();
+    }
+    let mut rows: Vec<_> = text
+        .iter()
+        .map(|&text| Row {
+            text,
+            source: Source::receipt(text),
+            change: None,
+        })
+        .collect();
+    replacements(&mut rows);
+    rows.iter()
+        .map(|row| match row.source {
+            Some(source) => draw(row, vec![Span::raw(source.body.to_owned())], p, usize::MAX),
+            None => Line::raw(row.text.to_owned()),
         })
         .collect()
 }
@@ -165,8 +200,8 @@ fn single_replacement(rows: &[Row<'_>], i: usize) -> bool {
 fn replacements(rows: &mut [Row<'_>]) {
     for i in 0..rows.len().saturating_sub(1) {
         if single_replacement(rows, i) {
-            let was = rows[i].source.expect("numbered deletion");
-            let is = rows[i + 1].source.expect("numbered addition");
+            let was = rows[i].source.expect("deletion row");
+            let is = rows[i + 1].source.expect("addition row");
             let (was, is) = diverged(was.body, is.body);
             rows[i].change = Some(was);
             rows[i + 1].change = Some(is);

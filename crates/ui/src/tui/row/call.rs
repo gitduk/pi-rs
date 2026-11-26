@@ -13,6 +13,7 @@ use super::steps::{STEP_INDENT, StepMark, text_room};
 use super::{Fold, Opening, page_of};
 use crate::render::{self, Outcome, Paint};
 use crate::tui::browse::PageLine;
+use pi_core::core::memory::Remember;
 use pi_store::text;
 
 /// One row under a call's line: what it was made with, or what came back.
@@ -29,6 +30,8 @@ enum Part {
     Result(String),
     /// What came back, as a change: the rows a tool sketched for the screen.
     Change(String),
+    /// A memory change or its accompanying receipt text, wrapped as prose.
+    Receipt(String),
 }
 
 /// The rows a row draws under a call's line: the one block it keeps of the
@@ -110,7 +113,7 @@ impl Eq for Call {}
 // before it. Answers the rows it holds, that blank row first.
 fn block(
     body: &mut Vec<Part>,
-    rows: &[String],
+    rows: &[&str],
     part: fn(String) -> Part,
     heads: fn(&str) -> bool,
 ) -> Range<usize> {
@@ -119,11 +122,11 @@ fn block(
     }
     let at = body.len();
     body.push(Part::Gap);
-    for line in rows {
+    for &line in rows {
         if heads(line) && !matches!(body.last(), Some(Part::Gap)) {
             body.push(Part::Gap);
         }
-        body.push(part(line.clone()));
+        body.push(part(line.to_owned()));
     }
     at..body.len()
 }
@@ -140,10 +143,11 @@ impl Call {
         argument: &str,
         result: Option<&str>,
     ) -> Self {
+        let receipt = name == Remember::NAME;
         // A line naming its tool alone says nothing of what it was made with:
         // the argument tells it, when that reads as one.
         let recovered;
-        let screen = if screen.trim() == name {
+        let screen = if !receipt && screen.trim() == name {
             recovered = serde_json::from_str(argument)
                 .map(|args| tool::summary(&args).into_owned())
                 .unwrap_or_else(|_| argument.to_string());
@@ -151,50 +155,52 @@ impl Call {
         } else {
             screen
         };
-        let head = screen.lines().next().unwrap_or_default().trim();
+        let mut rows = screen.lines();
+        let head = rows.next().unwrap_or_default().trim();
         // The page keeps what the call's own line does not already read: a
         // command is that line, and what it carries below is not.
         let first = argument.lines().next().unwrap_or_default().trim();
         let head_reads = !first.is_empty() && !head.is_empty() && head.contains(first);
-        let argument: Vec<String> = argument
-            .lines()
-            .skip(usize::from(head_reads))
-            .map(str::to_string)
-            .collect();
+        let argument: Vec<_> = argument.lines().skip(usize::from(head_reads)).collect();
         // What the tool sketched is what a screen shows; the result is the
         // fallback for a tool that sketched nothing. A command that changed
         // files says three things — what it ran, what it printed, what it
         // changed — and a blank row parts each from the one before it.
-        let mut output: Vec<String> = Vec::new();
-        let mut change: Vec<String> = Vec::new();
-        for line in screen.lines().skip(1) {
-            match tool::row::kind(line) {
-                tool::row::Kind::Output(_) => output.push(line.to_string()),
-                _ => change.push(line.to_string()),
-            }
+        let (output, change): (Vec<_>, Vec<_>) = rows.partition(|line| {
+            !receipt && matches!(tool::row::kind(line), tool::row::Kind::Output(_))
+        });
+        let result: Vec<_> = result
+            .filter(|_| output.is_empty() && change.is_empty())
+            .into_iter()
+            .flat_map(|out| pi_core::core::tools::shown(name, out))
+            .collect();
+        let mut body = Vec::new();
+        if !receipt {
+            body.extend(
+                argument
+                    .iter()
+                    .map(|line| Part::Argument((*line).to_owned())),
+            );
         }
-        // Nothing sketched: what it answered is the body.
-        let result: Vec<String> = if output.is_empty() && change.is_empty() {
-            result
-                .map(|out| {
-                    pi_core::core::tools::shown(name, out)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        // The page reads them all: the argument at its line's foot, then a
-        // blank, then each block after it in turn.
-        let mut body: Vec<Part> = argument.iter().cloned().map(Part::Argument).collect();
         let output_at = block(&mut body, &output, Part::Output, |_| false);
         // A command that changed several files parts them: a blank row before
         // each file's head, so the rows under a name stay its own.
-        let change_at = block(&mut body, &change, Part::Change, |line| {
-            matches!(tool::row::kind(line), tool::row::Kind::File { .. })
-        });
+        let change_at = if receipt {
+            body.extend(
+                change
+                    .into_iter()
+                    .map(|line| Part::Receipt(line.to_owned())),
+            );
+            0..body.len()
+        } else {
+            block(&mut body, &change, Part::Change, |line| {
+                matches!(tool::row::kind(line), tool::row::Kind::File { .. })
+            })
+        };
         let result_at = block(&mut body, &result, Part::Result, |_| false);
+        if receipt {
+            block(&mut body, &argument, Part::Argument, |_| false);
+        }
         // The row keeps what the call found — a change before what it printed —
         // and the argument's leading line, unless the call's line reads it.
         let shown = [&change_at, &result_at, &output_at]
@@ -202,7 +208,7 @@ impl Call {
             .find(|at| !at.is_empty())
             .cloned()
             .unwrap_or_default();
-        let lead = !head_reads && !argument.is_empty();
+        let lead = !receipt && !head_reads && !argument.is_empty();
         Self {
             outcome,
             name: name.to_string(),
@@ -214,7 +220,7 @@ impl Call {
             took: None,
             // A change is what a call shows unasked; anything else waits for
             // a click, or for the group it folds into to open with it.
-            open: !change_at.is_empty(),
+            open: !change_at.is_empty() || (receipt && !result_at.is_empty()),
             painted: RefCell::new(None),
         }
     }
@@ -258,7 +264,9 @@ impl Call {
     /// Whether what it holds is a change to files rather than output: the
     /// rows a tool drew, which want a line of their own.
     pub fn changed(&self) -> bool {
-        self.body.iter().any(|part| matches!(part, Part::Change(_)))
+        self.body
+            .iter()
+            .any(|part| matches!(part, Part::Change(_) | Part::Receipt(_)))
     }
 
     /// Whether it stands open.
@@ -280,11 +288,6 @@ impl Call {
     /// weighs it by before it is opened.
     pub fn height(&self) -> usize {
         self.height_in(usize::MAX)
-    }
-
-    // The part the row's `i`th line under its line draws.
-    fn kept_part(&self, i: usize) -> Option<&Part> {
-        self.glimpse.rows().nth(i).and_then(|at| self.body.get(at))
     }
 
     /// The rows it takes, `rows` being what its place allows: its own line,
@@ -310,7 +313,12 @@ impl Call {
     fn shown(&self, rows: usize) -> (usize, usize) {
         // What a row leaves out of its view is the page's as much as what it
         // has no room for: the count says how many rows it holds unseen.
-        let room = rows.saturating_sub(1);
+        let room = if self.lays_out() {
+            rows.saturating_sub(1)
+        } else {
+            // The transcript budgets the receipt after its lines wrap.
+            usize::MAX
+        };
         if room == 0 {
             return (0, 0);
         }
@@ -388,8 +396,9 @@ impl Call {
                 &mut had.lines
             }
             slot => {
+                let receipt = self.paint_receipt(paint);
                 let lines = (0..self.height_in(rows))
-                    .map(|j| self.lay(j, rows, hover == Some(j), paint, width))
+                    .map(|j| self.lay(j, rows, hover == Some(j), paint, width, &receipt))
                     .collect();
                 &mut slot
                     .insert(Painted {
@@ -413,6 +422,7 @@ impl Call {
         hovered: bool,
         paint: &Paint,
         width: usize,
+        receipt: &[Line<'static>],
     ) -> (Line<'static>, Option<Line<'static>>) {
         if j == 0 {
             return self.head(hovered, paint, width);
@@ -420,19 +430,44 @@ impl Call {
         let border = Line::from(STEP_INDENT);
         let room = render::result_room(width);
         let (body, left) = self.shown(rows);
-        let line = match self.kept_part(j - 1).filter(|_| j <= body) {
-            None => match left > 0 && j == 1 + body {
-                true => Line::from(paint.action_hint(hovered, format!("{left} more"))),
-                false => Line::default(),
-            },
-            Some(part) => self.part(part, paint, room),
+        let line = match self.glimpse.rows().nth(j - 1).filter(|_| j <= body) {
+            None if left > 0 && j == 1 + body => {
+                let hint = if self.name == Remember::NAME {
+                    "details".to_string()
+                } else {
+                    format!("{left} more")
+                };
+                Line::from(paint.action_hint(hovered, hint))
+            }
+            None => Line::default(),
+            Some(at) => self.part(at, paint, room, receipt),
         };
         (line, Some(border))
     }
 
+    // Paint the receipt together so a replacement can highlight its changed text.
+    // Receipt parts are at the start of the body, in the same order.
+    fn paint_receipt(&self, paint: &Paint) -> Vec<Line<'static>> {
+        let rows: Vec<_> = self
+            .body
+            .iter()
+            .map_while(|part| match part {
+                Part::Receipt(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        render::receipt_changes(&rows, paint)
+    }
+
     /// One row of what the call holds, in the voice its kind asks for.
-    fn part(&self, part: &Part, paint: &Paint, room: usize) -> Line<'static> {
-        match part {
+    fn part(
+        &self,
+        at: usize,
+        paint: &Paint,
+        room: usize,
+        receipt: &[Line<'static>],
+    ) -> Line<'static> {
+        match &self.body[at] {
             Part::Argument(text) => Line::from(paint.call_line(&self.name, text)),
             Part::Gap => Line::default(),
             // What it printed reads as it came, in the muted voice the change
@@ -440,6 +475,7 @@ impl Call {
             Part::Output(text) => Line::from(paint.span(&paint.theme.muted, text.clone())),
             Part::Result(text) => Line::from(text.clone()),
             Part::Change(text) => render::change(text, paint, room),
+            Part::Receipt(_) => receipt[at].clone(),
         }
     }
 
@@ -492,9 +528,9 @@ impl Fold for Call {
         self.page_row(i, rows) || self.cut(width)
     }
 
-    // It lays its own rows out in the budget: no slice is measured for it.
+    // Receipts use the transcript's wrapped layout so long notes fit the budget.
     fn lays_out(&self) -> bool {
-        true
+        self.name != Remember::NAME
     }
 
     fn opening(&self, _i: usize, paint: &Paint) -> Option<Opening> {
@@ -505,26 +541,15 @@ impl Fold for Call {
 impl Call {
     /// The page that reads it whole: its own line, then every row it holds.
     pub fn page(&self, paint: &Paint) -> Opening {
+        let receipt = self.paint_receipt(paint);
+        let (head, border) = self.head(false, paint, usize::MAX);
         page_of(
-            (0..1 + self.body.len())
-                .map(|j| {
-                    let (line, border) = self.whole(j, paint);
-                    (PageLine::from(line), border)
-                })
+            std::iter::once((PageLine::from(head), border))
+                .chain((0..self.body.len()).map(|at| {
+                    let line = self.part(at, paint, usize::MAX, &receipt);
+                    (PageLine::from(line), Some(Line::from(STEP_INDENT)))
+                }))
                 .collect(),
         )
-    }
-
-    // Row `j` as the page reads it: whole, however many rows there are, and
-    // the argument with it.
-    fn whole(&self, j: usize, paint: &Paint) -> (Line<'static>, Option<Line<'static>>) {
-        if j == 0 {
-            return self.head(false, paint, usize::MAX);
-        }
-        let border = Line::from(STEP_INDENT);
-        let Some(part) = self.body.get(j - 1) else {
-            return (Line::default(), Some(border));
-        };
-        (self.part(part, paint, usize::MAX), Some(border))
     }
 }
