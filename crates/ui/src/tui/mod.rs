@@ -31,6 +31,7 @@ mod vim;
 use agent::session::EntryId;
 use anyhow::Result;
 use crossterm::event::Event as TermEvent;
+use std::path::PathBuf;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::render::Paint;
@@ -111,6 +112,8 @@ pub(crate) enum Deed {
     // An empty list stops every running execution in the current checkout.
     StopCommands(Vec<u64>),
     RestartCommands(Vec<u64>),
+    // A call's file in the desktop's handler or the terminal editor.
+    OpenFile(PathBuf),
     // Drop the asides: the rows only drawn, never filed.
     Tidy,
     // The person's answer to a question its asker waits on, or none.
@@ -139,6 +142,7 @@ impl Deed {
             | Deed::BackgroundResults(_)
             | Deed::StopCommands(_)
             | Deed::RestartCommands(_)
+            | Deed::OpenFile(_)
             | Deed::Tidy
             | Deed::Answer { .. } => Fate::Now,
         }
@@ -161,6 +165,7 @@ enum Wake {
     Queued(Queued),
     // A turn ended and has to be settled, whichever lane it belongs to.
     Runtime(pi_core::execution::host::Event),
+    OpenInEditor(PathBuf),
     // Something only the screen cares about.
     Nothing,
     // Leave. Not a `break` at the arm: the way out has lanes to settle.
@@ -184,6 +189,7 @@ pub struct Tui {
     // Stops the reader while a child holds the terminal.
     hold: Hold,
     drivers: Drivers,
+    file_opens: tokio::task::JoinSet<term::FileOpen>,
 }
 
 impl Tui {
@@ -239,6 +245,7 @@ impl Tui {
             events,
             hold,
             drivers,
+            file_opens: tokio::task::JoinSet::new(),
         };
         if let Some(line) = last {
             tui.restarted(&line);
@@ -282,6 +289,7 @@ impl Tui {
             events: rx,
             hold: Hold::default(),
             drivers: Drivers::default(),
+            file_opens: tokio::task::JoinSet::new(),
         }
     }
 
@@ -654,6 +662,9 @@ impl Tui {
                 self.land_driven(said);
             }
             Deed::Tidy => self.ui.tidy(front_view(&mut self.views, self.core.lane())),
+            Deed::OpenFile(path) => {
+                self.file_opens.spawn(term::open_file(path));
+            }
             Deed::Answer { question, picked } => self.drivers.background().answer(question, picked),
         }
     }
@@ -878,6 +889,16 @@ impl Tui {
                 // `recv()` and `tick()` are; a blocking read gets its own thread.
                 tokio::select! {
                     event = self.core.next_runtime_event() => Wake::Runtime(event),
+                    Some(opened) = self.file_opens.join_next() => {
+                        match opened.unwrap_or_else(|e| Err(format!("could not open file: {e}"))) {
+                            Ok(Some(path)) => Wake::OpenInEditor(path),
+                            Ok(None) => Wake::Nothing,
+                            Err(why) => {
+                                self.notice(why);
+                                Wake::Nothing
+                            }
+                        }
+                    }
                     Some(started) = inb.started.recv() => {
                         self.land_started(started);
                         Wake::Nothing
@@ -941,6 +962,10 @@ impl Tui {
             let (asked, line) = match woke {
                 Wake::Runtime(event) => {
                     self.runtime_event(event);
+                    continue;
+                }
+                Wake::OpenInEditor(path) => {
+                    self.open_in_editor(&path).await;
                     continue;
                 }
                 Wake::Nothing => continue,

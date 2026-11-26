@@ -646,14 +646,8 @@ pub(super) fn scrollback_from(
             }
             // A tool's row is the call itself, built where the argument it
             // was made with is still at hand.
-            LogEntry::Tool {
-                result,
-                screen,
-                warned,
-                took,
-                ..
-            } => {
-                if let Some(call) = call_of(folds, result, screen.as_deref(), *warned, *took) {
+            LogEntry::Tool { .. } => {
+                if let Some(call) = call_of(folds, entry) {
                     push_tool_row(&mut out, folds, call);
                 }
             }
@@ -670,34 +664,47 @@ pub(super) fn scrollback_from(
     out
 }
 
-/// The call a committed tool entry leaves: its row from the entry, and the
-/// argument it was made with plus where it ran from what the live path kept for
-/// its id — `ToolResult` lacks both.
-pub(super) fn call_of(
-    folds: &mut Folds,
-    result: &llm::message::ToolResult,
-    screen: Option<&str>,
-    warned: bool,
-    took: Option<std::time::Duration>,
-) -> Option<Call> {
+/// Build a completed call from its entry and the arguments kept for its id.
+pub(super) fn call_of(folds: &mut Folds, entry: &LogEntry) -> Option<Call> {
+    let LogEntry::Tool {
+        result,
+        screen,
+        warned,
+        took,
+        file,
+        ..
+    } = entry
+    else {
+        return None;
+    };
     // An interrupted call left its start line standing; the rebuild draws none
     // of its result.
     if agent::session::is_stopped_call(result) {
         return None;
     }
     let (argument, cwd) = folds.take_argument(&result.call);
-    let screen = tool::screen_of(screen, &result.content);
+    let screen = tool::screen_of(screen.as_deref(), &result.content);
     let output = llm::message::flatten(&result.content);
+    let file = match file {
+        Some(file) => file.to_path_buf(),
+        // Old read results used lossy UTF-8. A replacement character makes
+        // the recorded filename ambiguous.
+        None => pi_tools::read::Read::file(result)
+            .filter(|path| !path.to_string_lossy().contains('\u{fffd}'))
+            .map(std::path::Path::to_path_buf),
+    }
+    .filter(|path| !result.is_error && path.is_absolute());
     Some(
         Call::new(
-            agent::Outcome::of(result.is_error, warned),
+            agent::Outcome::of(result.is_error, *warned),
             &result.name,
             &screen,
             &argument,
             Some(&output),
         )
         .in_cwd(cwd)
-        .timed(took),
+        .on_file(file)
+        .timed(*took),
     )
 }
 

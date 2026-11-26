@@ -68,6 +68,8 @@ pub struct Call {
     glimpse: Glimpse,
     // Where the call ran, when not the workspace root.
     cwd: Option<String>,
+    // The file it works on, when it names one: what a right click opens.
+    file: Option<std::path::PathBuf>,
     pub took: Option<Duration>,
     // Open where it stands, or closed to its own line. Its place sets this
     // when it lands; from then it is the reader's.
@@ -96,6 +98,7 @@ impl PartialEq for Call {
             && self.body == other.body
             && self.glimpse == other.glimpse
             && self.cwd == other.cwd
+            && self.file == other.file
             && self.took == other.took
             && self.open == other.open
     }
@@ -207,6 +210,7 @@ impl Call {
             body,
             glimpse: Glimpse { lead, block: shown },
             cwd: None,
+            file: None,
             took: None,
             // A change is what a call shows unasked; anything else waits for
             // a click, or for the group it folds into to open with it.
@@ -227,6 +231,17 @@ impl Call {
         self.took = took;
         self.painted = RefCell::new(None);
         self
+    }
+
+    /// The file the call works on, when it names one.
+    pub fn on_file(mut self, file: Option<std::path::PathBuf>) -> Self {
+        self.file = file;
+        self
+    }
+
+    /// The file the call works on, when it names one: what a right click opens.
+    pub fn file(&self) -> Option<&std::path::Path> {
+        self.file.as_deref()
     }
 
     /// Whether it landed well: a failed call is read on its own line.

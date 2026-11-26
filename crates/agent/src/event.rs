@@ -27,6 +27,11 @@ pub enum Event {
         id: String,
         at: std::time::Instant,
     },
+    // The resolved regular file a running call is accessing.
+    ToolFile {
+        id: String,
+        path: std::path::PathBuf,
+    },
     // A running call's latest word on how far it has got.
     ToolProgress {
         id: String,
@@ -105,7 +110,10 @@ impl Event {
     fn is_progress(&self) -> bool {
         matches!(
             self,
-            Self::Usage(_) | Self::ToolProgress { .. } | Self::ToolPrinted { .. }
+            Self::Usage(_)
+                | Self::ToolProgress { .. }
+                | Self::ToolPrinted { .. }
+                | Self::ToolFile { .. }
         )
     }
 
@@ -119,6 +127,7 @@ impl Event {
             | Self::TurnEnd { text, .. } => text.len(),
             Self::ToolQueued { id, name, args } => id.len() + name.len() + json_bytes(args),
             Self::ToolStart { id, .. } => id.len(),
+            Self::ToolFile { id, path } => id.len() + path.as_os_str().len(),
             Self::ToolProgress { id, text } | Self::ToolPrinted { id, text } => {
                 id.len() + text.len()
             }

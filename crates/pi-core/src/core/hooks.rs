@@ -218,6 +218,7 @@ fn watched(event: &Event) -> Option<(HookOn, Option<&str>, Value)> {
         // A tool's results land at its gates; a state update is no event.
         Event::ToolQueued { .. }
         | Event::ToolStart { .. }
+        | Event::ToolFile { .. }
         | Event::ToolEnd { .. }
         | Event::Committed { .. } => return None,
         Event::TextDelta(_)

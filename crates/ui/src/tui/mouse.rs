@@ -1,6 +1,8 @@
 //! Where a mouse event landed, and what that row means: the frame's regions,
 //! and the row under the pointer.
 
+use std::path::Path;
+
 use pi_store::statusline::Place;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 
@@ -151,6 +153,32 @@ impl Ui {
             .copied()
     }
 
+    fn pending_tool_id(&self, row: usize) -> Option<&str> {
+        self.tool_rows.get(row)?.as_deref()
+    }
+
+    // The file named by the visible tool heading under the pointer.
+    pub(super) fn file_at<'a>(&self, view: &'a View, col: u16, row: u16) -> Option<&'a Path> {
+        if self.reading() || !self.regions.history.contains(Position::new(col, row)) {
+            return None;
+        }
+        let file = match self.target_at(row)? {
+            Target::PendingTool(at) => {
+                let id = self.pending_tool_id(at)?;
+                view.state.tools.iter().find(|t| t.id == id)?.file()
+            }
+            Target::Scrollback(idx, line) => view.surface.scrollback.get(idx)?.file(line),
+            _ => None,
+        }?;
+        let at = row_in(self.regions.history, row)?;
+        let text = self.drawn.get(at)?.trim_end();
+        let indent = &text[..text.len() - text.trim_start().len()];
+        let col = usize::from(col - self.regions.history.x);
+        (pi_store::text::width(indent)..pi_store::text::width(text))
+            .contains(&col)
+            .then_some(file)
+    }
+
     pub(super) fn page_command_at(&self, col: u16, row: u16) -> Option<u64> {
         if self.reading() || !self.page_at_pointer(col, row) {
             return None;
@@ -278,11 +306,7 @@ impl Ui {
         match self.target_at(row) {
             // Live rows rebuild every frame, so a flag flip is enough.
             Some(Target::PendingTool(row)) => {
-                let id = self
-                    .tool_rows
-                    .get(row)
-                    .and_then(Option::as_ref)
-                    .map(String::as_str);
+                let id = self.pending_tool_id(row);
                 match id.and_then(|id| {
                     view.state
                         .tools

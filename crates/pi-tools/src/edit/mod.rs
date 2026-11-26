@@ -276,10 +276,12 @@ impl Tool for Edit {
         let real = ctx.workspace.resolve(path, self.tier())?;
         // read refuses these at the same ceiling: below, the whole file is held
         // twice over — content and syntax tree.
-        if let Ok(meta) = tokio::fs::metadata(&real).await
-            && meta.len() > MAX_BYTES
-        {
-            return Err(ToolError::Invalid(over_limit(path, meta.len())));
+        match tokio::fs::metadata(&real).await {
+            Ok(meta) if meta.len() > MAX_BYTES => {
+                return Err(ToolError::Invalid(over_limit(path, meta.len())));
+            }
+            Ok(meta) if meta.is_file() => ctx.report_file(&real),
+            _ => {}
         }
         // Held across the read and the write: two edits to one file in a turn
         // would both read the same bytes, and one would vanish with no error.

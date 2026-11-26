@@ -585,6 +585,20 @@ impl Row {
         self.hover() == Some(i)
     }
 
+    /// The file named by the tool heading on line `i`.
+    pub fn file(&self, i: usize) -> Option<&std::path::Path> {
+        let source = match self.layout_line(i) {
+            Some(LayoutLine::More { .. }) => return None,
+            Some(LayoutLine::Content { source, .. }) => source,
+            None => i,
+        };
+        match &self.0 {
+            Kind::Call(call) if source == 0 => call.file(),
+            Kind::Steps(group) => group.file(source),
+            _ => None,
+        }
+    }
+
     /// The line a click on line `i` opens or closes, if any: a call from its
     /// own line or the count under it, a group from its own line or a step's.
     pub fn click_line(&self, i: usize, width: usize) -> Option<usize> {
@@ -745,7 +759,7 @@ impl Row {
 
     /// Brings a row up to date before the frame draws: hover line, spinner
     /// tick, and the calls in flight this row draws.
-    pub fn update_live(&mut self, hovered: Option<usize>, spin: usize, held: &[PendingTool]) {
+    pub fn update_live(&mut self, hovered: Option<usize>, spin: usize, held: Vec<PendingTool>) {
         // Hover bolds, and bold is no wider: only what else changed moves
         // a height.
         self.1.hovered.set(

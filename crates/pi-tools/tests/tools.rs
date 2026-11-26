@@ -919,6 +919,18 @@ async fn reading_a_spill_stops_at_the_window_it_was_asked_for() {
     corrupt.extend(std::iter::repeat_n(0xFFu8, 1_000_000));
     std::fs::write(&at, &corrupt).unwrap();
 
+    #[cfg(unix)]
+    let c = {
+        let alias = dir.path().join("spill-alias");
+        std::os::unix::fs::symlink(c.spill_root(), &alias).unwrap();
+        c.with_spill_root(alias)
+    };
+    let file = std::sync::Arc::new(std::sync::OnceLock::new());
+    let reported = file.clone();
+    let c = c.with_file_reporter(std::sync::Arc::new(move |path| {
+        assert!(reported.set(path.to_path_buf()).is_ok());
+    }));
+
     // The locator our own writer mints: `<namespace>/<name>`.
     let locator = "spill:s1/big".to_string();
     let out = pi_tools::read::Read
@@ -936,6 +948,7 @@ async fn reading_a_spill_stops_at_the_window_it_was_asked_for() {
     // Nothing of the file is held as a view: spills are not edited, and a
     // session that kept every one of them would grow with its own output.
     assert!(c.viewed(&at).is_none(), "a spill was kept as a viewed file");
+    assert_eq!(file.get(), Some(&at.canonicalize().unwrap()));
     assert!(
         size > 4_000_000,
         "the file is worth the claim: {size} bytes"

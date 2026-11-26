@@ -2,6 +2,7 @@ pub mod archive;
 pub mod context;
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use llm::message::{
@@ -225,6 +226,53 @@ mod millis {
     }
 }
 
+/// A path's native representation, preserved when a session moves between systems.
+///
+/// The variants match the archive format previously written by `OsString`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArchivedPath {
+    /// Unix path bytes.
+    Unix(Vec<u8>),
+    /// Windows path code units.
+    Windows(Vec<u16>),
+}
+
+impl From<&Path> for ArchivedPath {
+    fn from(path: &Path) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            Self::Unix(path.as_os_str().as_bytes().to_vec())
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt as _;
+            Self::Windows(path.as_os_str().encode_wide().collect())
+        }
+    }
+}
+
+impl ArchivedPath {
+    /// Returns the path when its representation is native to this system.
+    pub fn to_path_buf(&self) -> Option<PathBuf> {
+        use std::ffi::OsString;
+
+        match self {
+            #[cfg(unix)]
+            Self::Unix(bytes) => {
+                use std::os::unix::ffi::OsStringExt as _;
+                Some(OsString::from_vec(bytes.clone()).into())
+            }
+            #[cfg(windows)]
+            Self::Windows(units) => {
+                use std::os::windows::ffi::OsStringExt as _;
+                Some(OsString::from_wide(units).into())
+            }
+            _ => None,
+        }
+    }
+}
+
 /// What the screen drew for a result, kept beside it so a rebuild draws the
 /// same row: the rows it drew, whether the result asked for a look, and how
 /// long the call ran.
@@ -235,6 +283,9 @@ pub struct Drawn {
     pub screen: Option<String>,
     pub warned: bool,
     pub took: Option<std::time::Duration>,
+    /// The resolved file the call accessed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<ArchivedPath>,
 }
 
 /// The session's atom. Append only, or truncated by a rollback; the content of
@@ -287,6 +338,8 @@ pub enum Entry {
             skip_serializing_if = "Option::is_none"
         )]
         took: Option<std::time::Duration>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file: Option<ArchivedPath>,
     },
     // Machine prose in the user's voice — a stopped run's cause, a round
     // note. The model reads it; the screen shows it muted. Omittable.
@@ -765,6 +818,7 @@ impl Session {
                     screen: drawn.screen,
                     warned: drawn.warned,
                     took: drawn.took,
+                    file: drawn.file,
                 });
                 id
             })
@@ -1295,6 +1349,7 @@ mod tests {
             screen: Some("false".into()),
             warned: true,
             took: Some(std::time::Duration::from_millis(5_400)),
+            file: None,
         };
         s.push_drawn(vec![(ToolResult::text("c", "bash", "exit 1"), drawn)]);
         let back: Session = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
@@ -1304,6 +1359,42 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Entry::Tool { warned: true, took, .. } if *took == five)),
         );
+    }
+
+    #[test]
+    fn tool_archives_preserve_native_and_foreign_paths() {
+        let mut session = Session::new();
+        session.push_results(vec![ToolResult::text("c", "read", "text")]);
+        let record = archive::Record::from_entry(&session.entries()[0]);
+
+        for (file, native) in [
+            (serde_json::json!({"Unix": [47, 255]}), cfg!(unix)),
+            (
+                serde_json::json!({"Windows": [67, 58, 92, 0xd800]}),
+                cfg!(windows),
+            ),
+        ] {
+            let mut saved = serde_json::to_value(&record).unwrap();
+            saved["metadata"]["drawn"]["file"] = file.clone();
+            let entry = serde_json::from_value::<archive::Record>(saved)
+                .unwrap()
+                .into_entry()
+                .unwrap();
+            let Entry::Tool {
+                file: Some(path), ..
+            } = &entry
+            else {
+                panic!("the archived tool must retain its file");
+            };
+            let local = path.to_path_buf();
+            assert_eq!(local.is_some(), native);
+            if let Some(local) = local {
+                assert_eq!(&ArchivedPath::from(local.as_path()), path);
+                assert_eq!(serde_json::to_value(local.as_os_str()).unwrap(), file);
+            }
+            let resaved = serde_json::to_value(archive::Record::from_entry(&entry)).unwrap();
+            assert_eq!(resaved["metadata"]["drawn"]["file"], file);
+        }
     }
 
     #[test]

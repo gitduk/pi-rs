@@ -56,6 +56,9 @@ pub(crate) fn reconcile(
         };
         drawn.screen = None;
         drawn.warned = false;
+        if result.is_error {
+            drawn.file = None;
+        }
         result = bound(result, ctx);
         result.content.extend(suffix);
         ready.insert(call.id.clone(), (result, drawn));

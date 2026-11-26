@@ -280,6 +280,8 @@ pub struct Ctx {
     // Where a running call hands out what it has printed so far, replacing
     // the last view; set per call by the loop.
     output: Option<Output>,
+    // Where this call reports the resolved file it is accessing.
+    file_reporter: Option<FileReporter>,
     // Only calls already listening receive a request; an idle request must
     // never change how the next call runs.
     background: tokio::sync::broadcast::Sender<()>,
@@ -290,6 +292,9 @@ pub type Progress = std::sync::Arc<dyn Fn(String) + Send + Sync>;
 
 /// Takes what a running call has printed so far, replacing the last view.
 pub type Output = std::sync::Arc<dyn Fn(String) + Send + Sync>;
+
+/// Takes the resolved file a call is accessing.
+pub type FileReporter = std::sync::Arc<dyn Fn(&std::path::Path) + Send + Sync>;
 
 pub type FileLocks =
     std::sync::Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, FileLock>>>;
@@ -320,6 +325,7 @@ impl Ctx {
             request: None,
             progress: None,
             output: None,
+            file_reporter: None,
             background: tokio::sync::broadcast::channel(1).0,
         }
     }
@@ -580,6 +586,19 @@ impl Ctx {
     /// Whether anything is listening for what this call prints.
     pub fn hears_output(&self) -> bool {
         self.output.is_some()
+    }
+
+    /// Route the resolved file this call accesses to `report`.
+    pub fn with_file_reporter(mut self, report: FileReporter) -> Self {
+        self.file_reporter = Some(report);
+        self
+    }
+
+    /// Report the resolved regular file this call is about to access.
+    pub fn report_file(&self, path: &std::path::Path) {
+        if let Some(report) = &self.file_reporter {
+            report(path);
+        }
     }
 
     /// Hold this while mutating `path`. Keyed on the resolved path, not the

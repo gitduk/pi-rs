@@ -182,7 +182,15 @@ impl Ui {
                     t.run = Run::Running {
                         since: *at,
                         progress: None,
+                        file: None,
                     };
+                }
+            }
+            Event::ToolFile { id, path } => {
+                if let Some(t) = view.state.tools.iter_mut().find(|t| t.id == *id)
+                    && let Run::Running { file, .. } = &mut t.run
+                {
+                    *file = Some(path.clone());
                 }
             }
             Event::ToolProgress { id, text } => {
@@ -214,7 +222,11 @@ impl Ui {
                     let call = Call::new(*outcome, name, screen, argument, None)
                         .in_cwd(t.cwd.clone())
                         .timed(Some(*took));
-                    t.run = Run::Landed(call);
+                    let file = match &mut t.run {
+                        Run::Running { file, .. } if call.landed_well() => file.take(),
+                        _ => None,
+                    };
+                    t.run = Run::Landed(call.on_file(file));
                     t.output = None;
                     t.open = false;
                 }
@@ -313,23 +325,8 @@ impl Ui {
             if view.surface.tail.is_some_and(|tail| entry.id() <= tail) {
                 continue;
             }
-            if let LogEntry::Tool {
-                result,
-                screen,
-                warned,
-                took,
-                ..
-            } = entry
-            {
-                // Placed before the drift check paints it: a row is never
-                // drawn without where its call ran.
-                let call = call_of(
-                    &mut view.surface.folds,
-                    result,
-                    screen.as_deref(),
-                    *warned,
-                    *took,
-                );
+            if let LogEntry::Tool { result, .. } = entry {
+                let call = call_of(&mut view.surface.folds, entry);
                 if let Some(call) = call {
                     self.check_pending(view, &result.call, &call);
                     push_tool_row(&mut view.surface.scrollback, &mut view.surface.folds, call);

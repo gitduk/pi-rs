@@ -1,6 +1,7 @@
 //! The rows a tool call occupies until it settles: the line it holds itself, and
 //! the group that draws it when there is one to fold into.
 
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -38,10 +39,11 @@ pub(super) struct RunTool {
 pub(super) enum Run {
     // Taken into its batch, waiting its turn.
     Queued,
-    // Running since `since`, with what it last said of its progress.
+    // Running since `since`, with its latest progress and resolved file.
     Running {
         since: Instant,
         progress: Option<String>,
+        file: Option<PathBuf>,
     },
     // Ended: the call its entry will adopt, parked until the committed
     // entries arrive — and what decides whether it can still fold.
@@ -49,6 +51,14 @@ pub(super) enum Run {
 }
 
 impl RunTool {
+    pub(super) fn file(&self) -> Option<&Path> {
+        match &self.run {
+            Run::Queued => None,
+            Run::Running { file, .. } => file.as_deref(),
+            Run::Landed(call) => call.file(),
+        }
+    }
+
     // Whether a click has something to open: output arrived and is not blank.
     pub(super) fn printable(&self) -> bool {
         self.output
@@ -131,6 +141,7 @@ pub(super) fn pending(tools: &[RunTool], now: Instant) -> Vec<PendingTool> {
             stage: t.stage(),
             secs: t.out_secs(now),
             cwd: t.cwd.clone(),
+            file: t.file().map(Path::to_path_buf),
         })
         .collect()
 }
