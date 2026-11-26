@@ -7,7 +7,7 @@ session store or the tool script protocol changed shape.
 
 Releases before 3.0.0 are recorded in the commit history, not here.
 
-## Unreleased
+## 3.0.10 - 2026-11-26
 
 ### Added
 
