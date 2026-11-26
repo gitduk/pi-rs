@@ -62,6 +62,10 @@ it draws nothing while the one checkout is all there is.
 
 ## Fields
 
+A field draws its own text. Treat that text as output for the user, not as a
+format to copy. To show the same facts in another shape, ask a script for the
+parts you want.
+
 `tabs` `flash` `model` `effort` `tier` `update` `spent` `state` `session`
 `workspace` `git` `elapsed` `in_out` `speed` `cache` `cost` `ctx` `compacted` `queued`
 `worktree`
@@ -88,6 +92,10 @@ An SGR number such as `"34"`, or `{"color": "#5c9cf5", "sgr": ["bold"]}`, sets
 colours outright.
 `{"tone": "code", "sgr": ["bold"]}` keeps the theme's colour for that tone and
 adds the emphasis.
+
+Give a script's answer its colour through `style`. Do not write an SGR run into
+the output. Only `style` follows a theme change. Use `add` for the lines added
+and `del` for the lines removed.
 
 ## Scripts
 
@@ -132,6 +140,37 @@ A script item carries exactly one of `command` or `name`.
   - `git` has `branch`, `added` and `removed`, and is omitted outside a repository.
 - Optional values are `null` unless documented as omitted. `session` is omitted
   outside a lane.
+
+A conditional reads these values. Use `tabs` to count the checkouts. Use `git`
+to keep a cell empty outside a repository. Use `run.outcome` to say how a run
+ended.
+
+## When one field cannot say it
+
+A field always draws its whole shape. When one part must appear only under a
+condition, build the cell from scripts. Each script prints one part with a
+leading space, or prints nothing. `style` gives each part its colour:
+
+```json
+{"group": [
+  {"field": "workspace", "style": {"tone": "code", "sgr": ["bold"]}},
+  {"script": {"command": "~/.pi/statusline.d/gitcell.py branch", "every": 5,
+              "style": {"tone": "code", "sgr": ["bold"]}}},
+  {"script": {"command": "~/.pi/statusline.d/gitcell.py add", "every": 5,
+              "style": "add"}},
+  {"script": {"command": "~/.pi/statusline.d/gitcell.py del", "every": 5,
+              "style": "del"}}
+]}
+```
+
+`gitcell.py branch` prints `" master"` while `PI_FACTS.tabs` holds one checkout.
+It prints nothing when `tabs` holds more, because `tabs` already names each
+checkout. A blank answer removes the cell, and the group closes the gap.
+`add` and `del` print `" +3"` and `" -2"` by the same rule. Each part shows the
+theme's own diff colour.
+
+Keep one script file with three arguments. Do not write three copies that read
+`PI_FACTS`.
 
 The statusline redraws from the last answer, so a slow script never stalls the
 screen.

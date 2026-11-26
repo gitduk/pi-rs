@@ -18,6 +18,11 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   highlighting as edits, plus the reasons for skipped entries. The call's
   JSON is available in its details.
 
+- The `statusline` skill stops leaving a field's own shape to guesswork: it says
+  a field's spelling and colours are not an interface to copy, builds a cell that
+  stands or falls with a condition from one script called once per part, and
+  gives colour through `style` so a theme change still carries.
+
 ## 3.0.9 - 2026-11-26
 
 ### Added
