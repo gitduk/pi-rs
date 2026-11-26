@@ -227,11 +227,22 @@ pub(super) fn input(ui: &mut crate::tui::Ui, width: usize) -> (Vec<Line<'static>
     ui.input_view(width, hint.as_deref())
 }
 
+// A checkout as git lists one, with the branch the bar draws.
+pub(super) fn tree(name: &str, branch: Option<&str>) -> pi_core::core::worktree::Tree {
+    pi_core::core::worktree::Tree {
+        path: std::path::PathBuf::from(name),
+        name: name.into(),
+        branch: branch.map(str::to_string),
+        main: false,
+    }
+}
+
 // A lane as the bar holds one.
 pub(super) fn tab(mark: crate::tui::Mark, name: &str) -> crate::tui::Tab {
     crate::tui::Tab {
         mark,
         name: name.into(),
+        branch: None,
     }
 }
 

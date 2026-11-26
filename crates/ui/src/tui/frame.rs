@@ -102,7 +102,7 @@ impl Ui {
         let facts = Facts::of(
             lane,
             view,
-            self.project.clone(),
+            self.git.clone(),
             self.tabs
                 .iter()
                 .map(|tab| Checkout {

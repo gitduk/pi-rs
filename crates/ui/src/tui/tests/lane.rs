@@ -4,7 +4,6 @@ use crate::tui::{Asked, Deed, Intent, Origin, View, front_view, view_at};
 use agent::Event;
 use pi_core::core::lane::Lane;
 use pi_core::input::Builtin;
-use pi_core::input::commands::Choice;
 use pi_store::keys::Mode;
 use pi_store::listing::Listing;
 
@@ -434,20 +433,11 @@ fn the_bar_lists_the_checkouts_no_lane_has_open() {
     tui.core.lanes.at_mut(0).set_worktree(Some("pi-rs".into()));
     tui.ui
         .lists
-        .worktrees
+        .checkouts
         .set(vec![
-            Choice {
-                name: "pi-rs".into(),
-                note: String::new(),
-            },
-            Choice {
-                name: "fix-mem".into(),
-                note: String::new(),
-            },
-            Choice {
-                name: "fw-rm".into(),
-                note: String::new(),
-            },
+            tree("pi-rs", Some("main")),
+            tree("fix-mem", Some("fix/memory")),
+            tree("fw-rm", None),
         ])
         .ok();
     tui.refresh_tabs();
@@ -459,7 +449,7 @@ fn the_bar_lists_the_checkouts_no_lane_has_open() {
             .unwrap_or_else(|| panic!("{name}: {shown:?}"))
     };
     assert!(
-        at("pi-rs") < at("fix-mem") && at("fix-mem") < at("fw-rm"),
+        at("main") < at("fix/memory") && at("fix/memory") < at("fw-rm"),
         "{shown:?}"
     );
     // And the order it lists them in is the order a step walks.
@@ -477,12 +467,9 @@ fn stepping_the_checkouts_walks_the_ring_and_wraps_both_ways() {
         let ui = test_ui(80, 24);
         let trees = ["pi-rs", "f1", "f2"]
             .iter()
-            .map(|n| Choice {
-                name: n.to_string(),
-                note: String::new(),
-            })
+            .map(|n| tree(n, Some(n)))
             .collect();
-        ui.lists.worktrees.set(trees).ok();
+        ui.lists.checkouts.set(trees).ok();
         let (_dir, mut lane) = a_running_lane();
         // A lane in the main checkout names it as its own directory.
         lane.set_worktree(Some(at.unwrap_or("pi-rs").to_string()));
@@ -506,16 +493,8 @@ fn a_step_never_lands_on_the_checkout_it_left() {
     let ring = |trees: &[&str], at: &str, forward: bool| {
         let ui = test_ui(80, 24);
         ui.lists
-            .worktrees
-            .set(
-                trees
-                    .iter()
-                    .map(|n| Choice {
-                        name: n.to_string(),
-                        note: String::new(),
-                    })
-                    .collect(),
-            )
+            .checkouts
+            .set(trees.iter().map(|n| tree(n, Some(n))).collect())
             .ok();
         let (_dir, mut lane) = a_running_lane();
         lane.set_worktree(Some(at.to_string()));
@@ -551,12 +530,9 @@ fn the_ring_walks_the_checkouts_order_not_the_lanes() {
     let mut tui = surface(dir.path());
     let trees = ["pi-rs", "feat/add", "fix/choose", "fix/lane", "fix/nmore"]
         .iter()
-        .map(|n| Choice {
-            name: n.to_string(),
-            note: String::new(),
-        })
+        .map(|n| tree(n, Some(n)))
         .collect();
-    tui.ui.lists.worktrees.set(trees).ok();
+    tui.ui.lists.checkouts.set(trees).ok();
 
     // Opened in an order of their own: git lists checkouts by path, which
     // puts `fix/nmore` last whatever order they were made in.
@@ -607,11 +583,8 @@ fn a_lane_whose_checkout_vanished_is_dropped_and_current_follows() {
     // the checkout that just went; dropping the lane drops the cache.
     tui.ui
         .lists
-        .worktrees
-        .set(vec![Choice {
-            name: "fix-mem".into(),
-            note: String::new(),
-        }])
+        .checkouts
+        .set(vec![tree("fix-mem", Some("fix-mem"))])
         .ok();
     let gone = vanished_lane("fix-mem");
     tui.core.lanes.push(gone);
@@ -625,7 +598,7 @@ fn a_lane_whose_checkout_vanished_is_dropped_and_current_follows() {
         "the lane leaving the bar is the whole notice"
     );
     assert!(
-        tui.ui.lists.worktrees().is_empty(),
+        tui.ui.lists.checkouts().is_empty(),
         "the stale ring entry went too"
     );
 
@@ -732,11 +705,8 @@ fn a_driven_lane_has_not_finished() {
 fn a_lone_checkout_has_no_next() {
     let ui = test_ui(80, 24);
     ui.lists
-        .worktrees
-        .set(vec![Choice {
-            name: "pi-rs".into(),
-            note: String::new(),
-        }])
+        .checkouts
+        .set(vec![tree("pi-rs", Some("pi-rs"))])
         .ok();
     let (_dir, lane) = a_running_lane();
     assert_eq!(ui.step_checkout(&lane, true), None);
@@ -835,12 +805,9 @@ fn normal_capitals_step_the_checkouts_and_the_window() {
     let mut ui = vim_ui();
     let trees = ["pi-rs", "f1", "f2"]
         .iter()
-        .map(|n| Choice {
-            name: n.to_string(),
-            note: String::new(),
-        })
+        .map(|n| tree(n, Some(n)))
         .collect();
-    ui.lists.worktrees.set(trees).ok();
+    ui.lists.checkouts.set(trees).ok();
     ui.vim = Some(Mode::Normal);
     let (_dir, mut lane) = a_running_lane();
     // Where a lane in the main checkout sits: it names its own directory.

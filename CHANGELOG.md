@@ -43,6 +43,14 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 - The `secrets` setting and the scans of provider keys and `.env` files that
   ran before the first request.
 
+- The status line's `project` field is split into `workspace`, the checkout's
+  directory name, and `git`, its branch and lines changed against `HEAD`.
+  `PI_FACTS` exposes the same two fields. A layout that names `project`
+  falls back to the built-in default.
+
+- The checkout bar draws each checkout's branch in place of its worktree name
+  where git reports one.
+
 ### Fixed
 
 - Credential fields such as `OPENAI_API_KEY=sk-...` get a same-length

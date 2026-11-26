@@ -8,11 +8,12 @@ use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 /// `~/.pi/statusline.json` holds: lines of fields, texts and groups.
 ///
 /// A field is a name the surface fills from what it knows — `model`,
-/// `effort`, `spent`, `cache`, `ctx`, `cost`, `state`, `project`, `tabs`,
-/// `flash`, `tier`, `update`, and the status parts (`elapsed`, `in_out`,
-/// `speed`, `compacted`, `queued`, `worktree`). `style` on any of them names a
-/// theme tone (`muted`, `heading`, `emphasis`, `code`, `input`, `ok`, `err`,
-/// `add`, `del`) or writes one out (`"34"`, `{"color":"#5c9cf5","sgr":["bold"]}`).
+/// `effort`, `spent`, `cache`, `ctx`, `cost`, `state`, `workspace`, `git`,
+/// `tabs`, `flash`, `tier`, `update`, and the status parts (`elapsed`,
+/// `in_out`, `speed`, `compacted`, `queued`, `worktree`). `style` on any of
+/// them names a theme tone (`muted`, `heading`, `emphasis`, `code`, `input`,
+/// `ok`, `err`, `add`, `del`) or writes one out (`"34"`,
+/// `{"color":"#5c9cf5","sgr":["bold"]}`).
 /// A script is told the session it draws for (`PI_SESSION_DIR`), the row's
 /// width in cells (`PI_COLUMNS`), and what the row knows as JSON (`PI_FACTS`);
 /// the SGR runs it prints colour its answer.

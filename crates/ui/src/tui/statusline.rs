@@ -53,10 +53,13 @@ pub(crate) struct Facts {
     pub tabs: Vec<Checkout>,
     /// Where the checkout's background executions stand.
     pub jobs: Jobs,
-    /// The checkout as `project` draws it; read once a second, and absent
+    /// The checkout's directory name; absent for a root with no name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// Where the checkout stands in git; read once a second, and absent
     /// outside a repository.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub project: Option<pi_store::statusline::Project>,
+    pub git: Option<pi_store::statusline::Git>,
     /// Whether this run's ceiling lets a script run at all: an outside command
     /// is the same power the `bash` tool asks for.
     #[serde(skip)]
@@ -235,9 +238,9 @@ impl Facts {
             Field::Queued if run.queued == 0 => return None,
             Field::Queued => format!("{} queued", run.queued),
             Field::Worktree => run.worktree.clone()?,
-            // Drawn by the screen, from its own state: a flash, the folded
-            // checkouts, the checkout's diff.
-            Field::Tabs | Field::Flash | Field::Project => return None,
+            Field::Workspace => self.workspace.clone()?,
+            // The surface renders these itself.
+            Field::Tabs | Field::Flash | Field::Git => return None,
         })
     }
 
@@ -269,7 +272,8 @@ impl Facts {
             run: Run::of(&run, None),
             tabs: Vec::new(),
             jobs: Jobs::default(),
-            project: None,
+            workspace: None,
+            git: None,
             may_run_scripts: false,
         }
     }
@@ -277,7 +281,7 @@ impl Facts {
     pub(super) fn of(
         lane: &Lane,
         view: &View,
-        project: Option<statusline::Project>,
+        git: Option<statusline::Git>,
         tabs: Vec<Checkout>,
         jobs: Jobs,
     ) -> Self {
@@ -324,16 +328,19 @@ impl Facts {
             },
             tabs,
             jobs,
-            project,
+            workspace: lane
+                .root()
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+            git,
             may_run_scripts: pi_store::statusline::may_run_scripts(lane.resolved().ceiling),
         }
     }
 }
 
-// The checkout the `project` field draws: the directory's own name, then, in a
-// repository, the branch and the worktree's lines against `HEAD`.
-pub(super) fn project_of(root: &std::path::Path) -> Option<statusline::Project> {
-    let name = root.file_name()?.to_string_lossy().into_owned();
+// Where the checkout stands in git: the branch it is on, then the lines its
+// worktree has changed against `HEAD`.
+pub(super) fn git_of(root: &std::path::Path) -> Option<statusline::Git> {
     let git = |args: &[&str]| -> Option<String> {
         let out = std::process::Command::new("git")
             .arg("--no-optional-locks")
@@ -348,21 +355,16 @@ pub(super) fn project_of(root: &std::path::Path) -> Option<statusline::Project> 
     // `symbolic-ref` still names the branch where `rev-parse` cannot resolve a
     // `HEAD` with no commit behind it; only a detached head reaches the latter.
     let branch = git(&["symbolic-ref", "--short", "HEAD"])
-        .or_else(|| git(&["rev-parse", "--abbrev-ref", "HEAD"]));
+        .or_else(|| git(&["rev-parse", "--abbrev-ref", "HEAD"]))?;
+    let diff = git(&["diff", "--numstat", "HEAD"]).unwrap_or_default();
     let mut added = 0;
     let mut removed = 0;
-    if branch.is_some() {
-        for line in git(&["diff", "--numstat", "HEAD"])
-            .unwrap_or_default()
-            .lines()
-        {
-            let mut cols = line.split('\t');
-            added += cols.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
-            removed += cols.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
-        }
+    for line in diff.lines() {
+        let mut cols = line.split('\t');
+        added += cols.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+        removed += cols.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
     }
-    Some(statusline::Project {
-        name,
+    Some(statusline::Git {
         branch,
         added,
         removed,
@@ -444,10 +446,11 @@ impl Ui {
                     Mark::Plain => ("", &theme.muted),
                     Mark::Unopened => (icons::UNOPENED_MARK, &theme.muted),
                 };
+                let name = tab.branch.as_deref().unwrap_or(&tab.name);
                 let label = if sign.is_empty() {
-                    tab.name.clone()
+                    name.to_string()
                 } else {
-                    format!("{sign} {}", tab.name)
+                    format!("{sign} {name}")
                 };
                 self.paint.span(style, label)
             })
@@ -568,7 +571,7 @@ impl Ui {
         let left = self.pieces(&line.left, facts, session);
         let right = self.pieces(&line.right, facts, session);
         let sep = match &line.sep {
-            Some(t) => self.text(t).unwrap_or_default(),
+            Some(t) => self.text(&t.text, &t.style).unwrap_or_default(),
             None => vec![self.tab_sep.clone()],
         };
         let gap = if left.is_empty() || right.is_empty() {
@@ -661,25 +664,14 @@ impl Ui {
         facts: &Facts,
         session: &std::path::Path,
     ) -> Option<Vec<Span<'static>>> {
-        let flash_slot = match item {
-            Item::Field(part) => *part == Field::Flash,
-            Item::Styled(s) => s.field == Field::Flash,
-            _ => false,
-        };
-        if flash_slot && self.flash.is_none() && !facts.alerts.is_empty() {
-            let alerts = facts.alerts.join(icons::PART_SEP);
-            return Some(vec![self.paint.span(&self.paint.theme.status.err, alerts)]);
-        }
-        let (text, look) = match item {
+        let (field, look) = match item {
             Item::Field(part) if part.is_part() => {
                 let text = self.value(*part, facts)?;
                 return Some(crate::status::painted(&text, &self.paint).spans);
             }
-            Item::Field(Field::Project) => return self.project_spans(&MUTED),
-            Item::Field(part) => (self.value(*part, facts)?, &MUTED),
-            Item::Styled(s) if s.field == Field::Project => return self.project_spans(&s.style),
-            Item::Styled(s) => (self.value(s.field, facts)?, &s.style),
-            Item::Text(t) => return self.text(t),
+            Item::Field(part) => (*part, &MUTED),
+            Item::Styled(s) => (s.field, &s.style),
+            Item::Text(t) => return self.text(&t.text, &t.style),
             Item::Script(s) => {
                 let answer = self.scripts.shown(s, session);
                 let spans = self.script_spans(&answer, &s.style);
@@ -687,10 +679,14 @@ impl Ui {
             }
             Item::Group(_) => return None,
         };
-        self.text(&statusline::Text {
-            text,
-            style: look.clone(),
-        })
+        match field {
+            Field::Flash if self.flash.is_none() && !facts.alerts.is_empty() => {
+                let alerts = facts.alerts.join(icons::PART_SEP);
+                Some(vec![self.paint.span(&self.paint.theme.status.err, alerts)])
+            }
+            Field::Git => Some(self.git_spans(facts.git.as_ref()?, look)),
+            _ => self.text(&self.value(field, facts)?, look),
+        }
     }
 
     // A group goes whole when it holds parts and none of them had anything to
@@ -713,34 +709,25 @@ impl Ui {
         (!spans.is_empty() && (parts == 0 || said > 0)).then_some(spans)
     }
 
-    // The checkout: its name and branch, then what changed, in the diff's own
-    // colours.
-    fn project_spans(&self, look: &Look) -> Option<Vec<Span<'static>>> {
-        let project = self.project.as_ref()?;
-        let named = match &project.branch {
-            Some(branch) => format!("{} {branch}", project.name),
-            None => project.name.clone(),
-        };
-        let mut spans = vec![self.paint.span(self.tone(look).as_ref(), named)];
-        if project.added + project.removed > 0 {
-            spans.push(self.paint.span(&self.paint.theme.muted, " "));
-            if project.added > 0 {
-                spans.push(
-                    self.paint
-                        .span(&self.paint.theme.diff.add, format!("+{}", project.added)),
-                );
-            }
-            if project.added > 0 && project.removed > 0 {
-                spans.push(self.paint.span(&self.paint.theme.muted, "/"));
-            }
-            if project.removed > 0 {
-                spans.push(
-                    self.paint
-                        .span(&self.paint.theme.diff.del, format!("-{}", project.removed)),
-                );
-            }
+    // The branch, then what changed, in the diff's own colours.
+    fn git_spans(&self, git: &statusline::Git, look: &Look) -> Vec<Span<'static>> {
+        let paint = &self.paint;
+        let mut spans = vec![paint.span(self.tone(look).as_ref(), git.branch.as_str())];
+        let has_added = git.added > 0;
+        let has_removed = git.removed > 0;
+        if has_added || has_removed {
+            spans.push(paint.span(&paint.theme.muted, " "));
         }
-        Some(spans)
+        if has_added {
+            spans.push(paint.span(&paint.theme.diff.add, format!("+{}", git.added)));
+        }
+        if has_added && has_removed {
+            spans.push(paint.span(&paint.theme.muted, "/"));
+        }
+        if has_removed {
+            spans.push(paint.span(&paint.theme.diff.del, format!("-{}", git.removed)));
+        }
+        spans
     }
 
     // What the screen itself has to say for a field: a flash it holds. Every
@@ -752,11 +739,11 @@ impl Ui {
         }
     }
 
-    fn text(&self, t: &statusline::Text) -> Option<Vec<Span<'static>>> {
-        (!t.text.is_empty()).then(|| {
+    fn text(&self, text: &str, look: &Look) -> Option<Vec<Span<'static>>> {
+        (!text.is_empty()).then(|| {
             vec![
                 self.paint
-                    .span(self.tone(&t.style).as_ref(), t.text.replace('\n', " ")),
+                    .span(self.tone(look).as_ref(), text.replace('\n', " ")),
             ]
         })
     }

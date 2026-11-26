@@ -506,7 +506,10 @@ pub(super) struct Lists {
     pub(super) sessions: std::cell::OnceCell<Vec<ResumeChoice>>,
     // The store's version `sessions` was read at.
     pub(super) sessions_at: u64,
-    pub(super) worktrees: std::cell::OnceCell<Vec<Choice>>,
+    worktrees: std::cell::OnceCell<Vec<Choice>>,
+    // The checkouts `worktrees` is built from, kept for what the menu's
+    // notes cannot say: the bar draws the branch itself.
+    pub(super) checkouts: std::cell::OnceCell<Vec<core::worktree::Tree>>,
     pub(super) editable: std::cell::OnceCell<Vec<EditChoice>>,
     // The flags that choose which files `/edit` offers.
     pub(super) pinned: pi_core::args::Pinned,
@@ -520,6 +523,7 @@ impl Lists {
             sessions: std::cell::OnceCell::new(),
             sessions_at: 0,
             worktrees: std::cell::OnceCell::new(),
+            checkouts: std::cell::OnceCell::new(),
             editable: std::cell::OnceCell::new(),
             pinned: Default::default(),
         }
@@ -550,28 +554,31 @@ impl Lists {
             .get_or_init(|| self.store.choices(&self.workspace))
     }
 
-    // The checkouts with the branch each is on, where that says more than the
-    // name. Empty outside a git repository, where there is nothing to offer.
-    pub(super) fn worktrees(&self) -> &[Choice] {
+    // The checkouts with the branch each is on. Empty outside a git
+    // repository, where there is nothing to offer.
+    pub(super) fn checkouts(&self) -> &[core::worktree::Tree] {
+        self.checkouts
+            .get_or_init(|| core::worktree::list(&self.workspace).unwrap_or_default())
+    }
+
+    // The checkouts as the worktree menu offers them: the branch where it
+    // says more than the name.
+    fn worktrees(&self) -> &[Choice] {
         self.worktrees.get_or_init(|| {
-            core::worktree::list(&self.workspace)
-                .map(|trees| {
-                    trees
-                        .into_iter()
-                        .map(|t| {
-                            let note = t.branch_note().unwrap_or_default().to_string();
-                            Choice { name: t.name, note }
-                        })
-                        .collect()
+            self.checkouts()
+                .iter()
+                .map(|t| Choice {
+                    name: t.name.clone(),
+                    note: t.branch_note().unwrap_or_default().to_string(),
                 })
-                .unwrap_or_default()
+                .collect()
         })
     }
 
     // What's known about the checkouts without asking git: `None` until
     // read, and never forks. The bar reads this so a frame never waits.
-    pub(super) fn worktrees_read(&self) -> Option<&[Choice]> {
-        self.worktrees.get().map(Vec::as_slice)
+    pub(super) fn checkouts_read(&self) -> Option<&[core::worktree::Tree]> {
+        self.checkouts.get().map(Vec::as_slice)
     }
 
     // Settings or files offered by `/edit` changed.
@@ -583,6 +590,7 @@ impl Lists {
     pub(super) fn forget(&mut self) {
         self.sessions.take();
         self.worktrees.take();
+        self.checkouts.take();
         self.forget_editable();
     }
 
