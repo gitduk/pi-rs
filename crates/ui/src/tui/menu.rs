@@ -64,9 +64,15 @@ impl Ui {
                 };
                 self.at_menu = Some((kind, token.to_string(), items));
             }
-            let lead = if kind == Path::At { "@" } else { "" };
+            let (lead, typed) = match kind {
+                Path::At => ("@", query),
+                Path::Home | Path::Directory => ("", token),
+            };
             let browse = query.is_empty() || query.ends_with('/');
             let (_, _, items) = self.at_menu.as_ref().expect("set above");
+            if matches!(items.as_slice(), [file] if !file.dir && file.path == typed) {
+                return Assistance::new(Vec::new(), hint);
+            }
             let menu = items
                 .iter()
                 .rev()
@@ -358,9 +364,8 @@ pub(super) struct List {
     // The line `picked` and `top` were set against: both are positions in
     // the list it grew, so another line starts over.
     picked_for: Option<String>,
-    // Text the list was dismissed at. Any edit brings the list back —
-    // Esc means "not that", not "never again".
-    pub(super) dismissed_at: Option<String>,
+    // Text for which the list stays closed after a paste or dismissal.
+    dismissed_at: Option<String>,
     // A line a key put there, which dismissing its list takes back untouched.
     pub(super) seeded: Option<String>,
     // A question's options marked so far, where several may be.
@@ -368,6 +373,10 @@ pub(super) struct List {
 }
 
 impl List {
+    pub(super) fn dismiss(&mut self, line: &str) {
+        self.dismissed_at = Some(line.to_string());
+    }
+
     // A fresh list: the highlight back on the bottom row, in sight.
     pub(super) fn restart(&mut self) {
         (self.picked, self.top) = (None, 0);
