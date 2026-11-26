@@ -34,6 +34,10 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 
 ### Fixed
 
+- Path completion stays closed when the token already spells the only candidate,
+  so a path typed or pasted whole leaves Enter to send the line. Text arriving
+  as a paste opens no list at all until the next edit.
+
 - Invalid tool calls report the JSON parse error and its location without
   echoing the arguments into diagnostics or retry messages.
 

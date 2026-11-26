@@ -97,6 +97,8 @@ impl Ui {
                     self.search_paste(&text);
                 } else {
                     self.editor.insert_str(&text.replace('\r', "\n"));
+                    // Pasted, not typed: no list over it until the next edit.
+                    self.list.dismissed_at = Some(self.editor.text().to_string());
                 }
                 return Asked::Own(Deed::Nothing);
             }

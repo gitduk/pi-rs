@@ -67,6 +67,12 @@ impl Ui {
             let lead = if kind == Path::At { "@" } else { "" };
             let browse = query.is_empty() || query.ends_with('/');
             let (_, _, items) = self.at_menu.as_ref().expect("set above");
+            // The only candidate is what the token already spells: nothing to
+            // complete, so the list stays away — a path typed whole, or pasted.
+            let typed = &token[lead.len()..];
+            if items.iter().all(|f| !f.dir && f.path == typed) {
+                return Assistance::new(Vec::new(), hint);
+            }
             let menu = items
                 .iter()
                 .rev()
