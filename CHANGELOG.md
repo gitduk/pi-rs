@@ -11,6 +11,10 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 
 ### Added
 
+- The status line's text can be selected and copied wherever the line sits,
+  the row over the input line included. A selected row shows the plain line
+  and gets its clickable parts back once the selection is released.
+
 - `{"unless": "<field>", "items": [...]}` and `{"when": "<field>", "items": [...]}`
   in the statusline `layout` draw their items only while that field says nothing,
   or something. The row reads the condition off the facts it already holds, so
