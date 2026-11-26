@@ -44,9 +44,10 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   the row's one-second cadence is not read again, so switching back and forth
   between two checkouts costs no git at all.
 
-- A turn that has gone quiet for under two seconds no longer draws the
-  `waiting` line. One second is the usual gap between two answers, so the line
-  said nothing was happening where something was.
+- The `waiting` line keeps its row for the whole turn, blank until the clock
+  has something to say. It used to be added once the turn had been quiet for two
+  seconds and taken away when the answer arrived, so a turn answered at two or
+  three seconds moved the screen twice.
 
 - The `statusline` skill stops leaving a field's own shape to guesswork: it says
   a field's spelling and colours are not an interface to copy, and shows a cell

@@ -876,32 +876,37 @@ impl Ui {
             out.push(row.clone(), None);
         }
 
-        // Nothing on screen moving — first bytes still to come, or the next
-        // answer due with no call out: one turning line, timed from `quiet`.
+        // A turn holds one row under what it has said so far, and fills it
+        // only while nothing on screen is moving — no retry ridden out, no
+        // stream, no call out. Held for the whole turn, the line fills a row
+        // instead of moving the screen when it lands.
         if let Some(work) = &view.state.work
             && matches!(work.doing, Doing::Turn { .. })
-            && !work.stopping
-            && work.retry.is_none()
-            && view.surface.stream.text().is_empty()
-            && !call::running(&view.state.tools)
-            && let Some(waited) =
-                crate::status::running_time(work.quiet.elapsed(), crate::status::QUIET)
         {
-            if spacing.push(super::spacing::Section::Other) {
-                out.push(Line::default(), None);
-            }
-            let line = Line::from(vec![
-                self.paint.span(
-                    &self.paint.theme.muted,
-                    format!("{} ", StepMark::Thinking(self.spinner).glyph()),
-                ),
-                self.paint.span(
-                    &self.paint.theme.muted,
-                    format!("waiting{}{waited}", icons::PART_SEP),
-                ),
-            ]);
-            for row in screen::fit(&line, width) {
-                out.push(row, None);
+            let still = !work.stopping
+                && work.retry.is_none()
+                && view.surface.stream.text().is_empty()
+                && !call::running(&view.state.tools);
+            let waited = still
+                .then(|| work.quiet.elapsed())
+                .and_then(|waited| crate::status::running_time(waited, crate::status::SHOWN));
+            match waited {
+                // One row whatever the width: a line that wraps would take a
+                // second row the second the clock lands.
+                None => out.push(Line::default(), None),
+                Some(waited) => {
+                    let line = Line::from(vec![
+                        self.paint.span(
+                            &self.paint.theme.muted,
+                            format!("{} ", StepMark::Thinking(self.spinner).glyph()),
+                        ),
+                        self.paint.span(
+                            &self.paint.theme.muted,
+                            format!("waiting{}{waited}", icons::PART_SEP),
+                        ),
+                    ]);
+                    out.push(screen::clip_line(&line, width), None);
+                }
             }
         }
 

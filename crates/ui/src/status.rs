@@ -16,12 +16,9 @@ use crate::tui::statusline::Facts;
 pub const SPIN: Duration = Duration::from_millis(90);
 
 /// When a clock is worth showing at all: a second is the usual gap between
-/// two answers, and a figure that lands inside it reads as a stutter.
+/// two answers, and a figure that lands inside it reads as a stutter. The
+/// waiting row is held for its whole turn, so its clock may start here too.
 pub const SHOWN: Duration = Duration::from_secs(1);
-
-/// When a silent turn is worth naming as waiting: a pause under this is the
-/// model thinking between two answers, not something the screen must explain.
-pub const QUIET: Duration = Duration::from_secs(2);
 
 // Show both counts: a percentage hides useful detail in large windows.
 pub(crate) fn context((used, window): (usize, usize)) -> Option<String> {
