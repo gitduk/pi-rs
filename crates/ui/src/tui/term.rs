@@ -140,8 +140,12 @@ fn desktop_available() -> bool {
         .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
 }
 
-/// Checks that the file still exists and opens it off the terminal's loop.
+/// Checks that the path is absolute and the file still exists, then opens it
+/// off the terminal's loop.
 pub(super) async fn open_file(path: PathBuf) -> FileOpen {
+    if !path.is_absolute() {
+        return Err(format!("{} must be an absolute path", path.display()));
+    }
     let meta = tokio::fs::metadata(&path)
         .await
         .map_err(|e| format!("could not open {}: {e}", path.display()))?;

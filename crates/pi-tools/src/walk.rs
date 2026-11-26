@@ -59,34 +59,19 @@ fn compile(
 /// Dotted entries are kept except `.git` itself; the global gitignore applies
 /// only inside the workspace; an exclude set prunes whole subtrees at the walk.
 pub fn walker(ws: &Workspace, root: &Path, skip: Option<GlobSet>) -> ignore::WalkBuilder {
-    let inside = root.starts_with(ws.root());
-    build(root, inside, skip, Some(ws.root().to_path_buf()))
-}
-
-/// `walker` for a caller holding a path, not a `Workspace`: `global` says
-/// whether the user's global gitignore applies at `root`.
-pub fn walker_at(root: &Path, global: bool, skip: Option<GlobSet>) -> ignore::WalkBuilder {
-    build(root, global, skip, None)
-}
-
-fn build(
-    root: &Path,
-    global: bool,
-    skip: Option<GlobSet>,
-    base: Option<PathBuf>,
-) -> ignore::WalkBuilder {
+    let base = ws.root().to_path_buf();
     let mut b = ignore::WalkBuilder::new(root);
     let top = root.to_path_buf();
     b.hidden(false)
         .follow_links(false)
         .git_ignore(true)
-        .git_global(global)
+        .git_global(root.starts_with(&base))
         .require_git(false)
         .filter_entry(move |e| {
             e.file_name() != ".git"
                 && skip
                     .as_ref()
-                    .is_none_or(|s| !matches(s, e.path(), &top, base.as_deref()))
+                    .is_none_or(|s| !matches(s, e.path(), &top, Some(&base)))
         });
     b
 }

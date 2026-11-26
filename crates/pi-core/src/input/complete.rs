@@ -11,6 +11,7 @@ const DELIMS: [char; 6] = [' ', '\t', '"', '\'', '=', '\n'];
 const WALK_CAP: usize = 2000;
 // What file suggestions offer at most.
 const TOP: usize = 20;
+const GIT_DIR: &str = ".git";
 
 /// One candidate: the path as the completed `@token` should read,
 /// workspace-relative, and whether it names a directory — a directory
@@ -49,7 +50,8 @@ fn token_start(line: &str, cursor: usize) -> usize {
 /// Ranked candidates for the text after the `@`, best first, at most `TOP`.
 ///
 /// Only one level is listed, the folder the query names (`src/`, `src/fo`)
-/// or the root; absolute, `~` and `..` scopes are refused.
+/// or the root; absolute, `~` and `..` scopes are refused. Gitignored
+/// entries are offered like any other, `.git` alone stays out.
 pub fn candidates(query: &str, root: &Path) -> Vec<FileEntry> {
     if root.as_os_str().is_empty() {
         return Vec::new();
@@ -60,31 +62,17 @@ pub fn candidates(query: &str, root: &Path) -> Vec<FileEntry> {
     if query.starts_with(['/', '~']) || query.split('/').any(|s| s == "..") {
         return Vec::new();
     }
-    let (scope, display_base, name) = split(&query, root, "");
-
-    // The tools' walk, so `@` offers what grep and glob would find. The scope
-    // never leaves the root, so the global gitignore applies.
-    let mut raw: Vec<(String, bool)> = Vec::new();
-    let walk = pi_tools::walk::walker_at(&scope, true, None)
-        .max_depth(Some(1))
-        .build();
-    for entry in walk.flatten() {
-        let Ok(rel) = entry.path().strip_prefix(&scope) else {
-            continue;
-        };
-        let Some(rel) = rel.to_str() else {
-            continue;
-        };
-        if rel.is_empty() {
-            continue;
-        }
-        let dir = entry.file_type().is_some_and(|t| t.is_dir());
-        raw.push((rel.replace('\\', "/"), dir));
-        if raw.len() >= WALK_CAP {
-            break;
-        }
+    if query
+        .rsplit_once('/')
+        .is_some_and(|(folder, _)| folder.split('/').any(|part| part == GIT_DIR))
+    {
+        return Vec::new();
     }
-    rank(raw, name, &display_base, false)
+    let (scope, display_base, name) = split(&query, root, "");
+    let entries = read_folder(&scope)
+        .filter(|(rel, _)| rel != GIT_DIR)
+        .take(WALK_CAP);
+    rank(entries, name, &display_base, false)
 }
 
 /// Candidates under `home` for the text after `~/`, each spelled from `~/`.
@@ -109,52 +97,51 @@ pub fn directories(query: &str, root: &Path, home: Option<&Path>) -> Vec<FileEnt
     listed(query, root, "", true)
 }
 
-// One folder read as it is, no ignore file: outside a project none applies.
-// Dot entries wait for a typed `.`, as in a shell.
-fn listed(query: &str, base: &Path, lead: &str, dirs_only: bool) -> Vec<FileEntry> {
-    let (scope, display_base, name) = split(query, base, lead);
-    let Ok(read) = std::fs::read_dir(&scope) else {
-        return Vec::new();
-    };
-    let hidden = name.starts_with('.');
-    let raw: Vec<(String, bool)> = read
+fn read_folder(dir: &Path) -> impl Iterator<Item = (String, bool)> {
+    std::fs::read_dir(dir)
+        .into_iter()
         .flatten()
         .filter_map(|e| {
+            let e = e.ok()?;
             let rel = e.file_name().into_string().ok()?;
-            // Followed: a link to a directory is somewhere to go.
-            let dir = e.path().is_dir();
-            ((hidden || !rel.starts_with('.')) && (dir || !dirs_only)).then_some((rel, dir))
+            // Follow symlinks to navigable directories.
+            let dir = match e.file_type() {
+                Ok(kind) if !kind.is_symlink() => kind.is_dir(),
+                _ => e.path().is_dir(),
+            };
+            Some((rel, dir))
         })
-        .take(if dirs_only { usize::MAX } else { WALK_CAP })
-        .collect();
-    rank(raw, name, &display_base, dirs_only)
+}
+
+// One folder read as it is. Dot entries wait for a typed `.`, as in a shell.
+fn listed(query: &str, base: &Path, lead: &str, dirs_only: bool) -> Vec<FileEntry> {
+    let (scope, display_base, name) = split(query, base, lead);
+    let hidden = name.starts_with('.');
+    let entries = read_folder(&scope)
+        .filter(|(rel, dir)| (hidden || !rel.starts_with('.')) && (*dir || !dirs_only))
+        .take(if dirs_only { usize::MAX } else { WALK_CAP });
+    rank(entries, name, &display_base, dirs_only)
 }
 
 // The folder `query` names under `root`, how its entries are spelled from
 // `lead`, and the name being typed in it.
-fn split(query: &str, root: &Path, lead: &str) -> (std::path::PathBuf, String, String) {
-    match query.rfind('/') {
-        Some(i) => (
-            root.join(&query[..i]),
-            format!("{lead}{}", &query[..=i]),
-            query[i + 1..].to_string(),
-        ),
-        None => (root.to_path_buf(), lead.to_string(), query.to_string()),
+fn split<'a>(query: &'a str, root: &Path, lead: &str) -> (std::path::PathBuf, String, &'a str) {
+    match query.rsplit_once('/') {
+        Some((folder, name)) => (root.join(folder), format!("{lead}{folder}/"), name),
+        None => (root.to_path_buf(), lead.to_string(), query),
     }
 }
 
 fn rank(
-    raw: Vec<(String, bool)>,
-    name: String,
+    entries: impl Iterator<Item = (String, bool)>,
+    name: &str,
     display_base: &str,
     dirs_only: bool,
 ) -> Vec<FileEntry> {
     let query_lower = name.to_lowercase();
     let browse = dirs_only && name.is_empty();
-    let mut scored: Vec<(i32, FileEntry)> = raw
-        .into_iter()
+    let mut scored: Vec<(i32, FileEntry)> = entries
         .filter_map(|(rel, dir)| {
-            let path = format!("{display_base}{rel}");
             let score = if query_lower.is_empty() {
                 // Nothing to match: children of the scope, folders first.
                 if dir { 110 } else { 100 }
@@ -174,7 +161,10 @@ fn rank(
                 }
                 s
             };
-            (score > 0).then_some((score, FileEntry { path, dir }))
+            (score > 0).then(|| {
+                let path = format!("{display_base}{rel}");
+                (score, FileEntry { path, dir })
+            })
         })
         .collect();
     scored.sort_by(|a, b| {
@@ -196,8 +186,8 @@ mod tests {
     use super::*;
     use std::fs;
 
-    // src/lib/mod.rs, src/main.rs, README.md, target/miss.rs (ignored),
-    // .git/config (excluded).
+    // src/lib/mod.rs, src/main.rs, README.md, target/miss.rs (gitignored,
+    // still offered), .git/config (excluded).
     fn tree() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
@@ -231,9 +221,11 @@ mod tests {
     fn bare_at_lists_the_root_folders_first() {
         let (_dir, root) = tree();
         let got = candidates("", &root);
-        // Upstream's fd hides `.git` itself but not other dot-files, so the
-        // gitignore file is a plain candidate here too.
-        assert_eq!(names(&got), vec!["src", "README.md", ".gitignore"]);
+        // `.git` stays out; other dot entries are plain candidates.
+        assert_eq!(
+            names(&got),
+            vec!["src", "target", "README.md", ".gitignore"]
+        );
         assert!(got[0].dir);
     }
 
@@ -256,10 +248,12 @@ mod tests {
     }
 
     #[test]
-    fn ignored_and_git_entries_stay_out() {
+    fn gitignored_entries_are_offered_and_git_metadata_is_excluded() {
         let (_dir, root) = tree();
-        assert!(candidates("ta", &root).is_empty());
+        assert_eq!(names(&candidates("ta", &root)), vec!["target"]);
         assert_eq!(names(&candidates(".gi", &root)), vec![".gitignore"]);
+        assert_eq!(names(&candidates(".git", &root)), vec![".gitignore"]);
+        assert!(candidates(".git/", &root).is_empty());
     }
 
     #[test]
