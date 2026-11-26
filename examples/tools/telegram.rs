@@ -1590,18 +1590,9 @@ mod split {
 // Presentation keeps the original semantic messages unchanged.
 mod protocol {
     use serde_json::{Value, json};
-    use std::sync::atomic::{AtomicU64, Ordering};
     pub fn hash(value: &str) -> String {
         use sha2::{Digest, Sha256};
         format!("{:x}", Sha256::digest(value.as_bytes()))
-    }
-    pub fn fresh() -> String {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        format!("channel-{now}-{}", NEXT.fetch_add(1, Ordering::Relaxed))
     }
     pub fn key(value: &Value) -> Option<String> {
         value
