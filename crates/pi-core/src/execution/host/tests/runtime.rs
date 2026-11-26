@@ -14,6 +14,7 @@ fn core(lane: Lane, store: pi_store::session::Store, table: Arc<Table>) -> Core 
         executions: Some(table),
         surface: &[],
         removals: Default::default(),
+        trees: None,
     }
 }
 

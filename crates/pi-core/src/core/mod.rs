@@ -95,6 +95,10 @@ pub struct Core {
     /// Checkouts a removal has claimed until the surface lands it: no lane
     /// may open one while its directory is going.
     pub removals: Vec<crate::input::Target>,
+    /// What `git worktree list` last said, and the repository it said it of: a
+    /// switch names a checkout the bar already shows, so the read that named it
+    /// is kept rather than forked again; a name it does not hold goes to git.
+    pub trees: Option<(std::path::PathBuf, Vec<worktree::Tree>)>,
 }
 
 impl Core {
@@ -906,6 +910,7 @@ mod tests {
             lanes: crate::core::lanes::Lanes::of(lane),
             executions: None,
             removals: Default::default(),
+            trees: None,
             surface: &[],
         }
     }

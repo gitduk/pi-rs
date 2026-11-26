@@ -437,6 +437,7 @@ async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended
         lanes: pi_core::core::lanes::Lanes::of(first),
         executions: None,
         removals: Default::default(),
+        trees: None,
         surface: words,
     };
     core.restore_messages()?;
@@ -550,6 +551,7 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         lanes: pi_core::core::lanes::Lanes::of(first),
         executions: None,
         removals: Default::default(),
+        trees: None,
         surface: words,
     };
     core.restore_messages()?;

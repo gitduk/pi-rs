@@ -9,6 +9,19 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 
 ## Unreleased
 
+### Added
+
+- `{"unless": "<field>", "items": [...]}` and `{"when": "<field>", "items": [...]}`
+  in the statusline `layout` draw their items only while that field says nothing,
+  or something. The row reads the condition off the facts it already holds, so
+  the cell appears and goes in the same frame as the field it follows — no
+  script, and nothing empty while a run starts.
+
+- The `branch` and `diff` fields replace `git`, which drew both at once. A
+  condition can then keep the branch and still show the diff, as a row does when
+  `tabs` already names the checkout. A layout that names `git` no longer parses,
+  so it is set aside and the built-in default stands until it is edited.
+
 ### Changed
 
 - New long-term memory entries have a short type prefix. Measured results
@@ -18,10 +31,22 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   highlighting as edits, plus the reasons for skipped entries. The call's
   JSON is available in its details.
 
+- Switching checkouts no longer re-reads the worktree list. A repository's
+  checkouts are the same from every one of them, and dropping the list on a
+  switch drew the bar for one frame from an empty one. A switch onto a checkout
+  the bar already shows also takes its path from that same read instead of
+  forking `git worktree list` to name it again. Its branch comes from the git
+  directory's `HEAD` rather than another git call, and a checkout read within
+  the row's one-second cadence is not read again, so switching back and forth
+  between two checkouts costs no git at all.
+
+- A turn that has gone quiet for under two seconds no longer draws the
+  `waiting` line. One second is the usual gap between two answers, so the line
+  said nothing was happening where something was.
+
 - The `statusline` skill stops leaving a field's own shape to guesswork: it says
-  a field's spelling and colours are not an interface to copy, builds a cell that
-  stands or falls with a condition from one script called once per part, and
-  gives colour through `style` so a theme change still carries.
+  a field's spelling and colours are not an interface to copy, and shows a cell
+  whose part stands or falls with a condition.
 
 ## 3.0.9 - 2026-11-26
 

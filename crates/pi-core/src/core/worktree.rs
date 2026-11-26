@@ -209,6 +209,22 @@ pub fn holding<'a>(trees: &'a [Tree], path: &Path) -> Option<&'a Tree> {
         .max_by_key(|t| t.path.as_os_str().len())
 }
 
+/// The git directory a checkout works in: its own `.git`, or the one a linked
+/// worktree's `.git` file names. A `.git` file of any other shape is refused
+/// rather than followed, so the answer stays inside a repository.
+pub fn git_dir(root: &Path) -> Option<std::path::PathBuf> {
+    let dot = root.join(".git");
+    if dot.is_dir() {
+        return Some(dot);
+    }
+    let link = std::fs::read_to_string(&dot).ok()?;
+    let named = link.trim().strip_prefix("gitdir: ")?;
+    let gitdir = root.join(named);
+    let worktrees = gitdir.parent()?;
+    let main = worktrees.parent()?;
+    (worktrees.ends_with("worktrees") && main.ends_with(".git")).then_some(gitdir)
+}
+
 /// The main checkout of the repository holding `dir`, or `dir` outside one.
 /// Read off `.git` rather than asked of git: it runs on every resolve.
 pub fn main_root(dir: &Path) -> PathBuf {
@@ -218,16 +234,10 @@ pub fn main_root(dir: &Path) -> PathBuf {
             return here.to_path_buf();
         }
         // A worktree's `.git` is a file naming `<main>/.git/worktrees/<name>`.
-        if let Ok(link) = std::fs::read_to_string(&git) {
-            let named = link.trim().strip_prefix("gitdir: ").map(|p| here.join(p));
-            let main = named.as_deref().and_then(|p| {
-                let worktrees = p.parent()?;
-                let dot_git = worktrees.parent()?;
-                (worktrees.ends_with("worktrees") && dot_git.ends_with(".git"))
-                    .then(|| dot_git.parent())
-                    .flatten()
-            });
-            return main.map_or_else(|| here.to_path_buf(), Path::to_path_buf);
+        if git.exists() {
+            let main = git_dir(here)
+                .and_then(|gitdir| gitdir.parent()?.parent()?.parent().map(Path::to_path_buf));
+            return main.unwrap_or_else(|| here.to_path_buf());
         }
     }
     dir.to_path_buf()
@@ -456,6 +466,35 @@ fn named(dir: &Path, name: &str) -> Result<(Vec<Tree>, usize)> {
 }
 
 impl Core {
+    // The checkout a name stands for, as the last read of this repository's
+    // list had it. A path that is no longer there is not an answer: git is
+    // asked again, and so is a list the repository has moved away from.
+    fn known_tree(&self, from: &Path, name: &str) -> Option<Tree> {
+        let (repo, trees) = self.trees.as_ref()?;
+        (*repo == main_root(from)).then(|| {
+            trees
+                .iter()
+                .find(|tree| tree.name == name && tree.path.is_dir())
+                .cloned()
+        })?
+    }
+
+    // The tree git just resolved is added to a list already read, rather than
+    // read again for it: `enter` holds the rest of the list still.
+    fn remember_tree(&mut self, dir: &Path, tree: &Tree) {
+        match self.trees.as_mut() {
+            Some((repo, trees)) if *repo == main_root(dir) => {
+                trees.retain(|known| known.path != tree.path);
+                trees.push(tree.clone());
+            }
+            _ => {
+                if let Ok(trees) = list(dir) {
+                    self.trees = Some((main_root(dir), trees));
+                }
+            }
+        }
+    }
+
     // What a `/worktree rm` with no name takes: every linked checkout, off the
     // loop. What cannot go now is refused here, before the disk moves.
     pub(super) fn remove_all_worktrees(&mut self) -> Result<Step, String> {
@@ -495,7 +534,16 @@ impl Core {
             return Ok(Step::Notice(format!("`{trimmed}` is being removed")));
         }
         let from = self.lane_mut().root().to_path_buf();
-        let tree = enter(&from, name).map_err(|e| refused("worktree", e))?;
+        // A name the last read already holds — every `H`/`L` and `/worktree`
+        // onto a checkout that exists — needs no fork to become a path.
+        let tree = match self.known_tree(&from, trimmed) {
+            Some(tree) => tree,
+            None => {
+                let tree = enter(&from, trimmed).map_err(|e| refused("worktree", e))?;
+                self.remember_tree(&from, &tree);
+                tree
+            }
+        };
         // Built before the comparison: both sides are then canonical, and a
         // path git and the workspace spell differently is still one directory.
         let ws = tool::Workspace::new(&tree.path)
@@ -601,6 +649,8 @@ impl Core {
     /// The checkout is gone: close the lanes that worked in it and say what
     /// went besides the directory. That it went is the surface's to show.
     pub fn settle_removal(&mut self, gone: Gone) -> String {
+        // The list it was read from no longer holds what went.
+        self.trees = None;
         let Gone {
             removed,
             sessions,

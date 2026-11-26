@@ -157,6 +157,7 @@ pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
         lanes: pi_core::core::lanes::Lanes::of(running_lane(dir)),
         executions: None,
         removals: Default::default(),
+        trees: None,
         surface: crate::tui::WORDS,
     };
     crate::tui::Tui::on_test_screen(core)

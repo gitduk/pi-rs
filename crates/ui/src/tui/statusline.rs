@@ -219,7 +219,7 @@ impl Facts {
             Field::Elapsed => {
                 let seconds = std::time::Duration::from_secs_f64(run.elapsed?);
                 return match self.running {
-                    true => crate::status::running_time(seconds),
+                    true => crate::status::running_time(seconds, crate::status::SHOWN),
                     false => Some(llm::figures::elapsed(seconds)),
                 };
             }
@@ -240,7 +240,7 @@ impl Facts {
             Field::Worktree => run.worktree.clone()?,
             Field::Workspace => self.workspace.clone()?,
             // The surface renders these itself.
-            Field::Tabs | Field::Flash | Field::Git => return None,
+            Field::Tabs | Field::Flash | Field::Branch | Field::Diff => return None,
         })
     }
 
@@ -338,6 +338,18 @@ impl Facts {
     }
 }
 
+// The branch as its git directory names it: a line of `HEAD`. Reading it is a
+// file read where naming it by git was a fork.
+fn read_head(root: &std::path::Path) -> Option<String> {
+    let gitdir = pi_core::core::worktree::git_dir(root)?;
+    let head = std::fs::read_to_string(gitdir.join("HEAD")).ok()?;
+    Some(
+        head.strip_prefix("ref: refs/heads/")?
+            .trim_end()
+            .to_string(),
+    )
+}
+
 // Where the checkout stands in git: the branch it is on, then the lines its
 // worktree has changed against `HEAD`.
 pub(super) fn git_of(root: &std::path::Path) -> Option<statusline::Git> {
@@ -354,7 +366,8 @@ pub(super) fn git_of(root: &std::path::Path) -> Option<statusline::Git> {
     };
     // `symbolic-ref` still names the branch where `rev-parse` cannot resolve a
     // `HEAD` with no commit behind it; only a detached head reaches the latter.
-    let branch = git(&["symbolic-ref", "--short", "HEAD"])
+    let branch = read_head(root)
+        .or_else(|| git(&["symbolic-ref", "--short", "HEAD"]))
         .or_else(|| git(&["rev-parse", "--abbrev-ref", "HEAD"]))?;
     let diff = git(&["diff", "--numstat", "HEAD"]).unwrap_or_default();
     let mut added = 0;
@@ -638,27 +651,56 @@ impl Ui {
         )
     }
 
+    // What the row draws in this place, in order. A condition adds its items
+    // here rather than inside a piece, so the line's own separator still
+    // stands between them.
     fn pieces(&self, items: &[Item], facts: &Facts, session: &std::path::Path) -> Vec<Piece> {
-        items
-            .iter()
-            .filter_map(|item| match item {
-                Item::Field(Field::Tabs) => self.tabs_piece(),
-                Item::Styled(s) if s.field == Field::Tabs => self.tabs_piece(),
-                Item::Group(g) => self.group(g, facts, session).map(Piece::Spans),
-                item => self.spans(item, facts, session).map(Piece::Spans),
-            })
-            .collect()
+        let mut pieces = Vec::new();
+        for item in items {
+            match item {
+                Item::Field(Field::Tabs) => pieces.extend(self.tabs_piece()),
+                Item::Styled(s) if s.field == Field::Tabs => pieces.extend(self.tabs_piece()),
+                Item::Group(g) => {
+                    pieces.extend(self.group_items(&g.group, facts, session).map(Piece::Spans));
+                }
+                Item::Condition(c) if self.keeps(c, facts, session) => {
+                    pieces.extend(self.pieces(&c.items, facts, session));
+                }
+                Item::Condition(_) => {}
+                item => pieces.extend(self.spans(item, facts, session).map(Piece::Spans)),
+            }
+        }
+        pieces
     }
 
-    // A lone checkout draws nothing: `workspace` and `git` already name it,
+    // Whether a condition's field answers as the condition asks: `unless`
+    // waits for silence, `when` for a word.
+    fn keeps(&self, c: &statusline::Condition, facts: &Facts, session: &std::path::Path) -> bool {
+        let silent = self.silent(c.field, facts, session);
+        match c.keeps {
+            statusline::Kept::Silent => silent,
+            statusline::Kept::Speaking => !silent,
+        }
+    }
+
+    // Whether a field has nothing to say this frame: what a condition reads,
+    // off the same facts the field draws from.
+    fn silent(&self, field: Field, facts: &Facts, session: &std::path::Path) -> bool {
+        match field {
+            Field::Tabs => self.tabs_piece().is_none(),
+            field => self.spans(&Item::Field(field), facts, session).is_none(),
+        }
+    }
+
+    // A lone checkout draws nothing: `workspace` and `branch` already name it,
     // and a strip of one says no more than they do.
     fn tabs_piece(&self) -> Option<Piece> {
         let front = self.tabs.iter().any(|t| t.mark == Mark::Front);
         (front && self.tabs.len() > 1).then_some(Piece::Tabs)
     }
 
-    // One item other than the checkouts or a group, None when it has nothing
-    // to say.
+    // One item other than the checkouts, a group or a condition: None when it
+    // has nothing to say.
     fn spans(
         &self,
         item: &Item,
@@ -678,30 +720,44 @@ impl Ui {
                 let spans = self.script_spans(&answer, &s.style);
                 return (!spans.is_empty()).then_some(spans);
             }
-            Item::Group(_) => return None,
+            Item::Group(_) | Item::Condition(_) => return None,
         };
         match field {
             Field::Flash if self.flash.is_none() && !facts.alerts.is_empty() => {
                 let alerts = facts.alerts.join(icons::PART_SEP);
                 Some(vec![self.paint.span(&self.paint.theme.status.err, alerts)])
             }
-            Field::Git => Some(self.git_spans(facts.git.as_ref()?, look)),
+            Field::Branch => {
+                let branch = &facts.git.as_ref()?.branch;
+                self.text(branch, look)
+            }
+            Field::Diff => self.diff_spans(facts.git.as_ref()?),
             _ => self.text(&self.value(field, facts)?, look),
         }
     }
 
-    // A group goes whole when it holds parts and none of them had anything to
-    // say: its labels would stand alone.
-    fn group(
+    // Items joined with nothing between. The whole goes when it holds parts and
+    // none of them had anything to say: its labels would stand alone. A
+    // condition lays out exactly as a group does, so it opens here.
+    fn group_items(
         &self,
-        g: &statusline::Group,
+        items: &[Item],
         facts: &Facts,
         session: &std::path::Path,
     ) -> Option<Vec<Span<'static>>> {
         let (mut spans, mut parts, mut said) = (Vec::new(), 0, 0);
-        for item in &g.group {
-            let got = self.spans(item, facts, session);
-            if matches!(item, Item::Field(_) | Item::Styled(_) | Item::Script(_)) {
+        for item in items {
+            let got = match item {
+                Item::Condition(c) if self.keeps(c, facts, session) => {
+                    self.group_items(&c.items, facts, session)
+                }
+                Item::Condition(_) => None,
+                item => self.spans(item, facts, session),
+            };
+            if matches!(
+                item,
+                Item::Field(_) | Item::Styled(_) | Item::Script(_) | Item::Condition(_)
+            ) {
                 parts += 1;
                 said += usize::from(got.is_some());
             }
@@ -710,15 +766,15 @@ impl Ui {
         (!spans.is_empty() && (parts == 0 || said > 0)).then_some(spans)
     }
 
-    // The branch, then what changed, in the diff's own colours.
-    fn git_spans(&self, git: &statusline::Git, look: &Look) -> Vec<Span<'static>> {
+    // What changed, in the diff's own two colours; nothing while the worktree
+    // is clean.
+    fn diff_spans(&self, git: &statusline::Git) -> Option<Vec<Span<'static>>> {
         let paint = &self.paint;
-        let mut spans = vec![paint.span(self.tone(look).as_ref(), git.branch.as_str())];
-        let has_added = git.added > 0;
-        let has_removed = git.removed > 0;
-        if has_added || has_removed {
-            spans.push(paint.span(&paint.theme.muted, " "));
+        let (has_added, has_removed) = (git.added > 0, git.removed > 0);
+        if !has_added && !has_removed {
+            return None;
         }
+        let mut spans = Vec::new();
         if has_added {
             spans.push(paint.span(&paint.theme.diff.add, format!("+{}", git.added)));
         }
@@ -728,7 +784,7 @@ impl Ui {
         if has_removed {
             spans.push(paint.span(&paint.theme.diff.del, format!("-{}", git.removed)));
         }
-        spans
+        Some(spans)
     }
 
     // What the screen itself has to say for a field: a flash it holds. Every
@@ -845,6 +901,7 @@ fn holds_flash(items: &[Item]) -> bool {
         Item::Field(part) => *part == Field::Flash,
         Item::Styled(s) => s.field == Field::Flash,
         Item::Group(g) => holds_flash(&g.group),
+        Item::Condition(c) => holds_flash(&c.items),
         Item::Text(_) | Item::Script(_) => false,
     })
 }

@@ -879,7 +879,8 @@ impl Ui {
             && work.retry.is_none()
             && view.surface.stream.text().is_empty()
             && !call::running(&view.state.tools)
-            && let Some(waited) = crate::status::running_time(work.quiet.elapsed())
+            && let Some(waited) =
+                crate::status::running_time(work.quiet.elapsed(), crate::status::QUIET)
         {
             if spacing.push(super::spacing::Section::Other) {
                 out.push(Line::default(), None);

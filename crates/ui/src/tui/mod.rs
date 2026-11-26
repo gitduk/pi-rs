@@ -65,6 +65,10 @@ const DOUBLE_TAP: std::time::Duration = std::time::Duration::from_millis(500);
 // line, short enough that a second try lands after it.
 const FLASH: std::time::Duration = std::time::Duration::from_secs(1);
 
+// How often the row looks at the world — files, git, the layout — and so the
+// most a switch back to a checkout can show its git state out of date.
+const LOOKED: std::time::Duration = std::time::Duration::from_secs(1);
+
 // How long a flash of `line` stays: each character adds less than the last,
 // so a long error stays longer but not in proportion to its length.
 fn flash_for(line: &str) -> std::time::Duration {
@@ -461,16 +465,32 @@ impl Tui {
         }
     }
 
-    // Runs `git` only for a layout that draws the git field, or a script that
-    // may read it from `PI_FACTS`.
+    // Runs `git` only for a layout that draws a part of it, or a script that
+    // may read it from `PI_FACTS`. A checkout read within the second the row
+    // keeps its numbers for is not read again: a switch back finds it fresh.
     fn look_git(&mut self) {
+        use pi_store::statusline::Field;
         let layout = &self.ui.layout;
-        let wanted = layout.uses(pi_store::statusline::Field::Git) || layout.scripted();
-        self.ui.git = if wanted {
-            statusline::git_of(self.core.lane().root())
-        } else {
-            None
-        };
+        let wanted = layout.uses(Field::Branch) || layout.uses(Field::Diff) || layout.scripted();
+        if !wanted {
+            self.ui.git = None;
+            return;
+        }
+        let root = self.core.lane().root().to_path_buf();
+        if let Some((at, git)) = self.ui.git_seen.get(&root)
+            && at.elapsed() < LOOKED
+        {
+            self.ui.git = git.clone();
+            return;
+        }
+        let git = statusline::git_of(&root);
+        // A read older than the cadence is never taken again: only what the
+        // row may still show is worth keeping.
+        self.ui.git_seen.retain(|_, (at, _)| at.elapsed() < LOOKED);
+        self.ui
+            .git_seen
+            .insert(root, (std::time::Instant::now(), git.clone()));
+        self.ui.git = git;
     }
 
     // The catalog's answer, when one has come: a poll on a channel, so it costs
@@ -568,6 +588,15 @@ impl Tui {
             branch: None,
         }));
         self.ui.tabs = tabs;
+        // The list's branches are as of the read that built it; the one you
+        // are in is read every second, so it does not go stale behind a
+        // `git switch` in another terminal.
+        if let (Some(front), Some(git)) = (
+            self.ui.tabs.iter_mut().find(|tab| tab.mark == Mark::Front),
+            &self.ui.git,
+        ) {
+            front.branch = Some(git.branch.clone());
+        }
     }
 
     // Drops idle lanes whose checkout was deleted outside pi (a working
@@ -818,12 +847,18 @@ impl Tui {
             // What changed on disk is taken up within a second: settings
             // resolve the lane again, a skill's word starts to answer. Not on
             // every frame: each look is a walk.
-            if looked.elapsed() >= std::time::Duration::from_secs(1) {
+            if looked.elapsed() >= LOOKED {
                 looked = std::time::Instant::now();
                 self.refresh_files();
                 self.look_git();
                 self.reload_statusline();
                 self.save_shown();
+            }
+            // The bar is built from the checkouts on disk, so a list that a
+            // switch has just dropped is read before the frame, not after it:
+            // a frame drawn meanwhile names the lanes and marks them wrong.
+            if self.ui.lists.checkouts_read().is_none() {
+                let _ = self.ui.lists.checkouts();
             }
             self.refresh_tabs();
             let executions = self.drivers.background();
@@ -853,12 +888,6 @@ impl Tui {
             let view = front_view(&mut self.views, self.core.lane());
             self.ui.flush(self.core.lane(), view);
             if std::mem::take(&mut self.ui.redraw) {
-                continue;
-            }
-            // After the frame, not before it: a fork here would hold the
-            // screen blank. Read again whenever something dropped the list.
-            if self.ui.lists.checkouts_read().is_none() {
-                let _ = self.ui.lists.checkouts();
                 continue;
             }
             let running = self.core.lane().is_running();

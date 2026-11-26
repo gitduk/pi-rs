@@ -181,8 +181,10 @@ fn background_text(execution: &BackgroundCommand) -> (String, String) {
         progress => format!("#{} {}{}{progress}", execution.id, title, icons::PART_SEP),
     };
     let state = match execution.state {
-        State::Running => crate::status::running_time(execution.started.elapsed())
-            .map_or_else(String::new, |time| format!("{}{time}", icons::PART_SEP)),
+        State::Running => {
+            crate::status::running_time(execution.started.elapsed(), crate::status::SHOWN)
+                .map_or_else(String::new, |time| format!("{}{time}", icons::PART_SEP))
+        }
         State::Back => format!("{}done, back when idle", icons::PART_SEP),
         State::Stopped => format!("{}stopped", icons::PART_SEP),
         State::Exited => format!("{}exited", icons::PART_SEP),

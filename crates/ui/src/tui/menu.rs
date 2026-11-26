@@ -594,10 +594,18 @@ impl Lists {
         self.forget_editable();
     }
 
-    // Points at a workspace, dropping the last one's answers — both
-    // lists are keyed by it, so after a move neither is merely stale.
+    // Points at a workspace, dropping the last one's answers. The sessions
+    // are read for it; the checkouts are the repository's rather than the
+    // directory's, so they stay — a switch inside one repository that dropped
+    // them drew a bar from nothing and then re-read git. Another repository is
+    // another list.
     pub(super) fn at(&mut self, workspace: &std::path::Path) {
+        if core::worktree::main_root(workspace) != core::worktree::main_root(&self.workspace) {
+            self.checkouts.take();
+        }
         self.workspace = workspace.to_path_buf();
-        self.forget();
+        self.sessions.take();
+        self.worktrees.take();
+        self.forget_editable();
     }
 }

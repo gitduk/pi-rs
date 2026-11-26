@@ -603,6 +603,7 @@ max_output_tokens = 2048
             lanes: ring,
             executions: None,
             removals: Default::default(),
+            trees: None,
             surface: &[],
         };
         core.try_reload().unwrap();

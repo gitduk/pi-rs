@@ -130,12 +130,13 @@ impl Layout {
         self.lines.iter().filter(|line| line.place == place).count()
     }
 
-    /// Whether any row draws `field`: the work behind it is worth doing only
-    /// then.
+    /// Whether any row draws `field`, or keeps its items on what it says: the
+    /// work behind it is worth doing only then.
     pub fn uses(&self, field: Field) -> bool {
         self.items().any(|item| match item {
             Item::Field(f) => *f == field,
             Item::Styled(s) => s.field == field,
+            Item::Condition(c) => c.field == field,
             _ => false,
         })
     }
@@ -146,13 +147,16 @@ impl Layout {
         self.items().any(|item| matches!(item, Item::Script(_)))
     }
 
-    /// Every item in the layout, groups opened, in drawing order.
+    /// Every item in the layout, groups and conditions opened, in drawing
+    /// order.
     pub fn items(&self) -> impl Iterator<Item = &Item> {
         fn walk<'a>(items: &'a [Item], out: &mut Vec<&'a Item>) {
             for item in items {
                 out.push(item);
-                if let Item::Group(g) = item {
-                    walk(&g.group, out);
+                match item {
+                    Item::Group(g) => walk(&g.group, out),
+                    Item::Condition(c) => walk(&c.items, out),
+                    _ => {}
                 }
             }
         }
@@ -332,7 +336,8 @@ pub struct Line {
 
 /// One thing a row draws: a field pi fills in — a bare name, or
 /// `{"field", "style"}` to colour it — fixed text, texts joined with no
-/// separator between them, or a value an outside script prints.
+/// separator between them, a value an outside script prints, or items a
+/// condition on another field keeps or drops.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     Field(Field),
@@ -340,6 +345,7 @@ pub enum Item {
     Group(Group),
     Styled(Styled),
     Script(Script),
+    Condition(Condition),
 }
 
 /// What pi keeps current itself. One with nothing to say drops out, and the
@@ -372,9 +378,11 @@ pub enum Field {
     Session,
     /// The checkout's directory name.
     Workspace,
-    /// The checkout's branch, and what its worktree has changed against
-    /// `HEAD`.
-    Git,
+    /// The checkout's branch.
+    Branch,
+    /// What the worktree has added and removed against `HEAD`, in the theme's
+    /// two diff colours; absent while the worktree is clean.
+    Diff,
     /// The clock of the run in flight, or of the one that last ended.
     Elapsed,
     /// What the run has sent and heard back, in tokens.
@@ -461,8 +469,15 @@ impl<'de> Deserialize<'de> for Item {
             Value::Object(m) if m.contains_key("group") => Group::deserialize(v).map(Item::Group),
             Value::Object(m) if m.contains_key("text") => Text::deserialize(v).map(Item::Text),
             Value::Object(m) if m.contains_key("script") => script_item(m).map(Item::Script),
+            Value::Object(m) if m.contains_key("unless") => {
+                condition(m, Kept::Silent, m.get("unless")).map(Item::Condition)
+            }
+            Value::Object(m) if m.contains_key("when") => {
+                condition(m, Kept::Speaking, m.get("when")).map(Item::Condition)
+            }
             _ => Err(serde_json::Error::custom(
-                "an item is a field's name, or an object with `field`, `text`, `group` or `script`",
+                "an item is a field's name, or an object with `field`, `text`, `group`, \
+                 `script`, `unless` or `when`",
             )),
         };
         item.map_err(D::Error::custom)
@@ -543,19 +558,85 @@ pub struct Group {
     pub group: Vec<Item>,
 }
 
-// The checkouts fold to the room a row leaves, which a group cannot give them.
+/// Items a line draws under a condition on another field. The row reads that
+/// field off the facts it already holds, so no run stands between the two and
+/// nothing waits to be told.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Condition {
+    /// The field the items wait on.
+    pub field: Field,
+    /// Which of that field's two answers lets them stand.
+    pub keeps: Kept,
+    pub items: Vec<Item>,
+}
+
+/// The answer a condition waits for: the key the layout wrote it under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kept {
+    /// The field says nothing: written as `unless`.
+    Silent,
+    /// The field says something: written as `when`.
+    Speaking,
+}
+
+impl Kept {
+    /// The key a layout spells this answer with.
+    pub fn key(self) -> &'static str {
+        match self {
+            Kept::Silent => "unless",
+            Kept::Speaking => "when",
+        }
+    }
+}
+
+// `{"unless": "<field>", "items": […]}` or the same under `when`: one shape,
+// the key saying which answer draws the items.
+fn condition(
+    m: &serde_json::Map<String, Value>,
+    keeps: Kept,
+    named: Option<&Value>,
+) -> Result<Condition, serde_json::Error> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Rest {
+        #[serde(deserialize_with = "flat")]
+        items: Vec<Item>,
+    }
+    let key = keeps.key();
+    let field: Field = serde_json::from_value(named.cloned().unwrap_or(Value::Null))
+        .map_err(|e| serde_json::Error::custom(format!("`{key}` names a field: {e}")))?;
+    let mut rest = m.clone();
+    rest.remove(key);
+    let rest: Rest =
+        serde_json::from_value(Value::Object(rest)).map_err(serde_json::Error::custom)?;
+    Ok(Condition {
+        field,
+        keeps,
+        items: rest.items,
+    })
+}
+
+// A group holds what it can lay out with nothing between: no checkout to fold
+// to the room a row leaves, and no group inside it. A condition lays out
+// exactly as the group does, so it may stand there.
 fn flat<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Item>, D::Error> {
     let items = Vec::<Item>::deserialize(d)?;
-    let nested = items.iter().any(|item| match item {
-        Item::Group(_) | Item::Field(Field::Tabs) => true,
-        Item::Styled(s) => s.field == Field::Tabs,
-        Item::Text(_) | Item::Field(_) | Item::Script(_) => false,
-    });
-    match nested {
-        true => Err(D::Error::custom(
-            "a group holds texts and fields, but not `tabs` or another group",
+    match items.iter().all(flat_holds) {
+        true => Ok(items),
+        false => Err(D::Error::custom(
+            "a group and a condition hold texts, fields, scripts and conditions, \
+             but not `tabs` or another group",
         )),
-        false => Ok(items),
+    }
+}
+
+fn flat_holds(item: &Item) -> bool {
+    match item {
+        Item::Group(_) => false,
+        Item::Condition(c) => c.items.iter().all(flat_holds),
+        Item::Field(part) => *part != Field::Tabs,
+        Item::Styled(s) => s.field != Field::Tabs,
+        Item::Text(_) | Item::Script(_) => true,
     }
 }
 
@@ -630,6 +711,34 @@ mod tests {
         // One list: pi's own names and the status line's, read as one.
         assert!(clock.contains("`spent`, `state`"), "{clock}");
         assert!(clock.contains("`elapsed`"), "{clock}");
+    }
+
+    #[test]
+    fn a_condition_names_the_field_its_items_wait_on() {
+        let line: Line =
+            serde_json::from_str(r#"{"left":[{"unless":"tabs","items":[{"text":" "},"branch"]}]}"#)
+                .unwrap();
+        let Item::Condition(c) = &line.left[0] else {
+            panic!("{line:?}");
+        };
+        assert_eq!((c.field, c.keeps), (Field::Tabs, Kept::Silent));
+        assert_eq!(c.items.len(), 2);
+
+        // A condition lays out as a group does, so the checkouts stay out of it.
+        let bad = r#"{"lines":[{"left":[{"unless":"diff","items":["tabs"]}]}]}"#;
+        let why = parse(bad).unwrap_err();
+        assert!(why.contains("not `tabs`"), "{why}");
+
+        // The other polarity reads the same field the other way round.
+        let line: Line =
+            serde_json::from_str(r#"{"left":[{"when":"diff","items":[{"text":" "}]}]}"#).unwrap();
+        assert!(
+            matches!(&line.left[0], Item::Condition(c) if (c.field, c.keeps) == (Field::Diff, Kept::Speaking))
+        );
+
+        // A field the condition reads is worked out for it, drawn or not.
+        let layout = Layout { lines: vec![line] };
+        assert!(layout.uses(Field::Diff), "the condition's field is read");
     }
 
     #[test]

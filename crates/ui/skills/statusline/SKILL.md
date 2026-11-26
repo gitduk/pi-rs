@@ -28,7 +28,7 @@ This skill describes the interface.
   "lines": [
     {"place": "top", "left": [{"field": "flash", "style": "emphasis"}]},
     {
-      "left":  ["workspace", "git", {"group": ["model", {"text": " "}, "effort"]}],
+      "left":  ["workspace", "branch", "diff", {"group": ["model", {"text": " "}, "effort"]}],
       "right": [{"script": {"command": "date +%H:%M", "every": 30}}],
       "sep":   {"text": "  ", "style": "muted"}
     }
@@ -54,6 +54,8 @@ A missing `style` is muted.
 | `{"field": "cache", "style": "ok"}` | one field in a colour |
 | `{"text": " \| ", "style": "muted"}` | fixed text |
 | `{"group": [item, …]}` | items joined without `sep`; the whole group disappears when each field in it has nothing to say |
+| `{"unless": "tabs", "items": [item, …]}` | items drawn only while that field has nothing to say |
+| `{"when": "diff", "items": [item, …]}` | items drawn only while that field has something to say |
 | `{"script": {"command": "…", "every": 30}}` | a value an outside command prints |
 | `{"script": "weather"}` | a value `<pi_home>/statusline.d/weather` prints |
 
@@ -67,12 +69,13 @@ format to copy. To show the same facts in another shape, ask a script for the
 parts you want.
 
 `tabs` `flash` `model` `effort` `tier` `update` `spent` `state` `session`
-`workspace` `git` `elapsed` `in_out` `speed` `cache` `cost` `ctx` `compacted` `queued`
-`worktree`
+`workspace` `branch` `diff` `elapsed` `in_out` `speed` `cache` `cost` `ctx`
+`compacted` `queued` `worktree`
 
 - `workspace` shows the checkout directory's name.
-- `git` shows the branch and the lines added and removed against `HEAD` in the
-  theme's diff colours. The field is empty outside a repository.
+- `branch` shows the branch the checkout is on; `diff` shows the lines it has
+  added and removed against `HEAD` in the theme's diff colours, and says
+  nothing while the worktree is clean. Both are empty outside a repository.
 - `state` — `idle`, `working`, `compacting`, `stopping`, or a retry it waits
   out. Always says something.
 - `session` — what the user calls this session, else the first thing it was
@@ -141,36 +144,37 @@ A script item carries exactly one of `command` or `name`.
 - Optional values are `null` unless documented as omitted. `session` is omitted
   outside a lane.
 
-A conditional reads these values. Use `tabs` to count the checkouts. Use `git`
-to keep a cell empty outside a repository. Use `run.outcome` to say how a run
-ended.
+A condition reads these values. Use `tabs` to keep a cell for the case where
+only one checkout is on the bar. Use `git` to keep a cell empty outside a
+repository. Use `run.outcome` to say how a run ended.
 
-## When one field cannot say it
+## When one part stands or falls with another
 
-A field always draws its whole shape. When one part must appear only under a
-condition, build the cell from scripts. Each script prints one part with a
-leading space, or prints nothing. `style` gives each part its colour:
+A field always draws its whole shape. When one part of a cell should appear
+only under a condition, the condition goes in the layout: not in the field,
+which would then have to know what another field says, and not in a script,
+which has no answer for the first frames and leaves the cell empty until one
+comes back.
 
 ```json
 {"group": [
   {"field": "workspace", "style": {"tone": "code", "sgr": ["bold"]}},
-  {"script": {"command": "~/.pi/statusline.d/gitcell.py branch", "every": 5,
-              "style": {"tone": "code", "sgr": ["bold"]}}},
-  {"script": {"command": "~/.pi/statusline.d/gitcell.py add", "every": 5,
-              "style": "add"}},
-  {"script": {"command": "~/.pi/statusline.d/gitcell.py del", "every": 5,
-              "style": "del"}}
+  {"unless": "tabs", "items": [{"text": " "}, {"field": "branch"}]},
+  {"when": "diff", "items": [{"text": " "}]},
+  {"field": "diff"}
 ]}
 ```
 
-`gitcell.py branch` prints `" master"` while `PI_FACTS.tabs` holds one checkout.
-It prints nothing when `tabs` holds more, because `tabs` already names each
-checkout. A blank answer removes the cell, and the group closes the gap.
-`add` and `del` print `" +3"` and `" -2"` by the same rule. Each part shows the
-theme's own diff colour.
+`{"unless": "<field>", "items": […]}` draws its items only while that field
+has nothing to say, and `{"when": "<field>", "items": […]}` only while it has
+something to say. The row decides both from the facts it already holds, so no
+run stands between the two and nothing waits to be told. Here the branch gives
+way once `tabs` names the checkouts, which it does while there is more than
+one. The space before the diff stands with the diff alone, so a clean worktree
+leaves no gap.
 
-Keep one script file with three arguments. Do not write three copies that read
-`PI_FACTS`.
+Two jobs still belong to a script: a value the row cannot read for itself, and
+a condition on something no field draws.
 
 The statusline redraws from the last answer, so a slow script never stalls the
 screen.

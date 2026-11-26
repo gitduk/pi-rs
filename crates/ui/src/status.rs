@@ -15,6 +15,14 @@ use crate::tui::statusline::Facts;
 
 pub const SPIN: Duration = Duration::from_millis(90);
 
+/// When a clock is worth showing at all: a second is the usual gap between
+/// two answers, and a figure that lands inside it reads as a stutter.
+pub const SHOWN: Duration = Duration::from_secs(1);
+
+/// When a silent turn is worth naming as waiting: a pause under this is the
+/// model thinking between two answers, not something the screen must explain.
+pub const QUIET: Duration = Duration::from_secs(2);
+
 // Show both counts: a percentage hides useful detail in large windows.
 pub(crate) fn context((used, window): (usize, usize)) -> Option<String> {
     if window == 0 {
@@ -48,9 +56,9 @@ pub fn line(fields: &[Field], snap: &Snapshot) -> String {
     settled(&parts(fields, &Facts::from_snapshot(snap.clone())))
 }
 
-/// A running clock starts at one second and advances in whole seconds.
-pub fn running_time(d: Duration) -> Option<String> {
-    (d.as_secs() > 0).then(|| llm::figures::elapsed(d))
+/// A running clock, absent until `after` has passed, then in whole seconds.
+pub fn running_time(d: Duration, after: Duration) -> Option<String> {
+    (d >= after).then(|| llm::figures::elapsed(d))
 }
 
 /// The static mark replaces the live spinner without shifting the figures.

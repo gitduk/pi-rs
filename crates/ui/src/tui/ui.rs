@@ -97,8 +97,13 @@ pub(super) struct Ui {
     // A note answering the last keypress, and when it landed. It stands
     // where the layout puts it for `flash_for` and then goes — see `statusline_lines`.
     pub(super) flash: Option<(String, Instant)>,
-    // The current checkout's git state, refreshed on a switch and once a second.
+    // The current checkout's git state: read once a second, and taken from
+    // `git_seen` when a switch lands on a checkout read within that second.
     pub(super) git: Option<pi_store::statusline::Git>,
+    // What each checkout read the last time it was in front, and when: a
+    // switch back inside the second the row lives by keeps that read.
+    pub(super) git_seen:
+        std::collections::HashMap<std::path::PathBuf, (Instant, Option<pi_store::statusline::Git>)>,
     // What the last write put in a session's file, and which session that was:
     // compared against, so the file is touched only when the numbers move.
     pub(super) shown: Option<(String, pi_store::statusline::Shown)>,
@@ -292,6 +297,7 @@ impl Ui {
             tabs: Vec::new(),
             flash: None,
             git: None,
+            git_seen: Default::default(),
             shown: None,
             scripts: super::statusline::Scripts::new(),
             statusline_at: None,
