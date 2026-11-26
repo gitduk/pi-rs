@@ -97,8 +97,7 @@ impl Ui {
                     self.search_paste(&text);
                 } else {
                     self.editor.insert_str(&text.replace('\r', "\n"));
-                    // Pasted, not typed: no list over it until the next edit.
-                    self.list.dismissed_at = Some(self.editor.text().to_string());
+                    self.list.dismiss(self.editor.text());
                 }
                 return Asked::Own(Deed::Nothing);
             }
@@ -528,9 +527,7 @@ impl Ui {
         if self.list.seeded.take().as_deref() == Some(self.editor.text()) {
             self.editor.clear();
         }
-        // Keyed to the text, so any edit brings the list back —
-        // "not that", not "never again".
-        self.list.dismissed_at = Some(self.editor.text().to_string());
+        self.list.dismiss(self.editor.text());
         self.disarm();
     }
 
