@@ -359,24 +359,27 @@ impl Ui {
             None => rows,
         };
         // Each readable stretch's rows are selected under the one above, at
-        // its full height.
-        let [_, (_, commands_base), (_, bar_base)] = regions.readable();
-        self.drawn = rows.iter().map(screen::plain).collect();
-        self.drawn.resize(commands_base, String::new());
-        self.drawn.extend(executions.iter().map(screen::plain));
-        self.drawn.resize(bar_base, String::new());
-        self.drawn.extend(bar.iter().map(screen::plain));
+        // its full height; the order is `readable`'s.
+        let stretches = regions.readable();
+        self.drawn.clear();
+        let bands = [&rows, &executions, &over_lines, &bar];
+        for (lines, (_, base)) in bands.into_iter().zip(stretches) {
+            self.drawn.resize(base, String::new());
+            self.drawn.extend(lines.iter().map(screen::plain));
+        }
         self.regions = regions;
         self.reflow_selection(view, width);
         self.drawn_width = width;
         let stamps = self.sent_stamps(view, regions.history);
-        let (mut rows, executions, bar) = match &self.selection {
+        let [_, (_, commands_base), (_, over_base), (_, bar_base)] = stretches;
+        let (mut rows, executions, over_lines, bar) = match &self.selection {
             Some(sel) => (
                 super::select::highlight(rows, sel, 0, |at| self.lead(view, at)),
                 super::select::highlight(executions, sel, commands_base, |_| 0),
+                super::select::highlight(over_lines, sel, over_base, |_| 0),
                 super::select::highlight(bar, sel, bar_base, |_| 0),
             ),
-            None => (rows, executions, bar),
+            None => (rows, executions, over_lines, bar),
         };
         if let Some((col, row)) = self.pointer
             && self.selection.is_none()
@@ -506,10 +509,12 @@ impl Ui {
             };
             if !over_rows.is_empty() {
                 frame.render_widget(Rows(&over_lines), regions.statusline_top);
-                parts(frame, regions.statusline_top, &over_rows);
             }
             frame.render_widget(Rows(&bar), regions.statusline);
             if self.selection.is_none() {
+                if !over_rows.is_empty() {
+                    parts(frame, regions.statusline_top, &over_rows);
+                }
                 parts(frame, regions.statusline, &bar_rows);
             }
             // Drawn last of the pinned rows: the list may cover the gap

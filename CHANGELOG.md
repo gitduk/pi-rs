@@ -9,6 +9,12 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 
 ## Unreleased
 
+### Added
+
+- The status line's text can be selected and copied wherever the line sits,
+  the row over the input line included. A selected row shows the plain line
+  and gets its clickable parts back once the selection is released.
+
 ### Changed
 
 - New long-term memory entries have a short type prefix. Measured results

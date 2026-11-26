@@ -382,12 +382,11 @@ impl Ui {
 
     pub(super) fn on_press(&mut self, view: &mut View, col: u16, row: u16) {
         self.selection = None;
-        // Only transcript rows hold text to select; the pending-calls toggle
-        // and the like answer the press itself, as they always did.
-        let [_, (executions, _), (bar, _)] = self.regions.readable();
-        let in_bar = [executions, bar]
-            .into_iter()
-            .any(|r| row_in(r, row).is_some());
+        // Rows under the transcript list and the bar hold text whatever they
+        // say; the toggle and the like answer the press itself.
+        let in_bar = self.regions.readable()[1..]
+            .iter()
+            .any(|(r, _)| row_in(*r, row).is_some());
         let at = self.point(col, row).filter(|_| {
             in_bar
                 || matches!(
@@ -893,9 +892,15 @@ impl Regions {
 
     // The rows text is selected in, top to bottom, each with the index its
     // first row takes among them all.
-    pub(super) fn readable(&self) -> [(Rect, usize); 3] {
+    pub(super) fn readable(&self) -> [(Rect, usize); 4] {
         let mut base = 0;
-        [self.history, self.executions, self.statusline].map(|r| {
+        [
+            self.history,
+            self.executions,
+            self.statusline_top,
+            self.statusline,
+        ]
+        .map(|r| {
             let at = base;
             base += r.height as usize;
             (r, at)
