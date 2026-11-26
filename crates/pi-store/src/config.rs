@@ -77,11 +77,6 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<Hook>,
 
-    /// Values that must not leave the machine, whatever they look like: for a
-    /// credential no rule would recognise by its shape.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub secrets: Vec<String>,
-
     /// How many times to retry a request the provider could not serve. Unset
     /// is `Retry::default()` — the number lives there, not here, so that an
     /// unset field and a missing config agree by construction.
@@ -99,14 +94,6 @@ pub struct Config {
     /// would delete the sessions of every other project.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keep_days: Option<u32>,
-}
-
-/// A credential one connection names: the field holding it and its value, so a
-/// listing can say where the value came from.
-#[derive(Debug)]
-pub struct Credential {
-    pub name: String,
-    pub value: String,
 }
 
 /// The modal keys, and the sequence that leaves Insert for Normal.
@@ -541,36 +528,6 @@ impl Config {
     /// when the endpoint wants none. The shape is checked at load.
     pub fn key_for(&self, model: &str) -> Option<String> {
         self.written_key(model).and_then(expand_key)
-    }
-
-    /// The values the user listed as never leaving, `$NAME` read the way a
-    /// key is: one contract for what a credential looks like in the file.
-    pub fn secrets(&self) -> Vec<String> {
-        let mut values: Vec<String> = (self.secrets.iter())
-            .filter_map(|raw| expand_key(raw))
-            .collect();
-        values.sort();
-        values.dedup();
-        values
-    }
-
-    /// Every credential the connections name, resolved: what a request must
-    /// not carry, whatever model is in place. One entry per value, under the
-    /// first connection that holds it.
-    pub fn keys(&self) -> Vec<Credential> {
-        let mut keys: Vec<Credential> = Vec::new();
-        for (provider, entry) in &self.provider {
-            let Some(value) = entry.api_key.as_deref().and_then(expand_key) else {
-                continue;
-            };
-            if !keys.iter().any(|known| known.value == value) {
-                keys.push(Credential {
-                    name: format!("provider.{provider}.api_key"),
-                    value,
-                });
-            }
-        }
-        keys
     }
 
     /// Flag > the files > the built-in default.

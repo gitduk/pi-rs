@@ -265,9 +265,7 @@ pub fn resolve(
 ) -> Result<Resolved> {
     let root = workspace.root();
     let mut notes = Vec::new();
-    // A reload reads the files and the scripts again, so what they name is
-    // added to the set the wires mask with from their next request on.
-    if !super::dial::arm(super::mask::find(root, config)) {
+    if !super::dial::arm() {
         notes.push("mask off — no key to name values by, so nothing is masked".to_string());
     }
     // Before any of it is read, so a write landing meanwhile reads as a change.

@@ -20,6 +20,9 @@ pub enum LlmError {
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("credential masking ran out of distinct replacements of the same shape")]
+    MaskShape,
+
     #[error("{0}")]
     Config(String),
 }

@@ -23,16 +23,31 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 - `@` path completion includes gitignored files and directories. It skips
   `.git` metadata.
 
-- `/mask` shows one table with each value's name, detection method, length,
-  mask count, and visible ends.
+- `/mask` shows one table with each value's name, length, mask count, and
+  visible ends.
 
-- The `.env` shape heuristic leaves plain base URLs visible to the model.
-  URLs with userinfo, a query, or a fragment are masked.
+- Pi detects credentials in outgoing request text. It recognizes known
+  prefixes, private key blocks, bare digests, URL logins, and fields such as
+  `*_API_KEY=`.
 
-- Model requests use stable, key-like replacements for secrets. Pi restores
-  the originals before displaying or saving responses and running tool calls.
+- URL masking covers login and query credentials while preserving the host,
+  port, and path.
+
+- Replacements preserve character count and format. An `sk-…` value keeps
+  its prefix, and a 32-character hex digest stays a 32-character hex digest.
+  Pi restores the originals before displaying or saving responses and
+  running tool calls.
+
+### Removed
+
+- The `secrets` setting and the scans of provider keys and `.env` files that
+  ran before the first request.
 
 ### Fixed
+
+- Credential fields such as `OPENAI_API_KEY=sk-...` get a same-length
+  replacement for the punctuation-only body. If the allocator finds no
+  distinct replacement, Pi reports an error before sending the request.
 
 - Invalid tool calls report the JSON parse error and its location without
   echoing the arguments into diagnostics or retry messages.

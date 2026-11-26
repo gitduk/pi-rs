@@ -5,7 +5,7 @@
 //! command still works while the vendor only ever sees the token.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError, RwLock};
 use std::task::{Context, Poll};
@@ -15,7 +15,6 @@ use futures::stream::{BoxStream, Stream, StreamExt};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::Result;
 use crate::message::{
     AssistantContent, Image, Message, ReasoningContent, ToolResultContent, UserContent,
 };
@@ -23,13 +22,65 @@ use crate::model::ModelSpec;
 use crate::request::Request;
 use crate::stream::{BlockKind, StreamEvent};
 use crate::transport::Transport;
-
-/// An opaque identifier uses 128 bits to make accidental matches unlikely.
-const ID_BYTES: usize = 16;
+use crate::{LlmError, Result};
 
 type Buckets = [Vec<usize>; 256];
 
-#[derive(Debug)]
+// Discovery borrows the request. Rewriting visits the same fields mutably.
+// Both leave signatures and encoded image data untouched.
+macro_rules! visit_request_text {
+    ($req:ident, $text:expr, $json:expr $(, $mutable:tt)?) => {{
+        if let Some(system) = &$($mutable)? $req.system {
+            ($text)(system);
+        }
+        for message in &$($mutable)? $req.messages {
+            match message {
+                Message::System { content } => ($text)(content),
+                Message::User { content } => {
+                    for part in content {
+                        match part {
+                            UserContent::Text(part) => ($text)(&$($mutable)? part.text),
+                            UserContent::ToolResult(result) => {
+                                for part in &$($mutable)? result.content {
+                                    match part {
+                                        ToolResultContent::Text(part) => {
+                                            ($text)(&$($mutable)? part.text);
+                                        }
+                                        ToolResultContent::Json { value } => ($json)(value),
+                                        ToolResultContent::Image(_) => {}
+                                    }
+                                }
+                            }
+                            UserContent::Image(Image::Url { url }) => ($text)(url),
+                            UserContent::Image(Image::Base64 { .. }) => {}
+                        }
+                    }
+                }
+                Message::Assistant { content } => {
+                    for part in content {
+                        match part {
+                            AssistantContent::Text(part) => ($text)(&$($mutable)? part.text),
+                            AssistantContent::ToolCall(call) => ($json)(&$($mutable)? call.args),
+                            AssistantContent::Reasoning(reasoning) => {
+                                for part in &$($mutable)? reasoning.content {
+                                    if let ReasoningContent::Text { text, .. } = part {
+                                        ($text)(text);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for tool in &$($mutable)? $req.tools {
+            ($text)(&$($mutable)? tool.description);
+            ($json)(&$($mutable)? tool.input_schema);
+        }
+    }};
+}
+
+#[derive(Clone, Debug)]
 pub struct Mask {
     key: [u8; 32],
     // In the order they were added; a bucket holds indices into this.
@@ -38,11 +89,10 @@ pub struct Mask {
     value_buckets: Buckets,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Entry {
     token: String,
     name: Option<String>,
-    tier: Tier,
     value: String,
 }
 
@@ -68,20 +118,11 @@ fn count(token: &str) {
     }
 }
 
-/// How a value came to be masked: the owner named it, or a shape rule only
-/// guessed at it. A guess is the one worth being able to look at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tier {
-    Named,
-    Guessed,
-}
-
 /// A masked value's source, abbreviated display, and replacement count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Footprint {
     /// What introduced the value; `None` when nothing did.
     pub name: Option<String>,
-    pub tier: Tier,
     /// The first characters, which for a key are its scheme rather than its
     /// secret: enough to recognise the value, not enough to use it.
     pub head: String,
@@ -116,34 +157,33 @@ impl Mask {
         }
     }
 
-    /// Register a value the owner named. A value already listed keeps its
-    /// first token and its first name.
-    pub fn add(&mut self, name: Option<&str>, value: &str) {
-        self.insert(name, Tier::Named, value);
+    /// Register a value found in text about to leave. A value already listed
+    /// keeps its first token and its first name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this value has no free token of the same shape.
+    pub fn add(&mut self, name: Option<&str>, value: &str) -> Result<()> {
+        self.insert(name, value, &HashSet::new())
     }
 
-    /// Register a value matched by a shape rule.
-    pub fn add_guessed(&mut self, name: Option<&str>, value: &str) {
-        self.insert(name, Tier::Guessed, value);
-    }
-
-    fn insert(&mut self, name: Option<&str>, tier: Tier, value: &str) {
+    fn insert(&mut self, name: Option<&str>, value: &str, pending: &HashSet<&str>) -> Result<()> {
         let Some(&first) = value.as_bytes().first() else {
-            return;
+            return Ok(());
         };
         if self.contains_value(value, first) {
-            return;
+            return Ok(());
         }
-        let token = self.allocate(value);
+        let token = self.allocate(value, pending)?;
         let index = self.entries.len();
         self.token_buckets[token.as_bytes()[0] as usize].push(index);
         self.value_buckets[first as usize].push(index);
         self.entries.push(Entry {
             token,
             name: name.map(str::to_string),
-            tier,
             value: value.to_string(),
         });
+        Ok(())
     }
 
     /// Every value in `text` as its token. Nothing else is touched.
@@ -184,68 +224,15 @@ impl Mask {
     /// signature is verified byte for byte, and image data is not text.
     pub fn cover_request(&self, req: &Request) -> Request {
         let mut out = req.clone();
-        if self.is_empty() {
-            return out;
-        }
-        if let Some(system) = out.system.as_mut() {
-            self.cover_field(system);
-        }
-        for message in &mut out.messages {
-            self.cover_message(message);
-        }
-        for tool in &mut out.tools {
-            self.cover_field(&mut tool.description);
-            map_json(&mut tool.input_schema, &|text| self.covered(text));
+        if !self.is_empty() {
+            visit_request_text!(
+                out,
+                |text| self.cover_field(text),
+                |value| map_json(value, &|text| self.covered(text)),
+                mut
+            );
         }
         out
-    }
-
-    fn cover_message(&self, message: &mut Message) {
-        match message {
-            Message::System { content } => self.cover_field(content),
-            Message::User { content } => {
-                for part in content {
-                    match part {
-                        UserContent::Text(text) => self.cover_field(&mut text.text),
-                        UserContent::ToolResult(result) => {
-                            for part in &mut result.content {
-                                match part {
-                                    ToolResultContent::Text(text) => {
-                                        self.cover_field(&mut text.text);
-                                    }
-                                    ToolResultContent::Json { value } => {
-                                        map_json(value, &|text| self.covered(text));
-                                    }
-                                    ToolResultContent::Image(_) => {}
-                                }
-                            }
-                        }
-                        // A URL is text; the encoded bytes beside it are not.
-                        UserContent::Image(Image::Url { url }) => self.cover_field(url),
-                        UserContent::Image(Image::Base64 { .. }) => {}
-                    }
-                }
-            }
-            Message::Assistant { content } => {
-                for part in content {
-                    match part {
-                        AssistantContent::Text(text) => self.cover_field(&mut text.text),
-                        AssistantContent::ToolCall(call) => {
-                            map_json(&mut call.args, &|text| self.covered(text));
-                        }
-                        AssistantContent::Reasoning(reasoning) => {
-                            for part in &mut reasoning.content {
-                                // The prose is covered; a signature is not, so
-                                // replaying it lands on the bytes it was made for.
-                                if let ReasoningContent::Text { text, .. } = part {
-                                    self.cover_field(text);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 
     /// Every token in `text` as its value. A token this mask never issued is
@@ -275,6 +262,25 @@ impl Mask {
         self.entries.is_empty()
     }
 
+    /// Whether this set already holds `value`.
+    pub fn contains(&self, value: &str) -> bool {
+        match value.as_bytes().first() {
+            Some(&first) => self.contains_value(value, first),
+            None => false,
+        }
+    }
+
+    /// Whether `value` is a token this set issued: a token seen again in the
+    /// text is a mask, not a secret to mask.
+    pub fn is_token(&self, value: &str) -> bool {
+        match value.as_bytes().first() {
+            Some(&first) => self
+                .entries_in(&self.token_buckets[first as usize])
+                .any(|entry| entry.token == value),
+            None => false,
+        }
+    }
+
     /// Every value as the listing shows it, in the order they were found.
     pub fn footprints(&self) -> Vec<Footprint> {
         self.entries
@@ -284,7 +290,6 @@ impl Mask {
                 let shown = head_chars(len);
                 Footprint {
                     name: entry.name.clone(),
-                    tier: entry.tier,
                     head: crate::slice::head_chars(&entry.value, shown).to_owned(),
                     tail: crate::slice::tail_chars(&entry.value, shown).to_owned(),
                     len,
@@ -344,43 +349,154 @@ impl Mask {
             .any(|entry| entry.value == value)
     }
 
-    fn allocate(&self, value: &str) -> String {
-        let mut salt = 0u64;
-        loop {
-            let token = self.token(value, salt);
-            let first = token.as_bytes()[0];
-            let taken = self
-                .entries_in(&self.token_buckets[first as usize])
-                .any(|entry| entry.token == token);
-            if !taken && value != token && !self.contains_value(&token, first) {
-                return token;
+    fn allocate(&self, value: &str, pending: &HashSet<&str>) -> Result<String> {
+        let body = value.strip_prefix("Bearer ").unwrap_or(value);
+        let body = body.strip_prefix("sk-").unwrap_or(body);
+        let body = if body.is_empty() { value } else { body };
+        let prefix = &value[..value.len() - body.len()];
+        let kind = Kind::of(body);
+        let length = body.chars().count();
+        let seed = self.expand(value, kind.bytes(length));
+        let mut token = String::with_capacity(prefix.len() + length);
+        token.push_str(prefix);
+
+        // Each offset visits a distinct candidate. Reserve both sides of
+        // existing mappings, the input itself and the rest of its batch.
+        for offset in 0..=2 * self.entries.len() + pending.len() + 1 {
+            token.truncate(prefix.len());
+            if !kind.render(&mut token, &seed, body, offset) {
+                break;
             }
-            salt += 1;
+            if token != value
+                && !pending.contains(token.as_str())
+                && !self.is_token(&token)
+                && !self.contains(&token)
+            {
+                return Ok(token);
+            }
+        }
+        Err(LlmError::MaskShape)
+    }
+
+    // Expand the seed by hashing once per block of replacement bytes.
+    fn expand(&self, value: &str, count: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(count);
+        for (round, start) in (0..count).step_by(Sha256::output_size()).enumerate() {
+            let mut digest = Sha256::new();
+            digest.update(self.key);
+            // Keep the first candidate from the original salted format.
+            digest.update(0u64.to_le_bytes());
+            digest.update((round as u64).to_le_bytes());
+            digest.update(value.as_bytes());
+            let block = digest.finalize();
+            out.extend_from_slice(&block[..block.len().min(count - start)]);
+        }
+        out
+    }
+}
+
+/// The shape a token keeps: a digest stays a digest of the same length, so
+/// the model can compare, join and count what it reads without seeing it.
+enum Kind {
+    Hex { upper: bool },
+    Base64 { pad: usize },
+    Punctuation,
+    Text,
+}
+
+impl Kind {
+    fn of(body: &str) -> Self {
+        if !body.is_empty() && body.chars().all(|c| c.is_ascii_hexdigit()) {
+            let upper = body.chars().any(|c| c.is_ascii_uppercase())
+                && !body.chars().any(|c| c.is_ascii_lowercase());
+            return Self::Hex { upper };
+        }
+        // A body made of punctuation has no data segments to separate.
+        if body.chars().all(is_shape_punctuation) {
+            return Self::Punctuation;
+        }
+        if body
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_'))
+        {
+            let pad = body.chars().rev().take_while(|c| *c == '=').count();
+            return Self::Base64 { pad };
+        }
+        Self::Text
+    }
+
+    fn bytes(&self, length: usize) -> usize {
+        match self {
+            Self::Hex { .. } => length.div_ceil(2),
+            _ => length,
         }
     }
 
-    fn token(&self, value: &str, salt: u64) -> String {
-        let mut digest = Sha256::new();
-        digest.update(self.key);
-        digest.update(salt.to_le_bytes());
-        digest.update(value.as_bytes());
-        let sum = digest.finalize();
-        let body = value.strip_prefix("Bearer ").unwrap_or(value);
-        let body = body.strip_prefix("sk-").unwrap_or(body);
-        let prefix = if body.is_empty() {
-            ""
-        } else {
-            &value[..value.len() - body.len()]
+    // Translate each digit by its seed within the alphabet. An offset with
+    // digits left over is past the end of this shape's candidate space.
+    fn render(&self, out: &mut String, bytes: &[u8], body: &str, mut offset: usize) -> bool {
+        const LOWER: &[u8; 16] = b"0123456789abcdef";
+        const UPPER: &[u8; 16] = b"0123456789ABCDEF";
+        const BASE64: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const TEXT: &[u8; 62] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        let mut next = |alphabet: &[u8], seed: u8| {
+            let radix = alphabet.len();
+            let digit = (usize::from(seed) + offset % radix) % radix;
+            offset /= radix;
+            char::from(alphabet[digit])
         };
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut token = String::with_capacity(prefix.len() + ID_BYTES * 2);
-        token.push_str(prefix);
-        for &byte in &sum[..ID_BYTES] {
-            token.push(char::from(HEX[usize::from(byte >> 4)]));
-            token.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        match self {
+            Self::Hex { upper } => {
+                let table = if *upper { UPPER } else { LOWER };
+                for index in 0..body.len() {
+                    let byte = bytes[index / 2];
+                    let nibble = if index % 2 == 0 {
+                        byte >> 4
+                    } else {
+                        byte & 0x0f
+                    };
+                    out.push(next(table, nibble));
+                }
+            }
+            Self::Base64 { pad } => {
+                let letters = body.len() - pad;
+                for (index, character) in body.chars().enumerate() {
+                    if matches!(character, '-' | '_') {
+                        out.push(character);
+                    } else if index >= letters {
+                        out.push('=');
+                    } else {
+                        out.push(next(BASE64, bytes[index]));
+                    }
+                }
+            }
+            Self::Punctuation => {
+                // These characters are safe both in URLs and in JSON text.
+                for &byte in bytes {
+                    out.push(next(b"-._~", byte));
+                }
+            }
+            Self::Text => {
+                for (character, &byte) in body.chars().zip(bytes) {
+                    if is_shape_punctuation(character) {
+                        out.push(character);
+                    } else {
+                        out.push(next(TEXT, byte));
+                    }
+                }
+            }
         }
-        token
+        offset == 0
     }
+}
+
+// Punctuation that carries a value's shape and is safe inside JSON text.
+fn is_shape_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        '-' | '_' | '.' | ':' | '/' | '@' | '+' | '=' | '~' | '$'
+    )
 }
 
 fn next_candidate(text: &str, from: usize, buckets: &Buckets) -> Option<usize> {
@@ -503,11 +619,87 @@ impl Armed {
         *self.0.write().unwrap_or_else(PoisonError::into_inner) = mask;
     }
 
+    /// Load the mask if none is armed, keeping a mask installed concurrently.
+    pub fn arm_if_empty(&self, load: impl FnOnce() -> Option<Mask>) -> bool {
+        if self.is_armed() {
+            return true;
+        }
+        let Some(mask) = load() else {
+            return self.is_armed();
+        };
+        self.0
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert_with(|| Arc::new(mask));
+        true
+    }
+
+    /// The set a request is covered with: what was found in it added to the
+    /// armed one. `None` when nothing is armed, so the request goes as it is.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a newly found value has no free token of its shape.
+    pub fn absorb(&self, mut found: Vec<crate::secret::Found>) -> Result<Option<Arc<Mask>>> {
+        if found.is_empty() {
+            return Ok(self.current());
+        }
+        let mut slot = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        let Some(current) = slot.as_ref() else {
+            return Ok(None);
+        };
+        found.retain(|(_, value)| !current.contains(value) && !current.is_token(value));
+        if found.is_empty() {
+            return Ok(slot.clone());
+        }
+        let pending = found.iter().map(|(_, value)| value.as_str()).collect();
+        let mut next = current.as_ref().clone();
+        for (name, value) in &found {
+            next.insert(name.as_deref(), value, &pending)?;
+        }
+        let next = Arc::new(next);
+        *slot = Some(Arc::clone(&next));
+        Ok(Some(next))
+    }
+
     pub fn current(&self) -> Option<Arc<Mask>> {
         self.0
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    fn is_armed(&self) -> bool {
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
+    }
+}
+
+// Every text a request carries, read for what only a credential looks like.
+fn secrets_in_request(req: &Request) -> Vec<crate::secret::Found> {
+    let mut found = Vec::new();
+    let mut take = |value: &str| found.extend(crate::secret::secrets_in(value));
+    visit_request_text!(req, take, |value| for_json_text(value, &mut take));
+    found
+}
+
+fn for_json_text(value: &Value, take: &mut impl FnMut(&str)) {
+    match value {
+        Value::String(text) => take(text),
+        Value::Array(items) => {
+            for item in items {
+                for_json_text(item, take);
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map {
+                take(key);
+                for_json_text(item, take);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -535,7 +727,12 @@ impl Transport for Masked {
         spec: &ModelSpec,
         req: &Request,
     ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
-        let Some(mask) = self.armed.current().filter(|mask| !mask.is_empty()) else {
+        let mask = if self.armed.is_armed() {
+            self.armed.absorb(secrets_in_request(req))?
+        } else {
+            None
+        };
+        let Some(mask) = mask.filter(|mask| !mask.is_empty()) else {
             return self.inner.stream(spec, req).await;
         };
         let covered = mask.cover_request(req);
@@ -706,7 +903,7 @@ mod tests {
     fn mask(key: [u8; 32], values: &[&str]) -> Arc<Mask> {
         let mut mask = Mask::new(key);
         for value in values {
-            mask.add(None, value);
+            mask.add(None, value).expect("a token");
         }
         Arc::new(mask)
     }
@@ -717,9 +914,8 @@ mod tests {
         let value = "Bearer sk-live-9f3a1c2b7d5e";
         let s = mask(KEY, &[value]);
         let token = s.cover(value);
-        let id = token.strip_prefix("Bearer sk-").expect("public prefix");
-        assert_eq!(id.len(), 2 * ID_BYTES);
-        assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(token.len(), value.len(), "same length, same public prefix");
+        assert!(token.starts_with("Bearer sk-"));
         assert_ne!(token, value);
         assert_eq!(
             s.restore(&format!("header: {token}")),
@@ -828,9 +1024,10 @@ mod tests {
     fn a_value_listed_twice_keeps_the_first_name_and_one_token() {
         let mut s = Mask::new(KEY);
         let value = "hunter2@corp.example";
-        s.add(Some("FIRST_PASSWORD"), value);
+        s.add(Some("FIRST_PASSWORD"), value).expect("first token");
         let token = s.cover(value);
-        s.add(Some("SECOND_PASSWORD"), value);
+        s.add(Some("SECOND_PASSWORD"), value)
+            .expect("existing token");
         assert_eq!(s.len(), 1);
         assert_eq!(s.footprints()[0].name.as_deref(), Some("FIRST_PASSWORD"));
         assert_eq!(s.cover(value), token);
@@ -848,25 +1045,24 @@ mod tests {
     }
 
     // The listing is where a person can see what was masked, how much of it
-    // is shown, and whether the mask rests on a guess: a head of four
-    // characters is enough to recognise a value and not enough to use it.
+    // is shown, and which name introduced it: a head of four characters is
+    // enough to recognise a value and not enough to use it.
     #[test]
     fn a_listing_names_each_value_and_shows_both_ends() {
         let mut s = Mask::new(KEY);
-        s.add(Some("TYPESAFE_API_KEY"), "sk-listing-0123456789");
-        s.add_guessed(None, "999888777:AAbbCCddEEffGG");
-        s.add(None, "hunter2");
+        s.add(Some("TYPESAFE_API_KEY"), "sk-listing-0123456789")
+            .expect("API key token");
+        s.add(None, "999888777:AAbbCCddEEffGG").expect("bot token");
+        s.add(None, "hunter2").expect("password token");
         let text = "sk-listing-0123456789 twice: sk-listing-0123456789";
         let _ = s.cover(text);
         let prints = s.footprints();
         assert_eq!(prints.len(), 3);
-        assert_eq!(prints[0].tier, Tier::Named);
         assert_eq!(prints[0].name.as_deref(), Some("TYPESAFE_API_KEY"));
         assert_eq!(prints[0].head, "sk-l");
         assert_eq!(prints[0].tail, "6789");
         assert_eq!(prints[0].len, 21);
         assert_eq!(prints[0].hits, 2);
-        assert_eq!(prints[1].tier, Tier::Guessed);
         assert_eq!(prints[1].name, None);
         assert_eq!(prints[1].hits, 0);
         // Four of a seven-character value would be more than half of it.
@@ -874,6 +1070,34 @@ mod tests {
         assert_eq!(prints[2].tail, "2");
         assert_eq!(prints[2].len, 7);
         assert!(prints.iter().all(|p| p.head.chars().count() <= 4));
+    }
+
+    // A token keeps the length and the alphabet of the value it hides: a
+    // digest stays a digest, so comparing and joining still work.
+    #[test]
+    fn a_token_keeps_the_length_and_alphabet_of_its_value() {
+        let hex = "a3f1c2b4d5e6f708192a3b4c5d6e7f80";
+        let s = mask(KEY, &[hex]);
+        let token = s.cover(hex);
+        assert_eq!(token.len(), hex.len());
+        assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(s.restore(&token), hex);
+
+        let upper = "A3F1C2B4D5E6F708192A3B4C5D6E7F80";
+        let s = mask(KEY, &[upper]);
+        let token = s.cover(upper);
+        assert!(
+            token
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()),
+            "{token}"
+        );
+
+        let long = "0123456789abcdef".repeat(8);
+        let s = mask(KEY, &[long.as_str()]);
+        let token = s.cover(&long);
+        assert_eq!(token.len(), long.len());
+        assert_eq!(s.restore(&token), long);
     }
 
     // A request carries text in a dozen places and opaque bytes in three. The
@@ -1114,6 +1338,85 @@ mod tests {
 
         armed.arm(Some(mask(KEY, &[value])));
         assert!(!call(&seen).contains(value));
+    }
+
+    // What is about to leave is read before it leaves: a credential the set
+    // has not seen reaches the wire as a token, and the set keeps it.
+    #[test]
+    fn a_credential_in_the_request_is_found_and_covered() {
+        let seen = Arc::new(Mutex::new(None));
+        let wire = Canned {
+            events: Vec::new(),
+            seen: Arc::clone(&seen),
+        };
+        let armed = Arc::new(Armed::default());
+        armed.arm(Some(Arc::new(Mask::new(KEY))));
+        let masked = Masked::new(Arc::new(wire), Arc::clone(&armed));
+        let spec = ModelSpec::test();
+        let value = "sk-found-0123456789abcdef";
+        let mut request = request_carrying(value, false);
+        // The first candidate for sk-... is itself a credential in this batch.
+        let other = mask(KEY, &["sk-..."]).cover("sk-...");
+        request.system = Some(format!(
+            "OPENAI_API_KEY=sk-...\nOTHER_KEY={other}\nPASSWD=changeme"
+        ));
+        let _ = block_on(masked.stream(&spec, &request)).expect("a stream");
+        let wire = wire_json(&seen.lock().expect("unpoisoned").clone().expect("a call"));
+        let mask = armed.current().expect("armed");
+        for value in [value, "sk-...", &other, "changeme"] {
+            assert!(mask.contains(value));
+            assert!(!wire.contains(value), "{wire}");
+            let token = mask.cover(value);
+            assert_eq!(token.len(), value.len());
+            assert!(wire.contains(&token), "{wire}");
+            assert_eq!(mask.restore(&token), value);
+        }
+        assert!(mask.cover("sk-...").starts_with("sk-"));
+    }
+
+    #[test]
+    fn an_unmaskable_credential_blocks_the_request() {
+        let seen = Arc::new(Mutex::new(None));
+        let wire = Canned {
+            events: Vec::new(),
+            seen: Arc::clone(&seen),
+        };
+        let armed = Arc::new(Armed::default());
+        let mut original = Mask::new(KEY);
+        for value in ["sk--", "sk-.", "sk-_", "sk-~"] {
+            if !original.is_token(value) {
+                original.add(None, value).expect("a free punctuation token");
+            }
+        }
+        let original = Arc::new(original);
+        armed.arm(Some(Arc::clone(&original)));
+        let masked = Masked::new(Arc::new(wire), Arc::clone(&armed));
+        let req = Request {
+            system: Some(
+                "redis://user:sk-found-0123456789abcdef@host/db redis://user:sk-:@host/db".into(),
+            ),
+            ..Request::default()
+        };
+        let result = block_on(masked.stream(&ModelSpec::test(), &req));
+        assert!(matches!(result, Err(LlmError::MaskShape)));
+        assert!(seen.lock().expect("unpoisoned").is_none());
+        assert!(Arc::ptr_eq(&armed.current().expect("armed"), &original));
+    }
+
+    // A token seen again in the text is still a token: finding it would mask
+    // the mask and hand the wire a token of a token.
+    #[test]
+    fn a_token_seen_again_is_not_a_secret() {
+        let mut set = Mask::new(KEY);
+        set.add(None, "sk-live-9f3a1c2b7d5e").expect("a token");
+        let token = set.cover("sk-live-9f3a1c2b7d5e");
+        let armed = Armed::default();
+        armed.arm(Some(Arc::new(set)));
+        let after = armed
+            .absorb(vec![(None, token)])
+            .expect("valid")
+            .expect("armed");
+        assert_eq!(after.len(), 1);
     }
 
     // The body a wire builds from a request, as the one string its parts

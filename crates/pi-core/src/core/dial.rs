@@ -1,66 +1,27 @@
 //! A model name turned into something that can be talked to: its spec and the
 //! client for its wire. Startup, `/model` and a reload all come through here.
 
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context, Result};
 use llm::mask::{Armed, Footprint, Mask, Masked};
 use llm::model::{Format, ModelSpec};
 use llm::transport::{Transport, anthropic::Anthropic, chat::ChatCompletions, openai::OpenAi};
 
-use super::mask::{Found, Secret};
 use crate::args::Pinned;
 use pi_store::config;
 
-/// What must not leave the machine: armed by whoever resolved the config, read
-/// by each wire at every request — so a value found later is covered from the
-/// next request on, and a run with two checkouts open masks what either named.
+// Every model transport shares the credentials found in outgoing requests.
 static MASK: LazyLock<Arc<Armed>> = LazyLock::new(|| Arc::new(Armed::default()));
 
-struct KnownSecrets {
-    armed_key: Option<[u8; 32]>,
-    values: Vec<Secret>,
-}
-
-// Keep values from earlier resolutions so they stay masked after a reload.
-static KNOWN: Mutex<KnownSecrets> = Mutex::new(KnownSecrets {
-    armed_key: None,
-    values: Vec::new(),
-});
-
-/// Arm what this resolution found. Answers whether anything is masked now: a
-/// run with no pi directory to keep the key in masks nothing, and says so.
-pub fn arm(found: Option<Found>) -> bool {
-    let Some(found) = found else {
-        return MASK.current().is_some();
-    };
-    let mut known = KNOWN.lock().unwrap_or_else(PoisonError::into_inner);
-    for secret in found.values {
-        if !known.values.iter().any(|entry| entry.value == secret.value) {
-            known.armed_key = None;
-            known.values.push(secret);
-        }
-    }
-    if known.armed_key == Some(found.key) {
-        return true;
-    }
-    let mut mask = Mask::new(found.key);
-    for secret in &known.values {
-        secret.cover_into(&mut mask);
-    }
-    tracing::debug!(target: "pi::mask", values = mask.len(), "armed");
-    MASK.arm(Some(Arc::new(mask)));
-    known.armed_key = Some(found.key);
-    true
+/// Enable masking with the persisted key and keep mappings across reloads.
+pub(super) fn arm() -> bool {
+    MASK.arm_if_empty(|| pi_store::mask::key().map(Mask::new))
 }
 
 /// What the armed set has masked so far, or `None` when nothing is armed.
 pub fn footprints() -> Option<Vec<Footprint>> {
     MASK.current().map(|mask| mask.footprints())
-}
-
-fn masked(wire: Arc<dyn Transport>) -> Arc<dyn Transport> {
-    Arc::new(Masked::new(wire, Arc::clone(&MASK)))
 }
 
 fn transport_for(spec: &ModelSpec, configured: Option<String>) -> Result<Arc<dyn Transport>> {
@@ -70,7 +31,7 @@ fn transport_for(spec: &ModelSpec, configured: Option<String>) -> Result<Arc<dyn
         Format::OpenAi => Arc::new(OpenAi::new(configured, http)),
         Format::Chat => Arc::new(ChatCompletions::new(configured, http)),
     };
-    Ok(masked(wire))
+    Ok(Arc::new(Masked::new(wire, Arc::clone(&MASK))))
 }
 
 /// One model, ready to talk to: what to send, and the client to send it with.

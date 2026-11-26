@@ -36,7 +36,9 @@ pub fn classify(err: &LlmError) -> Fault {
         LlmError::Stream(detail) if overflowing(detail) => Fault::Overflow,
         // A dropped socket or a truncated stream is worth another attempt.
         LlmError::Http(_) | LlmError::Stream(_) => Fault::Transient,
-        LlmError::Json(_) | LlmError::Config(_) | LlmError::Summarizer(_) => Fault::Permanent,
+        LlmError::Json(_) | LlmError::Config(_) | LlmError::Summarizer(_) | LlmError::MaskShape => {
+            Fault::Permanent
+        }
     }
 }
 

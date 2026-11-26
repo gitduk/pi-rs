@@ -7,6 +7,7 @@ pub mod message;
 pub mod meter;
 pub mod model;
 pub mod request;
+pub mod secret;
 pub mod slice;
 pub mod stream;
 pub mod totals;

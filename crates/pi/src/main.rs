@@ -219,9 +219,6 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
     let resume_model = prior.as_ref().map(|p| p.model.as_str());
     let catalog = core::catalog::Catalog::persistent();
     let config = Arc::new(catalog.enrich(&settings, &pinned, config)?);
-    // Before the first wire is made: what the files and the scripts name is
-    // what no request leaves with. A resolution arms it again on reload.
-    core::dial::arm(core::mask::find(workspace.root(), &config));
     let (named, named_by) = config
         .model(args.model.as_deref(), resume_model, from_project)
         .ok_or_else(|| no_model(&args))?;
