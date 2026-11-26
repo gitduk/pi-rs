@@ -256,7 +256,7 @@ impl Tui {
         tui.reload_statusline();
         // The row's checkout, before the first frame: the 1 s walk in
         // `run` comes too late for it.
-        tui.look_project();
+        tui.look_git();
         Ok(tui)
     }
 
@@ -327,7 +327,7 @@ impl Tui {
         self.ui.at_menu = None;
         self.ui.at_root = root;
         // The row's checkout follows the root now, not on the next look.
-        self.look_project();
+        self.look_git();
     }
 
     // Brings the screen into step after a change: parks the old lane's
@@ -461,13 +461,13 @@ impl Tui {
         }
     }
 
-    // Runs `git` only for a layout that draws the checkout, or a script that
+    // Runs `git` only for a layout that draws the git field, or a script that
     // may read it from `PI_FACTS`.
-    fn look_project(&mut self) {
+    fn look_git(&mut self) {
         let layout = &self.ui.layout;
-        let wanted = layout.uses(pi_store::statusline::Field::Project) || layout.scripted();
-        self.ui.project = if wanted {
-            statusline::project_of(self.core.lane().root())
+        let wanted = layout.uses(pi_store::statusline::Field::Git) || layout.scripted();
+        self.ui.git = if wanted {
+            statusline::git_of(self.core.lane().root())
         } else {
             None
         };
@@ -518,8 +518,8 @@ impl Tui {
 
     // Rebuilds the bar before every draw: an off-screen run must reach
     // the screen unasked, and a step walks this same order (bar = ring).
-    // The order is git's own, the one `worktree list` and the bar's counter
-    // walk; each lane sits where its checkout does, not where it was opened.
+    // The order is git's own, the one `worktree list` walks; each lane sits
+    // where its checkout does, not where it was opened.
     fn refresh_tabs(&mut self) {
         let current = self.core.lanes.front();
         let mut lanes: Vec<(String, Mark)> = self
@@ -549,21 +549,24 @@ impl Tui {
         let mut tabs: Vec<Tab> = Vec::with_capacity(lanes.len());
         // The checkouts on disk, in their own order: one no lane has open is
         // on the bar too, and `Lists` holds the read, one fork per list.
-        for tree in self.ui.lists.worktrees_read().unwrap_or_default() {
-            match lanes.iter().position(|(name, _)| *name == tree.name) {
-                Some(at) => {
-                    let (name, mark) = lanes.remove(at);
-                    tabs.push(Tab { mark, name });
-                }
-                None => tabs.push(Tab {
-                    mark: Mark::Unopened,
-                    name: tree.name.clone(),
-                }),
-            }
+        for tree in self.ui.lists.checkouts_read().unwrap_or_default() {
+            let (name, mark) = match lanes.iter().position(|(name, _)| *name == tree.name) {
+                Some(at) => lanes.remove(at),
+                None => (tree.name.clone(), Mark::Unopened),
+            };
+            tabs.push(Tab {
+                mark,
+                name,
+                branch: tree.branch.clone(),
+            });
         }
         // A lane git does not list — rooted outside the worktrees directory,
         // or in a subdirectory of a checkout — follows the disk's.
-        tabs.extend(lanes.into_iter().map(|(name, mark)| Tab { mark, name }));
+        tabs.extend(lanes.into_iter().map(|(name, mark)| Tab {
+            mark,
+            name,
+            branch: None,
+        }));
         self.ui.tabs = tabs;
     }
 
@@ -818,7 +821,7 @@ impl Tui {
             if looked.elapsed() >= std::time::Duration::from_secs(1) {
                 looked = std::time::Instant::now();
                 self.refresh_files();
-                self.look_project();
+                self.look_git();
                 self.reload_statusline();
                 self.save_shown();
             }
@@ -854,8 +857,8 @@ impl Tui {
             }
             // After the frame, not before it: a fork here would hold the
             // screen blank. Read again whenever something dropped the list.
-            if self.ui.lists.worktrees_read().is_none() {
-                let _ = self.ui.lists.worktrees();
+            if self.ui.lists.checkouts_read().is_none() {
+                let _ = self.ui.lists.checkouts();
                 continue;
             }
             let running = self.core.lane().is_running();

@@ -97,9 +97,8 @@ pub(super) struct Ui {
     // A note answering the last keypress, and when it landed. It stands
     // where the layout puts it for `flash_for` and then goes — see `statusline_lines`.
     pub(super) flash: Option<(String, Instant)>,
-    // The checkout as the `project` field draws it, read once a second and
-    // nowhere else: two `git` calls per frame is not a bar's price.
-    pub(super) project: Option<pi_store::statusline::Project>,
+    // The current checkout's git state, refreshed on a switch and once a second.
+    pub(super) git: Option<pi_store::statusline::Git>,
     // What the last write put in a session's file, and which session that was:
     // compared against, so the file is touched only when the numbers move.
     pub(super) shown: Option<(String, pi_store::statusline::Shown)>,
@@ -226,7 +225,10 @@ impl Mark {
 // view of state the surface does not own.
 pub(super) struct Tab {
     pub(super) mark: Mark,
+    // The name a lane answers to and the worktree menu offers; `branch` is
+    // what the bar draws in its place once git knows one.
     pub(super) name: String,
+    pub(super) branch: Option<String>,
 }
 
 impl Ui {
@@ -289,7 +291,7 @@ impl Ui {
             spinner: 0,
             tabs: Vec::new(),
             flash: None,
-            project: None,
+            git: None,
             shown: None,
             scripts: super::statusline::Scripts::new(),
             statusline_at: None,
@@ -352,7 +354,7 @@ impl Ui {
     // The checkout a step from this one (Normal `L`/`H`), wrapping at
     // either end; None with nowhere else to go.
     pub(super) fn step_checkout(&self, lane: &Lane, forward: bool) -> Option<String> {
-        let trees = self.lists.worktrees();
+        let trees = self.lists.checkouts();
         // Git's own order, the one the bar lists them in. A step names the
         // checkout it goes to, so two sharing a name are one stop.
         let mut order: Vec<&str> = Vec::with_capacity(trees.len());

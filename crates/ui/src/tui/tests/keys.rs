@@ -588,7 +588,7 @@ fn accepting_a_subcommand_or_tool_key_continues_into_its_arguments() {
 
     let mut ui = test_ui(80, 24);
     ui.tools = Some(pi_core::core::lane::a_resolved("").brief.clone());
-    ui.lists.worktrees.set(Vec::new()).unwrap();
+    ui.lists.checkouts.set(Vec::new()).unwrap();
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     for (prefix, completed) in [

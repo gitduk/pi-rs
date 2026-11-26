@@ -28,7 +28,7 @@ This skill describes the interface.
   "lines": [
     {"place": "top", "left": [{"field": "flash", "style": "emphasis"}]},
     {
-      "left":  ["project", {"group": ["model", {"text": " "}, "effort"]}],
+      "left":  ["workspace", "git", {"group": ["model", {"text": " "}, "effort"]}],
       "right": [{"script": {"command": "date +%H:%M", "every": 30}}],
       "sep":   {"text": "  ", "style": "muted"}
     }
@@ -62,11 +62,12 @@ A missing `style` is muted.
 ## Fields
 
 `tabs` `flash` `model` `effort` `tier` `update` `spent` `state` `session`
-`project` `elapsed` `in_out` `speed` `cache` `cost` `ctx` `compacted` `queued`
+`workspace` `git` `elapsed` `in_out` `speed` `cache` `cost` `ctx` `compacted` `queued`
 `worktree`
 
-- `project` — the checkout directory's name, then, inside a repository, the
-  branch and the lines the worktree added and removed, in a diff's own colours.
+- `workspace` shows the checkout directory's name.
+- `git` shows the branch and the lines added and removed against `HEAD` in the
+  theme's diff colours. The field is empty outside a repository.
 - `state` — `idle`, `working`, `compacting`, `stopping`, or a retry it waits
   out. Always says something.
 - `session` — what the user calls this session, else the first thing it was
@@ -126,9 +127,9 @@ A script item carries exactly one of `command` or `name`.
     `failed`, `plain`, `unopened`);
   - `jobs` — background executions: `running`, `back` (ended with results
     waiting), `stopped`, `exited`;
-  - `project` — `name`, then `branch`, `added`, `removed` inside a repository;
-    `branch` is `null` outside one.
-- A value the row leaves out is `null`; `session` is absent rather than null
+  - `workspace` is the checkout directory's name, omitted when the path has no name.
+  - `git` has `branch`, `added` and `removed`, and is omitted outside a repository.
+- Optional values are `null` unless documented as omitted. `session` is omitted
   outside a lane.
 
 The statusline redraws from the last answer, so a slow script never stalls the

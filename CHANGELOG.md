@@ -32,6 +32,14 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 - Model requests use stable, key-like replacements for secrets. Pi restores
   the originals before displaying or saving responses and running tool calls.
 
+- The status line's `project` field is split into `workspace`, the checkout's
+  directory name, and `git`, its branch and lines changed against `HEAD`.
+  `PI_FACTS` exposes the same two fields. A layout that names `project`
+  falls back to the built-in default.
+
+- The checkout bar draws each checkout's branch in place of its worktree name
+  where git reports one.
+
 ### Fixed
 
 - Invalid tool calls report the JSON parse error and its location without
