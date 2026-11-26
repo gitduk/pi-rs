@@ -2,7 +2,8 @@
 //! tool allows, and retained as each call finishes.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 
@@ -12,7 +13,7 @@ use tool::{Concurrency, Ctx, ToolError, ToolOutput};
 use tracing::Instrument as _;
 
 use crate::event::Reporter;
-use crate::session::{Drawn, Session};
+use crate::session::{ArchivedPath, Drawn, Session};
 use crate::{Agent, AgentError, Decision, Event, replies, seams::Input};
 
 // How much of a failed argument blob rides back to the model and log; past
@@ -133,21 +134,26 @@ impl Agent {
                                     at: began,
                                 })
                                 .await;
-                            let ctx = &with_call_reporter(ctx, call, reporter);
+                            let (ctx, file) = with_call_reporter(ctx, call, reporter);
                             let mut output =
-                                tool::output::gated(t.as_ref(), call.args.clone(), ctx).await;
+                                tool::output::gated(t.as_ref(), call.args.clone(), &ctx).await;
                             if let Ok(out) = &mut output
                                 && let Some(note) = self
                                     .brief
                                     .hooks
-                                    .after(&call.name, &call.args, out, ctx)
+                                    .after(&call.name, &call.args, out, &ctx)
                                     .await
                             {
                                 // Through the same gate as the tool's own output.
-                                let note = tool::output::bound(ToolOutput::text(note), ctx);
+                                let note = tool::output::bound(ToolOutput::text(note), &ctx);
                                 out.content.extend(note.content);
                             }
-                            landed(call, output, began.elapsed())
+                            landed(
+                                call,
+                                output,
+                                began.elapsed(),
+                                file.get().map(PathBuf::as_path),
+                            )
                         }
                     }
                 }
@@ -240,12 +246,20 @@ enum Landed {
     Ran(ToolResult, Drawn, Usage),
 }
 
-// The call's own context: its progress and what it prints said as events
-// under its id.
-fn with_call_reporter(ctx: &Ctx, call: &ToolCall, reporter: &Reporter) -> Ctx {
+// Route live updates under the call's id and keep its file for the result.
+fn with_call_reporter(
+    ctx: &Ctx,
+    call: &ToolCall,
+    reporter: &Reporter,
+) -> (Ctx, Arc<OnceLock<PathBuf>>) {
     let (progress_id, output_id) = (call.id.clone(), call.id.clone());
     let (progress_reporter, output_reporter) = (reporter.clone(), reporter.clone());
-    ctx.clone()
+    let file = Arc::new(OnceLock::new());
+    let seen = Arc::clone(&file);
+    let file_id = call.id.clone();
+    let file_reporter = reporter.clone();
+    let ctx = ctx
+        .clone()
         .with_progress(Arc::new(move |text| {
             progress_reporter.latest(Event::ToolProgress {
                 id: progress_id.clone(),
@@ -258,6 +272,15 @@ fn with_call_reporter(ctx: &Ctx, call: &ToolCall, reporter: &Reporter) -> Ctx {
                 text,
             })
         }))
+        .with_file_reporter(Arc::new(move |path| {
+            if seen.set(path.to_path_buf()).is_ok() {
+                file_reporter.latest(Event::ToolFile {
+                    id: file_id.clone(),
+                    path: path.to_path_buf(),
+                });
+            }
+        }));
+    (ctx, file)
 }
 
 // A call's output as its result, its end said as it lands.
@@ -265,6 +288,7 @@ fn landed(
     call: &ToolCall,
     output: Result<ToolOutput, ToolError>,
     took: std::time::Duration,
+    file: Option<&Path>,
 ) -> Landed {
     match output {
         Err(ToolError::Cancelled) => Landed::Stopped,
@@ -281,6 +305,7 @@ fn landed(
                     screen: Some(body),
                     warned: false,
                     took: Some(took),
+                    file: None,
                 },
             )
         }
@@ -295,6 +320,7 @@ fn landed(
                 screen: out.screen,
                 warned: out.warned,
                 took: Some(took),
+                file: file.map(ArchivedPath::from),
             };
             Landed::Ran(result, drawn, out.spent)
         }

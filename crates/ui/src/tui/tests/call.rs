@@ -481,6 +481,74 @@ fn a_click_after_a_prompt_opens_and_closes_its_own_call() {
     assert!(!view.state.tools.iter().find(|t| t.id == "c2").unwrap().open);
 }
 
+#[test]
+fn right_click_opens_the_resolved_file_on_the_visible_heading() {
+    use agent::session::{Drawn, Session, archive::Record};
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    let mut ui = test_ui(80, 24);
+    let (_dir, mut lane) = a_running_lane();
+    let mut view = View::default();
+    let path = lane.root().join("notes.md");
+    read_queued(&mut ui, &mut lane, &mut view, "c1", "missing/../notes.md");
+    ui.on_event(
+        &mut lane,
+        &mut view,
+        agent::Event::ToolStart {
+            id: "c1".into(),
+            at: std::time::Instant::now(),
+        },
+    );
+    ui.on_event(
+        &mut lane,
+        &mut view,
+        agent::Event::ToolFile {
+            id: "c1".into(),
+            path: path.clone(),
+        },
+    );
+    ui.flush(&lane, &mut view);
+    let row = ui.regions.history.y
+        + ui.row_targets
+            .iter()
+            .position(|t| matches!(t, Target::PendingTool(_)))
+            .unwrap() as u16;
+    let click = mouse_event(MouseEventKind::Down(MouseButton::Right), row);
+    assert!(matches!(
+        ui.key(&lane, &mut view, click, true),
+        crate::tui::Asked::Own(crate::tui::Deed::OpenFile(file)) if file == path
+    ));
+    assert_eq!(ui.file_at(&view, ui.regions.history.right() - 1, row), None);
+
+    let mut session = Session::new();
+    session.push_drawn(vec![(
+        llm::message::ToolResult::text("c1", "read", "read notes.md"),
+        Drawn {
+            file: Some(path.as_path().into()),
+            ..Default::default()
+        },
+    )]);
+    let entry = &session.entries()[0];
+    let record = serde_json::to_value(Record::from_entry(entry)).unwrap();
+    let restored = serde_json::from_value::<Record>(record)
+        .unwrap()
+        .into_entry()
+        .unwrap();
+    assert_eq!(&restored, entry);
+    let session = Session::from_parts(vec![restored], 2, None);
+    let mut view = View::default();
+    ui.rebuild(&mut view, &session, &lane.root().join("new-workspace"));
+    ui.flush(&lane, &mut view);
+    let row = ui.regions.history.y
+        + ui.row_targets
+            .iter()
+            .position(|t| matches!(t, Target::Scrollback(_, 0)))
+            .unwrap() as u16;
+    assert_eq!(ui.file_at(&view, 5, row), Some(path.as_path()));
+    ui.open_page(vec![ratatui::text::Line::from("details").into()]);
+    assert_eq!(ui.file_at(&view, 5, row), None);
+}
+
 // A failing call is never the row's: the row would name it, count it and
 // wear its ✗, then drop all three once its own row landed under it.
 #[test]
@@ -652,19 +720,14 @@ fn a_stopped_tool_call_is_silenced_in_tui() {
 
     // The rebuild draws nothing of it: the call it would leave is none.
     let stopped_entry = &session.entries()[2];
-    let agent::session::Entry::Tool { result, .. } = stopped_entry else {
-        panic!("a tool entry, {:?}", stopped_entry)
-    };
+    assert!(matches!(stopped_entry, agent::session::Entry::Tool { .. }));
     assert!(
-        crate::tui::scrollback::call_of(&mut Folds::default(), result, None, false, None).is_none(),
+        crate::tui::scrollback::call_of(&mut Folds::default(), stopped_entry).is_none(),
         "an interrupted call leaves no row"
     );
     // One that landed leaves one, on the same path.
-    let landed = llm::message::ToolResult::text("c2", "bash", "done");
-    assert!(
-        crate::tui::scrollback::call_of(&mut Folds::default(), &landed, None, false, None)
-            .is_some()
-    );
+    let landed = tool_entry(3, "c2", "bash", "done");
+    assert!(crate::tui::scrollback::call_of(&mut Folds::default(), &landed).is_some());
 }
 
 // The live rows the frame tagged as the calls in flight: what the surface
@@ -727,6 +790,7 @@ fn tool_entry(id: u64, call: &str, name: &str, screen: &str) -> agent::session::
         screen: Some(screen.into()),
         warned: false,
         took: None,
+        file: None,
     }
 }
 
@@ -739,6 +803,7 @@ fn failed_entry(id: u64, call: &str, name: &str, body: &str) -> agent::session::
         screen: Some(body.into()),
         warned: false,
         took: None,
+        file: None,
     }
 }
 

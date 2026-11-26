@@ -12,7 +12,7 @@ use super::browse::{PageInput, PageLayout};
 use super::call::{self, drawn, pending_line};
 use super::menu::MenuEntry;
 use super::mouse::{Pane, Regions, Target, row_in};
-use super::row::{PendingTool, Row, StepMark, count};
+use super::row::{Row, StepMark, count};
 use super::screen::{self, Rows};
 use super::scrollback::{Piece, ScrollbackRows, body};
 use super::search::{self, Anchor, Laid, Spot};
@@ -50,7 +50,7 @@ impl Ui {
         let last = view.surface.scrollback.len().checked_sub(1);
         let row_holds = view.surface.scrollback.last().is_some_and(Row::is_steps);
         let now = std::time::Instant::now();
-        let pending = if row_holds {
+        let mut pending = if row_holds {
             call::pending(&view.state.tools, now)
         } else {
             Vec::new()
@@ -65,7 +65,11 @@ impl Ui {
         for (idx, row) in view.surface.scrollback.iter_mut().enumerate() {
             // Only the last row takes them, and only the last row can be the
             // summary they belong to: any other is handed nothing.
-            let flight: &[PendingTool] = if Some(idx) == last { &pending } else { &[] };
+            let flight = if Some(idx) == last {
+                std::mem::take(&mut pending)
+            } else {
+                Vec::new()
+            };
             let hovered = self.hovered_scrollback.filter(|h| h.0 == idx).map(|h| h.1);
             row.update_live(hovered, self.spinner, flight);
         }
@@ -367,7 +371,7 @@ impl Ui {
         self.reflow_selection(view, width);
         self.drawn_width = width;
         let stamps = self.sent_stamps(view, regions.history);
-        let (rows, executions, bar) = match &self.selection {
+        let (mut rows, executions, bar) = match &self.selection {
             Some(sel) => (
                 super::select::highlight(rows, sel, 0, |at| self.lead(view, at)),
                 super::select::highlight(executions, sel, commands_base, |_| 0),
@@ -375,6 +379,17 @@ impl Ui {
             ),
             None => (rows, executions, bar),
         };
+        if let Some((col, row)) = self.pointer
+            && self.selection.is_none()
+            && self.file_at(view, col, row).is_some()
+            && let Some(line) = row_in(regions.history, row).and_then(|at| rows.get_mut(at))
+        {
+            let hint = "  right-click to open";
+            if line.width() + hint.len() <= width {
+                line.spans
+                    .push(self.paint.span(&self.paint.theme.muted, hint));
+            }
+        }
 
         self.below = if self.background_focus.is_some() {
             0

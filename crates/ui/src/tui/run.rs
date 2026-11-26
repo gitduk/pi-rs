@@ -439,9 +439,6 @@ impl Tui {
         let mut editor = tokio::task::spawn_blocking({
             let path = path.to_path_buf();
             move || {
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
                 let mut cmd = std::process::Command::new(program);
                 cmd.args(args).arg(&path);
                 // SIG_IGN is inherited across exec, and an editor installing
@@ -479,6 +476,11 @@ impl Tui {
     pub(super) async fn edit_file(&mut self, file: pi_core::core::resolve::Editable) -> Output {
         let name = &file.name;
         let draft = if file.is_prompt() {
+            if let Some(parent) = file.path.parent()
+                && let Err(e) = tokio::fs::create_dir_all(parent).await
+            {
+                return Output::Notice(format!("could not prepare {name}: {e}"));
+            }
             None
         } else {
             match ConfigDraft::for_missing(&file.path) {
@@ -528,6 +530,22 @@ impl Tui {
         };
         let said = std::iter::once(format!("{name} — in force from {when}")).chain(notes);
         Output::Notice(pi_core::input::notice(said))
+    }
+
+    // With no desktop, hand the terminal to the editor for the existing file.
+    pub(super) async fn open_in_editor(&mut self, path: &std::path::Path) {
+        let (ran, resumed) = self.in_editor(path).await;
+        if let Err(e) = resumed {
+            self.notice(format!("the screen did not come back: {e}"));
+            return;
+        }
+        match ran {
+            Err(e) => self.notice(format!("could not open {}: {e}", path.display())),
+            Ok(status) if !status.success() => {
+                self.notice(format!("editor exited {status} on {}", path.display()));
+            }
+            Ok(_) => {}
+        }
     }
 
     // Hand the terminal to `$EDITOR` on a copy of the line, and take back what

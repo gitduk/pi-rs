@@ -28,6 +28,8 @@ pub struct PendingTool {
     pub secs: Option<u64>,
     /// Where it runs, as `render::cwd` reads it off its arguments.
     pub cwd: Option<String>,
+    /// The file it works on, when it names one: what a right click opens.
+    pub file: Option<std::path::PathBuf>,
 }
 
 /// Where a call in flight stands, each stage holding what only it has.
@@ -704,6 +706,16 @@ impl Group {
         step_index(&self.steps, self.height(), self.framed().at(i)?)
     }
 
+    // The file the call on window row `i` works on, when it names one.
+    pub(super) fn file(&self, i: usize) -> Option<&std::path::Path> {
+        let at = self.framed().at(i)?;
+        match unit_at(&self.steps, &self.pending, self.height(), at)? {
+            (Unit::Step(Step::Tool(call)), 0) => call.file(),
+            (Unit::Pending(tool), _) => tool.file.as_deref(),
+            _ => None,
+        }
+    }
+
     // The step window row `i` falls in, and how far into its lines it lies.
     fn row_at(&self, i: usize) -> Option<(usize, usize)> {
         walk(&self.steps, self.height(), self.framed().at(i)?).ok()
@@ -946,18 +958,18 @@ impl Group {
         &mut self,
         hovered: Option<usize>,
         spin: usize,
-        held: &[PendingTool],
+        held: Vec<PendingTool>,
     ) -> bool {
         self.hovered = hovered;
         self.spinner = spin;
-        if self.pending.as_slice() == held {
+        if self.pending == held {
             return false;
         }
         let reshaped = self.pending.len() != held.len()
-            || self.pending.iter().zip(held).any(|(a, b)| {
+            || self.pending.iter().zip(&held).any(|(a, b)| {
                 (&a.name, &a.summary, a.landed()) != (&b.name, &b.summary, b.landed())
             });
-        self.pending = held.to_vec();
+        self.pending = held;
         reshaped
     }
 
@@ -1126,6 +1138,7 @@ mod tests {
             },
             secs: None,
             cwd: None,
+            file: None,
         }
     }
 
@@ -1138,7 +1151,7 @@ mod tests {
         row.update_live(
             None,
             0,
-            &[
+            vec![
                 pending("bash", "cargo test", false),
                 pending("read", "b.rs", true),
             ],
@@ -1156,11 +1169,11 @@ mod tests {
     #[test]
     fn a_pending_call_has_its_own_line_until_it_leaves() {
         let mut row = bundle(vec![tool("read", "a.rs")]);
-        row.update_live(None, 0, &[pending("grep", "match 1", false)]);
+        row.update_live(None, 0, vec![pending("grep", "match 1", false)]);
         assert_eq!(row.len(), 2, "one line per call, without a group header");
         assert!(shown(&row, 80)[1].contains("grep match 1"));
 
-        row.update_live(None, 0, &[]);
+        row.update_live(None, 0, Vec::new());
         assert_eq!(row.len(), 1, "folded back to the one tool it holds");
         assert!(!row.is_expandable());
     }

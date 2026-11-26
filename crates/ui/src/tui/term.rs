@@ -131,6 +131,48 @@ pub(super) fn reader() -> (UnboundedReceiver<TermEvent>, Hold) {
 // token, short enough a wedged one won't hold the terminal hostage.
 pub(super) const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// A successful desktop open, or the file to hand to the terminal editor.
+pub(super) type FileOpen = Result<Option<PathBuf>, String>;
+
+fn desktop_available() -> bool {
+    ["WAYLAND_DISPLAY", "DISPLAY"]
+        .into_iter()
+        .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+}
+
+/// Checks that the file still exists and opens it off the terminal's loop.
+pub(super) async fn open_file(path: PathBuf) -> FileOpen {
+    let meta = tokio::fs::metadata(&path)
+        .await
+        .map_err(|e| format!("could not open {}: {e}", path.display()))?;
+    if !meta.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    if !desktop_available() {
+        return Ok(Some(path));
+    }
+
+    let mut open = tokio::process::Command::new("xdg-open");
+    open.arg(&path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // The handler can outlive the terminal. Tokio can stop waiting at exit.
+    #[cfg(unix)]
+    open.process_group(0);
+    let status = open
+        .status()
+        .await
+        .map_err(|e| format!("could not open {} with xdg-open: {e}", path.display()))?;
+    if !status.success() {
+        return Err(format!(
+            "xdg-open could not open {} ({status})",
+            path.display()
+        ));
+    }
+    Ok(None)
+}
+
 // `$VISUAL` before `$EDITOR` before `vi`: the order other terminal
 // programs use.
 pub(super) fn external_editor() -> (String, Vec<String>) {

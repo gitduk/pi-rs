@@ -356,16 +356,15 @@ impl Tool for Read {
         // A `spill:` path names a file in the session's spill directory; only
         // locators our own writer minted resolve, refused before touching the filesystem.
         let is_spill = args.path.starts_with("spill:");
-        let (path, rel) = match args.path.strip_prefix("spill:") {
-            Some(_) => {
-                let path = ctx.spill_path(&args.path)?;
-                (path, args.path.clone())
-            }
-            None => {
-                let p = ctx.workspace.resolve(&args.path, self.tier())?;
-                let rel = ctx.workspace.display(&p);
-                (p, rel)
-            }
+        let (path, rel) = if is_spill {
+            let path = tokio::fs::canonicalize(ctx.spill_path(&args.path)?)
+                .await
+                .map_err(|e| ToolError::Invalid(format!("{}: {e}", args.path)))?;
+            (path, args.path)
+        } else {
+            let path = ctx.workspace.resolve(&args.path, self.tier())?;
+            let rel = ctx.workspace.display(&path);
+            (path, rel)
         };
         let meta = tokio::fs::metadata(&path)
             .await
@@ -415,15 +414,14 @@ impl Tool for Read {
             )));
         }
 
-        // A spill is written by pi and read back at whatever size it reached:
-        // served by its range, never held whole and never noted as viewed.
+        // Sniffing needs an ordinary file in memory. Spills are served by
+        // range at any size and never noted as viewed.
+        if !is_spill && meta.len() > MAX_BYTES {
+            return Ok(ToolOutput::text(over_limit(&rel, meta.len())));
+        }
+        ctx.report_file(&path);
         if is_spill {
             return spill_lines(&rel, &path, args.offset, args.limit).await;
-        }
-        // Sniffing needs the whole file in memory, so the size guard precedes
-        // the read.
-        if meta.len() > MAX_BYTES {
-            return Ok(ToolOutput::text(over_limit(&rel, meta.len())));
         }
         let bytes = tokio::fs::read(&path).await?;
         if let Some(media_type) = llm::message::Image::media_type(&bytes) {

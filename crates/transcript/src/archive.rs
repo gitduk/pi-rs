@@ -123,6 +123,7 @@ impl Record {
                 screen,
                 warned,
                 took,
+                file,
                 ..
             } => (
                 Annotation::Tool {
@@ -132,6 +133,7 @@ impl Record {
                         screen: screen.clone(),
                         warned: *warned,
                         took: *took,
+                        file: file.clone(),
                     },
                 },
                 vec![Content::ToolResult(result.clone())],
@@ -229,6 +231,7 @@ impl Record {
                     screen: drawn.screen,
                     warned: drawn.warned,
                     took: drawn.took,
+                    file: drawn.file,
                 }
             }
             Annotation::Note { id, at } => Entry::Note {

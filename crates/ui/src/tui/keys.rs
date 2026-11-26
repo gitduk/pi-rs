@@ -582,6 +582,13 @@ impl Ui {
                 }
                 self.on_press(view, mouse.column, mouse.row);
             }
+            MouseEventKind::Down(crossterm::event::MouseButton::Right) => {
+                if let Some(file) = self.file_at(view, mouse.column, mouse.row) {
+                    self.press = None;
+                    self.selection = None;
+                    return Asked::Own(Deed::OpenFile(file.to_path_buf()));
+                }
+            }
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
                 if let Some(id) = self.on_release(view, mouse.column, mouse.row) {
                     return Asked::Own(Deed::ToggleCommand(id));

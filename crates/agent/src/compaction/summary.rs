@@ -188,6 +188,7 @@ mod tests {
             screen: None,
             warned: false,
             took: None,
+            file: None,
         }
     }
 

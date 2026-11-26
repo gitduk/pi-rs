@@ -18,6 +18,13 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   It belongs to one connection and its credentials, so a rotated key or a new
   auth header means the facts are read again rather than inherited.
 
+- Right-click a `read` or `edit` heading to open the file the call accessed,
+  including after resuming the session. A running call offers the action once
+  it resolves the file. Linux desktops use the default application, and
+  headless sessions use the terminal editor. Failures appear in the status line.
+  Recorded paths survive when a session moves between Unix and Windows,
+  and the open action is available for paths native to the current system.
+
 ### Changed
 
 - The TUI shows consecutive automatic skill attachments on one `✔ skills`
