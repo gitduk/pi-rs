@@ -12,12 +12,12 @@ use super::browse::{PageInput, PageLayout};
 use super::call::{self, drawn, pending_line};
 use super::menu::MenuEntry;
 use super::mouse::{Pane, Regions, Target, row_in};
-use super::row::{Row, StepMark, count};
+use super::row::{Row, count};
 use super::screen::{self, Rows};
 use super::scrollback::{Piece, ScrollbackRows, body};
 use super::search::{self, Anchor, Laid, Spot};
 use super::statusline::{Checkout, Facts, Jobs};
-use super::view::{Doing, Scroll, StreamKind, View, remember_first_ask};
+use super::view::{Scroll, StreamKind, View, remember_first_ask};
 use crate::render;
 use crate::render::Paint;
 use pi_core::core::question::{Asker, Question};
@@ -160,6 +160,7 @@ impl Ui {
                 transcript,
                 text.iter().map(screen::Piece::height).sum(),
                 input,
+                self.layout.rows(Place::Top) > 0,
             )
         });
         let mut regions = page
@@ -398,7 +399,10 @@ impl Ui {
         } else {
             below
         };
-        let gap = if self.below > 0 {
+        // Scrolled up, the strip's first row says how much is below rather
+        // than naming the checkouts.
+        let hint = self.below > 0;
+        let gap = if hint {
             let shine = self
                 .pointer
                 .is_some_and(|(_, row)| row_in(regions.gap, row).is_some());
@@ -507,12 +511,12 @@ impl Ui {
                     }
                 }
             };
-            if !over_rows.is_empty() {
+            if !over_rows.is_empty() && !hint {
                 frame.render_widget(Rows(&over_lines), regions.statusline_top);
             }
             frame.render_widget(Rows(&bar), regions.statusline);
             if self.selection.is_none() {
-                if !over_rows.is_empty() {
+                if !over_rows.is_empty() && !hint {
                     parts(frame, regions.statusline_top, &over_rows);
                 }
                 parts(frame, regions.statusline, &bar_rows);
@@ -874,40 +878,6 @@ impl Ui {
         }
         for row in content.iter() {
             out.push(row.clone(), None);
-        }
-
-        // A turn holds one row under what it has said so far, and fills it
-        // only while nothing on screen is moving — no retry ridden out, no
-        // stream, no call out. Held for the whole turn, the line fills a row
-        // instead of moving the screen when it lands.
-        if let Some(work) = &view.state.work
-            && matches!(work.doing, Doing::Turn { .. })
-        {
-            let still = !work.stopping
-                && work.retry.is_none()
-                && view.surface.stream.text().is_empty()
-                && !call::running(&view.state.tools);
-            let waited = still
-                .then(|| work.quiet.elapsed())
-                .and_then(|waited| crate::status::running_time(waited, crate::status::SHOWN));
-            match waited {
-                // One row whatever the width: a line that wraps would take a
-                // second row the second the clock lands.
-                None => out.push(Line::default(), None),
-                Some(waited) => {
-                    let line = Line::from(vec![
-                        self.paint.span(
-                            &self.paint.theme.muted,
-                            format!("{} ", StepMark::Thinking(self.spinner).glyph()),
-                        ),
-                        self.paint.span(
-                            &self.paint.theme.muted,
-                            format!("waiting{}{waited}", icons::PART_SEP),
-                        ),
-                    ]);
-                    out.push(screen::clip_line(&line, width), None);
-                }
-            }
         }
 
         // Typed lines precede execution results to match delivery priority.

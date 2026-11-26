@@ -746,9 +746,10 @@ fn copy_out(code: &str) -> String {
     }
 }
 
-/// The blank rows between the transcript and whatever is pinned under it —
-/// a panel or the bar — so its last line never reads as part of them.
-const HISTORY_GAP: u16 = 1;
+/// The least the strip between the transcript and the input line takes: the
+/// top layout line draws there, and with no such line the row still parts the
+/// two and holds the scroll hint.
+const STRIP_LEAST: usize = 1;
 
 /// One band under the transcript, listed in the order it is laid: the order
 /// is also what a short screen keeps, so the input line goes first and the
@@ -816,9 +817,9 @@ impl Regions {
     /// What sits under the transcript, as many rows as `area` holds: the
     /// panes take their turn in the order `panes` lists them.
     pub(super) fn layout(area: Rect, panes: &[Pane]) -> Self {
-        // A row of history and the gap under it stay whatever else is asked
-        // for: a conversation with no row of its own has nothing to read.
-        let mut room = (area.height as usize).saturating_sub(1 + HISTORY_GAP as usize);
+        // A row of history stays whatever else is asked for: a conversation
+        // with no row of its own has nothing to read.
+        let mut room = (area.height as usize).saturating_sub(1);
         let (mut bar, mut editor, mut top, mut executions) = (0, 0, 0, 0);
         let (mut asked, mut menu) = (0, 0);
         for pane in panes {
@@ -830,7 +831,7 @@ impl Regions {
                 Pane::Statusline {
                     place: Place::Top,
                     rows,
-                } => top = take(&mut room, rows),
+                } => top = take(&mut room, rows.max(STRIP_LEAST)),
                 Pane::Editor(n) => editor = take(&mut room, n),
                 Pane::Panel {
                     asked: questions,
@@ -839,17 +840,23 @@ impl Regions {
                 Pane::Executions(n) => executions = take(&mut room, n),
             }
         }
+        // A run's rows keep one of their own above them: the screen's, not
+        // the conversation's, so a task list never reads as the last answer.
+        let space = u16::from(executions > 0);
         // One stack, top to bottom: what a screen shows when the panes above
         // it have taken their rows.
-        let [history, gap, executions, statusline_top, editor, statusline] = Layout::vertical([
+        let [history, _, executions, statusline_top, editor, statusline] = Layout::vertical([
             Constraint::Fill(1),
-            Constraint::Length(HISTORY_GAP),
+            Constraint::Length(space),
             Constraint::Length(executions as u16),
             Constraint::Length(top as u16),
             Constraint::Length(editor as u16),
             Constraint::Length(bar as u16),
         ])
         .areas(area);
+        // The strip's first row is the one the scroll hint takes: the top
+        // layout lines give way to it while the transcript is scrolled up.
+        let gap = statusline_top.rows().next().unwrap_or_default();
         // The panel covers the rows just over the input line — the gap and
         // the row above it with them, so an option sits beside the line it
         // completes. At most half of what stands above, so the conversation

@@ -371,7 +371,8 @@ pub enum Field {
     /// `cost` part is the run's alone.
     Spent,
     /// What the agent is doing, whether or not a run is on: `idle`, `working`,
-    /// a retry it waits out, a run stopping. Always says something.
+    /// `waiting` once the turn has gone quiet, a retry it waits out, a run
+    /// stopping. Always says something.
     State,
     /// What the user calls the session, else the first thing it was asked;
     /// absent until one of the two exists.

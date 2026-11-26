@@ -76,8 +76,8 @@ parts you want.
 - `branch` shows the branch the checkout is on; `diff` shows the lines it has
   added and removed against `HEAD` in the theme's diff colours, and says
   nothing while the worktree is clean. Both are empty outside a repository.
-- `state` — `idle`, `working`, `compacting`, `stopping`, or a retry it waits
-  out. Always says something.
+- `state` — `idle`, `working`, `compacting`, `stopping`, `waiting` once a turn
+  has gone quiet, or a retry it waits out. Always says something.
 - `session` — what the user calls this session, else the first thing it was
   asked, cut short; absent until one of the two exists.
 - `elapsed` — how long the run in flight has taken, and how long the run that

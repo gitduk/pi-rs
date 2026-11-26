@@ -44,10 +44,16 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   the row's one-second cadence is not read again, so switching back and forth
   between two checkouts costs no git at all.
 
-- The `waiting` line keeps its row for the whole turn, blank until the clock
-  has something to say. It used to be added once the turn had been quiet for two
-  seconds and taken away when the answer arrived, so a turn answered at two or
-  three seconds moved the screen twice.
+- A quiet turn says so in `state`, which reads `waiting` after a second with no
+  answer and no call out; how long it has waited is `elapsed`'s to say. It used
+  to be a line in the transcript, added once the turn had gone quiet and taken
+  away when the answer arrived, so a turn answered at two or three seconds moved
+  the screen twice.
+
+- The transcript meets the top status line directly. The blank row that used to
+  sit between them is gone, and the row under the transcript now carries the top
+  layout line, or — scrolled up — how much is below it. Background executions
+  keep a blank row of their own above them.
 
 - The `statusline` skill stops leaving a field's own shape to guesswork: it says
   a field's spelling and colours are not an interface to copy, and shows a cell

@@ -16,8 +16,7 @@ use crate::tui::statusline::Facts;
 pub const SPIN: Duration = Duration::from_millis(90);
 
 /// When a clock is worth showing at all: a second is the usual gap between
-/// two answers, and a figure that lands inside it reads as a stutter. The
-/// waiting row is held for its whole turn, so its clock may start here too.
+/// two answers, and a figure that lands inside it reads as a stutter.
 pub const SHOWN: Duration = Duration::from_secs(1);
 
 // Show both counts: a percentage hides useful detail in large windows.

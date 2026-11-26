@@ -302,7 +302,7 @@ impl Facts {
             .map(Effort::name),
             tier: Some(TierArg::name(lane.resolved().ceiling.into())),
             running: lane.is_running(),
-            state: state_of(work),
+            state: state_of(work, view),
             alerts: [
                 lane.unsaved().map(|_| "unsaved"),
                 pi_store::diagnostics::failed().then_some("diagnostics stopped"),
@@ -386,7 +386,7 @@ pub(super) fn git_of(root: &std::path::Path) -> Option<statusline::Git> {
 
 // What the agent is doing, as a row says it: the run in flight's own word,
 // and `idle` between runs, so the part never goes blank.
-fn state_of(work: Option<&Work>) -> String {
+fn state_of(work: Option<&Work>, view: &View) -> String {
     let Some(work) = work else {
         return "idle".to_string();
     };
@@ -399,6 +399,16 @@ fn state_of(work: Option<&Work>) -> String {
                 retry.attempt,
                 llm::figures::elapsed(retry.wait)
             )
+        }
+        // Nothing on screen moving: the row says the turn waits rather than
+        // works, so the transcript has no line to grow and take back. How long
+        // it has waited is `elapsed`'s to say, not this word's.
+        _ if matches!(work.doing, super::view::Doing::Turn { .. })
+            && view.surface.stream.text().is_empty()
+            && !super::call::running(&view.state.tools)
+            && work.quiet.elapsed() >= crate::status::SHOWN =>
+        {
+            "waiting".to_string()
         }
         _ => "working".to_string(),
     }

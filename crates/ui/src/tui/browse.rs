@@ -32,8 +32,10 @@ pub(super) struct PageLayout {
 }
 
 impl PageLayout {
-    pub(super) fn of(base: Regions, rows: usize, input: PageInput) -> Self {
-        let covers_editor = matches!(input, PageInput::Empty) && base.statusline_top.height == 0;
+    pub(super) fn of(base: Regions, rows: usize, input: PageInput, top_line: bool) -> Self {
+        // A page may cover the input line only where no top layout line stands
+        // between it and the transcript.
+        let covers_editor = matches!(input, PageInput::Empty) && !top_line;
         let bottom = if covers_editor {
             base.editor.bottom()
         } else {
