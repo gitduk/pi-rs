@@ -871,6 +871,8 @@ impl Tui {
             );
             let root = self.core.lane().root();
             self.ui.sync_background(executions.background(root));
+            self.ui
+                .sync_services(self.drivers.services().statuses(self.core.lane().id()));
             self.ui.tools = Some(self.core.lane().agent().brief.clone());
             // Walked once per line completing it, not on every pass: the
             // transcript holds still while `/rewind` is on the line.

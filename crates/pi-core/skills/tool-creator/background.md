@@ -55,6 +55,22 @@ while True:
     seen = digest
 ```
 
+## A service: one process for every session
+
+`service = true` in the same metadata makes the tool a service. pi starts one
+per machine — whichever pi boots first holds the lock, and the next one sees
+it taken — so it is not a tool the model may call. What the service is given:
+
+| Variable | What it is |
+|---|---|
+| `PI_SERVICE_LOCK_FD` | the fd holding the service's lock; keep it open, and exit when your work is done |
+| `PI_SESSIONS_DIR` | the directory holding one socket per running session, `<session>.sock` |
+
+Connect to every socket and speak the fd 3 frames from `events.md` on each;
+`status` reaches that session's statusline `services` field. A crashed service
+is restarted by any pi's next look, and one whose sockets are all gone should
+exit on its own.
+
 ## Background lifetime and channels
 
 A background wrapper returns a command ID immediately, before slow work starts.

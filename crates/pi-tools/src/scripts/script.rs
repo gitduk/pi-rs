@@ -32,17 +32,31 @@ pub struct Script {
     pub(crate) path: PathBuf,
     pub(crate) runner: Runner,
     pub(crate) background: bool,
+    pub(crate) service: bool,
     pub(crate) shell: Option<Arc<Bash>>,
     pub(crate) asks: Arc<dyn Ask>,
 }
 
 /// How a script is started.
+#[derive(Debug, Clone)]
 pub(crate) enum Runner {
     // A cargo script, built on its first run.
     Cargo,
     // The interpreter its `#!` line names, and the one argument the line may
     // add: read here rather than by the kernel, so no execute bit is needed.
     Shebang(String, Option<String>),
+}
+
+/// The command that runs a script, whatever started it.
+pub(crate) fn command_for(runner: &Runner, path: &Path) -> tokio::process::Command {
+    match runner {
+        Runner::Cargo => cargo_script(path),
+        Runner::Shebang(program, arg) => {
+            let mut command = tokio::process::Command::new(program);
+            command.args(arg).arg(path);
+            command
+        }
+    }
 }
 
 /// The interpreter a `#!` first line names, split as the kernel splits it:
@@ -61,14 +75,7 @@ pub(crate) fn shebang(text: &str) -> Option<(String, Option<String>)> {
 
 impl Script {
     fn command(&self) -> tokio::process::Command {
-        match &self.runner {
-            Runner::Cargo => cargo_script(&self.path),
-            Runner::Shebang(program, arg) => {
-                let mut command = tokio::process::Command::new(program);
-                command.args(arg).arg(&self.path);
-                command
-            }
-        }
+        command_for(&self.runner, &self.path)
     }
 
     // Declared string args also ride in as environment, under three guards: a
@@ -267,6 +274,7 @@ mod tests {
             path: PathBuf::from("spy.rs"),
             runner: Runner::Cargo,
             background: false,
+            service: false,
             shell: None,
             asks: Arc::new(crate::runtime::channel::NoOne),
         };

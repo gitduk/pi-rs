@@ -53,6 +53,9 @@ pub(crate) struct Facts {
     pub tabs: Vec<Checkout>,
     /// Where the checkout's background executions stand.
     pub jobs: Jobs,
+    /// What the session's services last reported, one line per connection;
+    /// drawn joined by the `services` field.
+    pub services: Vec<String>,
     /// The checkout's directory name; absent for a root with no name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
@@ -239,6 +242,8 @@ impl Facts {
             Field::Queued => format!("{} queued", run.queued),
             Field::Worktree => run.worktree.clone()?,
             Field::Workspace => self.workspace.clone()?,
+            Field::Services if self.services.is_empty() => return None,
+            Field::Services => self.services.join(" · "),
             // The surface renders these itself.
             Field::Tabs | Field::Flash | Field::Branch | Field::Diff => return None,
         })
@@ -272,6 +277,7 @@ impl Facts {
             run: Run::of(&run, None),
             tabs: Vec::new(),
             jobs: Jobs::default(),
+            services: Vec::new(),
             workspace: None,
             git: None,
             may_run_scripts: false,
@@ -284,6 +290,7 @@ impl Facts {
         git: Option<statusline::Git>,
         tabs: Vec<Checkout>,
         jobs: Jobs,
+        services: Vec<String>,
     ) -> Self {
         let snapshot = snapshot(lane, view);
         let spec = lane.agent().spec();
@@ -328,6 +335,7 @@ impl Facts {
             },
             tabs,
             jobs,
+            services,
             workspace: lane
                 .root()
                 .file_name()
@@ -448,6 +456,14 @@ impl FlashHit {
 }
 
 impl Ui {
+    // What the session's services last reported, one line per connection.
+    pub(super) fn sync_services(&mut self, statuses: Vec<String>) {
+        if self.services != statuses {
+            self.redraw = true;
+        }
+        self.services = statuses;
+    }
+
     // The checkouts, one entry each in `refresh_tabs` order. Too narrow, the
     // front one stays and each dropped end keeps its `…`.
     pub(super) fn tabs_strip(&self, strip: usize) -> Vec<Span<'static>> {

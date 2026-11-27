@@ -155,6 +155,17 @@ Host parsing is a property of the speaker, not a switch on the frame.
 | A script, `as:"person"` | yes | yes | **no** — answered `{"code":"denied"}` |
 | A script, `as:"task"` | yes, literal | literal | literal |
 
+## Services
+
+A tool declaring `service = true` runs as one process per machine, started by
+pi itself rather than offered to the model. It holds the lock pi passes at
+`PI_SERVICE_LOCK_FD` for its lifetime — exit when `PI_SESSIONS_DIR` holds no
+session socket you can connect to — and connects to every socket there,
+speaking this protocol on each. `say`, `initialize`, `status` and `listen` to
+`session` work as above; what a `status` says is drawn by the statusline's
+`services` field, not held on any execution's row. `ask`, `listen` to
+`questions`, `more` and `stop` are refused.
+
 ## Lifecycle
 
 - `say` opens a turn; with an `id`, its reply is how that turn ended.

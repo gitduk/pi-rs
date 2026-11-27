@@ -164,6 +164,9 @@ pub(super) struct Ui {
     pub(super) background_focus: Option<u64>,
     // Queued results need rows even without a live process.
     pub(super) every_command: Vec<pi_core::driver::background::BackgroundCommand>,
+    // What the session's services last reported, drawn by the `services`
+    // field of a statusline row.
+    pub(super) services: Vec<String>,
     // Independent of the running-execution list.
     pub(super) background_results_shown: bool,
     // The front lane's tools, for slash commands; read only when needed,
@@ -308,6 +311,7 @@ impl Ui {
             executions: Vec::new(),
             background_focus: None,
             every_command: Vec::new(),
+            services: Vec::new(),
             background_results_shown: false,
             tools: None,
             prompt_blocks: Vec::new(),

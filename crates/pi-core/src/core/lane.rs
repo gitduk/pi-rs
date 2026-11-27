@@ -671,10 +671,11 @@ impl Lane {
         archive: Arc<dyn Archive>,
         retry: agent::Retry,
         executions: Option<Arc<crate::driver::background::Table>>,
+        services: Option<Arc<crate::driver::services::Services>>,
         change: impl FnOnce(&mut Agent),
     ) {
         if let Some(table) = &executions {
-            self.bind_inputs(table);
+            self.bind_inputs(table, services.as_ref());
         }
         let previous = self.checkout.resolved.models.clone();
         if !Arc::ptr_eq(&previous, &resolved.models) {
@@ -694,13 +695,26 @@ impl Lane {
         self.checkout.resolved = arm(agent, resolved, archive, retry, executions);
     }
 
-    pub(super) fn bind_inputs(&mut self, table: &Arc<crate::driver::background::Table>) {
-        self.talk.ingress = Some(table.bind_inputs(
+    pub(super) fn bind_inputs(
+        &mut self,
+        table: &Arc<crate::driver::background::Table>,
+        services: Option<&Arc<crate::driver::services::Services>>,
+    ) {
+        let ingress = table.bind_inputs(
             self.root().to_path_buf(),
             self.token(),
             self.messages(),
             self.queue().clone(),
-        ));
+        );
+        if let Some(services) = services {
+            services.bind(self.id(), ingress.clone());
+        }
+        self.talk.ingress = Some(ingress);
+    }
+
+    /// The ingress background scripts and services submit through.
+    pub(super) fn ingress(&self) -> Option<std::sync::Arc<crate::execution::ingress::Ingress>> {
+        self.talk.ingress.clone()
     }
 
     /// Replace what was decided where the agent holds none of it — the
@@ -1117,8 +1131,9 @@ impl Core {
         let archive = self.archive(self.lane().root().to_path_buf());
         let retry = resolved.retry;
         let executions = self.executions.clone();
+        let services = self.services.clone();
         self.lane_mut()
-            .rearm(resolved, archive, retry, executions, |agent| {
+            .rearm(resolved, archive, retry, executions, services, |agent| {
                 // Detached children retain the meter belonging to their original session.
                 agent.meter = Arc::default();
             });
@@ -1273,8 +1288,9 @@ impl Core {
         }
         tracing::debug!(target: "pi::session", session = %id, workspace = %to.display(), "session moved");
         if let Some(executions) = self.executions.clone() {
+            let services = self.services.clone();
             executions.rehome(&from, &to);
-            self.lane_mut().bind_inputs(&executions);
+            self.lane_mut().bind_inputs(&executions, services.as_ref());
         }
         // Earlier calls name paths against the old root; nothing rewrites them.
         self.lane_mut().push_note(&format!(
@@ -1357,7 +1373,8 @@ impl Core {
             ..Opening::new(Arc::new(ag), resolved, ctx, environment)
         }));
         if let Some(table) = self.executions.clone() {
-            self.lane_mut().bind_inputs(&table);
+            let services = self.services.clone();
+            self.lane_mut().bind_inputs(&table, services.as_ref());
         }
         if let Some(notes) = self.refresh_model_config() {
             Arc::make_mut(&mut self.lane_mut().checkout.resolved)

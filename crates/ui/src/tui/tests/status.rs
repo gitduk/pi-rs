@@ -52,14 +52,26 @@ fn an_ended_run_keeps_its_time() {
     view.state.work.as_mut().expect("a running turn").since =
         Instant::now() - Duration::from_secs(2);
 
-    let facts =
-        crate::tui::statusline::Facts::of(&lane, &view, None, Vec::new(), Default::default());
+    let facts = crate::tui::statusline::Facts::of(
+        &lane,
+        &view,
+        None,
+        Vec::new(),
+        Default::default(),
+        Vec::new(),
+    );
     assert_eq!(facts.value(Field::State).as_deref(), Some("working"));
     assert!(facts.value(Field::Elapsed).is_some(), "timed while working");
 
     view.state.settle(crate::tui::view::Ending::Ok);
-    let facts =
-        crate::tui::statusline::Facts::of(&lane, &view, None, Vec::new(), Default::default());
+    let facts = crate::tui::statusline::Facts::of(
+        &lane,
+        &view,
+        None,
+        Vec::new(),
+        Default::default(),
+        Vec::new(),
+    );
     assert_eq!(facts.value(Field::State).as_deref(), Some("idle"));
     assert!(
         facts.value(Field::Elapsed).is_some(),

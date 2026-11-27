@@ -9,6 +9,19 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 
 ## Unreleased
 
+### Added
+
+- Tools declared with `service = true` run as services: one process per machine,
+  started by pi and shared by every session, not offered to the model. Each
+  session puts a socket in `$XDG_RUNTIME_DIR/pi/sessions/` (under `$PI_HOME/run`
+  when no runtime dir exists), the service holds the lock pi passes at
+  `PI_SERVICE_LOCK_FD` and connects to every socket, speaking the same fd 3
+  protocol. `say` reaches every session it is written to, `status` is drawn by
+  the statusline's new `services` field, and a crashed service is restarted by
+  whichever pi looks next. The first such service is `~/.pi/tools/sensor`:
+  disk levels (95% says, 98% critical, recovery under 92%) and temperatures,
+  with the cleanup assigned to one session at a time.
+
 ### Fixed
 
 - `H`/`L` reach a checkout `/worktree` has just made. The list read once for the

@@ -112,6 +112,10 @@ impl Default for Layout {
                 ],
                 right: vec![
                     Item::Styled(Styled {
+                        field: Field::Services,
+                        style: Look::Tone(Tone::Muted),
+                    }),
+                    Item::Styled(Styled {
                         field: Field::Update,
                         style: Look::Tone(Tone::Emphasis),
                     }),
@@ -402,6 +406,9 @@ pub enum Field {
     Queued,
     /// The worktree the session works in, absent in the repository's own.
     Worktree,
+    /// What the session's services last reported, joined by ` · `; says
+    /// nothing while no service is connected or each is silent.
+    Services,
 }
 
 impl Field {

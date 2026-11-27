@@ -111,6 +111,7 @@ impl Ui {
                 })
                 .collect(),
             Jobs::of(&self.every_command),
+            self.services.clone(),
         );
         let session = self.lists.store.session_dir(lane.root(), lane.id());
         let (over_rows, bar_rows) = self.statusline_lines(&facts, width, &session);
