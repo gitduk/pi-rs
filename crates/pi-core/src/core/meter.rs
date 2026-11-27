@@ -47,9 +47,6 @@ pub struct Snapshot {
     pub queued: usize,
     /// The model as its endpoint names it, as a line draws it.
     pub model_name: String,
-    /// The worktree the session is working in, or None in the repository's own
-    /// checkout.
-    pub worktree: Option<String>,
 }
 
 /// What a run spent, read off the one counter every call passes: the wire's
@@ -155,13 +152,7 @@ impl Tally {
     /// The one place a snapshot is built. What the events cannot say is asked
     /// for here: a one-shot run has no clock and no queue, and neither is a
     /// number the run reports.
-    pub fn snapshot(
-        &self,
-        model_name: &str,
-        worktree: Option<&str>,
-        elapsed: Option<Duration>,
-        queued: usize,
-    ) -> Snapshot {
+    pub fn snapshot(&self, model_name: &str, elapsed: Option<Duration>, queued: usize) -> Snapshot {
         let run = self.run_spend();
         let reading = self.reading(&run);
         Snapshot {
@@ -175,7 +166,6 @@ impl Tally {
             compactions: self.compactions,
             queued,
             model_name: model_name.to_string(),
-            worktree: worktree.map(str::to_string),
         }
     }
 
@@ -366,7 +356,7 @@ mod tests {
         t.on(&agent::Event::TurnStart { turn: 1 });
         charge(&meter, &usage(100, 5));
         charge(&meter, &usage(100, 20));
-        let mid = t.snapshot("m", None, None, 0);
+        let mid = t.snapshot("m", None, 0);
         assert_eq!((mid.input, mid.output), (200, 25));
 
         t.on(&agent::Event::TurnEnd {
@@ -375,7 +365,7 @@ mod tests {
             generating: Some(Duration::from_secs(2)),
         });
         charge(&meter, &usage(400, 7));
-        let s = t.snapshot("m", None, None, 0);
+        let s = t.snapshot("m", None, 0);
         assert_eq!((s.input, s.output), (600, 32));
         // 600 in at 10/mtok, 32 out at 100/mtok.
         assert!((s.cost - 0.0092).abs() < 1e-9, "cost was {}", s.cost);
@@ -392,7 +382,7 @@ mod tests {
         let mut t = Tally::default();
         t.seed(meter.clone());
         charge(&meter, &usage(2_000, 200));
-        let run = t.snapshot("m", None, None, 0);
+        let run = t.snapshot("m", None, 0);
         assert_eq!((run.input, run.output), (2_000, 200));
         assert_eq!(meter.read().usage.output, 300);
     }
@@ -402,7 +392,7 @@ mod tests {
     #[test]
     fn the_cache_share_is_the_runs() {
         let (meter, mut t) = seeded();
-        assert_eq!(t.snapshot("m", None, None, 0).cached, None);
+        assert_eq!(t.snapshot("m", None, 0).cached, None);
         let hit = |input, cache_read| Usage {
             input,
             cache_read,
@@ -411,9 +401,9 @@ mod tests {
         charge(&meter, &hit(1_000, 0));
         charge(&meter, &hit(51, 27_800));
         // 27,800 of 28,851 prompt tokens.
-        assert_eq!(t.snapshot("m", None, None, 0).cached, Some(96));
+        assert_eq!(t.snapshot("m", None, 0).cached, Some(96));
         t.on(&agent::Event::Usage(usage(0, 12)));
-        assert_eq!(t.snapshot("m", None, None, 0).cached, Some(96));
+        assert_eq!(t.snapshot("m", None, 0).cached, Some(96));
     }
 
     // A run's own total is the meter's word too: the events only say where the
@@ -434,7 +424,7 @@ mod tests {
             ctx: Some((72_400, 114_000)),
             compactions: 1,
         });
-        let s = t.snapshot("m", None, None, 0);
+        let s = t.snapshot("m", None, 0);
         assert_eq!((s.input, s.output), (8_400, 390));
         assert!((s.cost - 0.123).abs() < 1e-9, "cost was {}", s.cost);
         assert_eq!(s.ctx, Some((72_400, 114_000)));
@@ -447,12 +437,12 @@ mod tests {
     // nothing has none to report: nothing may mint counts out of either.
     #[test]
     fn no_event_mints_counts() {
-        let quiet = Tally::default().snapshot("m", None, None, 0);
+        let quiet = Tally::default().snapshot("m", None, 0);
         assert_eq!((quiet.input, quiet.output), (0, 0));
 
         let (_meter, mut t) = seeded();
         t.on(&agent::Event::TurnStart { turn: 1 });
-        let started = t.snapshot("m", None, None, 0);
+        let started = t.snapshot("m", None, 0);
         assert_eq!((started.input, started.output), (0, 0));
 
         t.on(&agent::Event::Done {
@@ -461,7 +451,7 @@ mod tests {
             ctx: None,
             compactions: 0,
         });
-        let s = t.snapshot("m", None, None, 0);
+        let s = t.snapshot("m", None, 0);
         assert_eq!((s.input, s.output), (0, 0));
     }
 
@@ -469,9 +459,8 @@ mod tests {
     // surface's own) has nowhere else to be patched in afterwards.
     #[test]
     fn a_snapshot_asks_for_what_no_event_states() {
-        let s = Tally::default().snapshot("sonnet", Some("f1"), Some(Duration::from_secs(3)), 2);
+        let s = Tally::default().snapshot("sonnet", Some(Duration::from_secs(3)), 2);
         assert_eq!(s.model_name, "sonnet");
-        assert_eq!(s.worktree.as_deref(), Some("f1"));
         assert_eq!(s.elapsed, Some(Duration::from_secs(3)));
         assert_eq!(s.queued, 2);
     }

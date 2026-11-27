@@ -65,18 +65,21 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   rather than from the model's first byte, so the screen no longer moves a row
   when the answer starts. A turn that thinks first holds the row too.
 
+- Separated workspace tabs from git worktrees: several tabs (lanes) now run
+  side by side in one workspace directory. `/tab [name]` opens a fresh session
+  tab here, `/tab close` closes the front tab and keeps its session on disk for
+  `/resume`, `H`/`L` step only across open tabs, and `/worktree` manages git
+  worktree checkouts alone. Tabs that share a branch or directory label are
+  told apart on the statusline's `tabs` strip by `·<name>` or `#2`, `#3`.
+- Removed the `worktree` statusline field (`Field::Worktree`) and the per-lane
+  worktree from snapshots and statusline facts.
+
 ### Fixed
 
 - Leaving or closing a session now aborts open `service` connection tasks on its
   socket alongside the accept loop, so stale service connections drop their
   fds, status slots, and session listeners immediately instead of lingering until
   the peer closes.
-
-- `H`/`L` reach a checkout `/worktree` has just made. The list read once for the
-  bar is kept across a switch inside one repository, and the new checkout was not
-  in it: the ring held one name, so a step said "the only checkout there is" while
-  the bar showed the lane. A switch into a checkout the list has not read now
-  drops the read, and the bar's next frame lists it.
 
 - A chat-format model that reads only the top-level effort reasoned anyway when
   pi asked for none, so a short answer such as the session title ran out of

@@ -21,7 +21,7 @@ impl<'de> Deserialize<'de> for Parts {
         let fields = Vec::<Field>::deserialize(d)?;
         match fields
             .iter()
-            .find(|f| !f.is_part() && !matches!(f, Field::Model | Field::Worktree))
+            .find(|f| !f.is_part() && !matches!(f, Field::Model))
         {
             Some(bad) => Err(serde::de::Error::custom(format!(
                 "`{}` is not a status line part",

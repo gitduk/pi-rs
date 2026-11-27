@@ -818,9 +818,6 @@ pub struct Renderer {
     // the line the terminal would have shown it.
     tally: pi_core::core::meter::Tally,
     model_name: String,
-
-    // The worktree this run is working in, for the part that names it.
-    worktree: Option<String>,
     thinking: bool,
     // Each stream is tracked separately: they share a terminal when both are
     // a tty, but only the dirty one may be terminated when piped apart.
@@ -835,7 +832,6 @@ impl Renderer {
         status: Vec<pi_store::statusline::Field>,
         model_name: String,
         meter: Arc<llm::meter::Meter>,
-        worktree: Option<String>,
     ) -> Self {
         // The run's own numbers are the wire's count from here on.
         let mut tally = pi_core::core::meter::Tally::default();
@@ -846,7 +842,6 @@ impl Renderer {
             status,
             tally,
             model_name,
-            worktree,
             thinking: false,
             out_dirty: false,
             err_dirty: false,
@@ -881,9 +876,7 @@ impl Renderer {
             Event::Done { .. } if !self.quiet => {
                 self.end_thinking();
                 self.settle();
-                let snap = self
-                    .tally
-                    .snapshot(&self.model_name, self.worktree.as_deref(), None, 0);
+                let snap = self.tally.snapshot(&self.model_name, None, 0);
                 let line = crate::status::line(&self.status, &snap);
                 if !line.is_empty() {
                     let painted = crate::status::painted(&line, &self.paint);
@@ -1120,7 +1113,6 @@ mod tests {
             pi_store::status::default_parts(),
             String::new(),
             std::sync::Arc::new(llm::meter::Meter::default()),
-            None,
         );
         r.on(agent::Event::TextDelta("There".into()));
         assert!(r.out_dirty, "an unterminated delta leaves the line open");

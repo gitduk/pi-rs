@@ -1510,22 +1510,28 @@ impl Table {
         each(&ids, |id| self.stop(root, id))
     }
 
-    /// Every execution of `from` comes back to `to` from now on: the conversation
-    /// it reports to moved there. It goes on running where it started.
-    pub fn rehome(&self, from: &Path, to: &Path) {
+    /// Every execution of `from` belonging to `session` comes back to `to` from
+    /// now on: the conversation it reports to moved there.
+    pub fn rehome(&self, from: &Path, to: &Path, session: &str) {
         let mut inner = self.lock();
-        for item in inner.items.iter_mut().filter(|i| i.root == from) {
+        for item in inner
+            .items
+            .iter_mut()
+            .filter(|i| i.root == from && i.owner.as_ref().is_some_and(|o| o.session == session))
+        {
             tracing::info!(target: "pi::background", execution = item.id, to = %to.display(), "rehomed");
             item.root = to.to_path_buf();
         }
-        for input in inner
-            .user_inputs
-            .values_mut()
-            .filter(|input| input.root == from)
-        {
+        for input in inner.user_inputs.values_mut().filter(|input| {
+            input.root == from && input.port.request().session().as_str() == session
+        }) {
             input.root = to.to_path_buf();
         }
-        for (at, _) in inner.standing.iter_mut().filter(|(at, _)| at == from) {
+        for (at, _) in inner
+            .standing
+            .iter_mut()
+            .filter(|(at, q)| at == from && q.session.as_deref() == Some(session))
+        {
             *at = to.to_path_buf();
         }
         inner.forget_ended(to);

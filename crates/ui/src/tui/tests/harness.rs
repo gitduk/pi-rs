@@ -168,7 +168,7 @@ pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
 // Put another lane in front, the way a checkout switch would, and
 // reconcile the surface against the lane it displaced.
 pub(super) fn switch_to(tui: &mut crate::tui::Tui, lane: Lane) {
-    let was = tui.core.lanes.front();
+    let was = tui.core.lane().token();
     tui.core.lanes.push_ahead(lane);
     tui.reconcile(was);
 }
@@ -245,7 +245,6 @@ pub(super) fn tab(mark: crate::tui::Mark, name: &str) -> crate::tui::Tab {
     crate::tui::Tab {
         mark,
         name: name.into(),
-        branch: None,
     }
 }
 

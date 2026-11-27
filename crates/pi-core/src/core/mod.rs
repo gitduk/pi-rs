@@ -343,7 +343,15 @@ impl Core {
             return;
         };
         for lane in self.lanes.all() {
-            let executions = table.carried(lane.root());
+            let executions: Vec<_> = table
+                .carried(lane.root())
+                .into_iter()
+                .filter(|item| {
+                    item.owner
+                        .as_ref()
+                        .is_none_or(|owner| owner.session == lane.id())
+                })
+                .collect();
             if !self.store.filed(lane.root(), lane.id()) {
                 if !executions.is_empty() {
                     tracing::warn!(target: "pi::background", executions = executions.len(), session = lane.id(), "not carried: session never saved");
@@ -463,6 +471,8 @@ impl Core {
                 dir => self.move_to(dir).unwrap_or_else(Step::Notice),
             },
             Builtin::Worktree(name) => self.worktree_step(&name),
+            Builtin::Tab(name) => self.open_tab(&name).unwrap_or_else(Step::Notice),
+            Builtin::CloseTab => self.close_tab().unwrap_or_else(Step::Notice),
             Builtin::Edit(name) => self.edit(&name),
         }
     }

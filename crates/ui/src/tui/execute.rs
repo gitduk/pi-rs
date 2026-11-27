@@ -32,7 +32,7 @@ impl Tui {
         let origin = request.origin;
         tracing::info!(target: "pi::session", request = request.id, ?origin,
             lane = request.lane, session = self.core.lane().id(), "dispatch");
-        let was = self.core.lanes.front();
+        let was = self.core.lane().token();
         let models = matches!(
             &intent,
             Intent::Builtin(Builtin::ListModels | Builtin::RefreshModels)

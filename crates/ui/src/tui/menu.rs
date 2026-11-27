@@ -576,7 +576,8 @@ impl Lists {
     }
 
     // What's known about the checkouts without asking git: `None` until
-    // read, and never forks. The bar reads this so a frame never waits.
+    // read, and never forks.
+    #[cfg(test)]
     pub(super) fn checkouts_read(&self) -> Option<&[core::worktree::Tree]> {
         self.checkouts.get().map(Vec::as_slice)
     }

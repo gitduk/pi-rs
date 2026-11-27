@@ -8,6 +8,7 @@
 | `/model --refresh`                 | refresh model lists from providers           |
 | `/effort [level]`                  | `off` `low` `medium` `high`, from now on      |
 | `/worktree [name]`, `/worktree rm` | work in `<repo>.worktrees/<name>`             |
+| `/tab [name]`, `/tab close`        | open a fresh tab in this workspace, or close it; `H`/`L` step open tabs |
 | `/mv <dir>`                        | move this session and its background commands to another directory |
 | `/compact [focus]`                 | summarize everything but the working tail     |
 | `/<tool> [key=value…]`             | run a named tool. Background tools return immediately |

@@ -48,9 +48,9 @@ pub(crate) struct Facts {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<Session>,
     pub run: Run,
-    /// The checkouts on the bar, in its order: state the screen owns, and a
+    /// The open tabs on the bar, in order: state the screen owns, and a
     /// script cannot read anywhere else.
-    pub tabs: Vec<Checkout>,
+    pub tabs: Vec<Tab>,
     /// Where the checkout's background executions stand.
     pub jobs: Jobs,
     /// What the session's services last reported, one line per connection;
@@ -106,8 +106,6 @@ pub(crate) struct Run {
     pub speed: Option<f64>,
     pub compacted: usize,
     pub queued: usize,
-    /// The worktree the session works in; absent in the repository's own.
-    pub worktree: Option<String>,
     /// The retry it waits out; `state` says `retry` while one is set.
     pub retry: Option<Retry>,
     /// How the run that last ended went; absent while one runs.
@@ -122,9 +120,9 @@ pub(crate) struct Retry {
     pub wait: f64,
 }
 
-/// One checkout on the bar: its name and how its last run ended.
+/// One open tab on the bar: its label and how its last run ended.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub(crate) struct Checkout {
+pub(crate) struct Tab {
     pub name: String,
     pub mark: Mark,
 }
@@ -169,7 +167,6 @@ impl Run {
             speed: snapshot.speed,
             compacted: snapshot.compactions,
             queued: snapshot.queued,
-            worktree: snapshot.worktree.clone(),
             retry: None,
             outcome: None,
         }
@@ -241,7 +238,6 @@ impl Facts {
             Field::Compacted => return crate::status::compacted(run.compacted),
             Field::Queued if run.queued == 0 => return None,
             Field::Queued => format!("{} queued", run.queued),
-            Field::Worktree => run.worktree.clone()?,
             Field::Workspace => self.workspace.clone()?,
             Field::Services if self.services.is_empty() => return None,
             Field::Services => self.services.join(" · "),
@@ -289,7 +285,7 @@ impl Facts {
         lane: &Lane,
         view: &View,
         git: Option<statusline::Git>,
-        tabs: Vec<Checkout>,
+        tabs: Vec<Tab>,
         jobs: Jobs,
         services: Vec<String>,
     ) -> Self {
@@ -349,7 +345,7 @@ impl Facts {
 
 // The branch as its git directory names it: a line of `HEAD`. Reading it is a
 // file read where naming it by git was a fork.
-fn read_head(root: &std::path::Path) -> Option<String> {
+pub(super) fn read_head(root: &std::path::Path) -> Option<String> {
     let gitdir = pi_core::core::worktree::git_dir(root)?;
     let head = std::fs::read_to_string(gitdir.join("HEAD")).ok()?;
     Some(
@@ -477,23 +473,16 @@ impl Ui {
             .tabs
             .iter()
             .map(|tab| {
-                let (sign, style) = match tab.mark {
+                let style = match tab.mark {
                     // The one you are in reads as the current thing.
-                    Mark::Front => ("", &theme.heading),
+                    Mark::Front => &theme.heading,
                     // Settled lanes are their colour alone: a glyph would repeat
                     // what `Done`/`Failed` already say.
-                    Mark::Done => ("", &theme.status.ok),
-                    Mark::Failed => ("", &theme.status.err),
-                    Mark::Plain => ("", &theme.muted),
-                    Mark::Unopened => (icons::UNOPENED_MARK, &theme.muted),
+                    Mark::Done => &theme.status.ok,
+                    Mark::Failed => &theme.status.err,
+                    Mark::Plain => &theme.muted,
                 };
-                let name = tab.branch.as_deref().unwrap_or(&tab.name);
-                let label = if sign.is_empty() {
-                    name.to_string()
-                } else {
-                    format!("{sign} {name}")
-                };
-                self.paint.span(style, label)
+                self.paint.span(style, tab.name.clone())
             })
             .collect();
         let dots = self.paint.span(&theme.muted, icons::ELLIPSIS);
@@ -719,7 +708,7 @@ impl Ui {
         }
     }
 
-    // A lone checkout draws nothing: `workspace` and `branch` already name it,
+    // A lone tab draws nothing: `workspace` and `branch` already name it,
     // and a strip of one says no more than they do.
     fn tabs_piece(&self) -> Option<Piece> {
         let front = self.tabs.iter().any(|t| t.mark == Mark::Front);

@@ -350,6 +350,12 @@ impl Ctx {
         self
     }
 
+    /// Share file locks across lanes working in the same workspace root.
+    pub fn with_file_locks(mut self, file_locks: FileLocks) -> Self {
+        self.file_locks = file_locks;
+        self
+    }
+
     /// Name the session, and the durable `spill_root` its spills are filed
     /// under by that name. Every session shares one root — a subagent's spills
     /// sit under its own name in the same tree, so the parent can read them

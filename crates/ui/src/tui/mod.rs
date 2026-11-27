@@ -120,6 +120,8 @@ pub(crate) enum Deed {
     OpenFile(PathBuf),
     // Drop the asides: the rows only drawn, never filed.
     Tidy,
+    // Step forward or back across already-open tabs.
+    StepLane(bool),
     // The person's answer to a question its asker waits on, or none.
     Answer {
         question: u64,
@@ -148,6 +150,7 @@ impl Deed {
             | Deed::RestartCommands(_)
             | Deed::OpenFile(_)
             | Deed::Tidy
+            | Deed::StepLane(_)
             | Deed::Answer { .. } => Fate::Now,
         }
     }
@@ -336,14 +339,20 @@ impl Tui {
 
     // Brings the screen into step after a change: parks the old lane's
     // draft, restores the new one's, follows lists, replays news.
-    fn reconcile(&mut self, was: usize) {
-        if was == self.core.lanes.front() {
+    fn reconcile(&mut self, was: u64) {
+        if was == self.core.lane().token() {
             // `/new` and `/resume` hand the lane in front another session.
             self.follow_recall();
             return;
         }
-        self.ui
-            .leave_lane(view_at(&mut self.views, self.core.lanes[was].token()));
+        if self.core.lanes.position_of(was).is_some() {
+            self.ui.leave_lane(view_at(&mut self.views, was));
+        } else if let Some(mut closed) = self.views.remove(&was) {
+            self.ui.leave_lane(&mut closed);
+            for queued in closed.queued.lock().drain() {
+                self.cancel_queued(queued.request, "its session was removed");
+            }
+        }
         let parked = std::mem::take(&mut front_view(&mut self.views, self.core.lane()).draft);
         self.ui.editor.set_line(&parked);
         self.follow_root();
@@ -538,11 +547,12 @@ impl Tui {
 
     // Rebuilds the bar before every draw: an off-screen run must reach
     // the screen unasked, and a step walks this same order (bar = ring).
-    // The order is git's own, the one `worktree list` walks; each lane sits
-    // where its checkout does, not where it was opened.
+    // The tab bar in lane order: branch (or directory name when outside git
+    // or detached), disambiguated by `·name` or `#2` when tabs share one.
     fn refresh_tabs(&mut self) {
         let current = self.core.lanes.front();
-        let mut lanes: Vec<(String, Mark)> = self
+        let mut stale_branches = false;
+        let entries: Vec<(Mark, String, Option<String>)> = self
             .core
             .lanes
             .iter()
@@ -563,47 +573,86 @@ impl Tui {
                         Run::Running { .. } | Run::Idle => Mark::Plain,
                     }
                 };
-                (lane_name(lane), mark)
+                let root = lane.root();
+                let branch = if at == current
+                    && let Some(git) = &self.ui.git
+                {
+                    Some(git.branch.clone())
+                } else if let Some((seen_at, g)) = self.ui.git_seen.get(root)
+                    && seen_at.elapsed() < LOOKED
+                {
+                    g.as_ref().map(|g| g.branch.clone())
+                } else if let Some((seen_at, cached)) = self.ui.branch_seen.get(root)
+                    && seen_at.elapsed() < LOOKED
+                {
+                    cached.clone()
+                } else {
+                    stale_branches = true;
+                    let branch = statusline::read_head(root);
+                    self.ui.branch_seen.insert(
+                        root.to_path_buf(),
+                        (std::time::Instant::now(), branch.clone()),
+                    );
+                    branch
+                };
+                let base = branch.unwrap_or_else(|| lane_name(lane));
+                (mark, base, lane.name())
             })
             .collect();
-        let mut tabs: Vec<Tab> = Vec::with_capacity(lanes.len());
-        // The checkouts on disk, in their own order: one no lane has open is
-        // on the bar too, and `Lists` holds the read, one fork per list.
-        for tree in self.ui.lists.checkouts_read().unwrap_or_default() {
-            let (name, mark) = match lanes.iter().position(|(name, _)| *name == tree.name) {
-                Some(at) => lanes.remove(at),
-                None => (tree.name.clone(), Mark::Unopened),
-            };
-            tabs.push(Tab {
-                mark,
-                name,
-                branch: tree.branch.clone(),
-            });
+        if stale_branches {
+            self.ui
+                .branch_seen
+                .retain(|_, (seen_at, _)| seen_at.elapsed() < LOOKED);
         }
-        // A lane git does not list — rooted outside the worktrees directory,
-        // or in a subdirectory of a checkout — follows the disk's.
-        tabs.extend(lanes.into_iter().map(|(name, mark)| Tab {
-            mark,
-            name,
-            branch: None,
-        }));
-        self.ui.tabs = tabs;
-        // The list's branches are as of the read that built it; the one you
-        // are in is read every second, so it does not go stale behind a
-        // `git switch` in another terminal.
-        if let (Some(front), Some(git)) = (
-            self.ui.tabs.iter_mut().find(|tab| tab.mark == Mark::Front),
-            &self.ui.git,
-        ) {
-            front.branch = Some(git.branch.clone());
+        let any_dup =
+            (0..entries.len()).any(|i| entries[i + 1..].iter().any(|(_, b, _)| *b == entries[i].1));
+        if !any_dup {
+            self.ui.tabs = entries
+                .into_iter()
+                .map(|(mark, name, _)| Tab { mark, name })
+                .collect();
+            return;
         }
+        // `(total_count, unnamed_seen)` for each base label.
+        let mut counts: std::collections::HashMap<String, (usize, usize)> =
+            std::collections::HashMap::with_capacity(entries.len());
+        for (_, base, _) in &entries {
+            counts.entry(base.clone()).or_default().0 += 1;
+        }
+        self.ui.tabs = entries
+            .into_iter()
+            .map(|(mark, base, session_name)| {
+                let name = if let Some((total, unnamed)) = counts.get_mut(&base)
+                    && *total > 1
+                {
+                    if let Some(session_name) = session_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                    {
+                        format!("{base}·{}", pi_store::text::clip(session_name, 12))
+                    } else {
+                        *unnamed += 1;
+                        if *unnamed == 1 {
+                            base
+                        } else {
+                            format!("{base}#{unnamed}")
+                        }
+                    }
+                } else {
+                    base
+                };
+                Tab { mark, name }
+            })
+            .collect();
     }
 
-    // Drops idle lanes whose checkout was deleted outside pi (a working
-    // or driven one stays). Silent — the bar says it's gone.
+    // Drops idle background lanes whose workspace was deleted outside pi (a
+    // running or driven one stays).
     fn drop_vanished_lanes(&mut self) {
         let front = self.core.lanes.ahead().token();
         let mut gone: Vec<u64> = Vec::new();
+        let mut checked: Vec<(&std::path::Path, bool)> = Vec::new();
         // Back to front, stopping at a working lane: a run out of front is
         // still owed its answer.
         for lane in self.core.lanes.all().iter().rev() {
@@ -613,9 +662,16 @@ impl Tui {
             if lane.token() == front {
                 continue;
             }
-            // Only a lane with a checkout of its own can go this way: the one
-            // pi was started in is no worktree, and one still on disk stands.
-            if lane.worktree().is_none() || lane.root().exists() {
+            let root = lane.root();
+            let exists = match checked.iter().find(|(p, _)| *p == root) {
+                Some((_, exists)) => *exists,
+                None => {
+                    let exists = root.exists();
+                    checked.push((root, exists));
+                    exists
+                }
+            };
+            if exists {
                 continue;
             }
             gone.push(lane.token());
@@ -627,8 +683,8 @@ impl Tui {
         for token in gone {
             self.core.remove_lane(token);
         }
-        // The ring's list is cached; a vanished checkout must not stay in it
-        // for a later step to offer — and re-create — by its stale name.
+        // Drop cached workspace/worktree lists so a vanished directory isn't
+        // still offered.
         self.ui.lists.forget();
     }
 
@@ -694,6 +750,17 @@ impl Tui {
                 self.land_driven(said);
             }
             Deed::Tidy => self.ui.tidy(front_view(&mut self.views, self.core.lane())),
+            Deed::StepLane(forward) => {
+                let was = self.core.lane().token();
+                match self.core.step_lane(forward) {
+                    Ok(Some(note)) => {
+                        self.reconcile(was);
+                        self.notice(note);
+                    }
+                    Ok(None) => self.ui.flash("the only tab there is"),
+                    Err(why) => self.ui.flash(why),
+                }
+            }
             Deed::OpenFile(path) => {
                 self.file_opens.spawn(term::open_file(path));
             }
@@ -833,8 +900,12 @@ impl Tui {
         let update = core::update::changed();
         let leaving = loop {
             self.serve_lanes();
-            // Before the bar rebuilds, so a vanished tab goes with its lane.
-            self.drop_vanished_lanes();
+            let look_now = looked.elapsed() >= LOOKED;
+            // Before `prune_views` and the bar rebuild, so a vanished tab goes with its lane.
+            if look_now {
+                looked = std::time::Instant::now();
+                self.drop_vanished_lanes();
+            }
             for request in prune_views(&self.core, &mut self.views) {
                 self.cancel_queued(request, "its session was removed");
             }
@@ -847,18 +918,11 @@ impl Tui {
             // What changed on disk is taken up within a second: settings
             // resolve the lane again, a skill's word starts to answer. Not on
             // every frame: each look is a walk.
-            if looked.elapsed() >= LOOKED {
-                looked = std::time::Instant::now();
+            if look_now {
                 self.refresh_files();
                 self.look_git();
                 self.reload_statusline();
                 self.save_shown();
-            }
-            // The bar is built from the checkouts on disk, so a list that a
-            // switch has just dropped is read before the frame, not after it:
-            // a frame drawn meanwhile names the lanes and marks them wrong.
-            if self.ui.lists.checkouts_read().is_none() {
-                let _ = self.ui.lists.checkouts();
             }
             self.refresh_tabs();
             let executions = self.drivers.background();

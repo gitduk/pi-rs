@@ -50,7 +50,7 @@ async fn recall_follows_a_session_the_lane_stayed_for() {
         .editor
         .seed_history("left behind".into(), vec!["asked elsewhere".to_string()]);
 
-    let was = tui.core.lanes.front();
+    let was = tui.core.lane().token();
     tui.reconcile(was);
 
     assert_eq!(
@@ -197,9 +197,10 @@ async fn what_a_lane_out_of_front_posted_is_in_its_view_already() {
         "a lane out of front did not take what its run posted"
     );
 
-    // The screen moves to it, the way a checkout switch does: still there once.
+    // The screen moves to it, the way a tab switch does: still there once.
+    let was = tui.core.lane().token();
     tui.core.lanes.show(1);
-    tui.reconcile(0);
+    tui.reconcile(was);
     let rows = lane_rows(&mut tui, token);
     assert_eq!(
         rows.iter()
@@ -424,169 +425,70 @@ fn the_bar_keeps_its_row_when_a_flash_comes_and_goes() {
     );
 }
 
-// The bar carries the whole ring, lanes' own and disk's alike: a checkout
-// no lane has open is on it as soon as read, so `H`/`L` can reach it unpressed.
+// The bar lists open tabs in lane order, using branch (or dir name) and
+// disambiguating tabs that share the same label via `·name` or `#2`.
 #[test]
-fn the_bar_lists_the_checkouts_no_lane_has_open() {
+fn the_bar_disambiguates_multiple_tabs_in_one_workspace() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let mut tui = surface(dir.path());
-    tui.core.lanes.at_mut(0).set_worktree(Some("pi-rs".into()));
-    tui.ui
-        .lists
-        .checkouts
-        .set(vec![
-            tree("pi-rs", Some("main")),
-            tree("fix-mem", Some("fix/memory")),
-            tree("fw-rm", None),
-        ])
-        .ok();
+    let base = dir
+        .path()
+        .file_name()
+        .expect("dir name")
+        .to_string_lossy()
+        .into_owned();
+    let mut second = running_lane_as(dir.path(), "s2");
+    second.set_name(Some("very-long-session-name".into()));
+    let third = running_lane_as(dir.path(), "s3");
+    tui.core.lanes.push(second);
+    tui.core.lanes.push(third);
     tui.refresh_tabs();
 
-    let shown = bar(&tui.ui, 39);
-    let at = |name: &str| {
-        shown
-            .find(name)
-            .unwrap_or_else(|| panic!("{name}: {shown:?}"))
-    };
-    assert!(
-        at("main") < at("fix/memory") && at("fix/memory") < at("fw-rm"),
-        "{shown:?}"
-    );
-    // And the order it lists them in is the order a step walks.
-    assert_eq!(
-        tui.ui.step_checkout(&tui.core.lanes[0], true).as_deref(),
-        Some("fix-mem")
-    );
-}
-
-// `L`/`H` walk the checkout ring forward/back; every checkout on disk is
-// in it (not just open ones), main one first per `core::worktree::list`.
-#[test]
-fn stepping_the_checkouts_walks_the_ring_and_wraps_both_ways() {
-    let ring = |at: Option<&str>, forward: bool| {
-        let ui = test_ui(80, 24);
-        let trees = ["pi-rs", "f1", "f2"]
-            .iter()
-            .map(|n| tree(n, Some(n)))
-            .collect();
-        ui.lists.checkouts.set(trees).ok();
-        let (_dir, mut lane) = a_running_lane();
-        // A lane in the main checkout names it as its own directory.
-        lane.set_worktree(Some(at.unwrap_or("pi-rs").to_string()));
-        ui.step_checkout(&lane, forward)
-    };
-    // The main checkout is the one a lane names as its directory.
-    assert_eq!(ring(None, true).as_deref(), Some("f1"));
-    assert_eq!(ring(Some("f1"), true).as_deref(), Some("f2"));
-    // And round the end, back to the main one.
-    assert_eq!(ring(Some("f2"), true).as_deref(), Some("pi-rs"));
-    // The other way round, from the main one.
-    assert_eq!(ring(None, false).as_deref(), Some("f2"));
-    assert_eq!(ring(Some("f1"), false).as_deref(), Some("pi-rs"));
-    assert_eq!(ring(Some("f2"), false).as_deref(), Some("f1"));
-}
-
-// A step names the checkout it goes to, so a name two checkouts share is one
-// stop: stepping from it must land elsewhere, not on itself.
-#[test]
-fn a_step_never_lands_on_the_checkout_it_left() {
-    let ring = |trees: &[&str], at: &str, forward: bool| {
-        let ui = test_ui(80, 24);
-        ui.lists
-            .checkouts
-            .set(trees.iter().map(|n| tree(n, Some(n))).collect())
-            .ok();
-        let (_dir, mut lane) = a_running_lane();
-        lane.set_worktree(Some(at.to_string()));
-        ui.step_checkout(&lane, forward)
-    };
-    // The main checkout and a tree made outside the worktrees home share a
-    // name; only the first is a stop, so the ring skips the duplicate.
-    assert_eq!(
-        ring(&["pi-rs", "pi-rs", "f1"], "pi-rs", true).as_deref(),
-        Some("f1")
-    );
-    assert_eq!(
-        ring(&["pi-rs", "pi-rs", "f1"], "pi-rs", false).as_deref(),
-        Some("f1")
-    );
-    // A lane git does not list — moved into a subdirectory — reads last on the
-    // bar, so the way on from it is the first checkout.
-    assert_eq!(
-        ring(&["pi-rs", "f1"], "sub", true).as_deref(),
-        Some("pi-rs")
-    );
-    assert_eq!(ring(&["pi-rs", "f1"], "sub", false).as_deref(), Some("f1"));
-    // Two names is a ring of two; one is nowhere to go.
-    assert_eq!(ring(&["pi-rs"], "pi-rs", true), None);
-    assert_eq!(ring(&["solo", "solo"], "solo", true), None);
-}
-
-// The ring walks the checkouts in git's order, the one the bar numbers them
-// in, whatever order their lanes were opened in.
-#[test]
-fn the_ring_walks_the_checkouts_order_not_the_lanes() {
-    let dir = tempfile::tempdir().expect("a checkout");
-    let mut tui = surface(dir.path());
-    let trees = ["pi-rs", "feat/add", "fix/choose", "fix/lane", "fix/nmore"]
-        .iter()
-        .map(|n| tree(n, Some(n)))
-        .collect();
-    tui.ui.lists.checkouts.set(trees).ok();
-
-    // Opened in an order of their own: git lists checkouts by path, which
-    // puts `fix/nmore` last whatever order they were made in.
-    tui.core.lanes.at_mut(0).set_worktree(Some("pi-rs".into()));
-    let mut guards = Vec::new();
-    for name in ["fix/nmore", "feat/add", "fix/choose", "fix/lane"] {
-        let (guard, mut lane) = a_running_lane();
-        lane.set_worktree(Some(name.into()));
-        tui.core.lanes.push(lane);
-        guards.push(guard);
-    }
-    tui.core.lanes.show(4);
-    tui.refresh_tabs();
-
+    let clipped = pi_store::text::clip("very-long-session-name", 12);
     let names: Vec<&str> = tui.ui.tabs.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(
         names,
-        ["pi-rs", "feat/add", "fix/choose", "fix/lane", "fix/nmore"],
-        "the bar lists the checkouts as git does"
+        vec![
+            base.clone(),
+            format!("{base}·{clipped}"),
+            format!("{base}#2")
+        ]
     );
-    assert_eq!(
-        tui.ui.tabs[3].mark,
-        crate::tui::Mark::Front,
-        "the lane in front is marked where its checkout sits"
-    );
+    let shown = bar(&tui.ui, 80);
+    assert!(shown.contains(&format!("{base}·{clipped}")), "{shown:?}");
+    assert!(shown.contains(&format!("{base}#2")), "{shown:?}");
+}
 
-    // So a step from the main checkout goes to the checkout after it on
-    // disk, not to the lane opened next.
-    let step = |at: usize, forward: bool| {
-        tui.ui
-            .step_checkout(&tui.core.lanes[at], forward)
-            .as_deref()
-            .map(str::to_string)
-    };
-    assert_eq!(step(0, true).as_deref(), Some("feat/add"));
-    assert_eq!(step(2, true).as_deref(), Some("fix/choose"));
-    assert_eq!(step(1, true).as_deref(), Some("pi-rs"), "round the end");
-    assert_eq!(step(0, false).as_deref(), Some("fix/nmore"));
+// `L`/`H` walk open lanes forward/back in lane order and wrap at both ends.
+#[tokio::test]
+async fn stepping_open_tabs_walks_lane_order_and_wraps_both_ways() {
+    let d0 = tempfile::tempdir().expect("dir0");
+    let d1 = tempfile::tempdir().expect("dir1");
+    let d2 = tempfile::tempdir().expect("dir2");
+    let mut tui = surface(d0.path());
+    tui.core.lanes.push(running_lane_as(d1.path(), "s1"));
+    tui.core.lanes.push(running_lane_as(d2.path(), "s2"));
+
+    tui.carry(crate::tui::Deed::StepLane(true)).await;
+    assert_eq!(tui.core.lanes.front(), 1);
+    tui.carry(crate::tui::Deed::StepLane(true)).await;
+    assert_eq!(tui.core.lanes.front(), 2);
+    tui.carry(crate::tui::Deed::StepLane(true)).await;
+    assert_eq!(tui.core.lanes.front(), 0, "wraps forward");
+
+    tui.carry(crate::tui::Deed::StepLane(false)).await;
+    assert_eq!(tui.core.lanes.front(), 2, "wraps back");
+    tui.carry(crate::tui::Deed::StepLane(false)).await;
+    assert_eq!(tui.core.lanes.front(), 1);
 }
 
 // A checkout deleted from the shell leaves its lane a dead end; dropping
-// idle ones keeps the bar's tab and step ring honest, with front unmoved.
+// idle ones keeps the bar's tab honest, with front unmoved.
 #[test]
 fn a_lane_whose_checkout_vanished_is_dropped_and_current_follows() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    // A stale ring entry would let a later step offer — and re-create —
-    // the checkout that just went; dropping the lane drops the cache.
-    tui.ui
-        .lists
-        .checkouts
-        .set(vec![tree("fix-mem", Some("fix-mem"))])
-        .ok();
-    let gone = vanished_lane("fix-mem");
+    let gone = vanished_lane();
     tui.core.lanes.push(gone);
     assert_eq!(tui.core.lanes.len(), 2);
 
@@ -597,14 +499,10 @@ fn a_lane_whose_checkout_vanished_is_dropped_and_current_follows() {
         tui.ui.flash.is_none(),
         "the lane leaving the bar is the whole notice"
     );
-    assert!(
-        tui.ui.lists.checkouts().is_empty(),
-        "the stale ring entry went too"
-    );
 
     // A vanished lane before the one in front shifts its index down.
     let mut tui = surface(dir.path());
-    let earlier = vanished_lane("fix-old");
+    let earlier = vanished_lane();
     tui.core.lanes.insert(0, earlier);
     tui.core.lanes.show(1);
     tui.core.lanes.at_mut(1).finish();
@@ -675,7 +573,7 @@ fn a_switch_into_a_checkout_the_list_has_not_read_reads_it_again() {
 fn a_vanished_lane_before_a_running_one_waits_for_it() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    let gone = vanished_lane("fix-mem");
+    let gone = vanished_lane();
     tui.core.lanes.push(gone);
     let (_run_dir, running) = a_running_lane();
     tui.core.lanes.push(running);
@@ -696,8 +594,7 @@ fn a_vanished_lane_before_a_running_one_waits_for_it() {
 fn only_a_finished_lane_wears_a_mark_in_the_bar() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    let (_run_dir, mut behind) = a_running_lane();
-    behind.set_worktree(Some("fix-mem".into()));
+    let (_run_dir, behind) = a_running_lane();
     tui.core.lanes.push(behind);
     tui.refresh_tabs();
 
@@ -730,7 +627,6 @@ fn a_driven_lane_has_not_finished() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     let (_run_dir, mut behind) = a_running_lane();
-    behind.set_worktree(Some("fix-mem".into()));
     behind.end(true, false);
     let execution = ::execution::background::RunSink::start(
         &pi_core::driver::background::Commands::new(tui.drivers.background()),
@@ -756,17 +652,16 @@ fn a_driven_lane_has_not_finished() {
     );
 }
 
-// Nowhere to go is said, not walked to: one checkout has no next.
-#[test]
-fn a_lone_checkout_has_no_next() {
-    let ui = test_ui(80, 24);
-    ui.lists
-        .checkouts
-        .set(vec![tree("pi-rs", Some("pi-rs"))])
-        .ok();
-    let (_dir, lane) = a_running_lane();
-    assert_eq!(ui.step_checkout(&lane, true), None);
-    assert_eq!(ui.step_checkout(&lane, false), None);
+// Nowhere to go flashes, rather than walking: one tab has no next.
+#[tokio::test]
+async fn a_lone_tab_flashes_when_stepped() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    tui.carry(crate::tui::Deed::StepLane(true)).await;
+    assert_eq!(
+        tui.ui.flash.as_ref().map(|(text, _)| text.as_str()),
+        Some("the only tab there is")
+    );
 }
 
 // A half-typed line belongs to the lane it was typed at: a switch parks
@@ -792,8 +687,9 @@ async fn a_draft_is_parked_on_the_lane_it_was_typed_at_and_comes_back() {
         "the checkout in front starts its own clean line"
     );
 
+    let from = tui.core.lane().token();
     tui.core.lanes.show(was);
-    tui.reconcile(was + 1);
+    tui.reconcile(from);
     assert_eq!(
         tui.ui.editor.text(),
         "half a thought meant for this lane",
@@ -854,31 +750,20 @@ async fn a_switch_mid_recall_keeps_the_line_being_typed() {
     );
 }
 
-// Normal: `L`/`H` step checkouts, the lowercase pair is left to the caret,
+// Normal: `L`/`H` step open tabs, the lowercase pair is left to the caret,
 // and `J`/`K` take the window half a screen at a time.
 #[test]
 fn normal_capitals_step_the_checkouts_and_the_window() {
     let mut ui = vim_ui();
-    let trees = ["pi-rs", "f1", "f2"]
-        .iter()
-        .map(|n| tree(n, Some(n)))
-        .collect();
-    ui.lists.checkouts.set(trees).ok();
     ui.vim = Some(Mode::Normal);
-    let (_dir, mut lane) = a_running_lane();
-    // Where a lane in the main checkout sits: it names its own directory.
-    lane.set_worktree(Some("pi-rs".into()));
+    let (_dir, lane) = a_running_lane();
     let mut view = View::default();
 
     let next = ui.key(&lane, &mut view, typed('L'), false);
-    assert!(
-        matches!(&next, Asked::Core(Intent::Builtin(Builtin::Worktree(name))) if name == "f1"),
-        "{next:?}"
-    );
-    lane.set_worktree(Some("f1".into()));
+    assert!(matches!(next, Asked::Own(Deed::StepLane(true))), "{next:?}");
     let prev = ui.key(&lane, &mut view, typed('H'), false);
     assert!(
-        matches!(&prev, Asked::Core(Intent::Builtin(Builtin::Worktree(name))) if name == "pi-rs"),
+        matches!(prev, Asked::Own(Deed::StepLane(false))),
         "{prev:?}"
     );
 
@@ -1169,12 +1054,11 @@ fn lane_rows(tui: &mut crate::tui::Tui, token: u64) -> Vec<String> {
     drawn_rows(view_at(&mut tui.views, token))
 }
 
-// An idle worktree lane whose checkout has been deleted from disk —
+// An idle lane whose workspace has been deleted from disk —
 // exactly what `drop_vanished_lanes` exists to find.
-fn vanished_lane(name: &str) -> Lane {
+fn vanished_lane() -> Lane {
     let (_dir, mut lane) = a_running_lane();
     lane.finish();
-    lane.set_worktree(Some(name.into()));
     std::fs::remove_dir_all(lane.root()).expect("the checkout goes");
     lane
 }

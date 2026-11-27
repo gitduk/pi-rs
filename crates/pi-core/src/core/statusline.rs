@@ -10,7 +10,7 @@ use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 /// A field is a name the surface fills from what it knows — `model`,
 /// `effort`, `spent`, `cache`, `ctx`, `cost`, `state`, `workspace`, `branch`,
 /// `diff`, `tabs`, `flash`, `tier`, `update`, and the status parts (`elapsed`,
-/// `in_out`, `speed`, `compacted`, `queued`, `worktree`). `style` on any of
+/// `in_out`, `speed`, `compacted`, `queued`). `style` on any of
 /// them names a theme tone (`muted`, `heading`, `emphasis`, `code`, `input`,
 /// `ok`, `err`, `add`, `del`) or writes one out (`"34"`,
 /// `{"color":"#5c9cf5","sgr":["bold"]}`); `diff` alone paints itself, in the

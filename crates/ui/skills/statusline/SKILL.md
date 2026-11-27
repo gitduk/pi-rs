@@ -61,7 +61,7 @@ A missing `style` is muted.
 | `{"script": "weather"}` | a value `<pi_home>/statusline.d/weather` prints |
 
 `tabs` cannot sit inside a group: it folds when the row runs out of width, and
-it draws nothing while the one checkout is all there is.
+it draws nothing while only one tab is open.
 
 ## Fields
 
@@ -71,10 +71,10 @@ parts you want.
 
 `tabs` `flash` `model` `effort` `tier` `update` `spent` `state` `session`
 `workspace` `branch` `diff` `elapsed` `in_out` `speed` `cache` `cost` `ctx`
-`compacted` `queued` `worktree`
+`compacted` `queued`
 
-- `workspace` shows the checkout directory's name.
-- `branch` shows the branch the checkout is on; `diff` shows the lines it has
+- `workspace` shows the workspace directory's name.
+- `branch` shows the branch the workspace is on; `diff` shows the lines it has
   added and removed against `HEAD` in the theme's diff colours, and says
   nothing while the worktree is clean. Both are empty outside a repository.
 - `state` — `idle`, `working`, `compacting`, `stopping`, `waiting` once a turn
@@ -136,19 +136,20 @@ A script item carries exactly one of `command` or `name`.
     compactions alike;
   - `run` — `elapsed` in seconds, `input`, `output`, `cache` as a percent,
     `cost`, `ctx` as `[used, window]`, `context_window`, `speed`, `compacted`,
-    `queued`, `worktree`, `retry` (`attempt`, `wait` in seconds), and `outcome`
+    `queued`, `retry` (`attempt`, `wait` in seconds), and `outcome`
     (`ok`, `stopped` or `failed`) once a run ends;
-  - `tabs` — every checkout on the bar: `name`, and `mark` (`front`, `done`,
-    `failed`, `plain`, `unopened`);
+  - `tabs` — every open tab on the bar: `name` — its branch, else its
+    directory name, disambiguated by `·<name>` or `#2` when tabs share one —
+    and `mark` (`front`, `done`, `failed`, `plain`);
   - `jobs` — background executions: `running`, `back` (ended with results
     waiting), `stopped`, `exited`;
-  - `workspace` is the checkout directory's name, omitted when the path has no name.
+  - `workspace` is the workspace directory's name, omitted when the path has no name.
   - `git` has `branch`, `added` and `removed`, and is omitted outside a repository.
 - Optional values are `null` unless documented as omitted. `session` is omitted
   outside a lane.
 
 A condition reads these values. Use `tabs` to keep a cell for the case where
-only one checkout is on the bar. Use `git` to keep a cell empty outside a
+only one tab is on the bar. Use `git` to keep a cell empty outside a
 repository. Use `run.outcome` to say how a run ended.
 
 ## When one part stands or falls with another
@@ -172,7 +173,7 @@ comes back.
 has nothing to say, and `{"when": "<field>", "items": […]}` only while it has
 something to say. The row decides both from the facts it already holds, so no
 run stands between the two and nothing waits to be told. Here the branch gives
-way once `tabs` names the checkouts, which it does while there is more than
+way once `tabs` names the tabs, which it does while there is more than
 one. The space before the diff stands with the diff alone, so a clean worktree
 leaves no gap.
 

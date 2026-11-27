@@ -76,8 +76,6 @@ struct Checkout {
     resolved: Arc<Resolved>,
     // Carried across turns: the file locks and edit shifts outlive any one run.
     ctx: Ctx,
-    // Which worktree this is, or None in the repository's own checkout.
-    worktree: Option<String>,
     // The session and its newest compaction when the prompt's files were
     // last looked at: either moving lets them be read again unnoticed.
     read_at: Option<ReadAt>,
@@ -507,7 +505,6 @@ pub struct Opening {
     pub created: u64,
     pub name: Option<String>,
     pub title: Option<String>,
-    pub worktree: Option<String>,
     /// The hold on `id`, when the opener already took it.
     pub claim: Option<session::Claim>,
     /// What `id`'s row last showed, for the lane that takes it up again.
@@ -531,7 +528,6 @@ impl Opening {
             created: 0,
             name: None,
             title: None,
-            worktree: None,
             claim: None,
             kept: None,
         }
@@ -555,7 +551,6 @@ impl Lane {
                 agent: parts.agent,
                 resolved: parts.resolved,
                 ctx: parts.ctx,
-                worktree: parts.worktree,
                 read_at: None,
             },
             talk: Conversation::new(
@@ -787,14 +782,7 @@ impl Lane {
         started: Option<std::time::Duration>,
         queued: usize,
     ) -> Snapshot {
-        self.talk
-            .tally
-            .snapshot(model, self.checkout.worktree.as_deref(), started, queued)
-    }
-
-    /// The checkout this lane works in, when it is not the repository's own.
-    pub fn worktree(&self) -> Option<&str> {
-        self.checkout.worktree.as_deref()
+        self.talk.tally.snapshot(model, started, queued)
     }
 
     /// The transcript is unavailable while an execution owns it.
@@ -1043,10 +1031,6 @@ impl Lane {
 // What tests stage a lane with, or read back off it, that nothing else may.
 #[cfg(any(test, feature = "testing"))]
 impl Lane {
-    pub fn set_worktree(&mut self, name: Option<String>) {
-        self.checkout.worktree = name;
-    }
-
     pub fn held(&self) -> usize {
         match &self.talk.transcript {
             Transcript::Home(_) => 0,
@@ -1079,8 +1063,17 @@ impl Core {
     /// moves as its neighbours go, and a surface holding one would take out
     /// somebody else's lane. `None` for the lane in front, and for one gone.
     pub fn remove_lane(&mut self, token: u64) -> Option<Lane> {
-        let lane = self.lanes.take(token)?;
+        let lane = self.take_lane(token)?;
         let _ = self.store.remove(lane.root(), lane.id());
+        Some(lane)
+    }
+
+    fn take_lane(&mut self, token: u64) -> Option<Lane> {
+        let lane = self.lanes.take(token)?;
+        lane.close_inputs();
+        if let Some(services) = &self.services {
+            services.unbind(lane.id());
+        }
         Some(lane)
     }
     /// Save the transcript, on disk before this returns: what a move, a rewind
@@ -1298,9 +1291,6 @@ impl Core {
         if to == from {
             return Ok(Step::Notice(format!("already in {}", to.display())));
         }
-        if self.lane_at(&to).is_some() {
-            return Err(format!("{} is open in another lane already", to.display()));
-        }
         let Some(empty) = self.lane().session().map(|s| s.is_empty()) else {
             return Err("a run has the transcript — wait for it to end".into());
         };
@@ -1309,15 +1299,16 @@ impl Core {
             self.save().map_err(failed)?;
         }
 
-        // The same answer opening a lane there gives: by containment, so a
-        // subdirectory of a checkout still names it.
-        let worktree = crate::core::worktree::current(&to);
+        let locks = self.file_locks_at(&to);
         let mut said = self.adopt(config, ws, Some(settings), None)?;
         // Built, not kept: a `Ctx`'s tables key on absolute paths in one tree.
         let id = self.lane().talk.id.clone();
         let ws = self.lane().ctx().workspace.clone();
-        *self.lane_mut().ctx_mut() = Ctx::new(ws).with_session(&id, pi_store::spill_root());
-        self.lane_mut().checkout.worktree = worktree;
+        let mut ctx = Ctx::new(ws).with_session(&id, pi_store::spill_root());
+        if let Some(locks) = locks {
+            ctx = ctx.with_file_locks(locks);
+        }
+        *self.lane_mut().ctx_mut() = ctx;
 
         // The record follows under the same id, with its artifacts and children.
         let messages = self.lane().messages();
@@ -1344,7 +1335,7 @@ impl Core {
         tracing::debug!(target: "pi::session", session = %id, workspace = %to.display(), "session moved");
         if let Some(executions) = self.executions.clone() {
             let services = self.services.clone();
-            executions.rehome(&from, &to);
+            executions.rehome(&from, &to, &id);
             self.lane_mut().bind_inputs(&executions, services.as_ref());
         }
         // Earlier calls name paths against the old root; nothing rewrites them.
@@ -1358,16 +1349,11 @@ impl Core {
         said.insert(0, format!("now in {}", to.display()));
         Ok(Step::Moved(crate::input::notice(said)))
     }
-    // Open a checkout as a new lane in front, on lane `like`'s agent; whole
+    // Open a workspace as a new lane in front, on lane `like`'s agent; whole
     // or not at all. Which session it takes up is the caller's.
-    pub(super) fn open_lane(
-        &mut self,
-        ws: tool::Workspace,
-        worktree: Option<String>,
-        like: usize,
-    ) -> Result<(), String> {
+    pub(super) fn open_lane(&mut self, ws: tool::Workspace, like: usize) -> Result<(), String> {
         let root = ws.root().to_path_buf();
-        let failed = |e| format!("nothing opened — {}", refused("worktree", e));
+        let failed = |e| format!("nothing opened — {}", refused("tab", e));
         let settings = Settings::load(self.pinned.config.as_deref(), &root).map_err(failed)?;
         let config = settings.config().map_err(failed)?;
         let config = self
@@ -1390,7 +1376,7 @@ impl Core {
         resolved.catalog_generation = self.catalog.generation();
 
         // The model travels; what the root decides does not. A switch changes
-        // trees, and which model is answering was a decision made elsewhere.
+        // workspaces, and which model is answering was a decision made elsewhere.
         let agent = &self.lanes[like].checkout.agent;
         let archive = self.archive(root.clone());
         let mut ag = (**agent).clone();
@@ -1415,7 +1401,11 @@ impl Core {
 
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
         // absolute paths in one tree, and none of that lane's describe this.
-        let ctx = tool::Ctx::new(ws);
+        // Share `FileLocks` with any open lane already in the same workspace.
+        let mut ctx = tool::Ctx::new(ws);
+        if let Some(locks) = self.file_locks_at(&root) {
+            ctx = ctx.with_file_locks(locks);
+        }
         mcp.sync(&config, &root);
         let environment = super::environment::Environment::new(
             Arc::new(config),
@@ -1423,10 +1413,12 @@ impl Core {
             resolved.commands.clone(),
             mcp,
         );
-        self.lanes.push_ahead(Lane::opened(Opening {
-            worktree,
-            ..Opening::new(Arc::new(ag), resolved, ctx, environment)
-        }));
+        self.lanes.push_ahead(Lane::opened(Opening::new(
+            Arc::new(ag),
+            resolved,
+            ctx,
+            environment,
+        )));
         if let Some(table) = self.executions.clone() {
             let services = self.services.clone();
             self.lane_mut().bind_inputs(&table, services.as_ref());
@@ -1439,33 +1431,99 @@ impl Core {
         self.in_force();
         Ok(())
     }
-    // The newest session filed for the checkout in front, or a fresh one.
+
+    fn file_locks_at(&self, root: &Path) -> Option<tool::FileLocks> {
+        self.lane_at(root)
+            .map(|existing| self.lanes[existing].ctx().file_locks.clone())
+    }
+
+    pub(super) fn refresh_front(&mut self) -> String {
+        let notes = self.refresh_config().unwrap_or_default();
+        self.in_force();
+        crate::input::notice(notes)
+    }
+
+    /// Open a new tab in the current workspace on a fresh session.
+    pub(super) fn open_tab(&mut self, name: &str) -> Result<Step, String> {
+        self.leave("tab")?;
+        let ws = self.lane().workspace().clone();
+        self.open_lane(ws, self.lanes.front())?;
+        self.fresh_session();
+        let name = name.trim();
+        let mut notes = Vec::new();
+        if !name.is_empty() {
+            self.lane_mut().set_name(Some(name.to_string()));
+            if let Err(e) = self.save() {
+                notes.push(crate::core::not_saved(&e));
+            }
+        }
+        Ok(Step::Notice(crate::input::notice(notes)))
+    }
+
+    /// Close the active tab, preserving its saved session on disk.
+    pub(super) fn close_tab(&mut self) -> Result<Step, String> {
+        if self.lanes.len() <= 1 {
+            return Err("only one tab is open".into());
+        }
+        if self.lane().is_running() {
+            return Err("a run is active in this tab — stop it first".into());
+        }
+        self.leave("tab")?;
+        let closing = self.lane().token();
+        let front = self.lanes.front();
+        let next = if front + 1 < self.lanes.len() {
+            front + 1
+        } else {
+            front - 1
+        };
+        self.lanes.show(next);
+        self.take_lane(closing);
+        Ok(Step::Notice(self.refresh_front()))
+    }
+
+    /// Switch to the next or previous open tab, wrapping around.
+    pub fn step_lane(&mut self, forward: bool) -> Result<Option<String>, String> {
+        let n = self.lanes.len();
+        if n < 2 {
+            return Ok(None);
+        }
+        self.leave("tab")?;
+        let at = self.lanes.front();
+        let next = if forward {
+            (at + 1) % n
+        } else {
+            (at + n - 1) % n
+        };
+        self.lanes.show(next);
+        Ok(Some(self.refresh_front()))
+    }
+    // The newest session filed for the workspace in front, or a fresh one.
     pub(super) fn take_up_latest(&mut self) -> Vec<String> {
-        // Asked with the root the next save will file under, so a tree is found
-        // by the same key it was stored by.
-        // One open in another pi stays there; this lane starts its own.
+        // Asked with the root the next save will file under, so a workspace is
+        // found by the same key it was stored by.
+        // One open in another tab or pi stays there; this lane starts its own.
         match self.store.take_latest(self.lane().root()) {
             Ok((stored, claim)) => self.adopt_session(stored, claim).unwrap_or_else(|why| {
                 self.fresh_session();
                 vec![why]
             }),
             Err(e) => {
-                // Nothing recorded for this tree is the ordinary case; an
+                // Nothing recorded for this workspace is the ordinary case; an
                 // archive that will not load is not, and says so only here.
-                tracing::debug!(target: "pi::session", error = %e, "no session to resume in this worktree");
+                tracing::debug!(target: "pi::session", error = %e, "no session to resume in this workspace");
                 self.fresh_session();
                 Vec::new()
             }
         }
     }
-    /// The checkouts a restart left open, `(root, filed session)` in the
-    /// order they were in, opened again around the one in front, each on its
-    /// own session and model. What does not come back is said under the
-    /// front one's banner, not fatal.
+    /// The tabs a restart left open, `(root, filed session)` in the order they
+    /// were in, opened again around the one in front, each on its own session
+    /// and model. What does not come back is said under the front one's banner,
+    /// not fatal.
     pub fn reopen(&mut self, lanes: &[(std::path::PathBuf, Option<String>)]) {
         let front = self.lanes.ahead().token();
         let like = self.lanes.front();
-        let mut order = Vec::new();
+        let mut order: Vec<u64> = Vec::new();
         let mut said = Vec::new();
         for (root, id) in lanes {
             let ws = match tool::Workspace::new(root) {
@@ -1475,44 +1533,58 @@ impl Core {
                     continue;
                 }
             };
-            order.push(ws.root().to_path_buf());
-            if self.lane_at(ws.root()).is_some() {
+            let existing = match id.as_deref() {
+                Some(existing_id) => self.lanes.iter().find(|lane| {
+                    lane.root() == ws.root()
+                        && lane.id() == existing_id
+                        && !order.contains(&lane.token())
+                }),
+                None => self.lanes.iter().find(|lane| {
+                    lane.root() == ws.root()
+                        && !order.contains(&lane.token())
+                        && !lanes
+                            .iter()
+                            .any(|(_, some)| some.as_deref() == Some(lane.id()))
+                }),
+            };
+            if let Some(existing) = existing {
+                order.push(existing.token());
                 continue;
             }
-            let worktree = crate::core::worktree::current(ws.root());
-            if let Err(why) = self.open_lane(ws, worktree, like) {
+            if let Err(why) = self.open_lane(ws, like) {
                 said.push(format!("{}: {why}", root.display()));
                 continue;
             }
-            let Some(id) = id else {
-                self.fresh_session();
-                continue;
-            };
-            // Carried over, not chosen: nothing to say about which one it is.
-            match self.store.take(self.lane().root(), id) {
-                Ok((stored, claim)) => {
-                    let model = stored.model.clone();
-                    match self.adopt_session(stored, claim) {
-                        Ok(notes) => {
-                            said.extend(notes);
-                            said.extend(self.rejoin(&model));
-                        }
-                        Err(why) => {
-                            self.fresh_session();
-                            said.push(why);
+            if let Some(id) = id {
+                // Carried over, not chosen: nothing to say about which one it is.
+                match self.store.take(self.lane().root(), id) {
+                    Ok((stored, claim)) => {
+                        let model = stored.model.clone();
+                        match self.adopt_session(stored, claim) {
+                            Ok(notes) => {
+                                said.extend(notes);
+                                said.extend(self.rejoin(&model));
+                            }
+                            Err(why) => {
+                                self.fresh_session();
+                                said.push(why);
+                            }
                         }
                     }
+                    Err(e) => {
+                        self.fresh_session();
+                        said.push(format!("{}: started afresh — {e:#}", root.display()));
+                    }
                 }
-                Err(e) => {
-                    self.fresh_session();
-                    said.push(format!("{}: started afresh — {e:#}", root.display()));
-                }
+            } else {
+                self.fresh_session();
             }
+            order.push(self.lane().token());
         }
         self.lanes.sort_keeping(front, |lane| {
             order
                 .iter()
-                .position(|root| root == lane.root())
+                .position(|&token| token == lane.token())
                 .unwrap_or(usize::MAX)
         });
         said.extend(self.refresh_model_config().unwrap_or_default());
@@ -1550,10 +1622,15 @@ impl Core {
         if id == self.lane().talk.id {
             if self.lane().session().is_none() {
                 return Err(
-                    "this checkout's transcript is gone — /new starts a session here".to_string(),
+                    "this tab's transcript is gone — /new starts a session here".to_string()
                 );
             }
             return Ok(Vec::new());
+        }
+        if self.lanes.iter().enumerate().any(|(i, lane)| {
+            i != self.lanes.front() && lane.root() == self.lane().root() && lane.id() == id
+        }) {
+            return Err(format!("session `{id}` is already open in another tab"));
         }
         self.leave("resume")?;
         let (stored, claim) = self
@@ -1587,7 +1664,8 @@ mod tests {
 
         let roots: Vec<_> = core.lanes.iter().map(|l| l.root().to_path_buf()).collect();
         let real = |p: &std::path::Path| p.canonicalize().unwrap();
-        assert_eq!(roots, [real(&other), real(&front)]);
+        assert_eq!(roots, [real(&other), real(&front), real(&other)]);
+        assert_ne!(core.lanes[0].id(), core.lanes[2].id());
         assert_eq!(core.lane().root(), real(&front));
         let notes = &core.lane().resolved().notes;
         let said = |what: &str, root: &std::path::Path| {
@@ -1645,7 +1723,7 @@ mod tests {
         std::fs::create_dir_all(&deep).unwrap();
         let mut core = a_repl(repo.path(), std::sync::Arc::new(Recording::default()), "m");
         core.move_to(&deep.display().to_string()).unwrap();
-        assert_eq!(core.lane().worktree(), Some("fix"));
+        assert_eq!(core.lane().root(), deep.canonicalize().unwrap());
     }
 
     // An opened lane is cloned from another's agent, so it would share that
@@ -1661,7 +1739,7 @@ mod tests {
         core.lane().agent().meter.reset(spent);
 
         let ws = tool::Workspace::new(dir.path()).unwrap();
-        core.open_lane(ws, None, 0).unwrap();
+        core.open_lane(ws, 0).unwrap();
         assert_eq!(core.lane().spent(), agent::Totals::default());
         assert_eq!(core.lanes[0].spent(), spent);
 

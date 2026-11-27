@@ -8,7 +8,7 @@ use clap::Parser;
 use pi_core::args::Args;
 use pi_core::core::dial::{dial, summary_writer};
 use pi_core::core::resolve::{fence, resolve};
-use pi_core::core::{self, Core, archive, lane, saves, worktree};
+use pi_core::core::{self, Core, archive, lane, saves};
 use pi_core::input::expand;
 use pi_store::icons;
 use pi_store::settings::Settings;
@@ -98,10 +98,9 @@ fn paint(
     status: Vec<pi_store::statusline::Field>,
     model_name: String,
     meter: std::sync::Arc<llm::meter::Meter>,
-    worktree: Option<String>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut r = render::Renderer::new(quiet, theme, status, model_name, meter, worktree);
+        let mut r = render::Renderer::new(quiet, theme, status, model_name, meter);
         while let Some(event) = rx.recv().await {
             r.on(event);
         }
@@ -169,7 +168,6 @@ struct Start {
     pinned: pi_core::args::Pinned,
     store: session::Store,
     workspace: tool::Workspace,
-    worktree: Option<String>,
     // What this run keeps: an interactive session, or one the user named with
     // `-c`/`--resume`. A one-shot prompt keeps no session archive.
     keeps: bool,
@@ -256,9 +254,6 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
     }
     // Captured before the spec and workspace move into the agent and context.
     let root = workspace.root().to_path_buf();
-    // Asked once: it shells out to git, and three startups of that was the
-    // pause `Lists` exists to avoid.
-    let worktree = worktree::current(&root);
 
     let mut ag = agent::Agent::new(dialled.transport, dialled.spec);
     if let Some(prior) = &prior {
@@ -321,7 +316,6 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
         pinned,
         store,
         workspace,
-        worktree,
         keeps,
         id,
         claim,
@@ -408,7 +402,6 @@ async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended
         pinned,
         store,
         workspace,
-        worktree,
         keeps,
         id,
         claim,
@@ -432,7 +425,6 @@ async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended
         created,
         name,
         title,
-        worktree,
         claim,
         kept,
         ..lane::Opening::new(Arc::new(ag), resolved, ctx, environment)
@@ -479,7 +471,6 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         config,
         store,
         workspace,
-        worktree,
         keeps,
         id,
         claim,
@@ -516,7 +507,6 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         config.status.to_vec(),
         ag.spec().wire_model().to_string(),
         ag.meter.clone(),
-        worktree.clone(),
     );
     let mut ctx = tool::Ctx::new(workspace).with_cancel(cancel_on_interrupt());
     // Every run names its conversation, kept or not; one that keeps nothing
@@ -545,7 +535,6 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         name: name.clone(),
         title,
         claim,
-        worktree,
         ..lane::Opening::new(
             Arc::new(ag),
             resolved.clone(),

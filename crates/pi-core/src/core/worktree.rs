@@ -558,16 +558,10 @@ impl Core {
         // reload note is worth saying.
         if let Some(i) = self.lane_at(ws.root()) {
             self.lanes.show(i);
-            let notes = self.refresh_config().unwrap_or_default();
-            self.in_force();
             // A reload note is a notice: a listing would open the page.
-            return Ok(Step::Notice(crate::input::notice(notes)));
+            return Ok(Step::Notice(self.refresh_front()));
         }
-        self.open_lane(
-            ws,
-            (!tree.main).then(|| tree.name.clone()),
-            self.lanes.front(),
-        )?;
+        self.open_lane(ws, self.lanes.front())?;
         let said = self.take_up_latest();
         Ok(Step::Swap(crate::input::notice(said)))
     }
@@ -1230,7 +1224,14 @@ mod tests {
         run_removal(&mut core, step);
         assert_eq!(core.lanes.len(), 2);
         assert_eq!(core.lanes.front(), 1);
-        assert_eq!(core.lane().worktree(), Some("feat-two"));
+        assert_eq!(
+            core.lane().root(),
+            home(dir.path())
+                .unwrap()
+                .join("feat-two")
+                .canonicalize()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1271,7 +1272,10 @@ mod tests {
         assert!(matches!(step, Step::Handled(_)), "bare, it lists: {step:?}");
 
         core.enter_worktree("rm").unwrap();
-        assert_eq!(core.lane().worktree(), Some("rm"));
+        assert_eq!(
+            core.lane().root(),
+            home(dir.path()).unwrap().join("rm").canonicalize().unwrap()
+        );
         assert!(home(dir.path()).unwrap().join("rm").exists());
 
         core.lanes.show(0);

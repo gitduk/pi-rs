@@ -1,6 +1,6 @@
 //! Runtime configuration, spending, diagnostics and session storage.
 
-use crate::core::instructions::short;
+use crate::core::instructions::{home_relative, short};
 use agent::Totals;
 
 use super::Core;
@@ -77,13 +77,7 @@ impl Core {
 
         let tier = format!("{:?}", resolved.ceiling).to_lowercase();
         rows.push(Row::new(["tier", &tier]));
-        let mut workspace = crate::core::instructions::home()
-            .and_then(|h| Some(format!("~/{}", root.strip_prefix(h).ok()?.display())))
-            .unwrap_or_else(|| root.display().to_string());
-        if let Some(tree) = lane.worktree() {
-            workspace.push_str(&format!("{sep}worktree {tree}"));
-        }
-        rows.push(Row::new(["workspace".into(), workspace]));
+        rows.push(Row::new(["workspace".into(), home_relative(root)]));
         let extra = lane.workspace().write_roots();
         if tool::Tier::Write.under(resolved.ceiling)
             && lane.workspace().fenced()

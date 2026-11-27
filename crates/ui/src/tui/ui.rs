@@ -104,6 +104,9 @@ pub(super) struct Ui {
     // switch back inside the second the row lives by keeps that read.
     pub(super) git_seen:
         std::collections::HashMap<std::path::PathBuf, (Instant, Option<pi_store::statusline::Git>)>,
+    // Cached git HEAD branch names per workspace root for the tab bar.
+    pub(super) branch_seen:
+        std::collections::HashMap<std::path::PathBuf, (Instant, Option<String>)>,
     // What the last write put in a session's file, and which session that was:
     // compared against, so the file is touched only when the numbers move.
     pub(super) shown: Option<(String, pi_store::statusline::Shown)>,
@@ -198,19 +201,16 @@ pub(super) struct LastPress {
     pub(super) opens: bool,
 }
 
-// What to call a checkout: the root answers to its directory name (as
-// `worktree list` does), so a fixed word wouldn't collide with one.
+// What to call a lane's directory when no branch name applies.
 pub(super) fn lane_name(lane: &Lane) -> String {
-    lane.worktree().map(str::to_string).unwrap_or_else(|| {
-        lane.root()
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    })
+    lane.root()
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
-// How a checkout shows on the bar: front, how its last run ended, plain
-// name, or `Unopened`. A run in flight shows nothing — only finished state.
+// How a tab shows on the bar: front, how its last run ended, or plain
+// name. A run in flight shows nothing — only finished state.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Mark {
@@ -218,26 +218,19 @@ pub(crate) enum Mark {
     Done,
     Failed,
     Plain,
-    Unopened,
 }
 
 impl Mark {
     // Whether this mark might be unread yet. The bar drops quiet ones
     // first — a colored name pushed off the edge is a run nobody saw end.
     pub(super) fn quiet(self) -> bool {
-        matches!(self, Mark::Plain | Mark::Unopened)
+        matches!(self, Mark::Plain)
     }
 }
 
-// One checkout as the bar shows it, rebuilt before every draw — the bar is a
+// One open tab as the bar shows it, rebuilt before every draw — the bar is a
 // view of state the surface does not own.
-pub(super) struct Tab {
-    pub(super) mark: Mark,
-    // The name a lane answers to and the worktree menu offers; `branch` is
-    // what the bar draws in its place once git knows one.
-    pub(super) name: String,
-    pub(super) branch: Option<String>,
-}
+pub(super) use super::statusline::Tab;
 
 impl Ui {
     // What leaves with the checkout: the half-typed line, parked in its lane's
@@ -301,6 +294,7 @@ impl Ui {
             flash: None,
             git: None,
             git_seen: Default::default(),
+            branch_seen: Default::default(),
             shown: None,
             scripts: super::statusline::Scripts::new(),
             statusline_at: None,
@@ -359,35 +353,6 @@ impl Ui {
     // A theme style, as ratatui sees it.
     pub(super) fn rat_style(&self, s: &ThemeStyle) -> RStyle {
         crate::sgr::style_to_ratatui(s)
-    }
-
-    // The checkout a step from this one (Normal `L`/`H`), wrapping at
-    // either end; None with nowhere else to go.
-    pub(super) fn step_checkout(&self, lane: &Lane, forward: bool) -> Option<String> {
-        let trees = self.lists.checkouts();
-        // Git's own order, the one the bar lists them in. A step names the
-        // checkout it goes to, so two sharing a name are one stop.
-        let mut order: Vec<&str> = Vec::with_capacity(trees.len());
-        for tree in trees {
-            if !order.contains(&tree.name.as_str()) {
-                order.push(&tree.name);
-            }
-        }
-        if order.len() < 2 {
-            return None;
-        }
-        // A lane whose checkout git does not list reads last on the bar, one
-        // step past the checkouts: the way on wraps, the way back does not.
-        let (n, at) = match order.iter().position(|name| *name == lane_name(lane)) {
-            Some(at) => (order.len(), at),
-            None => (order.len() + 1, order.len()),
-        };
-        let i = if forward {
-            (at + 1) % n
-        } else {
-            (at + n - 1) % n
-        };
-        Some(order[i].to_string())
     }
 
     pub(super) fn set_theme(

@@ -283,14 +283,14 @@ impl Core {
     }
 
     pub fn interrupt_session(&mut self, scope: &::execution::background::Scope) -> Option<u64> {
-        let at = self.lane_at(&scope.root)?;
+        let at = match &scope.owner {
+            Some(owner) => self
+                .lanes
+                .iter()
+                .position(|lane| lane.id() == owner.session),
+            None => self.lane_at(&scope.root),
+        }?;
         let lane = self.lanes.at_mut(at);
-        if let Some(owner) = &scope.owner
-            && owner.session != lane.id()
-        {
-            tracing::info!(target:"pi::session",source=%owner.session,session=lane.id(),"ignored interrupt for another session");
-            return None;
-        }
         lane.stop(false).then(|| lane.token())
     }
 

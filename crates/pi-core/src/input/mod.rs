@@ -55,6 +55,9 @@ pub enum Builtin {
     Mask,
     // The name to work in, or empty to list what there is.
     Worktree(String),
+    // Open a tab in the current workspace (optionally named), or close the current one.
+    Tab(String),
+    CloseTab,
     // The directory this conversation carries on in, or empty to say the one now.
     Mv(String),
     // An editable file by its listed name, or empty to list them.
@@ -120,6 +123,10 @@ impl Intent {
             // A lane of its own to move to, and the one being left keeps
             // working in the tree it was already in.
             Intent::Builtin(Builtin::Worktree(_)) => Fate::Now,
+            Intent::Builtin(Builtin::CloseTab) => Fate::Refused(
+                "/tab close cannot close a tab while a run is active — stop the run first",
+            ),
+            Intent::Builtin(Builtin::Tab(_)) => Fate::Now,
             Intent::Builtin(Builtin::Mv(_)) => {
                 Fate::Refused("/mv would move the tree this run is working in — stop the run first")
             }

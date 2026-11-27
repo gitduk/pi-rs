@@ -76,6 +76,7 @@ fn hand_on(word: &str, args: String) -> Intent {
     }
 }
 
+const CLOSE_TAB: &str = "close";
 const REFRESH_MODELS: &str = "--refresh";
 
 // Every built-in, once: help, completion and reading a line all come from
@@ -115,6 +116,28 @@ pub(crate) const BUILTIN: &[Command] = &[
         },
         "list this repository's worktrees, or work in one — rm removes one or all",
         |_, rest| Intent::Builtin(Builtin::Worktree(rest)),
+    ),
+    Command::builtin(
+        "/tab",
+        Args::Subcommands {
+            commands: &[Subcommand {
+                word: CLOSE_TAB,
+                help: "close the current tab, keeping its session on disk",
+                args: Args::None,
+            }],
+            fallback: Some(Parameter {
+                name: "name",
+                required: false,
+                values: Values::Text,
+            }),
+        },
+        "open a new tab in this workspace, or close the current one",
+        |_, rest| {
+            Intent::Builtin(match rest.as_str() {
+                CLOSE_TAB => Builtin::CloseTab,
+                _ => Builtin::Tab(rest),
+            })
+        },
     ),
     Command::builtin(
         "/mv",

@@ -274,7 +274,7 @@ impl Ui {
             Some(Action::RunInterrupt) => return self.interrupt(lane, view),
             Some(Action::Rewind) => return Asked::Own(Deed::Rewind),
             Some(action @ (Action::LaneNext | Action::LanePrev)) => {
-                return self.step_lane(lane, action == Action::LaneNext);
+                return Asked::Own(Deed::StepLane(action == Action::LaneNext));
             }
             // The session is what a press would replace, so it takes two.
             Some(Action::SessionNew) => return Asked::Core(Intent::Builtin(Builtin::New)),
@@ -411,16 +411,6 @@ impl Ui {
             return Asked::Own(Deed::Unsend);
         }
         Asked::Own(Deed::Interrupt)
-    }
-
-    fn step_lane(&mut self, lane: &Lane, forward: bool) -> Asked {
-        match self.step_checkout(lane, forward) {
-            Some(name) => Asked::Core(Intent::Builtin(Builtin::Worktree(name))),
-            None => {
-                self.flash("the only checkout there is");
-                Asked::Own(Deed::Nothing)
-            }
-        }
     }
 
     // The vim edits that leave Normal or change the line; false for any

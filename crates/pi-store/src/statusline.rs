@@ -357,8 +357,8 @@ pub enum Item {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Field {
-    /// The checkouts, folded to the room the rest of the row leaves; a lone
-    /// checkout draws nothing.
+    /// The open tabs, folded to the room the rest of the row leaves; a lone
+    /// tab draws nothing.
     Tabs,
     /// The answer to the last keypress, for a second.
     Flash,
@@ -404,8 +404,6 @@ pub enum Field {
     Compacted,
     /// Prompts typed while the run works and not yet sent.
     Queued,
-    /// The worktree the session works in, absent in the repository's own.
-    Worktree,
     /// What the session's services last reported, joined by ` · `; says
     /// nothing while no service is connected or each is silent.
     Services,
@@ -433,7 +431,6 @@ impl Field {
                 | Field::Ctx
                 | Field::Compacted
                 | Field::Queued
-                | Field::Worktree
         )
     }
 }

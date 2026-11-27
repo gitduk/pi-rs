@@ -949,7 +949,7 @@ format = "chat"
 
         let root = dir.path().join("three");
         std::fs::create_dir_all(root.join(".git")).unwrap();
-        core.open_lane(tool::Workspace::new(root).unwrap(), None, 0)
+        core.open_lane(tool::Workspace::new(root).unwrap(), 0)
             .unwrap();
         let resolved = core.lane().resolved();
         assert!(resolved.notes.is_empty(), "{:?}", resolved.notes);

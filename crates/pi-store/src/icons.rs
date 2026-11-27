@@ -32,7 +32,6 @@ pub const THINK_MARK: &str = THINK_FRAMES[5]; // reasoning ended: the frame the 
 pub const DONE_MARK: &str = "✔"; // a tool row that finished well
 pub const RELAYED_MARK: &str = "◆"; // an automatically submitted turn
 pub const FAIL_MARK: &str = "✘"; // a failure, a denial, a refused edit
-pub const UNOPENED_MARK: &str = "○"; // a checkout on the bar that no lane has open
 pub const COMPACT_RULE: &str = "───"; // the dashes a compaction banner wears
 const RULE_CELL: &str = "─"; // one cell of a horizontal rule
 pub const OVER_RULE: &str = RULE_CELL; // the line parting what lies over the transcript from it

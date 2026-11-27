@@ -16,7 +16,7 @@ use super::row::{Row, count};
 use super::screen::{self, Rows};
 use super::scrollback::{Piece, ScrollbackRows, body};
 use super::search::{self, Anchor, Laid, Spot};
-use super::statusline::{Checkout, Facts, Jobs};
+use super::statusline::{Facts, Jobs};
 use super::view::{Scroll, StreamKind, View, remember_first_ask};
 use crate::render;
 use crate::render::Paint;
@@ -103,13 +103,7 @@ impl Ui {
             lane,
             view,
             self.git.clone(),
-            self.tabs
-                .iter()
-                .map(|tab| Checkout {
-                    name: tab.name.clone(),
-                    mark: tab.mark,
-                })
-                .collect(),
+            self.tabs.clone(),
             Jobs::of(&self.every_command),
             self.services.clone(),
         );

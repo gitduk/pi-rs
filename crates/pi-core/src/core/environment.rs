@@ -74,7 +74,7 @@ mod tests {
         std::fs::write(&second_file, "retries = 7\n").unwrap();
         let mut core = crate::core::tests::a_repl(first.path(), Arc::default(), "m");
         core.try_reload().unwrap();
-        core.open_lane(tool::Workspace::new(second.path()).unwrap(), None, 0)
+        core.open_lane(tool::Workspace::new(second.path()).unwrap(), 0)
             .unwrap();
         assert_eq!(core.config().retries, Some(7));
         core.lanes.show(0);
