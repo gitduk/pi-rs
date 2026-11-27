@@ -21,6 +21,14 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 - The session file gains a `title` field. A build older than this one cannot
   read a session that has one, so the next release is a major version.
 
+### Fixed
+
+- A chat-format model that reads only the top-level effort reasoned anyway when
+  pi asked for none, so a short answer such as the session title ran out of
+  tokens before writing a word. The request now says `reasoning_effort: "none"`
+  beside `thinking: {"type": "disabled"}`, and both leave together on a host
+  that rejects either.
+
 ## 3.0.10 - 2026-11-26
 
 ### Added

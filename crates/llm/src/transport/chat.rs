@@ -19,7 +19,7 @@ use crate::message::{
     AssistantContent, Image, Message, Replay, ToolResult, ToolResultContent, UserContent,
 };
 use crate::model::{Format, ModelSpec};
-use crate::request::Request;
+use crate::request::{Effort, Request};
 use crate::stream::{BlockKind, StopReason, StreamEvent, Usage};
 
 pub struct ChatCompletions {
@@ -54,7 +54,7 @@ fn rejects_thinking(error: &LlmError) -> bool {
         .and_then(|value| value["error"]["message"].as_str().map(str::to_owned))
         .unwrap_or_else(|| body.clone())
         .to_ascii_lowercase();
-    message.contains("thinking")
+    (message.contains("thinking") || message.contains("reasoning"))
         && [
             "cannot be represented",
             "unsupported",
@@ -64,6 +64,13 @@ fn rejects_thinking(error: &LlmError) -> bool {
         ]
         .iter()
         .any(|term| message.contains(term))
+}
+// Both spellings leave together: a host that rejects one rejects the request.
+fn without_effort(body: &mut Value) {
+    if let Some(object) = body.as_object_mut() {
+        object.remove("thinking");
+        object.remove("reasoning_effort");
+    }
 }
 
 fn check_format(spec: &ModelSpec) -> Result<()> {
@@ -203,12 +210,16 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
             .insert(0, json!({ "role": "system", "content": system }));
     }
     // DeepSeek's chat wire takes `thinking: {type}` with `reasoning_effort`.
-    // Off is said out loud: a model told nothing thinks by its own default.
+    // Off is said out loud in both places: a host may read only the top-level
+    // effort and reason anyway, spending a 32-token answer on its own thoughts.
     if spec.accepts_effort {
         body["thinking"] = match req.effort.as_openai() {
             Some(effort) => json!({ "type": "enabled", "reasoning_effort": effort }),
             None => json!({ "type": "disabled" }),
         };
+        if req.effort == Effort::Off {
+            body["reasoning_effort"] = json!("none");
+        }
     }
 
     if !req.tools.is_empty() {
@@ -439,9 +450,7 @@ impl Transport for ChatCompletions {
             .expect("thinking capability lock poisoned")
             .contains(&key)
         {
-            body.as_object_mut()
-                .expect("chat body is an object")
-                .remove("thinking");
+            without_effort(&mut body);
         }
         let url = format!("{}/chat/completions", spec.base_url.trim_end_matches('/'));
         let response = Call::to(&self.http, "chat", url.clone(), spec, req)
@@ -450,9 +459,7 @@ impl Transport for ChatCompletions {
             .await;
         let resp = match response {
             Err(error) if body.get("thinking").is_some() && rejects_thinking(&error) => {
-                body.as_object_mut()
-                    .expect("chat body is an object")
-                    .remove("thinking");
+                without_effort(&mut body);
                 let response = Call::to(&self.http, "chat", url, spec, req)
                     .bearer(&self.api_key)
                     .send(&body)
