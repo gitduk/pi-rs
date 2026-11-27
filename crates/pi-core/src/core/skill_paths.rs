@@ -260,6 +260,7 @@ mod tests {
                     id: "path-skills",
                     model: "test",
                     name: None,
+                    title: None,
                     created: 0,
                     spent: Default::default(),
                 },

@@ -295,6 +295,7 @@ fn a_large_reply_stores_only_final_messages() {
                 id: "greeting",
                 model: "local/m",
                 name: None,
+                title: None,
                 created: 1,
                 spent: Default::default(),
             },
@@ -340,6 +341,7 @@ fn a_large_reply_stores_only_final_messages() {
                 id: "greeting",
                 model: &saved.model,
                 name: saved.name.as_deref(),
+                title: saved.title.as_deref(),
                 created: saved.created,
                 spent: saved.spent,
             },
@@ -364,6 +366,7 @@ fn a_resumed_one_shot_is_filed_into_the_session_it_named() {
         id: "s1",
         model: "local/m",
         name: Some("kept"),
+        title: None,
         created: 42,
         spent: Default::default(),
     };
@@ -426,6 +429,7 @@ fn a_resumed_session_whose_model_is_gone_runs_on_the_configured_one() {
         id: "s1",
         model: "gone/m",
         name: None,
+        title: None,
         created: 42,
         spent: Default::default(),
     };

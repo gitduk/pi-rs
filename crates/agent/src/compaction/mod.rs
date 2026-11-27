@@ -147,6 +147,11 @@ impl Summarizing {
 
 #[async_trait]
 impl Compactor for Summarizing {
+    fn writer(&self) -> Option<(&dyn Transport, &ModelSpec)> {
+        let (transport, spec) = self.writer.as_ref()?;
+        Some((&**transport, spec))
+    }
+
     async fn compact(
         &self,
         session: &mut session::Session,

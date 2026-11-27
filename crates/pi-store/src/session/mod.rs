@@ -32,6 +32,10 @@ pub struct Stored {
     /// nobody recognises a week later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// What a model called it, written from the first thing it was asked: the
+    /// row's stand-in for a name nobody gave.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// What the session has cost so far; absent in a file older than it.
     #[serde(default)]
     pub spent: llm::Totals,
@@ -45,6 +49,7 @@ pub struct Header<'a> {
     pub id: &'a str,
     pub model: &'a str,
     pub name: Option<&'a str>,
+    pub title: Option<&'a str>,
     pub created: u64,
     /// Here, not with the entries: a rewind takes turns back, never the money
     /// they cost.
@@ -52,13 +57,14 @@ pub struct Header<'a> {
 }
 
 /// A saved session as the resume list and its completion see it: the id it is
-/// named by, the name the user gave it if any, and the first thing it was
-/// asked, which is what stands in for one.
+/// named by, the name the user gave it if any, the title a model wrote from
+/// the first question, and that question, which stands in for both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeChoice {
     pub id: String,
     pub prompt: String,
     pub name: Option<String>,
+    pub title: Option<String>,
     /// When it was last worked on, which is also what the list sorts by.
     pub touched: u64,
     pub rounds: usize,
@@ -66,21 +72,28 @@ pub struct ResumeChoice {
 }
 
 /// How much of a session's row a list or a completion shows.
-const RESUME_WIDTH: usize = 60;
+pub const RESUME_WIDTH: usize = 60;
 
 impl ResumeChoice {
-    /// What a row calls this session: the name, if any, then the first
-    /// question — named because a first question stops meaning much later.
+    /// What a row calls this session: the name the user gave it, else the
+    /// title a model wrote from the first question, else the question itself
+    /// — a first question stops meaning much once there are forty.
     ///
     /// Here, not at each surface, so a session reads the same way everywhere.
     pub fn label(&self) -> String {
         let prompt = self.prompt.trim();
-        let name = self
+        let called = self
             .name
             .as_deref()
             .map(str::trim)
-            .filter(|n| !n.is_empty());
-        match name {
+            .filter(|n| !n.is_empty())
+            .or_else(|| {
+                self.title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+            });
+        match called {
             // Half the room at most, so a long name cannot crowd out the
             // question and leave the row saying nothing about the session.
             Some(name) if prompt.is_empty() => clip(name, RESUME_WIDTH),
@@ -472,6 +485,7 @@ impl Store {
                     id: at.session.as_str(),
                     model,
                     name: Some("subagent"),
+                    title: None,
                     created,
                     spent: Default::default(),
                 },
@@ -608,6 +622,7 @@ impl Store {
                     id: state.session.as_str().into(),
                     prompt: metadata.prompt,
                     name: metadata.name,
+                    title: metadata.title,
                     touched: metadata.touched,
                     rounds: metadata.rounds,
                     bytes: end,
@@ -689,6 +704,7 @@ mod tests {
             id,
             model,
             name,
+            title: None,
             created,
             spent: llm::Totals::default(),
         }
@@ -1340,6 +1356,7 @@ mod file_tests {
             id,
             model: "m",
             name: None,
+            title: None,
             created: 1,
             spent: Default::default(),
         }

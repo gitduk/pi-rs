@@ -119,6 +119,7 @@ impl Index {
             workspace: start.workspace.clone(),
             model: start.model.clone(),
             name: start.name.clone(),
+            title: start.title.clone(),
             created: start.created,
             spent: start.spent.unwrap_or_default(),
             parent: start.parent.clone(),

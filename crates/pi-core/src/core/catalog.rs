@@ -603,6 +603,7 @@ max_output_tokens = 2048
             lanes: ring,
             executions: None,
             services: None,
+            naming: false,
             removals: Default::default(),
             trees: None,
             surface: &[],

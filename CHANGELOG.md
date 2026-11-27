@@ -27,6 +27,16 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   transcript instead, worn as the row it was sent as. Scrolled up past it,
   the older rows keep the top row and nothing is shown there.
 
+- An unnamed session is titled by the summarizer from the first question it was
+  asked, so the status line and `/resume` show what it is about instead of a
+  cut-off question. The title is written once, off the run, charged to the
+  session's own meter, and through `summarize_model` when one is set. A name
+  you give with `/name` or `--name` always shows over it, and a session whose
+  title never arrived falls back to the question as before.
+
+- The session file gains a `title` field. A build older than this one cannot
+  read a session that has one, so the next release is a major version.
+
 ### Changed
 
 - A skill command run a second time in one session names the skill instead of

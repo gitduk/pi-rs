@@ -31,6 +31,7 @@ pub mod shells;
 mod skill_paths;
 pub mod status;
 pub mod statusline;
+pub mod title;
 pub mod tools;
 pub mod update;
 pub mod worktree;
@@ -93,6 +94,9 @@ pub struct Core {
     /// Services the surface armed: each lane's session gets a socket its
     /// services connect to. `None` keeps every lane unbound.
     pub services: Option<std::sync::Arc<crate::driver::services::Services>>,
+    /// Whether this run's session outlives it: a row nobody can come back to
+    /// is not worth naming.
+    pub naming: bool,
     /// Words the surface answers itself, listed beside the built-ins: each
     /// comes back as [`Step::Surface`]. Every resolve is handed them.
     pub surface: &'static [Command],
@@ -553,6 +557,7 @@ mod tests {
             id: "s1".into(),
             prompt: "fix the flaky test".into(),
             name: None,
+            title: None,
             touched: 0,
             rounds: 1,
             bytes: 0,
@@ -631,6 +636,7 @@ mod tests {
                     id: "s2",
                     model: "model-a",
                     name: None,
+                    title: None,
                     created: 0,
                     spent: Default::default(),
                 },
@@ -933,6 +939,7 @@ mod tests {
             lanes: crate::core::lanes::Lanes::of(lane),
             executions: None,
             services: None,
+            naming: false,
             removals: Default::default(),
             trees: None,
             surface: &[],

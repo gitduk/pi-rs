@@ -2,7 +2,7 @@
 
 | Input                              | Does                                          |
 | ---------------------------------- | --------------------------------------------- |
-| `/new`, `/resume [id]`, `/name`    | start, switch, label a session                |
+| `/new`, `/resume [id]`, `/name`    | start, switch, label a session; an unlabelled one is titled from its first question |
 | `/rewind <said>`, `esc esc`        | go back to something you said                 |
 | `/model [name]`                    | list the models, or move the session to one   |
 | `/model --refresh`                 | refresh model lists from providers           |
