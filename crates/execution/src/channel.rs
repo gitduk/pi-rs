@@ -161,9 +161,19 @@ pub trait Channel: Send + Sync {
     /// A line to submit, and what the model should know about it first.
     fn input(&self, text: String, note: String);
     /// A machine's words: an automatic input carrying where it came from.
-    fn task(&self, text: String, source: String, reason: String) -> Result<Receipt, String>;
+    fn task(
+        &self,
+        text: String,
+        source: String,
+        reason: String,
+        event: Option<String>,
+    ) -> Result<Receipt, String>;
     /// The answer to a question the model asked, named by that message.
     fn respond(&self, to: message::MessageId, text: String, stop: bool) -> Result<Receipt, String>;
+    /// Whether this channel's session currently has an active or queued turn.
+    fn busy(&self) -> bool {
+        false
+    }
     /// A question put to the person that this execution waits on.
     fn ask(&self, asked: Asked) -> Result<Answer, String>;
     fn choose(&self, asked: Asked);

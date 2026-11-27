@@ -346,6 +346,12 @@ impl Messages {
         self.lock().session.clone()
     }
 
+    /// Whether a request is currently running or queued in this conversation.
+    pub fn is_busy(&self) -> bool {
+        let table = self.lock();
+        table.active.is_some() || !table.waiting.is_empty()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Table> {
         self.0
             .lock()
@@ -538,7 +544,13 @@ impl Table {
         }
         if self.ensure_request(message.id())? {
             let record = &self.requests[message.id()];
-            if record.request.as_ref() != message || record.parent.as_ref() != parent.as_ref() {
+            let original = &record.request;
+            if original.session() != message.session()
+                || original.kind() != message.kind()
+                || original.body() != message.body()
+                || original.by() != message.by()
+                || record.parent.as_ref() != parent.as_ref()
+            {
                 return Err(Error::Conflict);
             }
             return Ok(Some(record.request.request_id().expect("stored request")));
@@ -888,6 +900,9 @@ mod tests {
         let wire = input(&messages);
         let id = messages.submit(wire.clone()).unwrap();
         assert_eq!(messages.submit(wire.clone()).unwrap(), id);
+        let mut later = wire.clone();
+        later.at += 5;
+        assert_eq!(messages.submit(later).unwrap(), id);
         let mut changed = wire;
         changed.body = vec![Block::Text("different".into())];
         assert!(matches!(messages.submit(changed), Err(Error::Conflict)));

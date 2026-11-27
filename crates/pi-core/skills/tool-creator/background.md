@@ -22,26 +22,26 @@ Read `events.md` for the protocol.
 # [required]
 # url = "The page to watch."
 # ---
-import hashlib, json, os, sys, time, urllib.request, uuid
+import hashlib, json, os, sys, urllib.request, uuid
 
 if os.environ.get("PI_EVENTS_FD") != "3":
     sys.exit("needs pi to keep it running")
 fd3 = os.fdopen(os.dup(3), "w")
 replies = os.fdopen(os.dup(3), "r")
-def say(frame):
+def send(frame):
     fd3.write(json.dumps(frame) + "\n"); fd3.flush()
 
 url = json.load(sys.stdin)["url"]
-say({"id":"hello", "op":"initialize", "protocol":4})
-say({"op":"status", "text":f"watching {url}"})
+send({"id":"hello", "op":"initialize", "protocol":5, "client":"watch"})
+send({"op":"status", "text":f"watching {url}"})
 source = "watch:" + uuid.uuid4().hex
 seen = None
 while True:
     digest = hashlib.sha256(urllib.request.urlopen(url).read()).hexdigest()
     if seen and digest != seen:
         message = uuid.uuid4().hex
-        say({"id":message, "op":"say", "text":f"{url} changed",
-             "as":"task", "source":source, "reason":"content changed"})
+        send({"id":message, "op":"event", "text":f"{url} changed",
+              "source":source, "reason":"content changed"})
         # Drain the receipt before producing another occurrence.
         while True:
             line = replies.readline()
@@ -80,10 +80,10 @@ A stop request sends SIGTERM, then SIGKILL, to the command's process group.
 Use bash controls to read output, stop, or restart the command.
 Restart reuses the original JSON input and reloads the `.env` beside the tool directory.
 
-Model `message`, `observe`, and runtime controls require background mode.
-Without `serve`, stdout at exit becomes the command's final automatic input.
-A producer that submits its own messages declares `serve`; its exit is status only.
-A nonzero exit also includes stderr.
+`send`, `event`, `reply`, `listen`, and `stop` require `background` mode.
+A process that never writes an fd 3 frame reports its output at exit.
+Once a script speaks on fd 3, it owns its words: `stdout` is ignored at exit,
+a clean exit updates status only, and a nonzero exit sends `stderr` to the session.
 
 In background mode, `status` and stderr are for the user during execution.
 Use `status` for what the user needs to know or do now, such as scanning a QR code.
@@ -92,11 +92,11 @@ Only a failing exit sends stderr to the model.
 
 The script manages its own persistent state under `$PI_HOME`.
 Restrict saved login tokens to owner access.
-Use `ToModel(user)` for words a person typed to this session.
-Use `ToModel(automatic)` with a stable source and event for discovered data.
+Use `send` for words a person typed to this session.
+Use `event` with a stable `source` and `key` (or `id`) for discovered data.
 
 One-shot invocations and subagents do not offer background script wrappers.
-Foreground scripts can use runtime `status` and internal `prompt`.
+Foreground scripts can use `initialize`, `info`, `status`, and `ask` (with `id`).
 
 To check the event protocol manually, redirect fd 3 to the terminal:
 `echo '{"url":"https://example.com"}' | PI_EVENTS_FD=3 python3 <tools-dir>/watch 3>&1`.

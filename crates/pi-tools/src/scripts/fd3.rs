@@ -3,17 +3,17 @@
 //! A line carrying `id` is answered exactly once; one without it never is.
 use crate::process::{Exited, Group, MAX_RUN, Streams, past, put_down, reap, spawn};
 use crate::runtime::background::{OutputMode, RunHandle, Scope};
-use crate::runtime::channel::{Answer, Ask, Asked, Observation, Receiver, Sender, Told};
-use crate::scripts::wire::{self, Id, Incoming, Speaker, Stream as Listening};
+use crate::runtime::channel::{Answer, Ask, Asked, Observation, Receipt, Receiver, Sender, Told};
+use crate::scripts::wire::{self, Frames, Id, Incoming, Stream as Listening};
 use ::execution::background::{Outcome, Report};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::AsRawFd;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
@@ -23,17 +23,29 @@ pub const FD_VAR: &str = "PI_EVENTS_FD";
 const FD: i32 = 3;
 // Detach a peer that stops draining its frames.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_LINE: usize = wire::MAX_FRAME_BYTES + 1;
 // A question is answered off the read loop, so the execution's deadline and
 // `stop` still land; this only bounds a host that never answers at all.
 const ASK_LIMIT: Duration = Duration::from_secs(24 * 3600);
+const FOREGROUND_CAPABILITIES: &[&str] = &["initialize", "info", "ask", "status"];
+const BACKGROUND_CAPABILITIES: &[&str] = &[
+    "initialize",
+    "info",
+    "send",
+    "event",
+    "reply",
+    "ask",
+    "listen:session",
+    "listen:questions",
+    "status",
+    "stop",
+];
 
 /// What the writer must still answer, shared with the reader.
 #[derive(Clone, Default)]
 struct Holding {
-    // One entry per `say`, in the order they were sent: the id to answer, when
-    // that say asked for one.
-    says: Arc<Mutex<VecDeque<Option<Id>>>>,
+    // One entry per `send`, in the order they were sent: the id to answer, when
+    // that send asked for one.
+    sends: Arc<Mutex<VecDeque<Option<Id>>>>,
     // The message a turn's remaining words belong to, by its number.
     linked: Arc<Mutex<HashMap<u64, message::MessageId>>>,
     // Questions put to this script, by the id it was asked under.
@@ -43,7 +55,7 @@ struct Holding {
 struct Process {
     child: Child,
     streams: Streams,
-    fd3: Fd3,
+    fd3: Frames<OwnedReadHalf>,
     told: Sender,
     out: Output,
     holding: Holding,
@@ -109,12 +121,7 @@ fn start(
 
     ours.set_nonblocking(true)?;
     let (read, write) = tokio::net::UnixStream::from_std(ours)?.into_split();
-    let fd3 = Fd3 {
-        reader: BufReader::new(read),
-        line: Vec::new(),
-        skipping: false,
-        open: true,
-    };
+    let fd3 = Frames::new(read);
     let holding = Holding::default();
     let (told, hear) = crate::runtime::channel::channel();
     let (out, output) = output();
@@ -189,7 +196,7 @@ pub async fn foreground(
     })
 }
 
-/// A foreground script may report progress and ask; its answer comes back here.
+/// A foreground script may initialize, read info, report progress and ask; its answer comes back here.
 fn answered_outside(
     value: &Value,
     out: &Output,
@@ -198,16 +205,32 @@ fn answered_outside(
     asks: &dyn Ask,
     waiting: Option<(Id, Answer)>,
 ) -> Option<(Id, Answer)> {
-    let incoming: Incoming = match serde_json::from_value(value.clone()) {
+    let incoming = match wire::decode(value) {
         Ok(incoming) => incoming,
-        Err(error) => {
-            out.reject(format!("invalid frame: {error}"));
+        Err(frame) => {
+            out.value(&frame);
             return waiting;
         }
     };
+    let id = incoming.id().cloned();
     match incoming {
+        Incoming::Initialize { id, protocol, .. } => {
+            out.value(&wire::initialize(
+                &id,
+                protocol,
+                "foreground",
+                ctx.session(),
+                ctx.workspace.root(),
+                FOREGROUND_CAPABILITIES,
+            ));
+            waiting
+        }
+        Incoming::Info { id } => {
+            out.value(&wire::info(&id, ctx.session(), ctx.workspace.root(), true));
+            waiting
+        }
         Incoming::Status { text } => {
-            ctx.progress(text);
+            ctx.progress(text.unwrap_or_default());
             waiting
         }
         Incoming::Ask {
@@ -248,9 +271,10 @@ fn answered_outside(
             waiting
         }
         _ => {
-            out.value(&wire::unreadable(
+            out.value(&wire::error(
+                id.as_ref(),
                 "frame",
-                "a foreground script may report status and ask",
+                "a foreground script may initialize, read info, report status and ask",
             ));
             waiting
         }
@@ -266,6 +290,7 @@ pub(crate) fn background(
     output: OutputMode,
     timeout: Option<Duration>,
 ) -> Result<(), ToolError> {
+    let workspace = ctx.workspace.root().to_path_buf();
     let Process {
         mut child,
         mut streams,
@@ -298,7 +323,7 @@ pub(crate) fn background(
                     return;
                 }
                 line=fd3.next()=>match line {
-                    Ok(value)=>{spoke=true; say_out(&value,&out,&holding,&execution).await;}
+                    Ok(value)=>{spoke=true; handle_frame(&value,&out,&holding,&execution,&workspace).await;}
                     Err(why)=>out.reject(why),
                 },
                 status=child.wait()=>break status,
@@ -355,107 +380,96 @@ pub(crate) fn background(
 }
 
 /// One line from the script: a request, a notice, or an answer to a question.
-async fn say_out(value: &Value, out: &Output, holding: &Holding, execution: &Arc<dyn RunHandle>) {
+async fn handle_frame(
+    value: &Value,
+    out: &Output,
+    holding: &Holding,
+    execution: &Arc<dyn RunHandle>,
+    workspace: &std::path::Path,
+) {
     if value.get("op").is_none() {
         answered(value, out, execution, holding);
         return;
     }
-    let incoming: Incoming = match serde_json::from_value(value.clone()) {
+    let incoming = match wire::decode(value) {
         Ok(incoming) => incoming,
-        Err(error) => {
-            let id = value
-                .get("id")
-                .and_then(|id| serde_json::from_value::<Id>(id.clone()).ok());
-            let frame = match id {
-                Some(id) => wire::failure(&id, "frame", format!("invalid frame: {error}")),
-                None => wire::unreadable("frame", format!("invalid frame: {error}")),
-            };
+        Err(frame) => {
             out.value(&frame);
             return;
         }
     };
-    if let Err((code, why)) = incoming.validate() {
-        match incoming.id() {
-            Some(id) => out.value(&wire::failure(id, code, why)),
-            None => out.value(&wire::unreadable(code, why)),
-        }
-        return;
-    }
     match incoming {
-        Incoming::Initialize { id, protocol } => {
-            if protocol == wire::PROTOCOL {
-                out.value(&wire::reply(&id, json!({"protocol": wire::PROTOCOL})));
-            } else {
-                out.value(&wire::failure(
-                    &id,
-                    "protocol",
-                    format!(
-                        "this pi speaks {}; the script asked for {protocol}",
-                        wire::PROTOCOL
-                    ),
-                ));
-            }
+        Incoming::Initialize { id, protocol, .. } => {
+            let session = execution.owner().map(|owner| owner.session);
+            out.value(&wire::initialize(
+                &id,
+                protocol,
+                "background",
+                session.as_deref(),
+                workspace,
+                BACKGROUND_CAPABILITIES,
+            ));
         }
-        Incoming::Say {
+        Incoming::Info { id } => {
+            let session = execution.owner().map(|owner| owner.session);
+            out.value(&wire::info(
+                &id,
+                session.as_deref(),
+                workspace,
+                execution.channel().busy(),
+            ));
+        }
+        Incoming::Send {
             id,
             text,
-            speaker,
             note,
             more,
-            re,
-            stop,
-            source,
-            reason,
         } => {
-            if let Some(re) = re {
-                match execution.channel().respond(re, text, stop) {
-                    Ok(_) => {
-                        if let Some(id) = id {
-                            out.value(&wire::reply(&id, json!({"accepted": true})));
-                        }
-                    }
-                    Err(why) => {
-                        if let Some(id) = id {
-                            out.value(&wire::failure(&id, "internal", why));
-                        } else {
-                            out.reject(why);
-                        }
-                    }
-                }
+            // The person's words, not the person's authority: a script
+            // relays what was said, never a command for this machine.
+            if text.starts_with('!') {
+                out.fail(
+                    id.as_ref(),
+                    "denied",
+                    "a line from a script may not run shell commands",
+                );
                 return;
             }
             execution.channel().drive(more);
-            match speaker {
-                Speaker::Person => {
-                    // The person's words, not the person's authority: a script
-                    // relays what was said, never a command for this machine.
-                    if text.starts_with('!') {
-                        if let Some(id) = id {
-                            out.value(&wire::failure(
-                                &id,
-                                "denied",
-                                "a line from a script may not run shell commands",
-                            ));
-                        } else {
-                            out.reject("a line from a script may not run shell commands");
-                        }
-                        return;
-                    }
-                    holding.says.lock().unwrap().push_back(id.clone());
-                    execution.channel().input(text, note);
-                }
-                Speaker::Task => match execution.channel().task(text, source, reason) {
-                    Ok(_) => {
-                        if let Some(id) = id {
-                            out.value(&wire::reply(&id, json!({"accepted": true})));
-                        }
-                    }
-                    Err(why) => match id {
-                        Some(id) => out.value(&wire::failure(&id, "internal", why)),
-                        None => out.reject(why),
-                    },
-                },
-            }
+            holding.sends.lock().unwrap().push_back(id);
+            execution.channel().input(text, note);
+        }
+        Incoming::Event {
+            id,
+            text,
+            source,
+            reason,
+            key,
+        } => {
+            let event = key
+                .filter(|k| !k.trim().is_empty())
+                .or_else(|| id.as_ref().map(ToString::to_string));
+            let exec = execution.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                exec.channel().task(text, source, reason, event)
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|res| res);
+            reply_receipt(out, id, res);
+        }
+        Incoming::Reply {
+            id,
+            to,
+            text,
+            cancel,
+        } => {
+            let exec = execution.clone();
+            let res = tokio::task::spawn_blocking(move || exec.channel().respond(to, text, cancel))
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|res| res);
+            reply_receipt(out, id, res);
         }
         Incoming::Ask { id, text, options } => match id {
             Some(id) => {
@@ -513,15 +527,26 @@ async fn say_out(value: &Value, out: &Output, holding: &Holding, execution: &Arc
                 out.value(&wire::reply(&id, json!({})));
             }
         },
-        Incoming::Status { text } => execution.channel().status(text),
+        Incoming::Status { text } => execution.channel().status(text.unwrap_or_default()),
         Incoming::Stop {} => execution.channel().interrupt(),
+    }
+}
+
+fn reply_receipt(out: &Output, id: Option<Id>, result: Result<Receipt, String>) {
+    match result {
+        Ok(receipt) => {
+            if let Some(id) = id {
+                out.value(&wire::accepted(&id, receipt.request.message().as_str()));
+            }
+        }
+        Err(why) => out.fail(id.as_ref(), "internal", why),
     }
 }
 
 /// A reply to a question this script was asked.
 fn answered(value: &Value, out: &Output, execution: &Arc<dyn RunHandle>, holding: &Holding) {
     let id = match value.get("id") {
-        Some(id) => match serde_json::from_value::<Id>(id.clone()) {
+        Some(id) => match Id::deserialize(id) {
             Ok(id) => id,
             Err(_) => {
                 out.reject("a reply needs a usable id");
@@ -549,14 +574,17 @@ fn answered(value: &Value, out: &Output, execution: &Arc<dyn RunHandle>, holding
         out.value(&wire::refused(question, why));
         return;
     }
-    let result = value.get("result").cloned().unwrap_or(Value::Null);
-    if let Some(picks) = result.get("picks").and_then(Value::as_array) {
+    let result = value.get("result");
+    if let Some(picks) = result
+        .and_then(|r| r.get("picks"))
+        .and_then(Value::as_array)
+    {
         let picks: Vec<usize> = (picks.iter())
             .filter_map(Value::as_u64)
             .map(|n| n as usize)
             .collect();
         execution.channel().answer(question, picks);
-    } else if let Some(text) = result.get("text").and_then(Value::as_str) {
+    } else if let Some(text) = result.and_then(|r| r.get("text")).and_then(Value::as_str) {
         execution.channel().answer_text(question, text.to_string());
     } else {
         out.value(&wire::failure(
@@ -639,6 +667,12 @@ impl Output {
         tracing::warn!(target: "pi::scripts", %why, "frame rejected");
         self.value(&wire::unreadable("frame", why));
     }
+    fn fail(&self, id: Option<&Id>, code: &str, why: impl Into<String>) {
+        match id {
+            Some(id) => self.value(&wire::failure(id, code, why)),
+            None => self.reject(why),
+        }
+    }
     fn observe(&self, observation: Box<dyn Observation>) {
         self.put(Outgoing::Observe(observation), 1);
     }
@@ -675,7 +709,7 @@ async fn tell(mut to: OwnedWriteHalf, mut hear: Receiver, mut output: OutputIn, 
                     Told::Response { request, event }=>match event {
                         ::execution::channel::Response::Finished { text, outcome }=>{
                             let linked=holding.linked.lock().unwrap().remove(&request);
-                            let id=holding.says.lock().unwrap().pop_front().flatten();
+                            let id=holding.sends.lock().unwrap().pop_front().flatten();
                             match id {
                                 Some(id)=>vec![wire::reply(&id, json!({
                                     "turn": request,
@@ -728,43 +762,6 @@ fn state(outcome: &crate::runtime::channel::Outcome) -> &'static str {
         Outcome::Done | Outcome::Exited(0) => "done",
         Outcome::Stopped(_) => "stopped",
         Outcome::Failed(_) | Outcome::Exited(_) => "failed",
-    }
-}
-
-struct Fd3 {
-    reader: BufReader<OwnedReadHalf>,
-    line: Vec<u8>,
-    skipping: bool,
-    open: bool,
-}
-impl Fd3 {
-    async fn next(&mut self) -> Result<Value, String> {
-        while self.open {
-            let room = (MAX_LINE + 1 - self.line.len()) as u64;
-            let read = (&mut self.reader)
-                .take(room)
-                .read_until(b'\n', &mut self.line)
-                .await;
-            let ended = matches!(read, Ok(0) | Err(_));
-            if ended {
-                self.open = false;
-            } else if self.line.last() != Some(&b'\n') && self.line.len() > MAX_LINE {
-                self.line.clear();
-                self.skipping = true;
-                continue;
-            } else if self.line.last() != Some(&b'\n') {
-                continue;
-            }
-            let line = std::mem::take(&mut self.line);
-            if std::mem::take(&mut self.skipping) || line.len() > MAX_LINE {
-                return Err("frame exceeds the byte limit".into());
-            }
-            if line.is_empty() && ended {
-                return Err("frame connection closed".into());
-            }
-            return serde_json::from_slice(&line).map_err(|e| format!("invalid frame: {e}"));
-        }
-        std::future::pending().await
     }
 }
 
@@ -844,7 +841,7 @@ mod tests {
             dir.path(),
             &format!(
                 "head -c {} /dev/zero | tr '\\0' x >&3; echo >&3; echo '{{\"op\":\"status\",\"text\":\"after\"}}' >&3",
-                MAX_LINE * 3
+                (wire::MAX_FRAME_BYTES + 1) * 3
             ),
         );
         foreground("big", cmd, Vec::new(), 5 * SECOND, &ctx, &NoOne)
@@ -886,14 +883,14 @@ printf '%s\n' "$a" > heard"#;
     }
 
     #[tokio::test]
-    async fn bash_background_carries_says_asks_and_notices() {
+    async fn bash_background_carries_sends_asks_and_notices() {
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(Sink::default());
         let ctx = ctx(dir.path());
         let _cmd = script(
             dir.path(),
-            r#"echo '{"id":1,"op":"initialize","protocol":4}' >&3
-echo '{"id":2,"op":"say","text":"host operation","note":"round 2","more":true}' >&3
+            r#"echo '{"id":1,"op":"initialize","protocol":5,"client":"test"}' >&3
+echo '{"id":2,"op":"send","text":"host operation","note":"round 2","more":true}' >&3
 echo '{"op":"ask","text":"the task changed","options":["summarize","go on"]}' >&3
 echo '{"id":3,"op":"listen","to":"questions"}' >&3
 echo '{"op":"status","text":"working"}' >&3
@@ -946,7 +943,16 @@ printf '%s\n%s\n%s\n' "$a" "$b" "$c" > heard"#,
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
         assert!(
-            heard.contains(&json!({"id":1,"result":{"protocol":4}})),
+            heard.contains(&json!({
+                "id": 1,
+                "result": {
+                    "protocol": 5,
+                    "mode": "background",
+                    "session": null,
+                    "workspace": dir.path(),
+                    "capabilities": BACKGROUND_CAPABILITIES,
+                }
+            })),
             "{heard:?}"
         );
         assert!(heard.contains(&json!({"id":3,"result":{}})), "{heard:?}");
@@ -963,7 +969,7 @@ printf '%s\n%s\n%s\n' "$a" "$b" "$c" > heard"#,
         let ctx = ctx(dir.path());
         let _cmd = script(
             dir.path(),
-            r#"echo '{"id":1,"op":"say","text":"!rm -rf /tmp/x"}' >&3
+            r#"echo '{"id":1,"op":"send","text":"!rm -rf /tmp/x"}' >&3
 read -r a <&3
 printf '%s\n' "$a" > heard"#,
         );
@@ -1084,5 +1090,33 @@ sleep 1"#,
             .expect("it ended");
         let said = sink.said.lock().unwrap().clone();
         assert!(said.iter().any(|s| s == "answer 3: [1]"), "{said:?}");
+    }
+
+    #[tokio::test]
+    async fn foreground_handles_initialize_info_and_rejects_unsupported_with_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx(dir.path());
+        let cmd = script(
+            dir.path(),
+            r#"echo '{"id":1,"op":"initialize","protocol":5}' >&3
+echo '{"id":2,"op":"info"}' >&3
+echo '{"id":3,"op":"send","text":"hi"}' >&3
+read -r a <&3; read -r b <&3; read -r c <&3
+printf '%s\n%s\n%s\n' "$a" "$b" "$c" > heard"#,
+        );
+        foreground("fg", cmd, Vec::new(), 5 * SECOND, &ctx, &NoOne)
+            .await
+            .unwrap();
+        let heard: Vec<Value> = std::fs::read_to_string(dir.path().join("heard"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(heard[0]["id"], 1);
+        assert_eq!(heard[0]["result"]["mode"], "foreground");
+        assert_eq!(heard[1]["id"], 2);
+        assert_eq!(heard[1]["result"]["busy"], true);
+        assert_eq!(heard[2]["id"], 3);
+        assert_eq!(heard[2]["error"]["code"], "frame");
     }
 }

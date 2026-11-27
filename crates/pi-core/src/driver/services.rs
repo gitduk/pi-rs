@@ -2,7 +2,7 @@
 //! than offered to the model. One process serves every session on the
 //! machine: each session puts a unix socket in `$PI_HOME`'s runtime place,
 //! and the service, one per machine under a lock it holds, connects to every
-//! socket and speaks the same fd 3 protocol. What a service says becomes the
+//! socket and speaks the same fd 3 protocol. What a service sends becomes the
 //! session's input; what it reports as status is drawn on the status line.
 
 use std::collections::{BTreeMap, HashMap};
@@ -14,17 +14,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use message::{Block, InputKind, Request, WireKind, WireMessage};
-use pi_tools::scripts::wire::{
-    self, Id, Incoming, MAX_FRAME_BYTES, PROTOCOL, Speaker, Stream as Listening,
-};
+use pi_tools::scripts::wire::{self, Id, Incoming, Stream as Listening};
+use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::OwnedReadHalf;
+use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::Child;
 use tokio::sync::mpsc;
 
-use crate::execution::ingress::Ingress;
+use crate::execution::ingress::{Ingress, SubmitError};
 
 /// Where the lock fd is handed to a service, named to it by this variable.
 const LOCK_FD: i32 = 3;
@@ -32,7 +30,14 @@ const LOCK_FD: i32 = 3;
 const HEAL: Duration = Duration::from_secs(60);
 // Detach a peer that stops draining its frames.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_LINE: usize = MAX_FRAME_BYTES + 1;
+const SERVICE_CAPABILITIES: &[&str] = &[
+    "initialize",
+    "info",
+    "send",
+    "event",
+    "listen:session",
+    "status",
+];
 
 /// The service side of pi: which services run, and what the sessions'
 /// services last reported. Dormant until armed, so a surface that never arms it
@@ -64,11 +69,17 @@ struct Places {
 struct Socket {
     path: PathBuf,
     accept: tokio::task::AbortHandle,
+    conns: Arc<Mutex<Option<Vec<tokio::task::AbortHandle>>>>,
 }
 
 impl Drop for Socket {
     fn drop(&mut self) {
         self.accept.abort();
+        if let Some(list) = self.conns.lock().expect("lock poisoned").take() {
+            for handle in list {
+                handle.abort();
+            }
+        }
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -177,23 +188,41 @@ impl Services {
             .clone();
         let next_slot = self.next_slot.clone();
         let session_name = session.to_string();
+        let conns = Arc::new(Mutex::new(Some(Vec::<tokio::task::AbortHandle>::new())));
+        let accept_conns = conns.clone();
         let accept = tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     return;
                 };
                 let slot = next_slot.fetch_add(1, Ordering::Relaxed);
-                tokio::spawn(serve(
+                let handle = tokio::spawn(serve(
                     stream,
                     session_name.clone(),
                     ingress.clone(),
                     slots.clone(),
                     slot,
-                ));
+                ))
+                .abort_handle();
+                let mut guard = accept_conns.lock().expect("lock poisoned");
+                match guard.as_mut() {
+                    Some(list) => {
+                        list.retain(|h| !h.is_finished());
+                        list.push(handle);
+                    }
+                    None => handle.abort(),
+                }
             }
         })
         .abort_handle();
-        sockets.insert(session.to_string(), Socket { path, accept });
+        sockets.insert(
+            session.to_string(),
+            Socket {
+                path,
+                accept,
+                conns,
+            },
+        );
     }
 
     /// Stop serving `session` on its socket.
@@ -315,268 +344,423 @@ async fn serve(
             }
         }
     });
-    let mut frames = Frames {
-        reader: BufReader::new(read),
-        line: Vec::new(),
-        skipping: false,
-        open: true,
+    let mut frames = wire::Frames::new(read);
+    let mut conn = Conn {
+        session,
+        ingress,
+        slots,
+        slot,
+        nonce: crate::execution::messages::new_id(),
+        client: String::new(),
+        to,
+        listeners: Listeners(Vec::new()),
     };
-    let mut listeners = Listeners(Vec::new());
     while let Ok(frame) = frames.next().await {
         // Whether the connection stays up: a frame pi will not serve ends it.
-        let stays = answer(frame, &session, &ingress, &slots, slot, &to, &mut listeners).await;
-        if !stays {
+        if !conn.answer(frame).await {
             break;
         }
     }
-    drop(listeners);
-    drop(to);
+    drop(conn);
     let _ = writer.await;
 }
 
-/// One line from a service: a request, a notice, or a reply with no question
-/// behind it. Whether the connection stays up.
-async fn answer(
-    frame: Value,
-    session: &str,
-    ingress: &Arc<Ingress>,
-    slots: &Slots,
+/// Per-connection state for serving frames from one connected service peer.
+struct Conn {
+    session: String,
+    ingress: Arc<Ingress>,
+    slots: Slots,
     slot: u64,
-    to: &mpsc::Sender<Value>,
-    listeners: &mut Listeners,
-) -> bool {
-    if frame.get("op").is_none() {
-        let id = frame.get("id").cloned();
-        let closed = match id {
-            Some(id) => match serde_json::from_value::<Id>(id) {
-                Ok(id) => wire::failure(&id, "closed", "no question is waiting under that id"),
-                Err(_) => wire::unreadable("frame", "a reply needs a usable id"),
-            },
-            None => wire::unreadable("frame", "a reply needs an id"),
-        };
-        return to.send(closed).await.is_ok();
+    nonce: message::MessageId,
+    client: String,
+    to: mpsc::Sender<Value>,
+    listeners: Listeners,
+}
+
+impl Conn {
+    async fn send(&self, frame: Value) -> bool {
+        self.to.send(frame).await.is_ok()
     }
-    let incoming: Incoming = match serde_json::from_value(frame) {
-        Ok(incoming) => incoming,
-        Err(error) => {
-            tracing::warn!(target: "pi::services", %error, "frame rejected");
-            return to
-                .send(wire::unreadable("frame", format!("invalid frame: {error}")))
-                .await
-                .is_ok();
-        }
-    };
-    if let Err((code, why)) = incoming.validate() {
-        tracing::warn!(target: "pi::services", %why, "frame rejected");
-        let said = match incoming.id() {
-            Some(id) => wire::failure(id, code, why),
-            None => wire::unreadable(code, why),
-        };
-        return to.send(said).await.is_ok();
+
+    /// Answer a frame pi will not do, by id when it has one.
+    async fn refuse(&self, id: Option<&Id>, code: &str, why: &str) -> bool {
+        tracing::warn!(target: "pi::services", %why, "frame refused");
+        self.send(wire::error(id, code, why)).await
     }
-    match incoming {
-        Incoming::Initialize { id, protocol } => {
-            let frame = if protocol == PROTOCOL {
-                wire::reply(&id, json!({"protocol": PROTOCOL}))
-            } else {
-                wire::failure(
-                    &id,
-                    "protocol",
-                    format!("this pi speaks {PROTOCOL}; the service asked for {protocol}"),
-                )
+
+    /// One line from a service: a request, a notice, or a reply with no question
+    /// behind it. Whether the connection stays up.
+    async fn answer(&mut self, frame: Value) -> bool {
+        if frame.get("op").is_none() {
+            let closed = match frame.get("id") {
+                Some(id) => match Id::deserialize(id) {
+                    Ok(id) => wire::failure(&id, "closed", "no question is waiting under that id"),
+                    Err(_) => wire::unreadable("frame", "a reply needs a usable id"),
+                },
+                None => wire::unreadable("frame", "a reply needs an id"),
             };
-            to.send(frame).await.is_ok()
+            return self.send(closed).await;
         }
-        Incoming::Say {
-            id,
-            re: None,
-            stop: true,
-            ..
-        } => refuse(id.as_ref(), "stop names the message it closes", to).await,
-        Incoming::Say {
-            id,
-            text,
-            speaker,
-            note: _,
-            more,
-            re: None,
-            stop: false,
-            source,
-            reason,
-        } => {
-            if more {
-                return refuse(id.as_ref(), "a service may not hold the checkout open", to).await;
+        let incoming = match wire::decode(&frame) {
+            Ok(incoming) => incoming,
+            Err(err_frame) => {
+                tracing::warn!(target: "pi::services", frame = %err_frame, "frame rejected");
+                return self.send(err_frame).await;
             }
-            let (kind, body) = match speaker {
-                Speaker::Person => {
-                    // The person's words, not the person's authority: a
-                    // service relays what was said, never a command.
-                    if text.starts_with('!') {
-                        return refuse(
+        };
+        match incoming {
+            Incoming::Initialize {
+                id,
+                protocol,
+                client: name,
+            } => {
+                let frame = wire::initialize(
+                    &id,
+                    protocol,
+                    "service",
+                    Some(&self.session),
+                    &self.ingress.root,
+                    SERVICE_CAPABILITIES,
+                );
+                if protocol == wire::PROTOCOL {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        self.client = name.to_string();
+                    }
+                    tracing::info!(
+                        target: "pi::services",
+                        session = %self.session,
+                        client = %self.client,
+                        "service initialized"
+                    );
+                }
+                self.send(frame).await
+            }
+            Incoming::Info { id } => {
+                self.send(wire::info(
+                    &id,
+                    Some(&self.session),
+                    &self.ingress.root,
+                    self.ingress.is_busy(),
+                ))
+                .await
+            }
+            Incoming::Send {
+                id,
+                text,
+                note,
+                more,
+            } => {
+                if more {
+                    return self
+                        .refuse(
                             id.as_ref(),
-                            "a line from a service may not run shell commands",
-                            to,
+                            "frame",
+                            "a service may not hold the checkout open",
                         )
                         .await;
-                    }
-                    (
-                        WireKind::Request(Request::ToModel(InputKind::User)),
-                        vec![Block::Text(text)],
-                    )
                 }
-                Speaker::Task => {
-                    let event = crate::execution::messages::new_id();
-                    (
-                        WireKind::Request(Request::ToModel(InputKind::Automatic)),
-                        vec![
-                            Block::Text(text),
-                            Block::Data(json!({
-                                "source": source,
-                                "reason": reason,
-                                "event": event.as_str(),
-                            })),
-                        ],
-                    )
+                if !note.is_empty() {
+                    return self
+                        .refuse(id.as_ref(), "frame", "a service may not attach turn notes")
+                        .await;
                 }
-            };
-            let wire = WireMessage {
-                id: crate::execution::messages::new_id(),
-                session: match message::SessionId::new(session.to_string()) {
-                    Ok(session) => session,
-                    Err(why) => {
-                        tracing::warn!(target: "pi::services", %why, "say refused");
-                        return refuse(id.as_ref(), &why.to_string(), to).await;
-                    }
-                },
-                by: None,
-                at: agent::session::now(),
-                kind,
-                body,
-            };
-            match ingress.submit(0, wire) {
-                Ok(_) => match id {
-                    Some(id) => to
-                        .send(wire::reply(&id, json!({"accepted": true})))
-                        .await
-                        .is_ok(),
-                    None => true,
-                },
-                Err(why) => refuse(id.as_ref(), &why, to).await,
+                // The person's words, not the person's authority: a service relays
+                // what was said, never a command.
+                if text.starts_with('!') {
+                    return self
+                        .refuse(
+                            id.as_ref(),
+                            "denied",
+                            "a line from a service may not run shell commands",
+                        )
+                        .await;
+                }
+                self.submit_wire(
+                    id.as_ref(),
+                    WireKind::Request(Request::ToModel(InputKind::User)),
+                    vec![Block::Text(text)],
+                )
+                .await
             }
-        }
-        Incoming::Say {
-            id, re: Some(_), ..
-        } => refuse(id.as_ref(), "a service may not answer questions", to).await,
-        Incoming::Ask { id, .. } => {
-            refuse(
-                id.as_ref(),
-                "a service may not ask; it may say and report",
-                to,
-            )
-            .await
-        }
-        Incoming::Listen {
-            id,
-            to: Listening::Session,
-            cursor,
-        } => match ingress.messages.observe(cursor) {
-            Ok(observation) => {
-                let cursor = observation.cursor().clone();
-                if to
-                    .send(wire::reply(&id, json!({"cursor": cursor})))
+            Incoming::Event {
+                id,
+                text,
+                source,
+                reason,
+                key,
+            } => {
+                let event = key
+                    .filter(|k| !k.trim().is_empty())
+                    .or_else(|| id.as_ref().map(ToString::to_string))
+                    .unwrap_or_else(|| crate::execution::messages::new_id().as_str().to_string());
+                self.submit_wire(
+                    id.as_ref(),
+                    WireKind::Request(Request::ToModel(InputKind::Automatic)),
+                    vec![
+                        Block::Text(text),
+                        Block::Data(json!({
+                            "source": source,
+                            "reason": reason,
+                            "event": event,
+                        })),
+                    ],
+                )
+                .await
+            }
+            Incoming::Reply { id, .. } => {
+                self.refuse(id.as_ref(), "frame", "a service may not answer questions")
                     .await
-                    .is_err()
-                {
-                    return false;
-                }
-                let to = to.clone();
-                let task = tokio::spawn(async move {
-                    let mut observation = observation;
-                    loop {
-                        match observation.next().await {
-                            Ok(event) => {
-                                let frame = wire::message(&event.cursor, event.message.as_ref());
-                                if to.send(frame).await.is_err() {
-                                    return;
-                                }
-                            }
-                            Err(_) => return,
-                        }
+            }
+            Incoming::Ask { id, .. } => {
+                self.refuse(
+                    id.as_ref(),
+                    "frame",
+                    "a service may not ask; it may send and report",
+                )
+                .await
+            }
+            Incoming::Listen {
+                id,
+                to: Listening::Session,
+                cursor,
+            } => match self.ingress.messages.observe(cursor) {
+                Ok(observation) => {
+                    let cursor = observation.cursor().clone();
+                    if !self.send(wire::reply(&id, json!({"cursor": cursor}))).await {
+                        return false;
                     }
-                });
-                listeners.0.push(task.abort_handle());
+                    let to = self.to.clone();
+                    let task = tokio::spawn(async move {
+                        let mut observation = observation;
+                        while let Ok(event) = observation.next().await {
+                            let frame = wire::message(&event.cursor, event.message.as_ref());
+                            if to.send(frame).await.is_err() {
+                                return;
+                            }
+                        }
+                    });
+                    self.listeners.0.push(task.abort_handle());
+                    true
+                }
+                Err(why) => {
+                    self.send(wire::failure(&id, "internal", why.to_string()))
+                        .await
+                }
+            },
+            Incoming::Listen {
+                id,
+                to: Listening::Questions,
+                cursor: _,
+            } => {
+                self.send(wire::failure(
+                    &id,
+                    "frame",
+                    "a service may not listen to questions",
+                ))
+                .await
+            }
+            Incoming::Status { text } => {
+                let mut guard = self.slots.lock().expect("lock poisoned");
+                match text {
+                    Some(text) if !text.trim().is_empty() => {
+                        guard.insert(self.slot, text);
+                    }
+                    _ => {
+                        guard.remove(&self.slot);
+                    }
+                }
                 true
             }
-            Err(why) => to
-                .send(wire::failure(&id, "internal", why.to_string()))
-                .await
-                .is_ok(),
-        },
-        Incoming::Listen {
-            id,
-            to: Listening::Questions,
-            cursor: _,
-        } => to
-            .send(wire::failure(
-                &id,
-                "frame",
-                "a service may not listen to questions",
-            ))
-            .await
-            .is_ok(),
-        Incoming::Status { text } => {
-            slots.lock().expect("lock poisoned").insert(slot, text);
-            true
+            Incoming::Stop {} => true,
         }
-        Incoming::Stop {} => true,
+    }
+
+    async fn submit_wire(&self, id: Option<&Id>, kind: WireKind, body: Vec<Block>) -> bool {
+        let msg_id = match request_message_id(id, &self.client, &self.nonce) {
+            Ok(msg_id) => msg_id,
+            Err(why) => return self.refuse(id, "frame", &why).await,
+        };
+        let session = match message::SessionId::new(self.session.clone()) {
+            Ok(session) => session,
+            Err(why) => {
+                tracing::warn!(target: "pi::services", %why, "send refused");
+                return self.refuse(id, "frame", &why.to_string()).await;
+            }
+        };
+        let wire = WireMessage {
+            id: msg_id,
+            session,
+            by: None,
+            at: agent::session::now(),
+            kind,
+            body,
+        };
+        let ingress = self.ingress.clone();
+        let submitted = tokio::task::spawn_blocking(move || ingress.submit(0, wire))
+            .await
+            .map_err(|e| SubmitError::Rejected(e.to_string()))
+            .and_then(|res| res);
+        match submitted {
+            Ok(receipt) => match id {
+                Some(id) => {
+                    self.send(wire::accepted(id, receipt.request.message().as_str()))
+                        .await
+                }
+                None => true,
+            },
+            Err(err) => {
+                let code = match &err {
+                    SubmitError::Closed => "session",
+                    SubmitError::Rejected(_) => "frame",
+                };
+                self.refuse(id, code, &err.to_string()).await
+            }
+        }
     }
 }
 
-/// Answer a frame pi will not do, by id when it has one.
-async fn refuse(id: Option<&Id>, why: &str, to: &mpsc::Sender<Value>) -> bool {
-    tracing::warn!(target: "pi::services", %why, "frame refused");
-    let frame = match id {
-        Some(id) => wire::failure(id, "frame", why),
-        None => wire::unreadable("frame", why),
+fn request_message_id(
+    id: Option<&Id>,
+    client: &str,
+    nonce: &message::MessageId,
+) -> Result<message::MessageId, String> {
+    let Some(id) = id else {
+        return Ok(crate::execution::messages::new_id());
     };
-    to.send(frame).await.is_ok()
+    let raw = if client.is_empty() {
+        format!("conn:{}:{id}", nonce.as_str())
+    } else {
+        format!("svc:{client}:{id}")
+    };
+    message::MessageId::new(raw).map_err(|e| e.to_string())
 }
 
-/// One line at a time off a socket, capped like the pipe a script speaks to.
-struct Frames {
-    reader: BufReader<OwnedReadHalf>,
-    line: Vec<u8>,
-    skipping: bool,
-    open: bool,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::execution::messages::Messages;
+    use crate::execution::queue::Queue;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-impl Frames {
-    async fn next(&mut self) -> Result<Value, String> {
-        while self.open {
-            let room = (MAX_LINE + 1 - self.line.len()) as u64;
-            let read = (&mut self.reader)
-                .take(room)
-                .read_until(b'\n', &mut self.line)
-                .await;
-            let ended = matches!(read, Ok(0) | Err(_));
-            if ended {
-                self.open = false;
-            } else if self.line.last() != Some(&b'\n') && self.line.len() > MAX_LINE {
-                self.line.clear();
-                self.skipping = true;
-                continue;
-            } else if self.line.last() != Some(&b'\n') {
-                continue;
+    fn test_services(dir: &std::path::Path) -> Arc<Services> {
+        let services = Arc::new(Services::default());
+        let _ = services.places.set(Places {
+            tools: dir.join("tools"),
+            discover: pi_tools::scripts::Dir::new(dir.join("tools")),
+            locks: dir.join("locks"),
+            logs: dir.join("logs"),
+            sessions: dir.to_path_buf(),
+        });
+        services
+    }
+
+    async fn exchange(
+        write: &mut tokio::net::unix::OwnedWriteHalf,
+        read: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+        frame: Value,
+    ) -> Value {
+        let mut line = serde_json::to_vec(&frame).unwrap();
+        line.push(b'\n');
+        write.write_all(&line).await.unwrap();
+        let mut resp = String::new();
+        read.read_line(&mut resp).await.unwrap();
+        serde_json::from_str(&resp).unwrap()
+    }
+
+    #[tokio::test]
+    async fn bind_serves_protocol_5_and_unbind_aborts_open_connections() {
+        let dir = tempfile::tempdir().unwrap();
+        let services = test_services(dir.path());
+        let session = message::SessionId::new("svc-s1".into()).unwrap();
+        let messages = Messages::new(session);
+        let queue = Queue::default();
+        let ingress = Arc::new(Ingress::new(
+            dir.path().to_path_buf(),
+            1,
+            messages,
+            queue.clone(),
+        ));
+        services.bind("svc-s1", ingress.clone());
+
+        let sock = dir.path().join("svc-s1.sock");
+        let stream = UnixStream::connect(&sock).await.unwrap();
+        let (r, mut w) = stream.into_split();
+        let mut r = BufReader::new(r);
+
+        let hello = exchange(
+            &mut w,
+            &mut r,
+            json!({"id": 1, "op": "initialize", "protocol": 5, "client": "sensor"}),
+        )
+        .await;
+        assert_eq!(hello["result"]["mode"], "service");
+        assert_eq!(hello["result"]["session"], "svc-s1");
+
+        let info = exchange(&mut w, &mut r, json!({"id": 2, "op": "info"})).await;
+        assert_eq!(info["result"]["busy"], false);
+
+        w.write_all(b"{\"op\":\"status\",\"text\":\"ok\"}\n")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while services.statuses("svc-s1") != vec!["ok".to_string()] {
+                tokio::task::yield_now().await;
             }
-            let line = std::mem::take(&mut self.line);
-            if std::mem::take(&mut self.skipping) || line.len() > MAX_LINE {
-                return Err("frame exceeds the byte limit".into());
+        })
+        .await
+        .unwrap();
+
+        let sent = exchange(
+            &mut w,
+            &mut r,
+            json!({"id": "r1", "op": "send", "text": "hello"}),
+        )
+        .await;
+        assert_eq!(sent["result"]["accepted"], true);
+        let msg_id = sent["result"]["message"].as_str().unwrap().to_string();
+
+        // Retry with the same id succeeds idempotently and queues once.
+        let retry = exchange(
+            &mut w,
+            &mut r,
+            json!({"id": "r1", "op": "send", "text": "hello"}),
+        )
+        .await;
+        assert_eq!(retry["result"]["message"], msg_id);
+        assert_eq!(queue.lock().len(), 1);
+
+        let info_busy = exchange(&mut w, &mut r, json!({"id": 3, "op": "info"})).await;
+        assert_eq!(info_busy["result"]["busy"], true);
+
+        // Clearing status removes the slot; unbinding drops socket and open connection.
+        w.write_all(b"{\"op\":\"status\",\"text\":null}\n")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !services.statuses("svc-s1").is_empty() {
+                tokio::task::yield_now().await;
             }
-            if line.is_empty() && ended {
-                return Err("frame connection closed".into());
-            }
-            return serde_json::from_slice(&line).map_err(|e| format!("invalid frame: {e}"));
-        }
-        std::future::pending().await
+        })
+        .await
+        .unwrap();
+
+        ingress.close();
+        let closed = exchange(
+            &mut w,
+            &mut r,
+            json!({"id": "r2", "op": "event", "text": "x", "source": "sensor", "reason": "disk"}),
+        )
+        .await;
+        assert_eq!(closed["error"]["code"], "session");
+
+        services.unbind("svc-s1");
+        let mut eof = String::new();
+        let bytes = tokio::time::timeout(Duration::from_secs(2), r.read_line(&mut eof))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes, 0, "unbind must close open service connections");
+        assert!(!sock.exists());
     }
 }

@@ -8,6 +8,14 @@ use ::execution::channel::Receipt;
 use message::WireMessage;
 use std::path::PathBuf;
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SubmitError {
+    #[error("session is no longer accepting inputs")]
+    Closed,
+    #[error("{0}")]
+    Rejected(String),
+}
+
 /// Kept by the conversation; connection tables keep only weak references.
 pub(crate) struct Ingress {
     pub root: PathBuf,
@@ -35,16 +43,24 @@ impl Ingress {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
     }
 
-    pub fn submit(&self, execution: u64, wire: WireMessage) -> Result<Receipt, String> {
+    pub fn is_busy(&self) -> bool {
+        self.messages.is_busy() || !self.queue.is_empty()
+    }
+
+    pub fn submit(&self, execution: u64, wire: WireMessage) -> Result<Receipt, SubmitError> {
         // Close waits for in-flight admission and queue insertion to finish.
         let accepting = self
             .accepting
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !*accepting {
-            return Err("session is no longer accepting inputs".into());
+            return Err(SubmitError::Closed);
         }
-        let (request, response) = match self.messages.admit_wire(wire).map_err(|e| e.to_string())? {
+        let (request, response) = match self
+            .messages
+            .admit_wire(wire)
+            .map_err(|e| SubmitError::Rejected(e.to_string()))?
+        {
             Admission::Accepted(input) => {
                 let request = input.message().request_id().expect("admitted input");
                 self.queue.push(Queued {
@@ -61,7 +77,7 @@ impl Ingress {
             cursor: self
                 .messages
                 .request_cursor(&request)
-                .map_err(|e| e.to_string())?,
+                .map_err(|e| SubmitError::Rejected(e.to_string()))?,
             request,
             response,
         })

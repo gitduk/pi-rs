@@ -133,7 +133,9 @@ impl crate::runtime::channel::Channel for Handle {
         text: String,
         source: String,
         reason: String,
+        event: Option<String>,
     ) -> Result<crate::runtime::channel::Receipt, String> {
+        let _ = event;
         self.said
             .lock()
             .unwrap()

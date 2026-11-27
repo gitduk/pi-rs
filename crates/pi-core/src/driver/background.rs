@@ -1898,7 +1898,9 @@ impl ::execution::channel::Channel for Handle {
             .table
             .ingress_for(self.id, self.run, &session)
             .and_then(|ingress| match &wire.kind {
-                message::WireKind::Request(_) => ingress.submit(self.id, wire),
+                message::WireKind::Request(_) => {
+                    ingress.submit(self.id, wire).map_err(|e| e.to_string())
+                }
                 message::WireKind::Response { .. } => {
                     self.table.accept_user_response(&ingress.messages, wire)
                 }
@@ -2006,18 +2008,41 @@ impl ::execution::channel::Channel for Handle {
         text: String,
         source: String,
         reason: String,
+        event: Option<String>,
     ) -> Result<::execution::channel::Receipt, String> {
-        let event = crate::execution::messages::new_id();
+        let event =
+            event.unwrap_or_else(|| crate::execution::messages::new_id().as_str().to_string());
         let wire = self.wire(
             message::WireKind::Request(message::Request::ToModel(message::InputKind::Automatic)),
             vec![
                 message::Block::Text(text),
                 message::Block::Data(json!({
-                    "source": source, "reason": reason, "event": event.as_str()
+                    "source": source, "reason": reason, "event": event
                 })),
             ],
         )?;
         self.message(wire)
+    }
+
+    fn busy(&self) -> bool {
+        let ingress = {
+            let inner = self.table.lock();
+            let Some(at) = inner.mine(self.id, self.run) else {
+                return false;
+            };
+            let Some(session) = inner.items[at]
+                .owner
+                .as_ref()
+                .and_then(|owner| message::SessionId::new(owner.session.clone()).ok())
+            else {
+                return false;
+            };
+            inner
+                .inputs
+                .get(&session)
+                .and_then(std::sync::Weak::upgrade)
+        };
+        ingress.is_some_and(|ingress| ingress.is_busy())
     }
 
     fn respond(
@@ -2985,9 +3010,9 @@ to = os.fdopen(os.dup(fd), "w", buffering=1)
 from_pi = os.fdopen(os.dup(fd), "r")
 def send(frame):
     to.write(json.dumps(frame) + "\n")
-send({"id":1,"op":"initialize","protocol":4})
+send({"id":1,"op":"initialize","protocol":5,"client":"test"})
 send({"id":2,"op":"listen","to":"session"})
-send({"op":"say","text":"/new"})
+send({"op":"send","text":"/new"})
 with open("frames", "w") as frames:
     for _ in range(2):
         line = from_pi.readline()
@@ -3017,7 +3042,7 @@ with open("frames", "w") as frames:
         .unwrap();
         assert_eq!(id, 1);
         let Back::Input { text, note } = taken else {
-            panic!("a person's say is a host line")
+            panic!("a send is a host line")
         };
         assert_eq!(text, "/new");
         assert!(note.is_empty());
@@ -3037,7 +3062,13 @@ with open("frames", "w") as frames:
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert!(
-            frames.contains(&json!({"id":1,"result":{"protocol":4}})),
+            frames.iter().any(|frame| {
+                frame["id"] == 1
+                    && frame["result"]["protocol"] == 5
+                    && frame["result"]["mode"] == "background"
+                    && frame["result"]["session"] == "wire-session"
+                    && frame["result"]["workspace"] == dir.path().to_string_lossy().as_ref()
+            }),
             "{frames:?}"
         );
         assert!(

@@ -13,14 +13,24 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 
 - Tools declared with `service = true` run as services: one process per machine,
   started by pi and shared by every session, not offered to the model. Each
-  session puts a socket in `$XDG_RUNTIME_DIR/pi/sessions/` (under `$PI_HOME/run`
+  session puts a socket in `$XDG_RUNTIME_DIR/pi/sessions/` (`$PI_HOME/run/sessions/`
   when no runtime dir exists), the service holds the lock pi passes at
   `PI_SERVICE_LOCK_FD` and connects to every socket, speaking the same fd 3
-  protocol. `say` reaches every session it is written to, `status` is drawn by
-  the statusline's new `services` field, and a crashed service is restarted by
-  whichever pi looks next. The first such service is `~/.pi/tools/sensor`:
-  disk levels (95% says, 98% critical, recovery under 92%) and temperatures,
-  with the cleanup assigned to one session at a time.
+  protocol. `send`/`event` reach every session they are written to, `status` is
+  drawn by the statusline's new `services` field, and a crashed service is
+  restarted by whichever pi looks next. The first such service is
+  `~/.pi/tools/sensor`: disk levels (95% notifies, 98% critical, recovery under
+  92%) and temperatures, with the cleanup assigned to an idle session.
+
+- Tool scripts and services now speak **protocol revision 5** on fd 3 and
+  session sockets, replacing the overloaded `say` operation with three distinct
+  operations: `send` (user input), `event` (automatic background/service input
+  with optional `key` deduplication), and `reply` (answering/cancelling a model
+  `ask`). `initialize` now accepts an optional `client` name and returns `mode`,
+  `session`, `workspace`, and `capabilities`; a new `info` query reports
+  `session`, `workspace`, and `busy`; `status` accepts `null`/empty `text` to
+  clear; and service requests with an `id` deduplicate through the session's
+  message log. `initialize` and `info` also work in foreground scripts.
 
 - A long answer no longer takes the question it answers out of reach: once
   the question has scrolled off the top of the transcript, it heads the
@@ -56,6 +66,11 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   when the answer starts. A turn that thinks first holds the row too.
 
 ### Fixed
+
+- Leaving or closing a session now aborts open `service` connection tasks on its
+  socket alongside the accept loop, so stale service connections drop their
+  fds, status slots, and session listeners immediately instead of lingering until
+  the peer closes.
 
 - `H`/`L` reach a checkout `/worktree` has just made. The list read once for the
   bar is kept across a switch inside one repository, and the new checkout was not
