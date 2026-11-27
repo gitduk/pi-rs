@@ -1998,6 +1998,69 @@ fn a_question_the_window_left_behind_pins_to_the_top_row() {
     );
 }
 
+// Scrolled between two turns, the heading names the question the window is
+// under, not the newest one: an older question goes on the top row once
+// nothing of the newer one is on screen.
+// The heading follows the question the window is under, and a question is
+// always on screen: one the window shows, or the one it has just scrolled past.
+#[test]
+fn the_heading_follows_the_question_the_window_is_under() {
+    use crate::tui::mouse::Target;
+    let mut ui = test_ui(40, 8);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    let paint = Paint::new(false);
+    let mut rows = Row::prompt("first question", 0, &paint);
+    rows.extend((1..=10).map(|n| Row::notice(format!("row {n}"))));
+    rows.extend(Row::prompt("second question", 1, &paint));
+    rows.extend((11..=20).map(|n| Row::notice(format!("row {n}"))));
+    view.surface.scrollback = rows.into();
+    let scroll_to = |ui: &mut crate::tui::Ui, view: &mut View, by: usize| {
+        view.surface.scroll = crate::tui::view::Scroll { by, top: None };
+        ui.flush(&lane, view);
+        let height = ui.regions.history.height as usize;
+        (ui.row_targets[0], ui.drawn[..height].to_vec())
+    };
+
+    // Under the second turn, both questions above: the second one heads.
+    for by in [0, 6] {
+        let (top, shown) = scroll_to(&mut ui, &mut view, by);
+        assert!(matches!(top, Target::Pin { ask: 11, .. }), "{by}: {top:?}");
+        assert!(shown[0].contains("second question"), "{by}: {shown:?}");
+    }
+
+    // The second question's own rows: it is on screen, so nothing covers it.
+    let (top, shown) = scroll_to(&mut ui, &mut view, 8);
+    assert!(!matches!(top, Target::Pin { .. }), "{top:?}");
+    assert!(
+        shown.iter().any(|row| row.contains("second question")),
+        "{shown:?}"
+    );
+
+    // Above it, into the first turn: the first heads now, the second is gone.
+    let (top, shown) = scroll_to(&mut ui, &mut view, 12);
+    assert!(matches!(top, Target::Pin { ask: 0, .. }), "{top:?}");
+    assert!(shown[0].contains("first question"), "{shown:?}");
+    assert!(
+        !shown.iter().any(|row| row.contains("second question")),
+        "{shown:?}"
+    );
+
+    // Back onto the first question itself: its own row, nothing over it.
+    let (top, shown) = scroll_to(&mut ui, &mut view, 20);
+    assert!(!matches!(top, Target::Pin { .. }), "{top:?}");
+    assert!(shown[0].contains("first question"), "{shown:?}");
+
+    // Wherever the window is, a question says which turn it is showing.
+    for by in 0..=24 {
+        let (_, shown) = scroll_to(&mut ui, &mut view, by);
+        assert!(
+            shown.iter().any(|row| row.contains("question")),
+            "by {by} shows no question: {shown:?}"
+        );
+    }
+}
+
 // A question pinned over the top row is not where the window opens: scrolling
 // from the newest rows must not anchor on it and jump back up the transcript.
 #[test]

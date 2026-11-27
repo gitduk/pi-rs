@@ -60,10 +60,10 @@ impl Scrollback {
         }
     }
 
-    // Where the last thing the user said opens: the first row of its prompt,
-    // the only one carrying when it was sent.
-    pub(super) fn last_ask(&self) -> Option<usize> {
-        self.0.iter().rposition(|row| row.sent().is_some())
+    // Where each thing the user said opens: the first row of its prompt, the
+    // only one carrying when it was sent.
+    pub(super) fn asks(&self) -> impl DoubleEndedIterator<Item = usize> + '_ {
+        (self.0.iter().enumerate()).filter_map(|(at, row)| row.sent().is_some().then_some(at))
     }
 
     // Drops the asides, saying whether there were any.

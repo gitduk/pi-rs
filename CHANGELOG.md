@@ -24,8 +24,9 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 
 - A long answer no longer takes the question it answers out of reach: once
   the question has scrolled off the top of the transcript, it heads the
-  transcript instead, worn as the row it was sent as. Scrolled up past it,
-  the older rows keep the top row and nothing is shown there.
+  transcript instead, worn as the row it was sent as. Further up, the question
+  of that turn takes the row, so an answer is never shown without the question
+  it answers — until one is on screen itself, which leaves the row alone.
 
 - An unnamed session is titled by the summarizer from the first question it was
   asked, so the status line and `/resume` show what it is about instead of a

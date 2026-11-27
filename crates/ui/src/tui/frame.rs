@@ -718,34 +718,37 @@ impl Ui {
             .collect()
     }
 
-    // The topmost history row the window shows; a cut first row shows nothing,
-    // and it is the row the pin would take its place from.
-    fn shown_top(&self) -> Option<usize> {
-        (self.row_targets.iter().enumerate()).find_map(|(drawn, target)| match target {
-            Target::Scrollback(idx, _) => Some(*idx),
-            Target::Separator(idx, _) if drawn > 0 => Some(*idx),
-            _ => None,
-        })
+    // The history rows the window shows, first and last: a first row cut off
+    // above shows nothing of itself, so it is not the first.
+    fn shown_rows(&self) -> Option<(usize, usize)> {
+        let mut shown =
+            (self.row_targets.iter().enumerate()).filter_map(|(drawn, target)| match target {
+                Target::Scrollback(idx, _) => Some(*idx),
+                Target::Separator(idx, _) if drawn > 0 => Some(*idx),
+                _ => None,
+            });
+        let first = shown.next()?;
+        Some((first, shown.next_back().unwrap_or(first)))
     }
 
-    // Whether the window has left row `ask` behind: nothing of it on screen,
-    // and above the window rather than below it.
-    fn left_behind(&self, ask: usize) -> bool {
-        self.shown_top().is_none_or(|top| ask < top)
+    // The question heading the rows above the window: the one in force where
+    // the window has scrolled to, once no question is on screen to say it.
+    fn ask_heading(&self, view: &View) -> Option<usize> {
+        let (first, last) = self.shown_rows().unwrap_or((usize::MAX, usize::MAX));
+        let newest = (view.surface.scrollback.asks())
+            .rev()
+            .find(|&ask| ask <= last)?;
+        (newest < first).then_some(newest)
     }
 
-    // The last question on the history's top row, once nothing of it is left
-    // on screen: it takes the place of the row that has just gone above.
+    // The question heading the rows above the window, drawn over its top row.
     fn pin_ask(&mut self, view: &View, width: usize, rows: &mut [Line<'static>]) {
         if rows.is_empty() || width < 2 {
             return;
         }
-        let Some(ask) = view.surface.scrollback.last_ask() else {
+        let Some(ask) = self.ask_heading(view) else {
             return;
         };
-        if !self.left_behind(ask) {
-            return;
-        }
         let Some(row) = view.surface.scrollback.get(ask) else {
             return;
         };
