@@ -870,10 +870,11 @@ impl Ui {
         } else {
             (view.surface.stream).answer_lines(width, &self.paint, body)
         };
-        if !thinking
-            && content.first().is_some_and(|line| !line.spans.is_empty())
-            && spacing.push(super::spacing::Section::Prose)
-        {
+        // The blank row parts the prompt from what answers it, and it stands
+        // from the moment the run is on: adding it with the first byte moved
+        // the screen a row when the byte came.
+        let said = content.first().is_some_and(|line| !line.spans.is_empty());
+        if (said || view.state.work.is_some()) && spacing.push(super::spacing::Section::Prose) {
             out.push(Line::default(), None);
         }
         for row in content.iter() {

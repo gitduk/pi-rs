@@ -17,6 +17,10 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   that layout looks the same. Scrolled up, the hint fills that blank row and
   the line keeps drawing, where it used to give way to the hint.
 
+- The blank row under a submitted prompt stands from the moment the run is on,
+  rather than from the model's first byte, so the screen no longer moves a row
+  when the answer starts. A turn that thinks first holds the row too.
+
 ## 3.0.10 - 2026-11-26
 
 ### Added
