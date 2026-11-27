@@ -7,6 +7,16 @@ session store or the tool script protocol changed shape.
 
 Releases before 3.0.0 are recorded in the commit history, not here.
 
+## Unreleased
+
+### Changed
+
+- A `top` status line no longer sits against the transcript's last row: a blank
+  row parts them. The row was already there for a layout with no `top` line —
+  it held the scroll hint — and now the line takes its own rows under it, so
+  that layout looks the same. Scrolled up, the hint fills that blank row and
+  the line keeps drawing, where it used to give way to the hint.
+
 ## 3.0.10 - 2026-11-26
 
 ### Added

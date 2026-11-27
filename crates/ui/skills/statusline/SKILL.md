@@ -37,8 +37,9 @@ This skill describes the interface.
 ```
 
 `place` is `top` or `bottom`, and defaults to `bottom`.
-A `top` line stands between the input line and the conversation; a `bottom`
-line stands under the input line.
+A `top` line stands between the input line and the conversation, a blank row
+over it parting it from the transcript; a `bottom` line stands under the input
+line.
 Every line keeps its row whether or not it has something to say, so the input
 line never moves.
 

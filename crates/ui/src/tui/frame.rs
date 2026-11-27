@@ -399,8 +399,8 @@ impl Ui {
         } else {
             below
         };
-        // Scrolled up, the strip's first row says how much is below rather
-        // than naming the checkouts.
+        // Scrolled up, the blank row over the status line says how much is
+        // below rather than staying blank.
         let hint = self.below > 0;
         let gap = if hint {
             let shine = self
@@ -511,12 +511,12 @@ impl Ui {
                     }
                 }
             };
-            if !over_rows.is_empty() && !hint {
+            if !over_rows.is_empty() {
                 frame.render_widget(Rows(&over_lines), regions.statusline_top);
             }
             frame.render_widget(Rows(&bar), regions.statusline);
             if self.selection.is_none() {
-                if !over_rows.is_empty() && !hint {
+                if !over_rows.is_empty() {
                     parts(frame, regions.statusline_top, &over_rows);
                 }
                 parts(frame, regions.statusline, &bar_rows);
