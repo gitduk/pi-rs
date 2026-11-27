@@ -63,6 +63,12 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   the bar showed the lane. A switch into a checkout the list has not read now
   drops the read, and the bar's next frame lists it.
 
+- A chat-format model that reads only the top-level effort reasoned anyway when
+  pi asked for none, so a short answer such as the session title ran out of
+  tokens before writing a word. The request now says `reasoning_effort: "none"`
+  beside `thinking: {"type": "disabled"}`, and both leave together on a host
+  that rejects either.
+
 ## 3.0.10 - 2026-11-26
 
 ### Added
