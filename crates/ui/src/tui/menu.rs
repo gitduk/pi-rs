@@ -594,13 +594,21 @@ impl Lists {
         self.forget_editable();
     }
 
-    // Points at a workspace, dropping the last one's answers. The sessions
-    // are read for it; the checkouts are the repository's rather than the
-    // directory's, so they stay — a switch inside one repository that dropped
-    // them drew a bar from nothing and then re-read git. Another repository is
-    // another list.
+    // Points at a workspace, dropping the last one's answers. A repository's
+    // checkouts stay unless the read cannot answer for the workspace.
     pub(super) fn at(&mut self, workspace: &std::path::Path) {
-        if core::worktree::main_root(workspace) != core::worktree::main_root(&self.workspace) {
+        let elsewhere =
+            core::worktree::main_root(workspace) != core::worktree::main_root(&self.workspace);
+        // By the path it was listed under, not the one that holds it: a checkout
+        // made inside a listed one is held by it and is still a stop of its own.
+        let unnamed = self.checkouts.get().is_some_and(|trees| {
+            match core::worktree::holding(trees, workspace) {
+                Some(tree) if tree.path == workspace => false,
+                Some(_) => core::worktree::git_dir(workspace).is_some(),
+                None => true,
+            }
+        });
+        if elsewhere || unnamed {
             self.checkouts.take();
         }
         self.workspace = workspace.to_path_buf();

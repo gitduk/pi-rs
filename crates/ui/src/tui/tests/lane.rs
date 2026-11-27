@@ -613,6 +613,62 @@ fn a_lane_whose_checkout_vanished_is_dropped_and_current_follows() {
     assert_eq!(tui.core.lanes.front(), 0, "the front lane follows its lane");
 }
 
+// The read is kept across a switch inside a repository, but a checkout it
+// has not read — one `/worktree` just made — is a new list.
+#[test]
+fn a_switch_into_a_checkout_the_list_has_not_read_reads_it_again() {
+    let base = tempfile::tempdir().expect("a place");
+    // Canonical, as the surface's own workspace is: one path spelled two ways
+    // reads as another repository and would pass the test for that reason.
+    let base = std::fs::canonicalize(base.path()).expect("a real path");
+    let repo = base.join("pi-rs");
+    // Beside the repository, the way `core::worktree` keeps one: its `.git`
+    // names the main checkout's, which is what makes both one repository.
+    let made = base.join("pi-rs.worktrees").join("one");
+    let link = repo.join(".git").join("worktrees").join("one");
+    std::fs::create_dir_all(&link).expect("a repository");
+    std::fs::create_dir_all(&made).expect("the worktree made");
+    std::fs::write(made.join(".git"), format!("gitdir: {}\n", link.display()))
+        .expect("the worktree's git link");
+
+    let mut tui = surface(&repo);
+    let main = pi_core::core::worktree::Tree {
+        path: repo.clone(),
+        main: true,
+        ..tree("pi-rs", Some("master"))
+    };
+    tui.ui.lists.checkouts.set(vec![main.clone()]).ok();
+
+    // A directory inside the checkout the list already holds: the read stands.
+    tui.ui.lists.at(&repo.join("crates"));
+    assert!(
+        tui.ui.lists.checkouts_read().is_some(),
+        "a switch inside a checkout keeps its read"
+    );
+
+    tui.ui.lists.at(&made);
+    assert!(
+        tui.ui.lists.checkouts_read().is_none(),
+        "the checkout the list has not read is read again"
+    );
+
+    // One made inside a checkout the list holds is held by that one, and is
+    // still a stop of its own: named by nothing, it would stay off the ring.
+    let inside = repo.join("sub");
+    let held = repo.join(".git").join("worktrees").join("sub");
+    std::fs::create_dir_all(&held).expect("a repository");
+    std::fs::create_dir_all(&inside).expect("the checkout inside");
+    std::fs::write(inside.join(".git"), format!("gitdir: {}\n", held.display()))
+        .expect("the inner checkout's git link");
+    tui.ui.lists.checkouts.set(vec![main]).ok();
+
+    tui.ui.lists.at(&inside);
+    assert!(
+        tui.ui.lists.checkouts_read().is_none(),
+        "a checkout the holding one does not name is read again"
+    );
+}
+
 // A vanished lane that sits before a running one waits: removing it
 // would shift the index the running lane's end reports back by.
 #[test]
