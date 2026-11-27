@@ -1949,3 +1949,51 @@ fn an_opened_line_that_wraps_counts_against_the_budget() {
         "the wrapped line is counted"
     );
 }
+
+// A question the window left behind heads it; one it is scrolled past stays
+// where it is, since a heading over older rows would name the wrong turn.
+#[test]
+fn a_question_the_window_left_behind_pins_to_the_top_row() {
+    let mut ui = test_ui(40, 8);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    let paint = Paint::new(false);
+    let mut rows = Row::prompt("first question", 0, &paint);
+    rows.extend((1..=10).map(|n| Row::notice(format!("row {n}"))));
+    rows.extend(Row::prompt("second question", 1, &paint));
+    rows.extend((11..=20).map(|n| Row::notice(format!("row {n}"))));
+    view.surface.scrollback = rows.into();
+    ui.flush(&lane, &mut view);
+    let height = ui.regions.history.height as usize;
+    assert!(
+        ui.drawn[0].contains("second question"),
+        "{:?}",
+        &ui.drawn[..height]
+    );
+    assert_eq!(
+        ui.drawn[height - 1].trim_end(),
+        "row 20",
+        "the pin takes a row above, not the newest one"
+    );
+    assert!(
+        ui.top_place().is_some(),
+        "the pin names a row still: a `/` search starts from the top of the view"
+    );
+
+    // Ten rows up from the newest puts the question on the window's last row:
+    // below what it shows, not above it.
+    view.surface.scroll.by = 10;
+    ui.flush(&lane, &mut view);
+    assert!(
+        ui.drawn[..height]
+            .iter()
+            .any(|row| row.contains("second question")),
+        "still in view below: {:?}",
+        &ui.drawn[..height]
+    );
+    assert!(
+        !ui.drawn[0].contains("question"),
+        "the older rows keep the top: {:?}",
+        &ui.drawn[..height]
+    );
+}

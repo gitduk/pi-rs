@@ -337,6 +337,15 @@ impl Ui {
             self.row_targets.push(target);
             self.row_of.push(at);
         }
+        // Scrolled up or on a hit, the next window opens on this one's top row,
+        // so a hit stays found as rows grow under it. Read before the pin takes it.
+        let on_hit = self.search_query().is_some_and(|(_, at)| at.is_some());
+        let anchored = (scroll > 0 || on_hit)
+            .then(|| self.anchor_here(view))
+            .flatten();
+        if !paged {
+            self.pin_ask(view, width, &mut rows);
+        }
         self.search_settle();
         // The query marked on the rows a search reads, a page's own.
         let look = self.rat_style(&self.paint.theme.matched);
@@ -412,13 +421,10 @@ impl Ui {
             None
         };
 
-        // Scrolled up, or on a hit, the next frame opens on this one's top
-        // row: a hit stays where it was found as the rows under it grow.
-        let on_hit = self.search_query().is_some_and(|(_, at)| at.is_some());
-        let top = (scroll > 0 || on_hit)
-            .then(|| self.anchor_here(view))
-            .flatten();
-        *self.window_mut(view) = Scroll { by: scroll, top };
+        *self.window_mut(view) = Scroll {
+            by: scroll,
+            top: anchored,
+        };
         let picked = self.list.highlighted(&menu);
         let table = self.menu_table(&menu, picked, regions.menu.width as usize);
         // The picked row on the input's band, the menu's width: a bar the eye
@@ -712,6 +718,53 @@ impl Ui {
                 Some((stamp, Line::from(span).style(band)))
             })
             .collect()
+    }
+
+    // The topmost history row the window shows; a cut first row shows nothing,
+    // and it is the row the pin would take its place from.
+    fn shown_top(&self) -> Option<usize> {
+        (self.row_targets.iter().enumerate()).find_map(|(drawn, target)| match target {
+            Target::Scrollback(idx, _) => Some(*idx),
+            Target::Separator(idx, _) if drawn > 0 => Some(*idx),
+            _ => None,
+        })
+    }
+
+    // Whether the window has left row `ask` behind: nothing of it on screen,
+    // and above the window rather than below it.
+    fn left_behind(&self, ask: usize) -> bool {
+        self.shown_top().is_none_or(|top| ask < top)
+    }
+
+    // The last question on the history's top row, once nothing of it is left
+    // on screen: it takes the place of the row that has just gone above.
+    fn pin_ask(&mut self, view: &View, width: usize, rows: &mut [Line<'static>]) {
+        if rows.is_empty() || width < 2 {
+            return;
+        }
+        let Some(ask) = view.surface.scrollback.last_ask() else {
+            return;
+        };
+        if !self.left_behind(ask) {
+            return;
+        }
+        let Some(row) = view.surface.scrollback.get(ask) else {
+            return;
+        };
+        let (body, border) = row.line(0, &self.paint, width);
+        let mut pinned = border.unwrap_or_default();
+        pinned.spans.extend(body.spans);
+        // Cut even when it fits: cutting drops the control bytes a prompt can
+        // carry into what a selection copies.
+        let cut = pinned.width() > width;
+        let ellipsis = cut.then(|| self.paint.span(&self.paint.theme.muted, icons::ELLIPSIS));
+        pinned = screen::cut(&pinned, width, ellipsis);
+        if let Some(band) = row.band(&self.paint) {
+            pinned = screen::banded(pinned, band);
+        }
+        rows[0] = pinned;
+        self.row_targets[0] = Target::Pin(ask);
+        self.row_of[0] = 0;
     }
 
     fn over_rule(&self, lit: bool) -> Block<'static> {

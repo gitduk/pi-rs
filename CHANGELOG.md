@@ -7,6 +7,15 @@ session store or the tool script protocol changed shape.
 
 Releases before 3.0.0 are recorded in the commit history, not here.
 
+## Unreleased
+
+### Added
+
+- A long answer no longer takes the question it answers out of reach: once
+  the question has scrolled off the top of the transcript, it heads the
+  transcript instead, worn as the row it was sent as. Scrolled up past it,
+  the older rows keep the top row and nothing is shown there.
+
 ## 3.0.10 - 2026-11-26
 
 ### Added

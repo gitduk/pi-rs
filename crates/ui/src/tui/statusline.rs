@@ -899,9 +899,7 @@ impl Ui {
             1 => return vec![ellipsis],
             _ => {}
         }
-        let mut cut = screen::clip_line(&Line::from(spans), room - 1).spans;
-        cut.push(ellipsis);
-        cut
+        screen::cut(&Line::from(spans), room, Some(ellipsis)).spans
     }
 }
 

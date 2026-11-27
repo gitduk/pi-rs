@@ -97,9 +97,7 @@ fn cut_line(line: Line<'static>, room: usize) -> Line<'static> {
     if pi_store::text::width(&screen::plain(&line)) <= room {
         return line;
     }
-    let mut cut = screen::clip_line(&line, room.saturating_sub(1));
-    cut.spans.push(Span::raw(icons::ELLIPSIS));
-    cut
+    screen::cut(&line, room, Some(Span::raw(icons::ELLIPSIS)))
 }
 
 // An opened block of reasoning still streaming shows this many of its first
