@@ -95,7 +95,7 @@ impl Ui {
     }
 
     // What row of the execution list is at screen row `row`.
-    fn command_row_at(&self, row: u16) -> Option<super::call::CommandRow> {
+    pub(super) fn command_row_at(&self, row: u16) -> Option<super::call::CommandRow> {
         if self.over_menu(row) {
             return None;
         }
@@ -119,30 +119,77 @@ impl Ui {
 
     // The execution whose row of the list is at screen row `row`.
     pub(super) fn command_at(&self, row: u16) -> Option<u64> {
-        let Some(super::call::CommandRow::BackgroundCommand(id)) = self.command_row_at(row) else {
+        let Some(super::call::CommandRow::BackgroundCommand { id, .. }) = self.command_row_at(row)
+        else {
             return None;
         };
         let execution = self
             .executions
             .iter()
             .find(|execution| execution.id == id)?;
-        let opens = super::call::background_opens(execution, self.screen.width());
+        let opens = super::call::background_opens(execution, self.screen.width())
+            || execution.state == pi_core::driver::background::State::Back;
         let open = self.background_open.as_ref().is_some_and(|o| o.id == id);
         (open || opens).then_some(id)
+    }
+
+    fn statusline_col(
+        &self,
+        place: StatuslinePlace,
+        at: usize,
+        cols: &std::ops::Range<usize>,
+        col: u16,
+        row: u16,
+    ) -> Option<(Rect, usize)> {
+        let strip = self.regions.strip(place);
+        let r = row_in(strip, row)?;
+        let c = col.checked_sub(strip.x)? as usize;
+        (r == at && cols.contains(&c)).then_some((strip, c))
     }
 
     /// The flash under screen cell (`col`, `row`), and whether its page action
     /// is under that cell.
     pub(super) fn flash_at(&self, col: u16, row: u16) -> Option<bool> {
         let (place, at, hit) = self.flash_hit.as_ref()?;
-        let strip = self.regions.strip(*place);
-        let r = row_in(strip, row)?;
-        let c = col.checked_sub(strip.x)? as usize;
-        (r == *at && hit.cols.contains(&c)).then(|| {
+        let (strip, _) = self.statusline_col(*place, *at, &hit.cols, col, row)?;
+        Some(
             hit.more
                 .as_ref()
-                .is_some_and(|(_, areas)| areas.action.contains(Position::new(col - strip.x, 0)))
+                .is_some_and(|(_, areas)| areas.action.contains(Position::new(col - strip.x, 0))),
+        )
+    }
+
+    fn tab_hit_at(&self, col: u16, row: u16) -> Option<(&super::statusline::TabHit, usize)> {
+        if self.over_menu(row) {
+            return None;
+        }
+        self.tab_hits.iter().find_map(|hit| {
+            let (_, c) = self.statusline_col(hit.place, hit.row, &hit.strip, col, row)?;
+            Some((hit, c))
         })
+    }
+
+    /// Open lane index under screen cell (`col`, `row`), if inside the tab strip.
+    pub(super) fn tab_at(&self, col: u16, row: u16) -> Option<usize> {
+        let (hit, c) = self.tab_hit_at(col, row)?;
+        hit.tabs
+            .iter()
+            .find_map(|(lane, cols)| cols.contains(&c).then_some(*lane))
+    }
+
+    /// Whether (`col`, `row`) hovers over the statusline tab strip.
+    pub(super) fn tab_strip_at(&self, col: u16, row: u16) -> bool {
+        self.tab_hit_at(col, row).is_some()
+    }
+
+    /// Whether (`col`, `row`) is on the statusline `jobs` badge.
+    pub(super) fn jobs_at(&self, col: u16, row: u16) -> bool {
+        if self.over_menu(row) {
+            return false;
+        }
+        self.jobs_hits
+            .iter()
+            .any(|(place, at, range)| self.statusline_col(*place, *at, range, col, row).is_some())
     }
 
     pub(super) fn target_at(&self, row: u16) -> Option<Target> {
@@ -184,10 +231,7 @@ impl Ui {
         if self.reading() || !self.page_at_pointer(col, row) {
             return None;
         }
-        match self.target_at(row) {
-            Some(Target::BackgroundResult(_, id)) => Some(id),
-            _ => self.earlier_at(row).or_else(|| self.command_at(row)),
-        }
+        self.earlier_at(row).or_else(|| self.command_at(row))
     }
 
     fn more_at_pointer(&self, col: u16, row: u16) -> bool {
@@ -696,9 +740,6 @@ pub(super) enum Target {
     // A running call's own line in the live block: a click opens or closes
     // what it printed, or folds the batch when there is nothing to show.
     PendingTool(usize),
-    // Completed executions waiting to be delivered in the live block.
-    BackgroundResults(usize),
-    BackgroundResult(usize, u64),
     Live(usize),
     // Line `n` of the text the reading page shows.
     Text(usize),
@@ -852,27 +893,38 @@ impl Regions {
         }
         // A run's rows keep one of their own above them: the screen's, not
         // the conversation's, so a task list never reads as the last answer.
-        let space = u16::from(executions > 0);
+        // When `executions` is open, that row also serves as `gap` so there
+        // is no extra blank line between the drawer and `statusline_top`.
+        let (upper, lower) = if executions > 0 {
+            (1, 0)
+        } else {
+            (0, gap as u16)
+        };
         // One stack, top to bottom: what a screen shows when the panes above
         // it have taken their rows.
         let [
             history,
-            _,
+            upper_gap,
             executions,
-            gap,
+            lower_gap,
             statusline_top,
             editor,
             statusline,
         ] = Layout::vertical([
             Constraint::Fill(1),
-            Constraint::Length(space),
+            Constraint::Length(upper),
             Constraint::Length(executions as u16),
-            Constraint::Length(gap as u16),
+            Constraint::Length(lower),
             Constraint::Length(top as u16),
             Constraint::Length(editor as u16),
             Constraint::Length(bar as u16),
         ])
         .areas(area);
+        let gap = if executions.height > 0 {
+            upper_gap
+        } else {
+            lower_gap
+        };
         // The panel covers the rows just over the input line — the gap and
         // the row above it with them, so an option sits beside the line it
         // completes. At most half of what stands above, so the conversation

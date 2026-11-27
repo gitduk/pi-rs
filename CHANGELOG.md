@@ -67,12 +67,19 @@ Releases before 3.0.0 are recorded in the commit history, not here.
 
 - Separated workspace tabs from git worktrees: several tabs (lanes) now run
   side by side in one workspace directory. `/tab [name]` opens a fresh session
-  tab here, `/tab close` closes the front tab and keeps its session on disk for
-  `/resume`, `H`/`L` step only across open tabs, and `/worktree` manages git
-  worktree checkouts alone. Tabs that share a branch or directory label are
-  told apart on the statusline's `tabs` strip by `·<name>` or `#2`, `#3`.
+  tab here, `/tab close` (or `x` in Normal mode on an empty line) closes the
+  front tab and keeps its session on disk for `/resume`, `H`/`L`, mouse clicks,
+  and scroll wheel events over the tab strip switch open tabs, and `/worktree`
+  manages git worktree checkouts alone. Tabs that share a branch or directory
+  label are told apart on the statusline's `tabs` strip by `·<name>` or `#2`,
+  `#3`.
 - Removed the `worktree` statusline field (`Field::Worktree`) and the per-lane
   worktree from snapshots and statusline facts.
+- Added a built-in `jobs` statusline field (`Field::Jobs`, included in the
+  default layout) that collapses running and waiting-delivery background
+  commands into a compact badge; `ctrl+k` opens and focuses the command drawer
+  (clicking the `jobs` badge toggles it) flush above the top statusline/input
+  line instead of keeping job rows always visible above the gap.
 
 ### Fixed
 

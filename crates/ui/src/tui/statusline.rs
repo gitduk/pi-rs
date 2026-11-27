@@ -53,6 +53,8 @@ pub(crate) struct Facts {
     pub tabs: Vec<Tab>,
     /// Where the checkout's background executions stand.
     pub jobs: Jobs,
+    #[serde(skip)]
+    pub jobs_label: Option<String>,
     /// What the session's services last reported, one line per connection;
     /// drawn joined by the `services` field.
     pub services: Vec<String>,
@@ -239,6 +241,7 @@ impl Facts {
             Field::Queued if run.queued == 0 => return None,
             Field::Queued => format!("{} queued", run.queued),
             Field::Workspace => self.workspace.clone()?,
+            Field::Jobs => self.jobs_label.clone()?,
             Field::Services if self.services.is_empty() => return None,
             Field::Services => self.services.join(" · "),
             // The surface renders these itself.
@@ -274,6 +277,7 @@ impl Facts {
             run: Run::of(&run, None),
             tabs: Vec::new(),
             jobs: Jobs::default(),
+            jobs_label: None,
             services: Vec::new(),
             workspace: None,
             git: None,
@@ -286,7 +290,7 @@ impl Facts {
         view: &View,
         git: Option<statusline::Git>,
         tabs: Vec<Tab>,
-        jobs: Jobs,
+        executions: &[pi_core::driver::background::BackgroundCommand],
         services: Vec<String>,
     ) -> Self {
         let snapshot = snapshot(lane, view);
@@ -294,6 +298,7 @@ impl Facts {
         let name = lane.name();
         let work = view.state.work.as_ref();
         let (retry, outcome) = screen_of(work, view.state.outcome);
+        let jobs = Jobs::of(executions);
         Self {
             model: endpoint_model(&snapshot.model_name),
             provider: spec.provider().map(str::to_string),
@@ -332,6 +337,7 @@ impl Facts {
             },
             tabs,
             jobs,
+            jobs_label: jobs_summary_of(executions, jobs),
             services,
             workspace: lane
                 .root()
@@ -341,6 +347,39 @@ impl Facts {
             may_run_scripts: pi_store::statusline::may_run_scripts(lane.resolved().ceiling),
         }
     }
+}
+
+#[cfg(test)]
+pub(super) fn jobs_summary(
+    executions: &[pi_core::driver::background::BackgroundCommand],
+) -> Option<String> {
+    jobs_summary_of(executions, Jobs::of(executions))
+}
+
+fn jobs_summary_of(
+    executions: &[pi_core::driver::background::BackgroundCommand],
+    jobs: Jobs,
+) -> Option<String> {
+    use pi_core::driver::background::State;
+    if jobs.running == 0 && jobs.back == 0 {
+        return None;
+    }
+    if jobs.running == 1
+        && jobs.back == 0
+        && let Some(job) = executions.iter().find(|j| j.state == State::Running)
+    {
+        let title = pi_store::text::clip(job.invocation.title().as_ref(), 20);
+        let elapsed = crate::status::running_time(job.started.elapsed(), crate::status::SHOWN);
+        return Some(match elapsed {
+            Some(time) => format!("#{} {title}{}{time}", job.id, icons::PART_SEP),
+            None => format!("#{} {title}", job.id),
+        });
+    }
+    Some(match (jobs.running, jobs.back) {
+        (r, 0) => super::row::count(r, "job"),
+        (0, b) => format!("{} waiting", super::row::count(b, "job")),
+        (r, b) => format!("{r} running{}{b} waiting", icons::PART_SEP),
+    })
 }
 
 // The branch as its git directory names it: a line of `HEAD`. Reading it is a
@@ -424,6 +463,7 @@ fn state_of(work: Option<&Work>, view: &View) -> String {
 enum Piece {
     Spans(Vec<Span<'static>>),
     Tabs,
+    Jobs(Vec<Span<'static>>),
 }
 
 pub(super) struct StatuslineRow {
@@ -435,6 +475,29 @@ pub(super) struct StatuslineRow {
 pub(super) struct FlashHit {
     pub(super) cols: std::ops::Range<usize>,
     pub(super) more: Option<(Line<'static>, super::browse::MoreAreas)>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct TabHit {
+    pub(super) place: statusline::Place,
+    pub(super) row: usize,
+    pub(super) strip: std::ops::Range<usize>,
+    pub(super) tabs: Vec<(usize, std::ops::Range<usize>)>,
+}
+
+fn shift_range(range: &mut std::ops::Range<usize>, by: usize, limit: usize) -> bool {
+    let end = (range.end + by).min(limit);
+    let start = (range.start + by).min(end);
+    *range = start..end;
+    start < end
+}
+
+impl TabHit {
+    fn shift(&mut self, by: usize, limit: usize) {
+        shift_range(&mut self.strip, by, limit);
+        let end = self.strip.end;
+        self.tabs.retain_mut(|(_, cols)| shift_range(cols, by, end));
+    }
 }
 
 impl FlashHit {
@@ -461,13 +524,24 @@ impl Ui {
         self.services = statuses;
     }
 
-    // The checkouts, one entry each in `refresh_tabs` order. Too narrow, the
-    // front one stays and each dropped end keeps its `…`.
     pub(super) fn tabs_strip(&self, strip: usize) -> Vec<Span<'static>> {
+        self.tabs_strip_with_hits(strip).0
+    }
+
+    // The open tabs, one entry each in `refresh_tabs` order. Too narrow, the
+    // front one stays and each dropped end keeps its `…`. Also returns local
+    // column ranges per visible tab and for the strip as a whole.
+    fn tabs_strip_with_hits(&self, strip: usize) -> (Vec<Span<'static>>, TabHit) {
+        let empty_hit = TabHit {
+            place: statusline::Place::Bottom,
+            row: 0,
+            strip: 0..0,
+            tabs: Vec::new(),
+        };
         let theme = &self.paint.theme;
         let sep = self.tab_sep.width();
         let Some(front) = self.tabs.iter().position(|t| t.mark == Mark::Front) else {
-            return Vec::new();
+            return (Vec::new(), empty_hit);
         };
         let items: Vec<Span<'static>> = self
             .tabs
@@ -521,23 +595,42 @@ impl Ui {
             }
         }
         let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut tabs: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
+        let mut x = 0;
         if lo > 0 {
             spans.push(dots.clone());
             spans.push(self.tab_sep.clone());
+            x += ell + sep;
         }
         for (i, item) in items.into_iter().enumerate().take(hi + 1).skip(lo) {
             if i > lo {
                 spans.push(self.tab_sep.clone());
+                x += sep;
             }
+            let w = widths[i];
+            let start = x.min(strip);
+            let end = (x + w).min(strip);
+            if start < end {
+                tabs.push((i, start..end));
+            }
+            x += w;
             spans.push(item);
         }
         if hi + 1 < n {
             spans.push(self.tab_sep.clone());
             spans.push(dots);
         }
-        // A front checkout too long for its share folds itself here rather
+        // A front tab too long for its share folds itself here rather
         // than eating the parts beside it.
-        screen::clip_line(&Line::from(spans), strip).spans
+        let clipped = screen::clip_line(&Line::from(spans), strip).spans;
+        let width = spans_width(&clipped);
+        let hit = TabHit {
+            place: statusline::Place::Bottom,
+            row: 0,
+            strip: 0..width,
+            tabs,
+        };
+        (clipped, hit)
     }
 
     /// The bar's rows, one per layout line. The only place an expired flash
@@ -558,6 +651,8 @@ impl Ui {
             _ => {}
         }
         self.flash_hit = None;
+        self.tab_hits.clear();
+        self.jobs_hits.clear();
         // A script runs off the frame: started here, read back once it says
         // something. What has not answered yet stands as its placeholder.
         // A layout outlives the run that wrote it, and the ceiling does not:
@@ -569,21 +664,24 @@ impl Ui {
         let mut over = Vec::new();
         let mut under = Vec::new();
         for line in &self.layout.lines {
-            let (row, hit) = self.bar_row(line, facts, width, session);
-            match line.place {
-                statusline::Place::Top => {
-                    if let Some(hit) = hit {
-                        self.flash_hit = Some((line.place, over.len(), hit));
-                    }
-                    over.push(row);
-                }
-                statusline::Place::Bottom => {
-                    if let Some(hit) = hit {
-                        self.flash_hit = Some((line.place, under.len(), hit));
-                    }
-                    under.push(row);
-                }
+            let (row, hit, tabs, jobs) = self.bar_row(line, facts, width, session);
+            let target = match line.place {
+                statusline::Place::Top => &mut over,
+                statusline::Place::Bottom => &mut under,
+            };
+            let at = target.len();
+            if let Some(hit) = hit {
+                self.flash_hit = Some((line.place, at, hit));
             }
+            for mut tab_hit in tabs {
+                tab_hit.place = line.place;
+                tab_hit.row = at;
+                self.tab_hits.push(tab_hit);
+            }
+            for range in jobs {
+                self.jobs_hits.push((line.place, at, range));
+            }
+            target.push(row);
         }
         (over, under)
     }
@@ -597,7 +695,12 @@ impl Ui {
         facts: &Facts,
         width: usize,
         session: &std::path::Path,
-    ) -> (StatuslineRow, Option<FlashHit>) {
+    ) -> (
+        StatuslineRow,
+        Option<FlashHit>,
+        Vec<TabHit>,
+        Vec<std::ops::Range<usize>>,
+    ) {
         let left = self.pieces(&line.left, facts, session);
         let right = self.pieces(&line.right, facts, session);
         let sep = match &line.sep {
@@ -631,8 +734,8 @@ impl Ui {
         ])
         .areas(area);
         let lcut = self.natural(&left, &sep) > left_area.width as usize;
-        let spans = self.join(left, left_area.width as usize, &sep);
-        let right = self.join(right, right_area.width as usize, &sep);
+        let (spans, left_tabs, left_jobs) = self.join(left, left_area.width as usize, &sep);
+        let (right, right_tabs, right_jobs) = self.join(right, right_area.width as usize, &sep);
         let [_, right_text] = RowLayout::horizontal([
             Constraint::Fill(1),
             Constraint::Length(spans_width(&right) as u16),
@@ -640,6 +743,22 @@ impl Ui {
         .areas(right_area);
         let left_line = Line::from(spans);
         let right_line = Line::from(right);
+        let mut tabs = Vec::new();
+        let mut jobs = Vec::new();
+        for (by, part_tabs, part_jobs) in [
+            (left_area.x as usize, left_tabs, left_jobs),
+            (right_text.x as usize, right_tabs, right_jobs),
+        ] {
+            for mut tab_hit in part_tabs {
+                tab_hit.shift(by, usize::MAX);
+                tabs.push(tab_hit);
+            }
+            for mut range in part_jobs {
+                if shift_range(&mut range, by, usize::MAX) {
+                    jobs.push(range);
+                }
+            }
+        }
         let shown = self.flash.is_some();
         let mut hit = (shown && holds_flash(&line.left))
             .then(|| FlashHit::of(&left_line.spans, left_area.x as usize, lcut));
@@ -664,6 +783,8 @@ impl Ui {
                 parts: [(left_area, left_line), (right_text, right_line)],
             },
             hit,
+            tabs,
+            jobs,
         )
     }
 
@@ -676,6 +797,12 @@ impl Ui {
             match item {
                 Item::Field(Field::Tabs) => pieces.extend(self.tabs_piece()),
                 Item::Styled(s) if s.field == Field::Tabs => pieces.extend(self.tabs_piece()),
+                Item::Field(Field::Jobs) => {
+                    pieces.extend(self.spans(item, facts, session).map(Piece::Jobs))
+                }
+                Item::Styled(s) if s.field == Field::Jobs => {
+                    pieces.extend(self.spans(item, facts, session).map(Piece::Jobs))
+                }
                 Item::Group(g) => {
                     pieces.extend(self.group_items(&g.group, facts, session).map(Piece::Spans));
                 }
@@ -742,6 +869,22 @@ impl Ui {
             Field::Flash if self.flash.is_none() && !facts.alerts.is_empty() => {
                 let alerts = facts.alerts.join(icons::PART_SEP);
                 Some(vec![self.paint.span(&self.paint.theme.status.err, alerts)])
+            }
+            Field::Jobs => {
+                let label = facts.jobs_label.as_deref()?;
+                let default = if self.jobs_open {
+                    Look::Tone(Tone::Heading)
+                } else if facts.jobs.back > 0 {
+                    Look::Tone(Tone::Emphasis)
+                } else {
+                    MUTED
+                };
+                let look = if matches!(item, Item::Field(_)) {
+                    &default
+                } else {
+                    look
+                };
+                self.text(label, look)
             }
             Field::Branch => {
                 let branch = &facts.git.as_ref()?.branch;
@@ -867,7 +1010,7 @@ impl Ui {
         let spans: usize = pieces
             .iter()
             .map(|p| match p {
-                Piece::Spans(s) => spans_width(s),
+                Piece::Spans(s) | Piece::Jobs(s) => spans_width(s),
                 Piece::Tabs => 0,
             })
             .sum();
@@ -884,28 +1027,62 @@ impl Ui {
         self.fixed(pieces, sep) + tabs
     }
 
-    fn join(&self, pieces: Vec<Piece>, room: usize, sep: &[Span<'static>]) -> Vec<Span<'static>> {
+    fn join(
+        &self,
+        pieces: Vec<Piece>,
+        room: usize,
+        sep: &[Span<'static>],
+    ) -> (Vec<Span<'static>>, Vec<TabHit>, Vec<std::ops::Range<usize>>) {
         let strip = room.saturating_sub(self.fixed(&pieces, sep));
         let mut spans = Vec::new();
+        let mut tabs = Vec::new();
+        let mut jobs = Vec::new();
         for (i, piece) in pieces.into_iter().enumerate() {
             if i > 0 {
                 spans.extend_from_slice(sep);
             }
             match piece {
                 Piece::Spans(s) => spans.extend(s),
-                Piece::Tabs => spans.extend(self.tabs_strip(strip)),
+                Piece::Jobs(s) => {
+                    let base = spans_width(&spans);
+                    let w = spans_width(&s);
+                    let mut range = 0..w;
+                    if shift_range(&mut range, base, room) {
+                        jobs.push(range);
+                    }
+                    spans.extend(s);
+                }
+                Piece::Tabs => {
+                    let base = spans_width(&spans);
+                    let (tab_spans, mut hit) = self.tabs_strip_with_hits(strip);
+                    hit.shift(base, room);
+                    if !hit.strip.is_empty() {
+                        tabs.push(hit);
+                    }
+                    spans.extend(tab_spans);
+                }
             }
         }
         if spans_width(&spans) <= room {
-            return spans;
+            return (spans, tabs, jobs);
         }
         let ellipsis = self.paint.span(&self.paint.theme.muted, icons::ELLIPSIS);
         match room {
-            0 => return Vec::new(),
-            1 => return vec![ellipsis],
+            0 => return (Vec::new(), Vec::new(), Vec::new()),
+            1 => return (vec![ellipsis], Vec::new(), Vec::new()),
             _ => {}
         }
-        screen::cut(&Line::from(spans), room, Some(ellipsis)).spans
+        let cut_limit = room.saturating_sub(ellipsis.width());
+        tabs.retain_mut(|hit| {
+            hit.shift(0, cut_limit);
+            !hit.strip.is_empty()
+        });
+        jobs.retain_mut(|range| shift_range(range, 0, cut_limit));
+        (
+            screen::cut(&Line::from(spans), room, Some(ellipsis)).spans,
+            tabs,
+            jobs,
+        )
     }
 }
 

@@ -16,7 +16,7 @@ use super::row::{Row, count};
 use super::screen::{self, Rows};
 use super::scrollback::{Piece, ScrollbackRows, body};
 use super::search::{self, Anchor, Laid, Spot};
-use super::statusline::{Facts, Jobs};
+use super::statusline::Facts;
 use super::view::{Scroll, StreamKind, View, remember_first_ask};
 use crate::render;
 use crate::render::Paint;
@@ -79,21 +79,25 @@ impl Ui {
         let hovered_command = self.pointer.and_then(|(_, row)| {
             (self
                 .command_at(row)
-                .map(call::CommandRow::BackgroundCommand))
+                .map(|id| call::CommandRow::BackgroundCommand { id, back: false }))
             .or(self.earlier_at(row).map(call::CommandRow::Earlier))
             .or(self.fold_at(row).then_some(call::CommandRow::Fold))
         });
         let open = self.background_open.as_ref();
-        let (mut executions, mut command_rows) = call::background_lines(
-            &self.executions,
-            hovered_command,
-            open,
-            self.background_all || self.background_focus.is_some(),
-            &self.paint,
-            width,
-        );
+        let (mut executions, mut command_rows) = if self.jobs_open {
+            call::background_lines(
+                &self.executions,
+                hovered_command,
+                open,
+                self.background_all || self.background_focus.is_some(),
+                &self.paint,
+                width,
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
         for (line, row) in executions.iter_mut().zip(&command_rows) {
-            if matches!(row, call::CommandRow::BackgroundCommand(id) if Some(*id) == self.background_focus)
+            if matches!(row, call::CommandRow::BackgroundCommand { id, .. } if Some(*id) == self.background_focus)
             {
                 line.style = line.style.add_modifier(ratatui::style::Modifier::REVERSED);
             }
@@ -104,7 +108,7 @@ impl Ui {
             view,
             self.git.clone(),
             self.tabs.clone(),
-            Jobs::of(&self.every_command),
+            &self.every_command,
             self.services.clone(),
         );
         let session = self.lists.store.session_dir(lane.root(), lane.id());
@@ -190,9 +194,9 @@ impl Ui {
         asked.truncate(regions.asked.height as usize);
         // A hidden selection must never receive destructive keys.
         let focus_row = self.background_focus.and_then(|id| {
-            command_rows
-                .iter()
-                .position(|row| *row == call::CommandRow::BackgroundCommand(id))
+            command_rows.iter().position(
+                |row| matches!(row, call::CommandRow::BackgroundCommand { id: row_id, .. } if *row_id == id),
+            )
         });
         let command_top = focus_row.map_or(0, |at| {
             let id = self.background_focus.expect("a focused row");
@@ -201,7 +205,7 @@ impl Ui {
                 .enumerate()
                 .skip(at + 1)
                 .find(|(_, row)| {
-                    matches!(row, call::CommandRow::BackgroundCommand(other) if *other != id)
+                    matches!(row, call::CommandRow::BackgroundCommand { id: other, .. } if *other != id)
                         || **row == call::CommandRow::Fold
                 })
                 .map_or(command_rows.len(), |(at, _)| at);
@@ -623,26 +627,14 @@ impl Ui {
                             row_actions.push(action);
                         }
                     }
-                    Target::BackgroundResult(..) => {
-                        let area = Rect {
-                            width: regions.history.width.saturating_sub(1),
-                            ..regions.history
-                        };
-                        if let Some(area) = row_area(area, at)
-                            && let Some(areas) = super::browse::MoreAreas::of(area)
-                        {
-                            actions.push(areas.action);
-                        }
-                    }
                     _ => {}
                 }
             }
             for (at, target) in self.command_rows.iter().enumerate() {
                 let opens = match target {
                     call::CommandRow::Earlier(_) => true,
-                    call::CommandRow::BackgroundCommand(_)
-                    | call::CommandRow::Under
-                    | call::CommandRow::Fold => false,
+                    call::CommandRow::BackgroundCommand { back, .. } => *back,
+                    call::CommandRow::Under | call::CommandRow::Fold => false,
                 };
                 if opens
                     && let Some(area) = row_area(
@@ -956,7 +948,7 @@ impl Ui {
         {
             out.push(row, None);
         }
-        let mut targets: Vec<_> = out
+        let targets: Vec<_> = out
             .rows
             .iter()
             .enumerate()
@@ -968,19 +960,6 @@ impl Ui {
                 }
             })
             .collect();
-        let hovered = self.pointer.and_then(|(_, row)| self.target_at(row));
-        let (results, result_targets) = call::background_results(
-            &self.every_command,
-            self.background_results_shown,
-            hovered,
-            &self.paint,
-            width,
-            out.rows.len(),
-        );
-        for row in results {
-            out.push(row, None);
-        }
-        targets.extend(result_targets);
         (out.rows, targets, out.ids)
     }
 

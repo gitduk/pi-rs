@@ -8,7 +8,7 @@
 | `/model --refresh`                 | refresh model lists from providers           |
 | `/effort [level]`                  | `off` `low` `medium` `high`, from now on      |
 | `/worktree [name]`, `/worktree rm` | work in `<repo>.worktrees/<name>`             |
-| `/tab [name]`, `/tab close`        | open a fresh tab in this workspace, or close it; `H`/`L` step open tabs |
+| `/tab [name]`, `/tab close`        | open a fresh tab in this workspace, or close it (`x` in Normal mode on an empty line); switch open tabs via `H`/`L`, click, or wheel |
 | `/mv <dir>`                        | move this session and its background commands to another directory |
 | `/compact [focus]`                 | summarize everything but the working tail     |
 | `/<tool> [key=value…]`             | run a named tool. Background tools return immediately |
@@ -34,9 +34,10 @@ their `key=value` arguments. Descriptions mark tools with `[tool]` and skills
 with `[skill]`. Existing commands keep their names when a tool has the same
 name. There is no `/tool` entry point.
 
-`ctrl+k` focuses the last background command above the input, in Vim Normal
-mode and on the insert-mode line alike.
-`ctrl+k` and `ctrl+j` move between commands.
+`ctrl+k` opens and focuses (and clicking the statusline `jobs` badge toggles) the
+background commands drawer above the input, covering running commands and
+finished results waiting for idle delivery. `ctrl+k` and `ctrl+j` move between
+commands.
 `ctrl+j` below the last command or `esc` returns to the draft at its original
 cursor position. pi highlights the selected command.
 

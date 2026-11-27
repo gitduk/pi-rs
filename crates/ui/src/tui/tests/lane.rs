@@ -482,6 +482,69 @@ async fn stepping_open_tabs_walks_lane_order_and_wraps_both_ways() {
     assert_eq!(tui.core.lanes.front(), 1);
 }
 
+// Clicking a tab selects it directly; scrolling the mouse wheel over the tab
+// strip steps through open tabs.
+#[tokio::test]
+async fn clicking_or_scrolling_the_tab_strip_switches_tabs() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    let d0 = tempfile::tempdir().expect("dir0");
+    let d1 = tempfile::tempdir().expect("dir1");
+    let d2 = tempfile::tempdir().expect("dir2");
+    let mut tui = surface(d0.path());
+    tui.core.lanes.push(running_lane_as(d1.path(), "s1"));
+    tui.core.lanes.push(running_lane_as(d2.path(), "s2"));
+    tui.refresh_tabs();
+    let flush = |tui: &mut crate::tui::Tui| {
+        let view = crate::tui::view_at(&mut tui.views, tui.core.lane().token());
+        tui.ui.flush(tui.core.lane(), view);
+    };
+    flush(&mut tui);
+
+    let hit = tui.ui.tab_hits[0].clone();
+    let strip = tui.ui.regions.strip(hit.place);
+    let row = strip.y + hit.row as u16;
+    let (_, tab2_cols) = hit.tabs.iter().find(|(i, _)| *i == 2).unwrap();
+    let mouse = |tui: &mut crate::tui::Tui, kind, column| {
+        let view = crate::tui::view_at(&mut tui.views, tui.core.lane().token());
+        tui.ui.key(
+            tui.core.lane(),
+            view,
+            crate::tui::TermEvent::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }),
+            false,
+        )
+    };
+    let crate::tui::Asked::Own(deed) = mouse(
+        &mut tui,
+        MouseEventKind::Down(MouseButton::Left),
+        strip.x + tab2_cols.start as u16,
+    ) else {
+        panic!("expected SelectLane deed");
+    };
+    assert!(matches!(deed, crate::tui::Deed::SelectLane(2)));
+    tui.carry(deed).await;
+    assert_eq!(tui.core.lanes.front(), 2);
+
+    flush(&mut tui);
+    let hit = tui.ui.tab_hits[0].clone();
+    let col = tui.ui.regions.strip(hit.place).x + hit.strip.start as u16;
+    let crate::tui::Asked::Own(next) = mouse(&mut tui, MouseEventKind::ScrollDown, col) else {
+        panic!("expected StepLane deed");
+    };
+    tui.carry(next).await;
+    assert_eq!(tui.core.lanes.front(), 0);
+    let crate::tui::Asked::Own(prev) = mouse(&mut tui, MouseEventKind::ScrollUp, col) else {
+        panic!("expected StepLane deed");
+    };
+    tui.carry(prev).await;
+    assert_eq!(tui.core.lanes.front(), 2);
+}
+
 // A checkout deleted from the shell leaves its lane a dead end; dropping
 // idle ones keeps the bar's tab honest, with front unmoved.
 #[test]
@@ -1664,14 +1727,8 @@ fn a_line_draws_the_models_name_and_the_input_keeps_its_identity() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     let view = crate::tui::front_view(&mut tui.views, tui.core.lane());
-    let facts = crate::tui::statusline::Facts::of(
-        tui.core.lane(),
-        view,
-        None,
-        Vec::new(),
-        Default::default(),
-        Vec::new(),
-    );
+    let facts =
+        crate::tui::statusline::Facts::of(tui.core.lane(), view, None, Vec::new(), &[], Vec::new());
     assert_eq!(
         facts.value(pi_store::statusline::Field::Model).as_deref(),
         Some("m"),

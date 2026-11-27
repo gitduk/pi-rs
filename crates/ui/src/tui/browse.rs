@@ -93,13 +93,6 @@ impl MoreAreas {
     }
 }
 
-// The action is rendered separately by the frame, in the same layout.
-pub(super) fn more_body(line: Line<'static>, width: usize) -> Line<'static> {
-    let area = Rect::new(0, 0, width as u16, 1);
-    let body = MoreAreas::of(area).map_or(area, |areas| areas.body);
-    super::screen::clip_line(&line, body.width as usize)
-}
-
 // A line of a text page: the code block a click on it copies when it is
 // that block's badge, and what in it a double click takes whole.
 pub(super) struct PageLine {

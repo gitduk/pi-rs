@@ -7,21 +7,24 @@ use super::{Asked, Deed, Ui};
 
 pub(super) const HINT: &str = "j/k move · ctrl+k/j move across input · x stop · r restart · X stop all · enter output · q/esc back";
 
+fn is_active_job(state: State) -> bool {
+    matches!(state, State::Running | State::Back)
+}
+
 impl Ui {
-    // Keep stopped rows available for restart while other commands still run.
+    // Keep stopped rows available for restart while the drawer is open.
     pub(super) fn sync_background(&mut self, all: Vec<BackgroundCommand>) {
-        if !all.iter().any(|j| j.state == State::Running) {
+        if !all.iter().any(|j| is_active_job(j.state)) {
             self.leave_background();
         }
         let at = self
             .background_focus
             .and_then(|id| self.executions.iter().position(|j| j.id == id));
-        let focused = self.background_focus.is_some();
+        let open = self.jobs_open;
         let executions = all
             .iter()
             .filter(|j| {
-                j.state == State::Running
-                    || (focused && self.executions.iter().any(|old| old.id == j.id))
+                is_active_job(j.state) || (open && self.executions.iter().any(|old| old.id == j.id))
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -32,16 +35,36 @@ impl Ui {
                 .and_then(|at| executions.get(at.min(executions.len().saturating_sub(1))))
                 .map(|j| j.id);
         }
+        if executions.is_empty() {
+            self.jobs_open = false;
+            self.background_focus = None;
+            self.background_open = None;
+        }
         self.every_command = all;
         self.executions = executions;
-        if !self.every_command.iter().any(|j| j.state == State::Back) {
-            self.background_results_shown = false;
+    }
+
+    pub(super) fn toggle_jobs(&mut self) {
+        if self.jobs_open {
+            self.leave_background();
+            return;
+        }
+        if self.executions.is_empty() {
+            return;
+        }
+        self.jobs_open = true;
+        self.disarm();
+        if self.vim.is_some() && !self.reading() && self.menu().is_empty() {
+            self.background_focus = self.executions.last().map(|j| j.id);
         }
     }
 
     pub(super) fn leave_background(&mut self) {
-        if self.background_focus.take().is_some() {
-            self.executions.retain(|j| j.state == State::Running);
+        if self.jobs_open || self.background_focus.is_some() {
+            self.jobs_open = false;
+            self.background_focus = None;
+            self.background_open = None;
+            self.executions.retain(|j| is_active_job(j.state));
             self.disarm();
         }
     }
@@ -53,13 +76,16 @@ impl Ui {
             return None;
         }
         if self.vim.is_none() || self.reading() || !self.menu().is_empty() {
-            self.leave_background();
+            if self.background_focus.is_some() {
+                self.leave_background();
+            }
             return None;
         }
         let Some(id) = self.background_focus else {
             if self.executions.is_empty() {
                 return None;
             }
+            self.jobs_open = true;
             self.background_focus = self.executions.last().map(|j| j.id);
             self.disarm();
             return Some(Asked::Own(Deed::Nothing));

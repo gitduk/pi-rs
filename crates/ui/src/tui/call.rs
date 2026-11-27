@@ -9,7 +9,6 @@ use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 
 use super::browse::PageLine;
-use super::mouse::Target;
 use super::row::{self, Call, PendingTool, Row, Stage, StepMark};
 use super::scrollback::{Folds, Scrollback};
 use super::ui::OpenCommand;
@@ -223,7 +222,12 @@ fn background_parts(
         Some(progress) => (title.as_ref(), progress),
         None => (rest, ""),
     };
-    let border = Line::from(paint.span_hovered(hovered, &paint.theme.muted, id));
+    let tag = if execution.state == State::Back {
+        format!("{} {id}", icons::RELAYED_MARK)
+    } else {
+        id
+    };
+    let border = Line::from(paint.span_hovered(hovered, &paint.theme.muted, tag));
     let mut spans = match execution.invocation.as_ref() {
         Invocation::Shell { .. } => paint.shell(description, hovered),
         Invocation::Tool { name, .. } | Invocation::Task { name, .. } => {
@@ -261,7 +265,7 @@ pub(super) fn tail_rows(said: &[String], room: usize) -> (usize, Vec<Line<'stati
 /// What a row of the execution list is, for a click to find.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CommandRow {
-    BackgroundCommand(u64),
+    BackgroundCommand { id: u64, back: bool },
     // Over the tail of what an open execution printed: the lines cut above it.
     Earlier(u64),
     // What an open execution printed, under its row.
@@ -293,56 +297,6 @@ pub(super) fn background_page(
     }
     let said = said(body).into_iter().map(|l| Line::from(l).into());
     std::iter::once(head).chain(said).collect()
-}
-
-// Finished executions can accumulate while a turn holds their delivery.
-pub(super) fn background_results(
-    executions: &[BackgroundCommand],
-    open: bool,
-    hovered: Option<Target>,
-    paint: &Paint,
-    width: usize,
-    at: usize,
-) -> (Vec<Line<'static>>, Vec<Target>) {
-    let executions = executions.iter().filter(|j| j.state == State::Back);
-    let count = executions.clone().count();
-    if count == 0 {
-        return (Vec::new(), Vec::new());
-    }
-    let room = width.saturating_sub(1);
-    let text = format!(
-        "{} {} waiting{}click to {}",
-        icons::RELAYED_MARK,
-        row::count(count, "execution result"),
-        icons::PART_SEP,
-        if open { "less" } else { "expand" },
-    );
-    let shine = matches!(hovered, Some(Target::BackgroundResults(_)));
-    let mut spans = vec![paint.action_hint(shine, within(&text, room))];
-    if !open && let Some(execution) = executions.clone().rev().find(|j| !j.last.is_empty()) {
-        let latest = format!("{}#{} {}", icons::PART_SEP, execution.id, execution.last);
-        spans.push(paint.span(
-            &paint.theme.muted,
-            within(&latest, room.saturating_sub(pi_store::text::width(&text))),
-        ));
-    }
-    let mut lines = vec![Line::from(spans)];
-    let mut targets = vec![Target::BackgroundResults(at)];
-    if open {
-        for execution in executions {
-            let (head, _) = background_text(execution);
-            let ([head, last, tail], _) =
-                fit_background_row(head, String::new(), &execution.last, width);
-            let shine =
-                matches!(hovered, Some(Target::BackgroundResult(_, id)) if id == execution.id);
-            lines.push(super::browse::more_body(
-                closed_command_line(execution, &head, last, tail, shine, paint),
-                room,
-            ));
-            targets.push(Target::BackgroundResult(at + targets.len(), execution.id));
-        }
-    }
-    (lines, targets)
 }
 
 fn closed_command_line(
@@ -388,7 +342,12 @@ pub(super) fn background_lines(
         BACKGROUND_SHOWN
     };
     for execution in executions.iter().take(shown) {
-        let shine = hovered == Some(CommandRow::BackgroundCommand(execution.id));
+        let shine =
+            matches!(hovered, Some(CommandRow::BackgroundCommand { id, .. }) if id == execution.id);
+        let row_kind = CommandRow::BackgroundCommand {
+            id: execution.id,
+            back: execution.state == State::Back,
+        };
         let rows = if let Some(OpenCommand { body, .. }) = open.filter(|o| o.id == execution.id) {
             let (head, tail) = background_text(execution);
             let (mut row, border) = background_parts(execution, &head, shine, paint);
@@ -402,10 +361,7 @@ pub(super) fn background_lines(
                 &row,
                 room,
             );
-            ids.extend(std::iter::repeat_n(
-                CommandRow::BackgroundCommand(execution.id),
-                rows.len(),
-            ));
+            ids.extend(std::iter::repeat_n(row_kind, rows.len()));
             if from > 0 {
                 let shine = matches!(hovered, Some(CommandRow::Earlier(id)) if id == execution.id);
                 rows.push(Line::from(
@@ -420,7 +376,7 @@ pub(super) fn background_lines(
         } else {
             let ([head, last, tail], _) = background_row(execution, width);
             let row = closed_command_line(execution, &head, last, tail, shine, paint);
-            ids.push(CommandRow::BackgroundCommand(execution.id));
+            ids.push(row_kind);
             vec![row]
         };
         lines.extend(rows);
@@ -442,7 +398,12 @@ pub(super) fn background_lines(
 // leaves; the line it printed takes the rest.
 fn background_row(execution: &BackgroundCommand, width: usize) -> ([String; 3], bool) {
     let (head, tail) = background_text(execution);
-    fit_background_row(head, tail, &execution.last, width)
+    let mark = if execution.state == State::Back {
+        pi_store::text::width(icons::RELAYED_MARK) + 1
+    } else {
+        0
+    };
+    fit_background_row(head, tail, &execution.last, width.saturating_sub(mark))
 }
 
 fn fit_background_row(head: String, tail: String, last: &str, width: usize) -> ([String; 3], bool) {

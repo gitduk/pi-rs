@@ -111,6 +111,7 @@ impl Default for Layout {
                     }),
                 ],
                 right: vec![
+                    Item::Field(Field::Jobs),
                     Item::Styled(Styled {
                         field: Field::Services,
                         style: Look::Tone(Tone::Muted),
@@ -404,6 +405,8 @@ pub enum Field {
     Compacted,
     /// Prompts typed while the run works and not yet sent.
     Queued,
+    /// Running or waiting background commands; absent when none.
+    Jobs,
     /// What the session's services last reported, joined by ` · `; says
     /// nothing while no service is connected or each is silent.
     Services,

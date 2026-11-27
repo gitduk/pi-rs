@@ -111,8 +111,6 @@ pub(crate) enum Deed {
     // The explicit page action, independent of an execution's state.
     ReadCommand(u64),
     ToggleCommand(u64),
-    // Show or hide the completed executions waiting for delivery.
-    BackgroundResults(bool),
     // An empty list stops every running execution in the current checkout.
     StopCommands(Vec<u64>),
     RestartCommands(Vec<u64>),
@@ -122,6 +120,8 @@ pub(crate) enum Deed {
     Tidy,
     // Step forward or back across already-open tabs.
     StepLane(bool),
+    // Switch directly to an open tab by index.
+    SelectLane(usize),
     // The person's answer to a question its asker waits on, or none.
     Answer {
         question: u64,
@@ -145,12 +145,12 @@ impl Deed {
             | Deed::RecallQueued(_)
             | Deed::ReadCommand(_)
             | Deed::ToggleCommand(_)
-            | Deed::BackgroundResults(_)
             | Deed::StopCommands(_)
             | Deed::RestartCommands(_)
             | Deed::OpenFile(_)
             | Deed::Tidy
             | Deed::StepLane(_)
+            | Deed::SelectLane(_)
             | Deed::Answer { .. } => Fate::Now,
         }
     }
@@ -551,6 +551,8 @@ impl Tui {
     // or detached), disambiguated by `·name` or `#2` when tabs share one.
     fn refresh_tabs(&mut self) {
         let current = self.core.lanes.front();
+        let now = std::time::Instant::now();
+        let fresh = |seen_at: std::time::Instant| now.saturating_duration_since(seen_at) < LOOKED;
         let mut stale_branches = false;
         let entries: Vec<(Mark, String, Option<String>)> = self
             .core
@@ -579,20 +581,19 @@ impl Tui {
                 {
                     Some(git.branch.clone())
                 } else if let Some((seen_at, g)) = self.ui.git_seen.get(root)
-                    && seen_at.elapsed() < LOOKED
+                    && fresh(*seen_at)
                 {
                     g.as_ref().map(|g| g.branch.clone())
                 } else if let Some((seen_at, cached)) = self.ui.branch_seen.get(root)
-                    && seen_at.elapsed() < LOOKED
+                    && fresh(*seen_at)
                 {
                     cached.clone()
                 } else {
                     stale_branches = true;
                     let branch = statusline::read_head(root);
-                    self.ui.branch_seen.insert(
-                        root.to_path_buf(),
-                        (std::time::Instant::now(), branch.clone()),
-                    );
+                    self.ui
+                        .branch_seen
+                        .insert(root.to_path_buf(), (now, branch.clone()));
                     branch
                 };
                 let base = branch.unwrap_or_else(|| lane_name(lane));
@@ -602,7 +603,7 @@ impl Tui {
         if stale_branches {
             self.ui
                 .branch_seen
-                .retain(|_, (seen_at, _)| seen_at.elapsed() < LOOKED);
+                .retain(|_, (seen_at, _)| fresh(*seen_at));
         }
         let any_dup =
             (0..entries.len()).any(|i| entries[i + 1..].iter().any(|(_, b, _)| *b == entries[i].1));
@@ -730,7 +731,6 @@ impl Tui {
             }
             Deed::Rewind => self.open_rewind(),
             Deed::External => self.edit_externally().await,
-            Deed::BackgroundResults(shown) => self.ui.background_results_shown = shown,
             Deed::ReadCommand(id) => {
                 if let Some(execution) = self.ui.every_command.iter().find(|j| j.id == id)
                     && let Some(body) = self.drivers.background().body(self.core.lane().root(), id)
@@ -752,19 +752,38 @@ impl Tui {
             Deed::Tidy => self.ui.tidy(front_view(&mut self.views, self.core.lane())),
             Deed::StepLane(forward) => {
                 let was = self.core.lane().token();
-                match self.core.step_lane(forward) {
-                    Ok(Some(note)) => {
-                        self.reconcile(was);
-                        self.notice(note);
-                    }
-                    Ok(None) => self.ui.flash("the only tab there is"),
-                    Err(why) => self.ui.flash(why),
-                }
+                let res = self.core.step_lane(forward);
+                self.land_lane_switch(was, res, Some("the only tab there is"));
+            }
+            Deed::SelectLane(at) => {
+                let was = self.core.lane().token();
+                let res = self.core.select_lane(at);
+                self.land_lane_switch(was, res, None);
             }
             Deed::OpenFile(path) => {
                 self.file_opens.spawn(term::open_file(path));
             }
             Deed::Answer { question, picked } => self.drivers.background().answer(question, picked),
+        }
+    }
+
+    fn land_lane_switch(
+        &mut self,
+        was: u64,
+        result: Result<Option<String>, String>,
+        empty_flash: Option<&'static str>,
+    ) {
+        match result {
+            Ok(Some(note)) => {
+                self.reconcile(was);
+                self.notice(note);
+            }
+            Ok(None) => {
+                if let Some(msg) = empty_flash {
+                    self.ui.flash(msg);
+                }
+            }
+            Err(why) => self.ui.flash(why),
         }
     }
 

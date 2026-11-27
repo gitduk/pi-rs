@@ -172,6 +172,7 @@ pub enum Action {
     AppQuit,
     LanePrev,
     LaneNext,
+    LaneClose,
     ThinkFold,
     ThinkFoldAll,
     // Into Normal from Insert; the sequence's first character comes back off
@@ -485,14 +486,21 @@ const BINDINGS: &[Binding] = &[
         action: A::LanePrev,
         when: LINE.normal(),
         keys: &["H"],
-        note: "the previous checkout, opening it if it is not",
+        note: "the previous open tab",
     },
     Binding {
         id: "lane.next",
         action: A::LaneNext,
         when: LINE.normal(),
         keys: &["L"],
-        note: "the next checkout, opening it if it is not",
+        note: "the next open tab",
+    },
+    Binding {
+        id: "lane.close",
+        action: A::LaneClose,
+        when: LINE.normal().empty(),
+        keys: &["x"],
+        note: "close the current tab",
     },
     // The window, where the lowercase pair moves through recall instead.
     Binding {
@@ -1593,5 +1601,23 @@ mod tests {
         for b in BINDINGS {
             assert!(bound.contains(&b.action), "{} reaches nothing", b.id);
         }
+    }
+
+    #[test]
+    fn normal_x_closes_tab_only_on_an_empty_line() {
+        let keys = Keys::default();
+        let normal = |line_empty| Layers {
+            mode: Mode::Normal,
+            line_empty,
+            ..Layers::default()
+        };
+        assert_eq!(
+            keys.action(press("x"), normal(true)),
+            Some(Action::LaneClose)
+        );
+        assert_eq!(
+            keys.action(press("x"), normal(false)),
+            Some(Action::DeleteCharForward)
+        );
     }
 }

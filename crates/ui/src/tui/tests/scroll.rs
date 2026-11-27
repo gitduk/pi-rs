@@ -1393,6 +1393,7 @@ fn a_page_lies_over_the_commands() {
     let mut ui = test_ui(80, 24);
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
+    ui.jobs_open = true;
     ui.executions = vec![background_command(1, Invocation::shell("serve"))];
     ui.flush(&lane, &mut view);
     assert_eq!(ui.regions.executions.height, 1, "the execution has its row");

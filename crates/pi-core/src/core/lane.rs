@@ -1487,13 +1487,25 @@ impl Core {
         if n < 2 {
             return Ok(None);
         }
-        self.leave("tab")?;
         let at = self.lanes.front();
         let next = if forward {
             (at + 1) % n
         } else {
             (at + n - 1) % n
         };
+        self.switch_lane(next)
+    }
+
+    /// Switch directly to the open tab at `next`.
+    pub fn select_lane(&mut self, next: usize) -> Result<Option<String>, String> {
+        if next >= self.lanes.len() || next == self.lanes.front() {
+            return Ok(None);
+        }
+        self.switch_lane(next)
+    }
+
+    fn switch_lane(&mut self, next: usize) -> Result<Option<String>, String> {
+        self.leave("tab")?;
         self.lanes.show(next);
         Ok(Some(self.refresh_front()))
     }
@@ -1523,6 +1535,8 @@ impl Core {
     pub fn reopen(&mut self, lanes: &[(std::path::PathBuf, Option<String>)]) {
         let front = self.lanes.ahead().token();
         let like = self.lanes.front();
+        let claimed: std::collections::HashSet<&str> =
+            lanes.iter().filter_map(|(_, id)| id.as_deref()).collect();
         let mut order: Vec<u64> = Vec::new();
         let mut said = Vec::new();
         for (root, id) in lanes {
@@ -1542,9 +1556,7 @@ impl Core {
                 None => self.lanes.iter().find(|lane| {
                     lane.root() == ws.root()
                         && !order.contains(&lane.token())
-                        && !lanes
-                            .iter()
-                            .any(|(_, some)| some.as_deref() == Some(lane.id()))
+                        && !claimed.contains(lane.id())
                 }),
             };
             if let Some(existing) = existing {

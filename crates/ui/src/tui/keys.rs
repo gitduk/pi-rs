@@ -102,8 +102,14 @@ impl Ui {
                 return Asked::Own(Deed::Nothing);
             }
             TermEvent::Mouse(mouse) => {
-                if matches!(mouse.kind, MouseEventKind::Down(_)) {
-                    self.leave_background();
+                if matches!(mouse.kind, MouseEventKind::Down(_))
+                    && !self.jobs_at(mouse.column, mouse.row)
+                {
+                    if self.command_row_at(mouse.row).is_some() {
+                        self.background_focus = None;
+                    } else {
+                        self.leave_background();
+                    }
                 }
                 return self.mouse(view, mouse);
             }
@@ -220,7 +226,7 @@ impl Ui {
     // The stop: whatever is over the editor closes, and a run stops. With
     // neither, it says the next one leaves.
     fn cancel(&mut self, view: &mut View, running: bool) -> Asked {
-        let focused = self.background_focus.is_some();
+        let focused = self.jobs_open || self.background_focus.is_some();
         self.leave_background();
         let closed = self.close_overlay(view) || focused;
         if running {
@@ -276,6 +282,7 @@ impl Ui {
             Some(action @ (Action::LaneNext | Action::LanePrev)) => {
                 return Asked::Own(Deed::StepLane(action == Action::LaneNext));
             }
+            Some(Action::LaneClose) => return Asked::Core(Intent::Builtin(Builtin::CloseTab)),
             // The session is what a press would replace, so it takes two.
             Some(Action::SessionNew) => return Asked::Core(Intent::Builtin(Builtin::New)),
             // No `running` check: leaving is one intent whatever is in
@@ -541,6 +548,9 @@ impl Ui {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let up = matches!(mouse.kind, MouseEventKind::ScrollUp);
                 self.selection = None;
+                if self.tab_strip_at(mouse.column, mouse.row) {
+                    return Asked::Own(Deed::StepLane(!up));
+                }
                 if !self.wheel_window(view, mouse.column, mouse.row, up) {
                     self.scroll_view(view, up, 1);
                 }
@@ -551,23 +561,10 @@ impl Ui {
                 self.on_drag(mouse.column, mouse.row);
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                if let Some(id) = self.page_command_at(mouse.column, mouse.row) {
+                if let Some(deed) = self.left_click(mouse.column, mouse.row) {
                     self.press = None;
                     self.selection = None;
-                    return Asked::Own(Deed::ReadCommand(id));
-                }
-                if !self.reading() {
-                    let deed = match self.target_at(mouse.row) {
-                        Some(super::mouse::Target::BackgroundResults(_)) => {
-                            Some(Deed::BackgroundResults(!self.background_results_shown))
-                        }
-                        _ => None,
-                    };
-                    if let Some(deed) = deed {
-                        self.press = None;
-                        self.selection = None;
-                        return Asked::Own(deed);
-                    }
+                    return Asked::Own(deed);
                 }
                 self.on_press(view, mouse.column, mouse.row);
             }
@@ -586,6 +583,19 @@ impl Ui {
             _ => {}
         }
         Asked::Own(Deed::Nothing)
+    }
+
+    fn left_click(&mut self, col: u16, row: u16) -> Option<Deed> {
+        if self.flash_at(col, row) != Some(true) {
+            if let Some(at) = self.tab_at(col, row) {
+                return Some(Deed::SelectLane(at));
+            }
+            if !self.reading() && self.jobs_at(col, row) {
+                self.toggle_jobs();
+                return Some(Deed::Nothing);
+            }
+        }
+        self.page_command_at(col, row).map(Deed::ReadCommand)
     }
 
     // Up from the bottom of recall takes back the typed lines still queued,

@@ -110,6 +110,9 @@ async fn named_scripts_use_bash_background_with_original_input_and_environment()
         );
         let head = format!("#{} {}", execution.id, execution.invocation.title());
         ui.sync_background(executions);
+        if !ui.jobs_open {
+            ui.toggle_jobs();
+        }
         ui.flush(&lane, &mut view);
         let buffer = ui.screen.test_buffer();
         let area = ui.regions.executions;
@@ -266,7 +269,9 @@ fn expanded_output_follows_the_heading_without_launch_details() {
             .unwrap();
         let last_head = targets
             .iter()
-            .rposition(|target| *target == call::CommandRow::BackgroundCommand(1))
+            .rposition(|target| {
+                matches!(*target, call::CommandRow::BackgroundCommand { id: 1, .. })
+            })
             .unwrap();
         assert_eq!(earlier, last_head + 1);
         assert!(
@@ -307,7 +312,10 @@ async fn background_commands_share_shell_colours_and_keep_status_muted() {
     }
     let paint = Paint::new(true);
     for hovered in [false, true] {
-        let hover = hovered.then_some(call::CommandRow::BackgroundCommand(executions[0].id));
+        let hover = hovered.then_some(call::CommandRow::BackgroundCommand {
+            id: executions[0].id,
+            back: false,
+        });
         let (lines, _) = call::background_lines(&executions, hover, None, false, &paint, 160);
         let expected = paint.shell(command, hovered);
         assert_eq!(&lines[0].spans[1..1 + expected.len()], expected);
@@ -505,10 +513,11 @@ fn global_cancel_keeps_working_and_paste_does_not_change_a_focused_draft() {
 
 #[test]
 fn waiting_results_fold_without_wrapping_long_commands() {
-    use crate::tui::mouse::Target;
-    use crate::tui::screen::{plain, rows};
+    use crate::render::Paint;
+    use crate::tui::call;
+    use crate::tui::screen::rows;
+    use crate::tui::statusline::jobs_summary;
 
-    let view = View::default();
     let mut pending = background(&(1..=14).collect::<Vec<_>>());
     for execution in &mut pending {
         execution.state = State::Back;
@@ -523,39 +532,87 @@ fn waiting_results_fold_without_wrapping_long_commands() {
     for width in [20, 40, 80] {
         let mut ui = test_ui(width, 24);
         ui.sync_background(pending.clone());
-        let (live, targets, _) = ui.live(&view, false, std::time::Instant::now());
-        assert_eq!(live.len(), targets.len());
-        let at = targets
-            .iter()
-            .position(|t| matches!(t, Target::BackgroundResults(_)))
-            .unwrap();
-        assert_eq!(live.len(), at + 1, "all results share one row");
-        assert_eq!(rows(&live[at], width as usize), 1);
-        if width == 80 {
-            assert!(plain(&live[at]).contains(&pending[13].last));
-        }
+        assert!(!ui.jobs_open, "the drawer starts folded");
+        assert_eq!(
+            jobs_summary(&ui.every_command).as_deref(),
+            Some("1 running · 14 waiting")
+        );
 
-        ui.background_results_shown = true;
-        let (live, targets, _) = ui.live(&view, false, std::time::Instant::now());
+        let (lines, targets) = call::background_lines(
+            &ui.executions,
+            None,
+            None,
+            true,
+            &Paint::new(false),
+            width as usize,
+        );
         let ids: Vec<_> = targets
             .iter()
             .filter_map(|t| match t {
-                Target::BackgroundResult(_, id) => Some(*id),
+                call::CommandRow::BackgroundCommand { id, .. } => Some(*id),
                 _ => None,
             })
             .collect();
-        assert_eq!(ids, (1..=14).collect::<Vec<_>>());
-        assert!(live[at..].iter().all(|l| rows(l, width as usize) == 1));
-        assert_eq!(ui.executions.iter().map(|j| j.id).collect::<Vec<_>>(), [15]);
-
-        ui.sync_background(background(&[15]));
-        assert!(!ui.background_results_shown, "the next batch starts folded");
+        assert_eq!(ids, (1..=15).collect::<Vec<_>>());
+        assert!(lines.iter().all(|l| rows(l, width as usize) == 1));
     }
+}
+
+#[test]
+fn jobs_summary_and_badge_tones_track_job_states_and_drawer() {
+    use crate::render::Paint;
+    use crate::tui::statusline::{Facts, jobs_summary};
+
+    assert_eq!(jobs_summary(&[]), None);
+
+    let single = background(&[7]);
+    assert_eq!(jobs_summary(&single).as_deref(), Some("#7 command 7"));
+
+    let two_running = background(&[1, 2]);
+    assert_eq!(jobs_summary(&two_running).as_deref(), Some("2 jobs"));
+
+    let mut one_waiting = background(&[3]);
+    one_waiting[0].state = State::Back;
+    assert_eq!(jobs_summary(&one_waiting).as_deref(), Some("1 job waiting"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let lane = running_lane(dir.path());
+    let view = View::default();
+    let session = dir.path().join("session");
+    let mut ui = test_ui(120, 24);
+    ui.paint = Paint::new(true);
+
+    let tone_of = |ui: &mut crate::tui::Ui, executions: &[BackgroundCommand]| {
+        let facts = Facts::of(&lane, &view, None, Vec::new(), executions, Vec::new());
+        let expected = facts.value(pi_store::statusline::Field::Jobs).unwrap();
+        let (_, under) = ui.statusline_lines(&facts, 120, &session);
+        under
+            .into_iter()
+            .flat_map(|row| row.line.spans)
+            .find(|span| span.content.as_ref() == expected)
+            .expect("rendered jobs badge")
+            .style
+            .fg
+    };
+
+    assert_eq!(
+        tone_of(&mut ui, &single),
+        ui.paint.span(&ui.paint.theme.muted, "").style.fg
+    );
+    assert_eq!(
+        tone_of(&mut ui, &one_waiting),
+        ui.paint.span(&ui.paint.theme.emphasis, "").style.fg
+    );
+    ui.jobs_open = true;
+    assert_eq!(
+        tone_of(&mut ui, &one_waiting),
+        ui.paint.span(&ui.paint.theme.heading, "").style.fg
+    );
 }
 
 #[tokio::test]
 async fn waiting_results_expand_and_open_the_original_output_without_delivering_it() {
-    use crate::tui::mouse::Target;
+    use crate::tui::call::CommandRow;
     use crate::tui::screen::plain;
 
     let dir = tempfile::tempdir().unwrap();
@@ -579,43 +636,39 @@ async fn waiting_results_expand_and_open_the_original_output_without_delivering_
         let view = crate::tui::view_at(&mut tui.views, tui.core.lane().token());
         tui.ui.flush(tui.core.lane(), view);
     };
-    let click = |tui: &mut crate::tui::Tui, at: usize, column: u16| {
+    let click = |tui: &mut crate::tui::Tui, column: u16, row: u16| {
         press(
             tui,
             TermEvent::Mouse(crossterm::event::MouseEvent {
                 kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
                 column,
-                row: tui.ui.regions.history.y + at as u16,
+                row,
                 modifiers: KeyModifiers::NONE,
             }),
         )
     };
 
     flush(&mut tui);
-    let at = tui
-        .ui
-        .row_targets
-        .iter()
-        .position(|t| matches!(t, Target::BackgroundResults(_)))
-        .unwrap();
-    let asked = click(&mut tui, at, 5);
-    assert_eq!(deed(asked), Deed::BackgroundResults(true));
-    tui.carry(Deed::BackgroundResults(true)).await;
+    assert!(!tui.ui.jobs_open);
+    let (place, row_idx, range) = tui.ui.jobs_hits[0].clone();
+    let badge_row = tui.ui.regions.strip(place).y + row_idx as u16;
+    let badge_col = tui.ui.regions.strip(place).x + range.start as u16;
+    let asked = click(&mut tui, badge_col, badge_row);
+    assert!(matches!(asked, Asked::Own(Deed::Nothing)));
+    assert!(tui.ui.jobs_open);
+
     flush(&mut tui);
     let at = tui
         .ui
-        .row_targets
+        .command_rows
         .iter()
-        .position(|t| matches!(t, Target::BackgroundResult(_, id) if *id == execution.id()))
+        .position(
+            |t| matches!(t, CommandRow::BackgroundCommand { id, .. } if *id == execution.id()),
+        )
         .unwrap();
-    let col = tui
-        .ui
-        .more_hits
-        .iter()
-        .find(|area| area.y == tui.ui.regions.history.y + at as u16)
-        .unwrap()
-        .x;
-    let asked = click(&mut tui, at, col);
+    let col = tui.ui.regions.executions.x;
+    let row = tui.ui.regions.executions.y + at as u16;
+    let asked = click(&mut tui, col, row);
     tui.carry(deed(asked)).await;
     let page = tui
         .ui
@@ -631,13 +684,28 @@ async fn waiting_results_expand_and_open_the_original_output_without_delivering_
 
     tui.ui.close_page();
     flush(&mut tui);
-    let at = tui
-        .ui
-        .row_targets
-        .iter()
-        .position(|t| matches!(t, Target::BackgroundResults(_)))
-        .unwrap();
-    let asked = click(&mut tui, at, 5);
-    tui.carry(deed(asked)).await;
-    assert!(!tui.ui.background_results_shown);
+    let (_, row_idx, range) = tui.ui.jobs_hits[0].clone();
+    let badge_row = tui.ui.regions.strip(place).y + row_idx as u16;
+    let badge_col = tui.ui.regions.strip(place).x + range.start as u16;
+    click(&mut tui, badge_col, badge_row);
+    assert!(!tui.ui.jobs_open);
+
+    // A flash sharing the row does not take the badge's click.
+    tui.ui.flash("moving foreground commands to the background");
+    flush(&mut tui);
+    let (_, row_idx, range) = tui.ui.jobs_hits[0].clone();
+    let badge_row = tui.ui.regions.strip(place).y + row_idx as u16;
+    let badge_col = tui.ui.regions.strip(place).x + range.start as u16;
+    click(&mut tui, badge_col, badge_row);
+    assert!(tui.ui.jobs_open);
+
+    // A mouse-opened drawer with no focus closes without flashing quit.
+    tui.ui.flash = None;
+    assert_eq!(tui.ui.background_focus, None);
+    press(
+        &mut tui,
+        TermEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+    );
+    assert!(!tui.ui.jobs_open);
+    assert!(tui.ui.flash.is_none());
 }

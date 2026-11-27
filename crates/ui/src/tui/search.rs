@@ -34,10 +34,7 @@ impl Spot {
             }
             Target::Pin { ask, .. } => Some(Spot::Row(ask, 0)),
             Target::Text(n) => Some(Spot::Text(n)),
-            Target::PendingTool(i)
-            | Target::BackgroundResults(i)
-            | Target::BackgroundResult(i, _)
-            | Target::Live(i) => Some(Spot::Live(i)),
+            Target::PendingTool(i) | Target::Live(i) => Some(Spot::Live(i)),
             Target::Rule | Target::Gap => None,
         }
     }

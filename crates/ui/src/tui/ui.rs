@@ -119,6 +119,8 @@ pub(super) struct Ui {
         usize,
         super::statusline::FlashHit,
     )>,
+    pub(super) tab_hits: Vec<super::statusline::TabHit>,
+    pub(super) jobs_hits: Vec<(pi_store::statusline::Place, usize, std::ops::Range<usize>)>,
     pub(super) more_hits: Vec<ratatui::layout::Rect>,
     // Rows a click opens a page from without a hint of their own: an open
     // execution's `N more` line.
@@ -161,7 +163,9 @@ pub(super) struct Ui {
     // Whether the live block lists every call in flight or just the newest
     // with a count; a click flips it. Outlives the calls themselves.
     pub(super) live_tools_shown: bool,
-    // Keep stopped rows available for restart while this list has focus.
+    // Whether the background jobs drawer above the input line is open.
+    pub(super) jobs_open: bool,
+    // Keep stopped rows available for restart while the drawer is open.
     pub(super) executions: Vec<pi_core::driver::background::BackgroundCommand>,
     // List changes must not redirect a stop to a different execution.
     pub(super) background_focus: Option<u64>,
@@ -170,8 +174,6 @@ pub(super) struct Ui {
     // What the session's services last reported, drawn by the `services`
     // field of a statusline row.
     pub(super) services: Vec<String>,
-    // Independent of the running-execution list.
-    pub(super) background_results_shown: bool,
     // The front lane's tools, for slash commands; read only when needed,
     // since reading one re-stats the tools directory.
     pub(super) tools: Option<Arc<agent::Briefing>>,
@@ -238,7 +240,6 @@ impl Ui {
     // there, and gives the line back first.
     pub(super) fn leave_lane(&mut self, view: &mut View) {
         self.leave_background();
-        self.background_results_shown = false;
         self.search_close(view);
         view.draft = self.editor.take_composing();
         self.flash = None;
@@ -299,14 +300,16 @@ impl Ui {
             scripts: super::statusline::Scripts::new(),
             statusline_at: None,
             flash_hit: None,
+            tab_hits: Vec::new(),
+            jobs_hits: Vec::new(),
             more_hits: Vec::new(),
             page_hits: Vec::new(),
             copied: None,
+            jobs_open: false,
             executions: Vec::new(),
             background_focus: None,
             every_command: Vec::new(),
             services: Vec::new(),
-            background_results_shown: false,
             tools: None,
             prompt_blocks: Vec::new(),
             background_open: None,
