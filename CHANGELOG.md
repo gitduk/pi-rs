@@ -22,6 +22,11 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   disk levels (95% says, 98% critical, recovery under 92%) and temperatures,
   with the cleanup assigned to one session at a time.
 
+- A long answer no longer takes the question it answers out of reach: once
+  the question has scrolled off the top of the transcript, it heads the
+  transcript instead, worn as the row it was sent as. Scrolled up past it,
+  the older rows keep the top row and nothing is shown there.
+
 ### Changed
 
 - A skill command run a second time in one session names the skill instead of

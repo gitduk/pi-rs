@@ -32,6 +32,7 @@ impl Spot {
             Target::Scrollback(idx, line) | Target::Separator(idx, line) => {
                 Some(Spot::Row(idx, line))
             }
+            Target::Pin(idx) => Some(Spot::Row(idx, 0)),
             Target::Text(n) => Some(Spot::Text(n)),
             Target::PendingTool(i)
             | Target::BackgroundResults(i)

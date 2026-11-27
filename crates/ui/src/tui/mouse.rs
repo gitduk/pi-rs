@@ -705,6 +705,9 @@ pub(super) enum Target {
     Rule,
     // Neither: the room over a page's output.
     Gap,
+    // A question pinned over the history's top row: it draws line 0 of the row
+    // it names, so an anchor and a search start there, and it takes no click.
+    Pin(usize),
 }
 
 // The frame's regions, laid out once and drawn by name. The only place the

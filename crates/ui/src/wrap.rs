@@ -39,6 +39,18 @@ pub fn clip_line(line: &Line<'_>, width: usize) -> Line<'static> {
     line_of(&kept)
 }
 
+/// `line` cut to `room` columns, `mark` ending it in place of the columns cut
+/// off: for a strip that is one row.
+pub fn cut(line: &Line<'_>, room: usize, mark: Option<Span<'static>>) -> Line<'static> {
+    let cols = match mark {
+        Some(_) => room.saturating_sub(1),
+        None => room,
+    };
+    let mut cut = clip_line(line, cols);
+    cut.spans.extend(mark);
+    cut
+}
+
 /// The end of `line` that fits `width` columns: for a line still being
 /// written, whose newest columns are what is waited for. Only the last run
 /// answers; earlier lines are not part of it.
