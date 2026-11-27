@@ -16,6 +16,14 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   second copy of the whole `SKILL.md`, because the first copy is still above.
   Once a compaction drops that copy, the next run sends it in full again.
 
+### Fixed
+
+- `H`/`L` reach a checkout `/worktree` has just made. The list read once for the
+  bar is kept across a switch inside one repository, and the new checkout was not
+  in it: the ring held one name, so a step said "the only checkout there is" while
+  the bar showed the lane. A switch into a checkout the list has not read now
+  drops the read, and the bar's next frame lists it.
+
 ## 3.0.10 - 2026-11-26
 
 ### Added
