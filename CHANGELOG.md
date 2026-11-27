@@ -7,6 +7,15 @@ session store or the tool script protocol changed shape.
 
 Releases before 3.0.0 are recorded in the commit history, not here.
 
+## Unreleased
+
+### Changed
+
+- A skill command run a second time in one session names the skill instead of
+  sending its instructions again: `/simplify` twice now costs a line, not a
+  second copy of the whole `SKILL.md`, because the first copy is still above.
+  Once a compaction drops that copy, the next run sends it in full again.
+
 ## 3.0.10 - 2026-11-26
 
 ### Added

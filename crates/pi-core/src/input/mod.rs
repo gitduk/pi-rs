@@ -4,6 +4,8 @@
 pub mod commands;
 pub mod complete;
 
+use std::collections::HashSet;
+
 use skills::Skill;
 
 use crate::input::commands::{Command, Source};
@@ -168,21 +170,28 @@ pub(crate) fn refused(what: &str, e: anyhow::Error) -> String {
     detail
 }
 
-// Body goes in whole, not fetched later: the model shouldn't spend a turn
-// re-learning instructions `/commit` says the user already chose.
-fn expanded(skill: &Skill, args: &str) -> Result<agent::session::Prompt, String> {
-    let text = skill.text().map_err(|e| {
-        let why = refused(&skill.name, anyhow::anyhow!("{}: {e}", skill.dir.display()));
-        format!("cannot run {} — {why}", skill.name)
-    })?;
-    let delivered = skills::delivery(skill, &text).map_err(|why| {
-        let why = refused(&skill.name, anyhow::anyhow!(why));
-        format!("cannot run {} — {why}", skill.name)
-    })?;
-    let mut out = format!(
-        "Run the `{}` skill. Its instructions follow.\n\n{delivered}",
-        skill.name
-    );
+// Body goes in whole, not fetched later: `/commit` says the user already
+// chose it. A session holding it gets back the line, not a second copy.
+fn expanded(skill: &Skill, args: &str, again: bool) -> Result<agent::session::Prompt, String> {
+    let mut out = if again {
+        format!(
+            "Run the `{}` skill again. Its instructions are already in the context above.",
+            skill.name
+        )
+    } else {
+        let text = skill.text().map_err(|e| {
+            let why = refused(&skill.name, anyhow::anyhow!("{}: {e}", skill.dir.display()));
+            format!("cannot run {} — {why}", skill.name)
+        })?;
+        let delivered = skills::delivery(skill, &text).map_err(|why| {
+            let why = refused(&skill.name, anyhow::anyhow!(why));
+            format!("cannot run {} — {why}", skill.name)
+        })?;
+        format!(
+            "Run the `{}` skill. Its instructions follow.\n\n{delivered}",
+            skill.name
+        )
+    };
     if !args.is_empty() {
         // Below the instructions, so the skill is read as the standing order
         // and this as what it is being applied to.
@@ -193,11 +202,16 @@ fn expanded(skill: &Skill, args: &str) -> Result<agent::session::Prompt, String>
         skill = %skill.name,
         bytes = out.len(),
         args = !args.is_empty(),
+        again,
         "skill invoked"
     );
     Ok(agent::session::Prompt {
+        // Only a run that sent the body names its source.
+        context: (!again)
+            .then(|| skills::source(&skill.name))
+            .into_iter()
+            .collect(),
         text: out,
-        context: vec![skills::source(&skill.name)],
         ..Default::default()
     })
 }
@@ -234,8 +248,14 @@ fn command_word(line: &str) -> Option<&str> {
         .filter(|word| word.starts_with('/'))
 }
 
-// A word `read` did not know: a skill to run, or a typo to name.
-pub(crate) fn step_for(commands: &[Command], word: &str, args: &str) -> Step {
+// A word `read` did not know: a skill to run, or a typo to name. `delivered`
+// names the skills the session already holds; `None` when it has none to ask.
+pub(crate) fn step_for(
+    commands: &[Command],
+    word: &str,
+    args: &str,
+    delivered: Option<&HashSet<&str>>,
+) -> Step {
     let typed = || format!("{word} {args}").trim_end().to_string();
     let skill = match commands
         .iter()
@@ -256,7 +276,8 @@ pub(crate) fn step_for(commands: &[Command], word: &str, args: &str) -> Step {
             ));
         }
     };
-    match expanded(skill, args) {
+    let again = delivered.is_some_and(|names| names.contains(skill.name.as_str()));
+    match expanded(skill, args, again) {
         Ok(send) => Step::Prompt {
             typed: Some(typed()),
             send,
@@ -276,7 +297,7 @@ pub fn expand(commands: &[Command], line: &str) -> Option<Result<agent::session:
     let Intent::Other { word, args } = read(line, commands, None) else {
         return None;
     };
-    Some(expanded(skill_for(commands, &word)?, &args))
+    Some(expanded(skill_for(commands, &word)?, &args, false))
 }
 
 /// Whether `line` reaches the model as written, naming no command to run.
@@ -446,17 +467,26 @@ pub fn notice(lines: impl IntoIterator<Item = impl AsRef<str>>) -> String {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn both_skill_command_entries_keep_provenance_and_task_arguments() {
+    use std::collections::HashSet;
+
+    fn review_commands() -> Vec<crate::input::commands::Command> {
         let skill = skills::Skill::builtin(
             "---\nname: review\ndescription: Review code.\n---\nRead the changed code.\n",
         )
         .unwrap();
         let mut notes = Vec::new();
-        let commands = crate::input::commands::commands(&[skill], &[], &mut notes);
-        let super::Step::Prompt { send, typed } =
-            super::step_for(&commands, "/review", "Review src/api.rs without edits.")
-        else {
+        crate::input::commands::commands(&[skill], &[], &mut notes)
+    }
+
+    #[test]
+    fn both_skill_command_entries_keep_provenance_and_task_arguments() {
+        let commands = review_commands();
+        let super::Step::Prompt { send, typed } = super::step_for(
+            &commands,
+            "/review",
+            "Review src/api.rs without edits.",
+            None,
+        ) else {
             panic!("a skill command must become a task");
         };
         let once = super::expand(&commands, "/review Review src/api.rs without edits.")
@@ -472,5 +502,22 @@ mod tests {
         assert!(send.text.ends_with("Review src/api.rs without edits.\n"));
         assert!(!send.text.contains("description:"));
         assert_eq!(send.context, [skills::source("review")]);
+    }
+
+    #[test]
+    fn a_skill_whose_instructions_reached_the_model_is_named_not_sent_again() {
+        let commands = review_commands();
+        let delivered: HashSet<&str> = ["review"].into_iter().collect();
+        let super::Step::Prompt { send, .. } = super::step_for(
+            &commands,
+            "/review",
+            "Review src/api.rs without edits.",
+            Some(&delivered),
+        ) else {
+            panic!("a skill command must become a task");
+        };
+        assert!(!send.text.contains("Read the changed code."));
+        assert!(send.text.ends_with("Review src/api.rs without edits.\n"));
+        assert!(send.context.is_empty());
     }
 }

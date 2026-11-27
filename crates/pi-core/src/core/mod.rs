@@ -9,6 +9,7 @@ pub mod ask;
 pub mod bash;
 pub mod catalog;
 pub mod context;
+mod delivered;
 pub mod dial;
 pub mod environment;
 pub mod hooks;
@@ -389,7 +390,10 @@ impl Core {
                 }
             }
             Intent::Builtin(builtin) => self.builtin(builtin),
-            Intent::Other { word, args } => step_for(self.commands(), &word, &args),
+            Intent::Other { word, args } => {
+                let delivered = self.lane().session().map(delivered::names);
+                step_for(self.commands(), &word, &args, delivered.as_ref())
+            }
         }
     }
 

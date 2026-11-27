@@ -1,10 +1,10 @@
 //! Attach skill instructions when a tool batch reads matching files.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use agent::session::{Context, Entry, Seen, Session};
+use agent::session::{Context, Entry};
 use agent::{ContextRequest, Decision, Event, Hooks};
 use async_trait::async_trait;
 use llm::estimate;
@@ -34,35 +34,6 @@ fn recent_reads<'a>(recent: &'a [Entry], root: &Path) -> HashSet<&'a Path> {
             pi_tools::read::Read::file(result)?.strip_prefix(root).ok()
         })
         .collect()
-}
-
-fn visible_skills(session: &Session) -> HashSet<&str> {
-    let mut names = HashSet::new();
-    let mut calls = HashMap::new();
-    for seen in session.view() {
-        let Seen::As(entry) = seen else { continue };
-        match entry {
-            Entry::Ask { ask, .. } => names.extend(skills::included(&ask.context)),
-            Entry::Context { context, .. } => {
-                names.extend(skills::source_name(&context.source));
-            }
-            Entry::Answer { .. } => {
-                calls.clear();
-                calls.extend(entry.tool_calls().filter_map(|call| {
-                    Load::instruction_name(call).map(|name| (call.id.as_str(), name))
-                }));
-            }
-            Entry::Tool { result, .. } if result.name == Load::NAME => {
-                names.extend(
-                    calls
-                        .remove(result.call.as_str())
-                        .filter(|_| !result.is_error),
-                );
-            }
-            _ => {}
-        }
-    }
-    names
 }
 
 #[async_trait]
@@ -97,12 +68,12 @@ impl Hooks for PathSkills {
         if matching.is_empty() {
             return attachments;
         }
-        let visible = visible_skills(request.session);
+        let delivered = super::delivered::names(request.session);
         for skill in matching {
             if room == 0 {
                 break;
             }
-            if visible.contains(skill.name.as_str()) {
+            if delivered.contains(skill.name.as_str()) {
                 continue;
             }
             let args = json!({ "name": skill.name });
@@ -165,7 +136,7 @@ fn attachment_tokens(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent::session::{Compaction, Omission};
+    use agent::session::{Compaction, Omission, Session};
     use llm::message::{AssistantContent, ToolCall, ToolResult};
     use pi_store::session::{Header, Store};
     use std::path::PathBuf;
