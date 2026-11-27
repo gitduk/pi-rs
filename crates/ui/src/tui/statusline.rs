@@ -73,7 +73,8 @@ pub(crate) struct Session {
     pub id: String,
     /// What the user calls it, if anything.
     pub name: Option<String>,
-    /// What a row names it by: that name, else the first thing it was asked.
+    /// What a row names it by: that name, else the title a model wrote from
+    /// the first thing it was asked, else that first thing.
     pub title: Option<String>,
     /// When it began, in seconds since the epoch.
     pub started: u64,
@@ -315,7 +316,7 @@ impl Facts {
             released: pi_core::core::update::released(),
             session: Some(Session {
                 id: lane.id().to_string(),
-                title: name.clone().or_else(|| view.state.first_ask.clone()),
+                title: lane.called().or_else(|| view.state.first_ask.clone()),
                 name,
                 started: lane.created(),
                 workspace: lane.root().to_string_lossy().into_owned(),

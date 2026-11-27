@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::task::Poll;
 use tokio::task::{Id, JoinError, JoinSet};
 
-#[derive(Default)]
 pub struct Runtime {
     tasks: JoinSet<Done>,
     owners: HashMap<Id, Owner>,
@@ -19,6 +18,27 @@ pub struct Runtime {
     fallback: Arc<Table>,
     closing: bool,
     next_lane: usize,
+    // A title written off the run, waiting for the loop to file it: the
+    // session's row has one writer, and this is where it writes.
+    titles: tokio::sync::mpsc::UnboundedSender<crate::core::title::Titled>,
+    titled: tokio::sync::mpsc::UnboundedReceiver<crate::core::title::Titled>,
+}
+
+impl Default for Runtime {
+    fn default() -> Self {
+        let (titles, titled) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            tasks: JoinSet::default(),
+            owners: HashMap::default(),
+            events: VecDeque::default(),
+            completed: None,
+            fallback: Arc::default(),
+            closing: false,
+            next_lane: 0,
+            titles,
+            titled,
+        }
+    }
 }
 
 struct Owner {
@@ -53,6 +73,11 @@ pub enum Event {
 }
 
 impl Runtime {
+    /// Where a title written off the run is handed back to the loop.
+    pub(crate) fn titles(&self) -> tokio::sync::mpsc::UnboundedSender<crate::core::title::Titled> {
+        self.titles.clone()
+    }
+
     fn spawn(&mut self, owner: Owner, future: impl Future<Output = Done> + Send + 'static) {
         let id = self.tasks.spawn(future).id();
         self.owners.insert(id, owner);
@@ -112,6 +137,12 @@ impl Core {
         }
         let previous = self.lanes[at].session().map_or(0, |s| s.entries().len());
         let (notices, reconfigured) = self.prepare_model_lane(at);
+        // The question this session opened with is what a row names it by
+        // until someone names it: the model gets one go at a better line, on
+        // the connection this turn ended up with.
+        if previous == 0 {
+            self.start_title(at, input.prompt().shown_text().to_owned());
+        }
         let mut entries = self.lanes[at]
             .session()
             .map(|session| session.entries()[previous..].to_vec())
@@ -370,6 +401,10 @@ impl Core {
                     }
                     Poll::Pending
                 }) => return self.record_agent(lane,event),
+                Some(titled) = self.runtime.titled.recv() => {
+                    self.land_title(titled);
+                    return Event::Activity;
+                }
                 () = table.changed().notified() => return Event::Activity,
                 () = tokio::time::sleep_until(due.unwrap_or_else(tokio::time::Instant::now)), if due.is_some() => {},
             }

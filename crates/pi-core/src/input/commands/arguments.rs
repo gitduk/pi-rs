@@ -426,8 +426,9 @@ fn values(
                 .iter()
                 .filter(|s| {
                     let holds = |text: &str| pi_store::text::matches(text, typed);
-                    (s.name.is_some() || !s.prompt.is_empty())
+                    (s.name.is_some() || s.title.is_some() || !s.prompt.is_empty())
                         && (s.name.as_deref().is_some_and(holds)
+                            || s.title.as_deref().is_some_and(holds)
                             || holds(&s.prompt)
                             || holds(&s.id))
                 })

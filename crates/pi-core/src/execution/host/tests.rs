@@ -259,6 +259,7 @@ async fn a_crashed_model_keeps_the_native_archive_and_saves_its_terminal_message
                 id: lane.id(),
                 model: lane.model(),
                 name: None,
+                title: None,
                 created: 0,
                 spent: Default::default(),
             },

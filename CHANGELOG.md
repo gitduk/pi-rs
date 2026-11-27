@@ -7,6 +7,20 @@ session store or the tool script protocol changed shape.
 
 Releases before 3.0.0 are recorded in the commit history, not here.
 
+## Unreleased
+
+### Added
+
+- An unnamed session is titled by the summarizer from the first question it was
+  asked, so the status line and `/resume` show what it is about instead of a
+  cut-off question. The title is written once, off the run, charged to the
+  session's own meter, and through `summarize_model` when one is set. A name
+  you give with `/name` or `--name` always shows over it, and a session whose
+  title never arrived falls back to the question as before.
+
+- The session file gains a `title` field. A build older than this one cannot
+  read a session that has one, so the next release is a major version.
+
 ## 3.0.10 - 2026-11-26
 
 ### Added

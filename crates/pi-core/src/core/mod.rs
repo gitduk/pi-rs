@@ -30,6 +30,7 @@ pub mod shells;
 mod skill_paths;
 pub mod status;
 pub mod statusline;
+pub mod title;
 pub mod tools;
 pub mod update;
 pub mod worktree;
@@ -89,6 +90,9 @@ pub struct Core {
     /// Where calls that outlive their turn are kept, when a surface serves
     /// them; a run with nothing to come back to keeps no executions.
     pub executions: Option<std::sync::Arc<crate::driver::background::Table>>,
+    /// Whether this run's session outlives it: a row nobody can come back to
+    /// is not worth naming.
+    pub naming: bool,
     /// Words the surface answers itself, listed beside the built-ins: each
     /// comes back as [`Step::Surface`]. Every resolve is handed them.
     pub surface: &'static [Command],
@@ -530,6 +534,7 @@ mod tests {
             id: "s1".into(),
             prompt: "fix the flaky test".into(),
             name: None,
+            title: None,
             touched: 0,
             rounds: 1,
             bytes: 0,
@@ -608,6 +613,7 @@ mod tests {
                     id: "s2",
                     model: "model-a",
                     name: None,
+                    title: None,
                     created: 0,
                     spent: Default::default(),
                 },
@@ -909,6 +915,7 @@ mod tests {
             pinned,
             lanes: crate::core::lanes::Lanes::of(lane),
             executions: None,
+            naming: false,
             removals: Default::default(),
             trees: None,
             surface: &[],

@@ -176,6 +176,8 @@ struct Start {
     id: String,
     claim: Option<session::Claim>,
     name: Option<String>,
+    // What a model called it, when the session came back from disk.
+    title: Option<String>,
     created: u64,
     carried: agent::session::Session,
     // How many messages the session came back with.
@@ -301,6 +303,9 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
         .name
         .clone()
         .or_else(|| prior.as_ref().and_then(|p| p.name.clone()));
+    // A title is the row's own, so it rides with the session it was written
+    // for; the user's name, when there is one, is what shows instead.
+    let title = prior.as_ref().and_then(|p| p.title.clone());
     let created = prior
         .as_ref()
         .map(|p| p.created)
@@ -321,6 +326,7 @@ async fn start(args: Arc<Args>, interactive: bool) -> Result<Start> {
         id,
         claim,
         name,
+        title,
         created,
         carried,
         resumed,
@@ -403,9 +409,11 @@ async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended
         store,
         workspace,
         worktree,
+        keeps,
         id,
         claim,
         name,
+        title,
         created,
         carried,
         words,
@@ -423,6 +431,7 @@ async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended
         id,
         created,
         name,
+        title,
         worktree,
         claim,
         kept,
@@ -436,6 +445,7 @@ async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended
         pinned,
         lanes: pi_core::core::lanes::Lanes::of(first),
         executions: None,
+        naming: keeps,
         removals: Default::default(),
         trees: None,
         surface: words,
@@ -470,6 +480,7 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         id,
         claim,
         name,
+        title,
         created,
         carried,
         resumed,
@@ -528,6 +539,7 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         id: id.clone(),
         created,
         name: name.clone(),
+        title,
         claim,
         worktree,
         ..lane::Opening::new(
@@ -550,6 +562,7 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         pinned,
         lanes: pi_core::core::lanes::Lanes::of(first),
         executions: None,
+        naming: keeps,
         removals: Default::default(),
         trees: None,
         surface: words,
@@ -611,7 +624,10 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
                 .unsaved()
                 .map_or(Ok(()), |why| Err(anyhow::anyhow!(why)))
         };
-        say_saved(saved, &id, name.as_deref(), resumed, args.quiet);
+        // The row's name, as the session stands now: a `/name` or a title
+        // that arrived while the run was going is what the file holds.
+        let called = core.lane().called();
+        say_saved(saved, &id, called.as_deref(), resumed, args.quiet);
     }
     // A stopped run is the one whose subagents were cut short with a save
     // in flight.

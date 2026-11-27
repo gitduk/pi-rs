@@ -156,6 +156,7 @@ pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
         pinned: pi_core::args::Pinned::default(),
         lanes: pi_core::core::lanes::Lanes::of(running_lane(dir)),
         executions: None,
+        naming: false,
         removals: Default::default(),
         trees: None,
         surface: crate::tui::WORDS,

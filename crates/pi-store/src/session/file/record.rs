@@ -264,6 +264,8 @@ pub(in crate::session) struct Start {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spent: Option<llm::Totals>,
@@ -449,6 +451,7 @@ impl Start {
             model: metadata.model.clone(),
             created: metadata.created,
             name: metadata.name.clone(),
+            title: metadata.title.clone(),
             parent: metadata.parent.clone(),
             spent: (metadata.spent != llm::Totals::default()).then_some(metadata.spent),
         }

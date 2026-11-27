@@ -78,8 +78,9 @@ parts you want.
   nothing while the worktree is clean. Both are empty outside a repository.
 - `state` — `idle`, `working`, `compacting`, `stopping`, `waiting` once a turn
   has gone quiet, or a retry it waits out. Always says something.
-- `session` — what the user calls this session, else the first thing it was
-  asked, cut short; absent until one of the two exists.
+- `session` — what the user calls this session, else the title a model wrote
+  from the first thing it was asked, else that first thing, cut short; absent
+  until one of the three exists.
 - `elapsed` — how long the run in flight has taken, and how long the run that
   last ended took once the row is back to idle.
 - `spent` — what the session has cost so far; `cost` — what the run in flight,
@@ -127,7 +128,8 @@ A script item carries exactly one of `command` or `name`.
   - `model`, `provider`, `effort`, `tier`, `running`, `state`, `alerts`,
     `update`, `released`;
   - `session` — `id`, `name` (only once the user names it), `title` (that name,
-    else the first thing it was asked), `started` in seconds since the epoch,
+    else a model's title from the first question, else that first question),
+    `started` in seconds since the epoch,
     `workspace`, and `spent`: `usage` (`input`, `output`, `cache_read`,
     `cache_write`) with `cost` in dollars, the whole session, children and
     compactions alike;

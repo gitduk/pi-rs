@@ -602,6 +602,7 @@ max_output_tokens = 2048
             pinned,
             lanes: ring,
             executions: None,
+            naming: false,
             removals: Default::default(),
             trees: None,
             surface: &[],

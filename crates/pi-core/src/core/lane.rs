@@ -101,6 +101,9 @@ struct Conversation {
     _claim: Option<Arc<session::Claim>>,
     // What the user calls this session, if anything.
     name: Arc<Mutex<Option<String>>>,
+    // What a model calls it, written from the first thing it was asked. The
+    // user's name shows over it; without one, this is what a row shows.
+    title: Arc<Mutex<Option<String>>>,
     // What the run in flight has cost so far, seeded when a run
     // arms; the status lines read this run alone, `/status` the session.
     tally: Tally,
@@ -203,9 +206,16 @@ impl Conversation {
             created,
             _claim: claim.map(Arc::new),
             name: Arc::new(Mutex::new(name)),
+            title: Arc::default(),
             unsaved: Arc::default(),
             filed: false,
         }
+    }
+
+    // The title arrives with the session it belongs to, read off its file.
+    fn titled(mut self, title: Option<String>) -> Self {
+        self.title = Arc::new(Mutex::new(title));
+        self
     }
 }
 
@@ -227,6 +237,7 @@ pub(crate) struct Save {
     id: String,
     model: String,
     name: Arc<Mutex<Option<String>>>,
+    title: Arc<Mutex<Option<String>>>,
     created: u64,
     unsaved: Arc<Mutex<Option<String>>>,
 }
@@ -240,6 +251,7 @@ impl Save {
             id: lane.talk.id.clone(),
             model: lane.model().into(),
             name: lane.talk.name.clone(),
+            title: lane.talk.title.clone(),
             created: lane.talk.created,
             unsaved: lane.talk.unsaved.clone(),
         }
@@ -256,10 +268,16 @@ impl Save {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        let title = self
+            .title
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let header = session::Header {
             id: &self.id,
             model: &self.model,
             name: name.as_deref(),
+            title: title.as_deref(),
             created: self.created,
             spent,
         };
@@ -488,6 +506,7 @@ pub struct Opening {
     pub id: String,
     pub created: u64,
     pub name: Option<String>,
+    pub title: Option<String>,
     pub worktree: Option<String>,
     /// The hold on `id`, when the opener already took it.
     pub claim: Option<session::Claim>,
@@ -511,6 +530,7 @@ impl Opening {
             id: String::new(),
             created: 0,
             name: None,
+            title: None,
             worktree: None,
             claim: None,
             kept: None,
@@ -545,7 +565,8 @@ impl Lane {
                 parts.name,
                 parts.claim,
                 parts.kept,
-            ),
+            )
+            .titled(parts.title),
             runner: Runner {
                 run: Run::Idle,
                 events,
@@ -873,6 +894,30 @@ impl Lane {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = name;
     }
 
+    /// What a row calls this session: the name the user gave it, else the
+    /// title a model wrote from the first question.
+    pub fn called(&self) -> Option<String> {
+        self.name().or_else(|| self.title())
+    }
+
+    /// What a model calls this session, when one has written a title.
+    pub fn title(&self) -> Option<String> {
+        self.talk
+            .title
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Write what a model called this session, or drop it.
+    pub fn set_title(&mut self, title: Option<String>) {
+        *self
+            .talk
+            .title
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = title;
+    }
+
     /// Why the transcript on disk is behind this one, while it is.
     pub fn unsaved(&self) -> Option<String> {
         self.talk
@@ -1170,7 +1215,12 @@ impl Core {
         stored: Stored,
         claim: session::Claim,
     ) -> Result<Vec<String>, String> {
-        let (id, name, created) = (stored.id.clone(), stored.name.clone(), stored.created);
+        let (id, name, title, created) = (
+            stored.id.clone(),
+            stored.name.clone(),
+            stored.title.clone(),
+            stored.created,
+        );
         let messages = crate::execution::messages::Messages::load(
             message::SessionId::new(id.clone()).map_err(|e| refused("resume", e.into()))?,
             &self.store.path_of(self.lane().root(), &id),
@@ -1186,7 +1236,8 @@ impl Core {
             name,
             Some(claim),
             kept,
-        );
+        )
+        .titled(title);
         talk.messages = messages;
         self.becomes(talk);
         self.lane().checkout.agent.meter.reset(spent);

@@ -152,6 +152,16 @@ impl Agent {
         &self.model.spec
     }
 
+    /// The wire and the model a side question is asked on — a title, a
+    /// summary: the model the compactor holds when it has one, else this one.
+    /// Charged to the same meter either way.
+    pub fn side(&self) -> (Metered<'_>, &ModelSpec) {
+        match self.compactor.writer() {
+            Some((transport, spec)) => (self.wire().over(transport), spec),
+            None => (self.wire(), self.spec()),
+        }
+    }
+
     /// Point the same run at a different host, and the budget at that host's.
     pub fn retarget(&mut self, transport: Arc<dyn Transport>, spec: ModelSpec) {
         self.model = Arc::new(Model { transport, spec });

@@ -162,6 +162,12 @@ pub trait Compactor: Send + Sync {
         }
     }
 
+    /// The wire and the model a side question of the session's is asked on,
+    /// when this compactor holds a model of its own for that kind of prose.
+    fn writer(&self) -> Option<(&dyn Transport, &ModelSpec)> {
+        None
+    }
+
     /// Shrink it now, at the user's word rather than the window's: no budget is
     /// asked of it, and `focus` is what the person wants kept.
     async fn compact_now(

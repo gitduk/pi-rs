@@ -82,6 +82,7 @@ pub(super) struct Metadata {
     pub workspace: String,
     pub model: String,
     pub name: Option<String>,
+    pub title: Option<String>,
     pub created: u64,
     pub spent: llm::Totals,
     pub parent: Option<String>,
@@ -412,6 +413,7 @@ pub(super) fn write(
         workspace: workspace.to_string_lossy().into_owned(),
         model: header.model.into(),
         name: header.name.map(str::to_owned),
+        title: header.title.map(str::to_owned),
         created,
         spent: header.spent,
         parent: parent.map(str::to_owned),
@@ -453,6 +455,7 @@ pub fn read(at: &Location) -> Result<Stored> {
         model: metadata.model,
         created: metadata.created,
         name: metadata.name,
+        title: metadata.title,
         spent: metadata.spent,
         session,
     })
