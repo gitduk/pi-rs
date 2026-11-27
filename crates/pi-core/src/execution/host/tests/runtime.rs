@@ -12,6 +12,7 @@ fn core(lane: Lane, store: pi_store::session::Store, table: Arc<Table>) -> Core 
         pinned: Default::default(),
         lanes: Lanes::of(lane),
         executions: Some(table),
+        services: None,
         surface: &[],
         removals: Default::default(),
         trees: None,

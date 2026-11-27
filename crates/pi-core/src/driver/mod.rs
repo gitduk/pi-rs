@@ -6,6 +6,7 @@
 
 pub mod background;
 pub mod input;
+pub mod services;
 
 use std::sync::Arc;
 
@@ -69,6 +70,7 @@ pub struct Next {
 #[derive(Default)]
 pub struct Drivers {
     executions: Arc<background::Table>,
+    services: Arc<services::Services>,
     // Runs an execution is told the end of — its input opened them, or it follows
     // its checkout — each with its answer so far.
     owed: Vec<Owed>,
@@ -172,6 +174,12 @@ impl Drivers {
     /// lanes' tools and this driver share it.
     pub fn background(&self) -> Arc<background::Table> {
         self.executions.clone()
+    }
+
+    /// The services this pi runs: armed by the surface that wants them, and
+    /// read by the surface that draws their statuses.
+    pub fn services(&self) -> Arc<services::Services> {
+        self.services.clone()
     }
 
     /// The line a driver sends `lane`, the checkout at `root`, next. Asked

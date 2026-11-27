@@ -51,7 +51,24 @@ pub struct Dir {
 
 struct Seen {
     tools: Vec<Arc<dyn Tool>>,
+    services: Vec<Service>,
     skipped: Vec<Skip>,
+}
+
+/// A script run by pi itself, not offered to the model: one process per
+/// machine, started with the sessions it may speak to.
+#[derive(Debug, Clone)]
+pub struct Service {
+    pub name: String,
+    pub path: PathBuf,
+    runner: Runner,
+}
+
+impl Service {
+    /// The command that runs the service, whatever its `#!` names.
+    pub fn command(&self) -> tokio::process::Command {
+        script::command_for(&self.runner, &self.path)
+    }
 }
 
 /// A script that could not be registered, and why.
@@ -92,6 +109,11 @@ impl Dir {
         self.fresh(|seen| seen.skipped.iter().map(Skip::to_string).collect())
     }
 
+    /// The scripts declared as services, in the directory's sorted order.
+    pub fn services(&self) -> Vec<Service> {
+        self.fresh(|seen| seen.services.clone())
+    }
+
     fn fresh<T>(&self, read: impl FnOnce(&Seen) -> T) -> T {
         self.seen.read(stamps(&self.dir), || self.build(), read)
     }
@@ -99,7 +121,16 @@ impl Dir {
     fn build(&self) -> Seen {
         let (scripts, skipped) = discover_in(&self.dir);
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+        let mut services = Vec::new();
         for script in scripts {
+            if script.service {
+                services.push(Service {
+                    name: script.name,
+                    path: script.path,
+                    runner: script.runner,
+                });
+                continue;
+            }
             if script.background && self.shell.is_none() {
                 continue;
             }
@@ -119,7 +150,11 @@ impl Dir {
                 tools.push(Arc::new(broken));
             }
         }
-        Seen { tools, skipped }
+        Seen {
+            tools,
+            services,
+            skipped,
+        }
     }
 }
 
@@ -201,8 +236,8 @@ pub fn discover_in(dir: &Path) -> (Vec<Script>, Vec<Skip>) {
             Runner::Cargo => interface(&text),
             Runner::Shebang(..) => header(&text),
         };
-        let (description, args, background) = match read {
-            Ok(found) => found,
+        let declared = match read {
+            Ok(declared) => declared,
             Err(why) => {
                 skipped.push(Skip { path, why });
                 continue;
@@ -210,9 +245,10 @@ pub fn discover_in(dir: &Path) -> (Vec<Script>, Vec<Skip>) {
         };
         tools.push(Script {
             name: name.to_string(),
-            description,
-            args,
-            background,
+            description: declared.description,
+            args: declared.args,
+            background: declared.background,
+            service: declared.service,
             path,
             runner,
             shell: None,
@@ -280,11 +316,22 @@ impl Tool for Broken {
     }
 }
 
-type Interface = (String, Vec<Arg>, bool);
+/// What a script's manifest or header declares it to be.
+#[derive(Debug)]
+struct Declared {
+    description: String,
+    args: Vec<Arg>,
+    background: bool,
+    service: bool,
+}
+
+// What a declaration may carry besides its description: one list, so the
+// two parsers' `known` checks cannot drift apart.
+const DECLARED_KEYS: &[&str] = &["required", "optional", "background", "service"];
 
 /// The frontmatter's manifest is the interface declaration: the same block
 /// cargo reads the script's dependencies from.
-fn interface(text: &str) -> Result<Interface, String> {
+fn interface(text: &str) -> Result<Declared, String> {
     let manifest = frontmatter(text).ok_or("no --- frontmatter")?;
     let manifest: toml::Table = manifest.parse().map_err(|e| format!("frontmatter: {e}"))?;
     let package = manifest.get("package");
@@ -299,18 +346,24 @@ fn interface(text: &str) -> Result<Interface, String> {
         .and_then(|m| m.get("pi"));
     const PREFIX: &str = "package.metadata.pi.";
     if let Some(declared) = declared {
-        known(declared, &["required", "optional", "background"], PREFIX)?;
+        known(declared, DECLARED_KEYS, PREFIX)?;
     }
     let args = declared_args(declared, PREFIX)?;
-    Ok((description.to_string(), args, background_mode(declared)?))
+    Ok(Declared {
+        description: description.to_string(),
+        args,
+        background: mode(declared, "background")?,
+        service: mode(declared, "service")?,
+    })
 }
 
-fn background_mode(table: Option<&toml::Value>) -> Result<bool, String> {
-    match table.and_then(|table| table.get("background")) {
+// What a declared mode flag says: false when absent, refused when not a bool.
+fn mode(table: Option<&toml::Value>, key: &str) -> Result<bool, String> {
+    match table.and_then(|table| table.get(key)) {
         None => Ok(false),
         Some(value) => value
             .as_bool()
-            .ok_or_else(|| "background must be true or false".to_string()),
+            .ok_or_else(|| format!("{key} must be true or false")),
     }
 }
 
@@ -366,7 +419,7 @@ fn declared_args(table: Option<&toml::Value>, prefix: &str) -> Result<Vec<Arg>, 
 /// Any other script's interface: TOML in a comment block right after the
 /// `#!` line, between `---` fences that carry the comment's own prefix —
 /// `# ---`, `// ---` — with `description`, `[required]` and `[optional]`.
-fn header(text: &str) -> Result<Interface, String> {
+fn header(text: &str) -> Result<Declared, String> {
     const NONE: &str = "no `# ---` header after the #! line";
     let mut lines = text.lines().skip(1).skip_while(|l| l.trim().is_empty());
     let fence = lines.next().ok_or(NONE)?.trim_end();
@@ -402,15 +455,16 @@ fn header(text: &str) -> Result<Interface, String> {
         .ok_or("no description in the header")?;
     known(
         &table,
-        &["description", "required", "optional", "background"],
+        &[["description"].as_slice(), DECLARED_KEYS].concat(),
         "",
     )?;
     let args = declared_args(Some(&table), "")?;
-    Ok((
-        description.to_string(),
+    Ok(Declared {
+        description: description.to_string(),
         args,
-        background_mode(Some(&table))?,
-    ))
+        background: mode(Some(&table), "background")?,
+        service: mode(Some(&table), "service")?,
+    })
 }
 
 /// The manifest between the `---` fences, after an optional shebang.
@@ -475,7 +529,7 @@ mod tests {
             for parsed in [interface(&rust), header(&shell)] {
                 assert_eq!(
                     parsed
-                        .map(|(_, _, mode)| mode)
+                        .map(|declared| declared.background)
                         .as_ref()
                         .map_err(String::as_str),
                     expected.as_ref().map_err(|error| *error)
@@ -556,10 +610,10 @@ mod tests {
         let text = "#!/usr/bin/env cargo\n---\n[package]\ndescription = \"Count lines\"\n\n\
                     [package.metadata.pi.required]\nfile = \"file to count\"\n\n\
                     [dependencies]\nserde_json = \"1\"\n---\nfn main() {}\n";
-        let (description, args, _) = interface(text).unwrap();
-        assert_eq!(description, "Count lines");
+        let declared = interface(text).unwrap();
+        assert_eq!(declared.description, "Count lines");
         assert_eq!(
-            args,
+            declared.args,
             vec![Arg {
                 name: "file".into(),
                 description: "file to count".into(),
@@ -735,7 +789,7 @@ mod tests {
     #[test]
     fn a_header_reads_in_its_own_comment_style() {
         let js = "#!/usr/bin/env node\n\n// ---\n// description = \"Hi\"\n//\n// ---\n";
-        assert_eq!(header(js).unwrap().0, "Hi");
+        assert_eq!(header(js).unwrap().description, "Hi");
         let open = "#!/bin/sh\n# ---\n# description = \"Hi\"\n";
         assert!(header(open).unwrap_err().contains("not closed"));
         let stray = "#!/bin/sh\n# ---\ndescription = \"Hi\"\n# ---\n";

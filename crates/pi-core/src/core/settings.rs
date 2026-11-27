@@ -72,6 +72,7 @@ impl Core {
             archive,
             retry,
             executions,
+            self.services.clone(),
             |_| {},
         );
         // The shelf was read again with the rest, so a skill found on it is
@@ -186,6 +187,7 @@ impl Core {
             archive,
             retry,
             executions,
+            self.services.clone(),
             |ag| {
                 ag.compactor = std::sync::Arc::new(agent::Summarizing::new(writer, idle));
                 if let Some((transport, spec)) = retarget {
@@ -341,8 +343,9 @@ impl Core {
         // The child is built from this agent, so the tool is hung again for it
         // to run on the model this session just moved to.
         let executions = self.executions.clone();
+        let services = self.services.clone();
         self.lane_mut()
-            .rearm(resolved, archive, retry, executions, |ag| {
+            .rearm(resolved, archive, retry, executions, services, |ag| {
                 ag.retarget(transport, spec)
             });
     }

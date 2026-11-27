@@ -436,13 +436,17 @@ async fn interactive(start: Start, updated_from: Option<String>) -> Result<Ended
         pinned,
         lanes: pi_core::core::lanes::Lanes::of(first),
         executions: None,
+        services: None,
         removals: Default::default(),
         trees: None,
         surface: words,
     };
     core.restore_messages()?;
     let drivers = pi_core::driver::Drivers::default();
+    let services = drivers.services();
+    services.arm();
     core.enable_background(drivers.background());
+    core.enable_services(services);
     core.reopen(&args.lanes());
     core.revive_commands();
     core::update::watch();
@@ -550,6 +554,7 @@ async fn once(start: Start, prompt: String) -> Result<Ended> {
         pinned,
         lanes: pi_core::core::lanes::Lanes::of(first),
         executions: None,
+        services: None,
         removals: Default::default(),
         trees: None,
         surface: words,

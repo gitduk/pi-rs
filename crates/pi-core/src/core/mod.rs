@@ -90,6 +90,9 @@ pub struct Core {
     /// Where calls that outlive their turn are kept, when a surface serves
     /// them; a run with nothing to come back to keeps no executions.
     pub executions: Option<std::sync::Arc<crate::driver::background::Table>>,
+    /// Services the surface armed: each lane's session gets a socket its
+    /// services connect to. `None` keeps every lane unbound.
+    pub services: Option<std::sync::Arc<crate::driver::services::Services>>,
     /// Words the surface answers itself, listed beside the built-ins: each
     /// comes back as [`Step::Surface`]. Every resolve is handed them.
     pub surface: &'static [Command],
@@ -252,10 +255,26 @@ impl Core {
             let retry = lane.resolved().retry;
             let archive = self.archive(lane.root().to_path_buf());
             let resolved = lane.resolved().clone();
-            self.lanes
-                .at_mut(at)
-                .rearm(resolved, archive, retry, self.executions.clone(), |_| {});
+            self.lanes.at_mut(at).rearm(
+                resolved,
+                archive,
+                retry,
+                self.executions.clone(),
+                self.services.clone(),
+                |_| {},
+            );
         }
+    }
+
+    /// Serve each lane's services from `services`, which the surface armed;
+    /// lanes already open bind their sessions' sockets from their inputs.
+    pub fn enable_services(&mut self, services: std::sync::Arc<crate::driver::services::Services>) {
+        for lane in self.lanes.iter() {
+            if let Some(ingress) = lane.ingress() {
+                services.bind(lane.id(), ingress);
+            }
+        }
+        self.services = Some(services);
     }
 
     /// The checkout in front. Always one: `Lanes` keeps a lane in front even
@@ -913,6 +932,7 @@ mod tests {
             pinned,
             lanes: crate::core::lanes::Lanes::of(lane),
             executions: None,
+            services: None,
             removals: Default::default(),
             trees: None,
             surface: &[],

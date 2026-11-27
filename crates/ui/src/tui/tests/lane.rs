@@ -1786,6 +1786,7 @@ fn a_line_draws_the_models_name_and_the_input_keeps_its_identity() {
         None,
         Vec::new(),
         Default::default(),
+        Vec::new(),
     );
     assert_eq!(
         facts.value(pi_store::statusline::Field::Model).as_deref(),
