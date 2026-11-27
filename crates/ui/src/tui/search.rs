@@ -32,7 +32,7 @@ impl Spot {
             Target::Scrollback(idx, line) | Target::Separator(idx, line) => {
                 Some(Spot::Row(idx, line))
             }
-            Target::Pin(idx) => Some(Spot::Row(idx, 0)),
+            Target::Pin { ask, .. } => Some(Spot::Row(ask, 0)),
             Target::Text(n) => Some(Spot::Text(n)),
             Target::PendingTool(i)
             | Target::BackgroundResults(i)
@@ -196,9 +196,15 @@ impl Ui {
         self.place_at(n)
     }
 
-    fn place_at(&self, n: usize) -> Option<Place> {
+    // Where the window opens at row `n` of the last frame: a pin draws over a
+    // row without being where the window is, so it hands back the row it covers.
+    pub(super) fn place_at(&self, n: usize) -> Option<Place> {
+        let target = *self.row_targets.get(n)?;
+        if let Target::Pin { under, .. } = target {
+            return under;
+        }
         Some(Place {
-            spot: Spot::of(*self.row_targets.get(n)?)?,
+            spot: Spot::of(target)?,
             row: *self.row_of.get(n)?,
         })
     }

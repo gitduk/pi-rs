@@ -3,11 +3,12 @@
 
 use std::path::Path;
 
-use pi_store::statusline::Place;
+use pi_store::statusline::Place as StatuslinePlace;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 
 use super::Ui;
 use super::screen;
+use super::search::Place;
 use super::select::{self, Drawn, Point, Selection};
 use super::ui::Press;
 use super::view::View;
@@ -706,8 +707,8 @@ pub(super) enum Target {
     // Neither: the room over a page's output.
     Gap,
     // A question pinned over the history's top row: it draws line 0 of the row
-    // it names, so an anchor and a search start there, and it takes no click.
-    Pin(usize),
+    // it names, takes no click, and covers `under`, still where the window opens.
+    Pin { ask: usize, under: Option<Place> },
 }
 
 // The frame's regions, laid out once and drawn by name. The only place the
@@ -762,7 +763,7 @@ const STRIP_LEAST: usize = 1;
 pub(super) enum Pane {
     /// The statusline's rows: the ones over the input line, or the ones
     /// under it. One variant, since they differ only in where they sit.
-    Statusline { place: Place, rows: usize },
+    Statusline { place: StatuslinePlace, rows: usize },
     /// The input line.
     Editor(usize),
     /// A question and the options that answer it, when one is open. It
@@ -811,10 +812,10 @@ pub(super) fn row_in(area: Rect, row: u16) -> Option<usize> {
 impl Regions {
     /// The row `place` draws on: the one over the input line, or the one
     /// under it.
-    pub(super) fn strip(&self, place: Place) -> Rect {
+    pub(super) fn strip(&self, place: StatuslinePlace) -> Rect {
         match place {
-            Place::Top => self.statusline_top,
-            Place::Bottom => self.statusline,
+            StatuslinePlace::Top => self.statusline_top,
+            StatuslinePlace::Bottom => self.statusline,
         }
     }
 
@@ -829,11 +830,11 @@ impl Regions {
         for pane in panes {
             match *pane {
                 Pane::Statusline {
-                    place: Place::Bottom,
+                    place: StatuslinePlace::Bottom,
                     rows,
                 } => bar = take(&mut room, rows),
                 Pane::Statusline {
-                    place: Place::Top,
+                    place: StatuslinePlace::Top,
                     rows,
                 } => {
                     // The line keeps its rows before the blank row does: a

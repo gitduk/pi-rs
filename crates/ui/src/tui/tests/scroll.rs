@@ -1997,3 +1997,44 @@ fn a_question_the_window_left_behind_pins_to_the_top_row() {
         &ui.drawn[..height]
     );
 }
+
+// A question pinned over the top row is not where the window opens: scrolling
+// from the newest rows must not anchor on it and jump back up the transcript.
+#[test]
+fn a_pinned_question_leaves_the_newest_rows_where_they_are() {
+    let mut ui = vim_ui_at(30, 12);
+    ui.vim = Some(pi_store::keys::Mode::Normal);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    view.surface.scrollback.append(Row::prompt(
+        "a question that wraps because it is long",
+        0,
+        &ui.paint,
+    ));
+    for n in 1..=40 {
+        view.surface.scrollback.extend(Row::answer(
+            &format!("answer {n} with text long enough to wrap once"),
+            &ui.paint,
+        ));
+    }
+    ui.flush(&lane, &mut view);
+    let bottom = ui.drawn.clone();
+    assert_eq!(view.surface.scroll, crate::tui::view::Scroll::newest());
+    for key in ['J', 'J', 'j'] {
+        ui.key(&lane, &mut view, typed(key), false);
+        ui.flush(&lane, &mut view);
+        assert_eq!(
+            view.surface.scroll,
+            crate::tui::view::Scroll::newest(),
+            "{key} on the newest rows leaves them newest"
+        );
+        assert_eq!(ui.drawn, bottom, "{key} drew another window");
+    }
+    ui.key(&lane, &mut view, typed('K'), false);
+    ui.flush(&lane, &mut view);
+    assert!(!view.surface.scroll.newest_rows(), "K scrolls up");
+    ui.key(&lane, &mut view, typed('J'), false);
+    ui.flush(&lane, &mut view);
+    assert_eq!(view.surface.scroll, crate::tui::view::Scroll::newest());
+    assert_eq!(ui.drawn, bottom, "and J takes it back down");
+}

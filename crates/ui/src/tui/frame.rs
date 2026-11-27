@@ -760,8 +760,9 @@ impl Ui {
         if let Some(band) = row.band(&self.paint) {
             pinned = screen::banded(pinned, band);
         }
+        let under = self.place_at(0);
         rows[0] = pinned;
-        self.row_targets[0] = Target::Pin(ask);
+        self.row_targets[0] = Target::Pin { ask, under };
         self.row_of[0] = 0;
     }
 
