@@ -713,7 +713,8 @@ pub(super) enum Target {
 pub(super) struct Regions {
     // The scrolled transcript, the live region's rows included.
     pub(super) history: Rect,
-    // The blank row under it, which says what is below once scrolled up.
+    // The blank row between the transcript and the top status line, which
+    // says what is below once scrolled up.
     pub(super) gap: Rect,
     // The question the completion list answers, over its rule.
     pub(super) asked: Rect,
@@ -726,9 +727,9 @@ pub(super) struct Regions {
     pub(super) executions: Rect,
     // The input line, between the conversation and the bar.
     pub(super) editor: Rect,
-    // The row over the input line, when the layout asks for one. A menu
-    // covers it while one is open: an option sits beside the input, not
-    // above a row of blank.
+    // The rows over the input line, when the layout asks for one. A menu
+    // covers them while one is open: an option sits beside the input, not
+    // above rows of blank.
     pub(super) statusline_top: Rect,
     // The row under it: the checkouts, or the flash that took its row.
     pub(super) statusline: Rect,
@@ -746,9 +747,9 @@ fn copy_out(code: &str) -> String {
     }
 }
 
-/// The least the strip between the transcript and the input line takes: the
-/// top layout line draws there, and with no such line the row still parts the
-/// two and holds the scroll hint.
+/// The rows the strip between the transcript and the input line keeps besides
+/// the top layout line: one blank, parting the conversation from the line, and
+/// holding the scroll hint.
 const STRIP_LEAST: usize = 1;
 
 /// One band under the transcript, listed in the order it is laid: the order
@@ -820,7 +821,7 @@ impl Regions {
         // A row of history stays whatever else is asked for: a conversation
         // with no row of its own has nothing to read.
         let mut room = (area.height as usize).saturating_sub(1);
-        let (mut bar, mut editor, mut top, mut executions) = (0, 0, 0, 0);
+        let (mut bar, mut editor, mut gap, mut top, mut executions) = (0, 0, 0, 0, 0);
         let (mut asked, mut menu) = (0, 0);
         for pane in panes {
             match *pane {
@@ -831,7 +832,12 @@ impl Regions {
                 Pane::Statusline {
                     place: Place::Top,
                     rows,
-                } => top = take(&mut room, rows.max(STRIP_LEAST)),
+                } => {
+                    // The line keeps its rows before the blank row does: a
+                    // short screen shows the line, not an empty strip.
+                    top = take(&mut room, rows);
+                    gap = take(&mut room, STRIP_LEAST);
+                }
                 Pane::Editor(n) => editor = take(&mut room, n),
                 Pane::Panel {
                     asked: questions,
@@ -845,18 +851,24 @@ impl Regions {
         let space = u16::from(executions > 0);
         // One stack, top to bottom: what a screen shows when the panes above
         // it have taken their rows.
-        let [history, _, executions, statusline_top, editor, statusline] = Layout::vertical([
+        let [
+            history,
+            _,
+            executions,
+            gap,
+            statusline_top,
+            editor,
+            statusline,
+        ] = Layout::vertical([
             Constraint::Fill(1),
             Constraint::Length(space),
             Constraint::Length(executions as u16),
+            Constraint::Length(gap as u16),
             Constraint::Length(top as u16),
             Constraint::Length(editor as u16),
             Constraint::Length(bar as u16),
         ])
         .areas(area);
-        // The strip's first row is the one the scroll hint takes: the top
-        // layout lines give way to it while the transcript is scrolled up.
-        let gap = statusline_top.rows().next().unwrap_or_default();
         // The panel covers the rows just over the input line — the gap and
         // the row above it with them, so an option sits beside the line it
         // completes. At most half of what stands above, so the conversation

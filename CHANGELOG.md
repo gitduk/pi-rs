@@ -29,6 +29,16 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   second copy of the whole `SKILL.md`, because the first copy is still above.
   Once a compaction drops that copy, the next run sends it in full again.
 
+- A `top` status line no longer sits against the transcript's last row: a blank
+  row parts them. The row was already there for a layout with no `top` line —
+  it held the scroll hint — and now the line takes its own rows under it, so
+  that layout looks the same. Scrolled up, the hint fills that blank row and
+  the line keeps drawing, where it used to give way to the hint.
+
+- The blank row under a submitted prompt stands from the moment the run is on,
+  rather than from the model's first byte, so the screen no longer moves a row
+  when the answer starts. A turn that thinks first holds the row too.
+
 ### Fixed
 
 - `H`/`L` reach a checkout `/worktree` has just made. The list read once for the

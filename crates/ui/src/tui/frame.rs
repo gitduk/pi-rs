@@ -400,18 +400,15 @@ impl Ui {
         } else {
             below
         };
-        // Scrolled up, the strip's first row says how much is below rather
-        // than naming the checkouts.
-        let hint = self.below > 0;
-        let gap = if hint {
+        // Scrolled up, the blank row over the status line says how much is
+        // below rather than staying blank.
+        let gap = (self.below > 0).then(|| {
             let shine = self
                 .pointer
                 .is_some_and(|(_, row)| row_in(regions.gap, row).is_some());
             let more = format!("{below} more below");
-            Some(Line::from(self.paint.action_hint(shine, more)).centered())
-        } else {
-            None
-        };
+            Line::from(self.paint.action_hint(shine, more)).centered()
+        });
 
         // Scrolled up, or on a hit, the next frame opens on this one's top
         // row: a hit stays where it was found as the rows under it grow.
@@ -512,12 +509,12 @@ impl Ui {
                     }
                 }
             };
-            if !over_rows.is_empty() && !hint {
+            if !over_rows.is_empty() {
                 frame.render_widget(Rows(&over_lines), regions.statusline_top);
             }
             frame.render_widget(Rows(&bar), regions.statusline);
             if self.selection.is_none() {
-                if !over_rows.is_empty() && !hint {
+                if !over_rows.is_empty() {
                     parts(frame, regions.statusline_top, &over_rows);
                 }
                 parts(frame, regions.statusline, &bar_rows);
@@ -871,10 +868,11 @@ impl Ui {
         } else {
             (view.surface.stream).answer_lines(width, &self.paint, body)
         };
-        if !thinking
-            && content.first().is_some_and(|line| !line.spans.is_empty())
-            && spacing.push(super::spacing::Section::Prose)
-        {
+        // The blank row parts the prompt from what answers it, and it stands
+        // from the moment the run is on: adding it with the first byte moved
+        // the screen a row when the byte came.
+        let showing = content.first().is_some_and(|line| !line.spans.is_empty());
+        if (showing || view.state.work.is_some()) && spacing.push(super::spacing::Section::Prose) {
             out.push(Line::default(), None);
         }
         for row in content.iter() {
