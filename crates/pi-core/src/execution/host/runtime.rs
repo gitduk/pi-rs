@@ -301,8 +301,12 @@ impl Core {
             self.runtime.closing = true;
         }
         let mut cancelled = Vec::new();
+        let services = self.services.clone();
         for lane in self.lanes.all_mut() {
             lane.close_inputs();
+            if let Some(services) = &services {
+                services.unbind(lane.id());
+            }
             cancelled.extend(lane.queue().lock().drain().map(|queued| queued.request));
             lane.cancel();
         }

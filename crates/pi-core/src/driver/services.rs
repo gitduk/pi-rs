@@ -60,13 +60,15 @@ struct Places {
     sessions: PathBuf,
 }
 
-/// A session's socket, unlinked when pi leaves it.
+/// A session's socket, unlinked and stopped when pi leaves it.
 struct Socket {
     path: PathBuf,
+    accept: tokio::task::AbortHandle,
 }
 
 impl Drop for Socket {
     fn drop(&mut self) {
+        self.accept.abort();
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -126,7 +128,9 @@ impl Services {
             tracing::warn!(target: "pi::services", %why, "services stay off: no place for them");
             return;
         }
-        let _ = self.places.set(places);
+        if self.places.set(places).is_err() {
+            return;
+        }
         tracing::info!(target: "pi::services", "armed");
         let weak = Arc::downgrade(self);
         tokio::spawn(async move {
@@ -149,9 +153,7 @@ impl Services {
             return;
         };
         let mut sockets = self.sockets.lock().expect("lock poisoned");
-        if sockets.contains_key(session) {
-            return;
-        }
+        sockets.remove(session);
         let path = sessions.join(format!("{session}.sock"));
         let _ = std::fs::remove_file(&path);
         let listener = match std::os::unix::net::UnixListener::bind(&path).and_then(|listener| {
@@ -166,7 +168,6 @@ impl Services {
             }
         };
         tracing::info!(target: "pi::services", session, path = %path.display(), "session socket bound");
-        sockets.insert(session.to_string(), Socket { path });
         let slots = self
             .slots
             .lock()
@@ -175,8 +176,8 @@ impl Services {
             .or_default()
             .clone();
         let next_slot = self.next_slot.clone();
-        let session = session.to_string();
-        tokio::spawn(async move {
+        let session_name = session.to_string();
+        let accept = tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     return;
@@ -184,13 +185,20 @@ impl Services {
                 let slot = next_slot.fetch_add(1, Ordering::Relaxed);
                 tokio::spawn(serve(
                     stream,
-                    session.clone(),
+                    session_name.clone(),
                     ingress.clone(),
                     slots.clone(),
                     slot,
                 ));
             }
-        });
+        })
+        .abort_handle();
+        sockets.insert(session.to_string(), Socket { path, accept });
+    }
+
+    /// Stop serving `session` on its socket.
+    pub(crate) fn unbind(&self, session: &str) {
+        self.sockets.lock().expect("lock poisoned").remove(session);
     }
 
     /// One pass of the heal loop: reap what this pi started, and start what
@@ -272,6 +280,17 @@ impl Services {
     }
 }
 
+/// Spawned `Listen` tasks for one connection, aborted when the connection ends.
+struct Listeners(Vec<tokio::task::AbortHandle>);
+
+impl Drop for Listeners {
+    fn drop(&mut self) {
+        for handle in &self.0 {
+            handle.abort();
+        }
+    }
+}
+
 /// One connection from a service: every frame it speaks, answered.
 async fn serve(
     stream: UnixStream,
@@ -302,13 +321,15 @@ async fn serve(
         skipping: false,
         open: true,
     };
+    let mut listeners = Listeners(Vec::new());
     while let Ok(frame) = frames.next().await {
         // Whether the connection stays up: a frame pi will not serve ends it.
-        let stays = answer(frame, &session, &ingress, &slots, slot, &to).await;
+        let stays = answer(frame, &session, &ingress, &slots, slot, &to, &mut listeners).await;
         if !stays {
             break;
         }
     }
+    drop(listeners);
     drop(to);
     let _ = writer.await;
 }
@@ -322,6 +343,7 @@ async fn answer(
     slots: &Slots,
     slot: u64,
     to: &mpsc::Sender<Value>,
+    listeners: &mut Listeners,
 ) -> bool {
     if frame.get("op").is_none() {
         let id = frame.get("id").cloned();
@@ -468,7 +490,7 @@ async fn answer(
                     return false;
                 }
                 let to = to.clone();
-                tokio::spawn(async move {
+                let task = tokio::spawn(async move {
                     let mut observation = observation;
                     loop {
                         match observation.next().await {
@@ -482,6 +504,7 @@ async fn answer(
                         }
                     }
                 });
+                listeners.0.push(task.abort_handle());
                 true
             }
             Err(why) => to

@@ -1161,6 +1161,10 @@ impl Core {
     }
     // Replace the conversation and spill namespace together.
     fn becomes(&mut self, talk: Conversation) {
+        let old_id = self.lane().id().to_owned();
+        if let Some(services) = &self.services {
+            services.unbind(&old_id);
+        }
         let lane = self.lane_mut();
         lane.close_inputs();
         lane.talk = talk;
