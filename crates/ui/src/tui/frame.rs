@@ -401,16 +401,13 @@ impl Ui {
         };
         // Scrolled up, the blank row over the status line says how much is
         // below rather than staying blank.
-        let hint = self.below > 0;
-        let gap = if hint {
+        let gap = (self.below > 0).then(|| {
             let shine = self
                 .pointer
                 .is_some_and(|(_, row)| row_in(regions.gap, row).is_some());
             let more = format!("{below} more below");
-            Some(Line::from(self.paint.action_hint(shine, more)).centered())
-        } else {
-            None
-        };
+            Line::from(self.paint.action_hint(shine, more)).centered()
+        });
 
         // Scrolled up, or on a hit, the next frame opens on this one's top
         // row: a hit stays where it was found as the rows under it grow.
@@ -873,8 +870,8 @@ impl Ui {
         // The blank row parts the prompt from what answers it, and it stands
         // from the moment the run is on: adding it with the first byte moved
         // the screen a row when the byte came.
-        let said = content.first().is_some_and(|line| !line.spans.is_empty());
-        if (said || view.state.work.is_some()) && spacing.push(super::spacing::Section::Prose) {
+        let showing = content.first().is_some_and(|line| !line.spans.is_empty());
+        if (showing || view.state.work.is_some()) && spacing.push(super::spacing::Section::Prose) {
             out.push(Line::default(), None);
         }
         for row in content.iter() {
