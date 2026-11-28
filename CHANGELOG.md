@@ -7,6 +7,14 @@ session store or the tool script protocol changed shape.
 
 Releases before 3.0.0 are recorded in the commit history, not here.
 
+## Unreleased
+
+### Fixed
+
+- The command drawer marks the row the keys act on with the input line's band
+  instead of reversing the whole row, which drowned each command's own colours,
+  and no longer parks the terminal's cursor in that row's gutter.
+
 ## 3.1.0 - 2026-11-27
 
 ### Added

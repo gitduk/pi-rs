@@ -96,10 +96,12 @@ impl Ui {
         } else {
             (Vec::new(), Vec::new())
         };
+        // The row the keys act on wears the input's band.
         for (line, row) in executions.iter_mut().zip(&command_rows) {
             if matches!(row, call::CommandRow::BackgroundCommand { id, .. } if Some(*id) == self.background_focus)
+                && let Some(band) = self.band
             {
-                line.style = line.style.add_modifier(ratatui::style::Modifier::REVERSED);
+                *line = screen::banded(std::mem::take(line), band);
             }
         }
         remember_first_ask(view, lane);
@@ -216,13 +218,10 @@ impl Ui {
         command_rows.drain(..command_top.min(command_rows.len()));
         executions.truncate(regions.executions.height as usize);
         command_rows.truncate(regions.executions.height as usize);
-        let command_caret = focus_row.and_then(|at| {
-            let row = at.saturating_sub(command_top);
-            (row < regions.executions.height as usize)
-                .then_some((regions.executions.x, regions.executions.y + row as u16))
-        });
+        let focus_shown = focus_row
+            .is_some_and(|at| at.saturating_sub(command_top) < regions.executions.height as usize);
         self.command_rows = command_rows;
-        if self.background_focus.is_some() && command_caret.is_none() {
+        if self.background_focus.is_some() && !focus_shown {
             self.leave_background();
         }
         bar.truncate(regions.statusline.height as usize);
@@ -571,9 +570,8 @@ impl Ui {
                 frame.buffer_mut().set_style(regions.editor, band);
             }
             frame.render_widget(Rows(&input_view), regions.editor);
-            if let Some(caret) = command_caret {
-                frame.set_cursor_position(caret);
-            } else if regions.editor.height > 0 {
+            // The band already says where the keys are: no cursor beside it.
+            if !focus_shown && regions.editor.height > 0 {
                 let caret_row = regions.editor.y + caret_in_view as u16;
                 frame.set_cursor_position((caret.1, caret_row));
             }
