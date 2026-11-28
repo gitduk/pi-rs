@@ -77,22 +77,20 @@ impl Ui {
         self.tool_rows = tool_ids;
 
         let hovered_command = self.pointer.and_then(|(_, row)| {
-            (self
-                .command_at(row)
-                .map(|id| call::CommandRow::BackgroundCommand { id, back: false }))
-            .or(self.earlier_at(row).map(call::CommandRow::Earlier))
-            .or(self.fold_at(row).then_some(call::CommandRow::Fold))
+            self.command_at(row)
+                .map(|id| call::CommandRow::BackgroundCommand { id, back: false })
+                .or(self.earlier_at(row).map(call::CommandRow::Earlier))
         });
         let open = self.background_open.as_ref();
         let (mut executions, mut command_rows) = if self.jobs_open {
-            call::background_lines(
-                &self.executions,
-                hovered_command,
-                open,
-                self.background_all || self.background_focus.is_some(),
-                &self.paint,
-                width,
-            )
+            // Lines past the terminal's height are cut later: don't build them.
+            let shown = if self.background_focus.is_none() {
+                let cap = self.screen.area().height as usize;
+                &self.executions[..self.executions.len().min(cap)]
+            } else {
+                &self.executions
+            };
+            call::background_lines(shown, hovered_command, open, &self.paint, width)
         } else {
             (Vec::new(), Vec::new())
         };
@@ -208,7 +206,6 @@ impl Ui {
                 .skip(at + 1)
                 .find(|(_, row)| {
                     matches!(row, call::CommandRow::BackgroundCommand { id: other, .. } if *other != id)
-                        || **row == call::CommandRow::Fold
                 })
                 .map_or(command_rows.len(), |(at, _)| at);
             end.saturating_sub(regions.executions.height as usize)
@@ -632,7 +629,7 @@ impl Ui {
                 let opens = match target {
                     call::CommandRow::Earlier(_) => true,
                     call::CommandRow::BackgroundCommand { back, .. } => *back,
-                    call::CommandRow::Under | call::CommandRow::Fold => false,
+                    call::CommandRow::Under => false,
                 };
                 if opens
                     && let Some(area) = row_area(

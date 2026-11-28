@@ -104,11 +104,6 @@ impl Ui {
             .copied()
     }
 
-    // Whether screen row `row` folds or unfolds the execution list.
-    pub(super) fn fold_at(&self, row: u16) -> bool {
-        self.command_row_at(row) == Some(super::call::CommandRow::Fold)
-    }
-
     // The open execution whose cut-off lines the row at screen row `row` stands for.
     pub(super) fn earlier_at(&self, row: u16) -> Option<u64> {
         match self.command_row_at(row)? {
@@ -332,10 +327,6 @@ impl Ui {
             self.scroll_view(view, false, super::screen::TOP);
             return;
         }
-        if self.fold_at(row) {
-            self.background_all = !self.background_all;
-            return;
-        }
         // Only the explicit page action opens a cut flash.
         if self.flash_at(col, row) == Some(true)
             && let Some((line, _)) = &self.flash
@@ -446,7 +437,7 @@ impl Ui {
         };
         let execution = self.command_at(row);
         // A row that answers a click is clicked, never double-clicked.
-        let single = execution.is_some() || self.fold_at(row) || self.earlier_at(row).is_some();
+        let single = execution.is_some() || self.earlier_at(row).is_some();
         let count = match &self.press {
             Some(p) if !single && p.at == at && p.when.elapsed() < MULTI_CLICK => (p.count % 3) + 1,
             _ => 1,

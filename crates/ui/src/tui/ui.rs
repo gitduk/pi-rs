@@ -184,8 +184,6 @@ pub(super) struct Ui {
     pub(super) tool_rows: Vec<Option<String>>,
     // Whose own row each bar row the last frame drew is, from the top.
     pub(super) command_rows: Vec<super::call::CommandRow>,
-    // Every execution listed, not the first few: the fold row flips it.
-    pub(super) background_all: bool,
     // The rows under the window the last frame drew; scrolled up, the row
     // under the history says so, and a click on it goes down to them.
     pub(super) below: usize,
@@ -315,7 +313,6 @@ impl Ui {
             background_open: None,
             tool_rows: Vec::new(),
             command_rows: Vec::new(),
-            background_all: false,
             below: 0,
             images: Vec::new(),
             layout: Default::default(),

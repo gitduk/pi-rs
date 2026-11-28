@@ -15,6 +15,10 @@ Releases before 3.0.0 are recorded in the commit history, not here.
   instead of reversing the whole row, which drowned each command's own colours,
   and no longer parks the terminal's cursor in that row's gutter.
 
+- The command drawer lists every background command. The `click for less` row
+  under the list is gone: with the drawer open the list was fully unfolded, so
+  clicking it changed nothing.
+
 ## 3.1.0 - 2026-11-27
 
 ### Added

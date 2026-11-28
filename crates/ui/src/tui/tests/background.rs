@@ -258,7 +258,6 @@ fn expanded_output_follows_the_heading_without_launch_details() {
             &[command.clone()],
             None,
             Some(&open),
-            false,
             &Paint::new(false),
             width,
         );
@@ -316,7 +315,7 @@ async fn background_commands_share_shell_colours_and_keep_status_muted() {
             id: executions[0].id,
             back: false,
         });
-        let (lines, _) = call::background_lines(&executions, hover, None, false, &paint, 160);
+        let (lines, _) = call::background_lines(&executions, hover, None, &paint, 160);
         let expected = paint.shell(command, hovered);
         assert_eq!(&lines[0].spans[1..1 + expected.len()], expected);
         let progress = lines[0]
@@ -330,9 +329,8 @@ async fn background_commands_share_shell_colours_and_keep_status_muted() {
         );
     }
     for width in [24, 160] {
-        let (colour, _) = call::background_lines(&executions, None, None, false, &paint, width);
-        let (plain, _) =
-            call::background_lines(&executions, None, None, false, &Paint::new(false), width);
+        let (colour, _) = call::background_lines(&executions, None, None, &paint, width);
+        let (plain, _) = call::background_lines(&executions, None, None, &Paint::new(false), width);
         for (colour, plain) in colour.iter().zip(plain) {
             assert_eq!(colour.to_string(), plain.to_string());
         }
@@ -512,7 +510,7 @@ fn global_cancel_keeps_working_and_paste_does_not_change_a_focused_draft() {
 }
 
 #[test]
-fn waiting_results_fold_without_wrapping_long_commands() {
+fn every_waiting_result_is_listed_without_wrapping_long_commands() {
     use crate::render::Paint;
     use crate::tui::call;
     use crate::tui::screen::rows;
@@ -532,7 +530,7 @@ fn waiting_results_fold_without_wrapping_long_commands() {
     for width in [20, 40, 80] {
         let mut ui = test_ui(width, 24);
         ui.sync_background(pending.clone());
-        assert!(!ui.jobs_open, "the drawer starts folded");
+        assert!(!ui.jobs_open, "the drawer starts closed");
         assert_eq!(
             jobs_summary(&ui.every_command).as_deref(),
             Some("1 running · 14 waiting")
@@ -542,7 +540,6 @@ fn waiting_results_fold_without_wrapping_long_commands() {
             &ui.executions,
             None,
             None,
-            true,
             &Paint::new(false),
             width as usize,
         );

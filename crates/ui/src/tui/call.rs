@@ -168,9 +168,6 @@ pub(super) fn push_tool_row(scrollback: &mut Scrollback, folds: &mut Folds, call
     scrollback.push(Row::call(call));
 }
 
-// More than this and the list would crowd out the history it sits under.
-pub(super) const BACKGROUND_SHOWN: usize = 4;
-
 // What a command's row says, in two: what it is, then how long it has run,
 // which a narrow row keeps whole.
 fn background_text(execution: &BackgroundCommand) -> (String, String) {
@@ -270,8 +267,6 @@ pub(super) enum CommandRow {
     Earlier(u64),
     // What an open execution printed, under its row.
     Under,
-    // The row folding the list past `BACKGROUND_SHOWN`, or unfolding it.
-    Fold,
 }
 
 // What an open execution printed, a line per row, blank ones left out.
@@ -329,19 +324,12 @@ pub(super) fn background_lines(
     executions: &[BackgroundCommand],
     hovered: Option<CommandRow>,
     open: Option<&OpenCommand>,
-    all: bool,
     paint: &Paint,
     width: usize,
 ) -> (Vec<Line<'static>>, Vec<CommandRow>) {
     let room = width.saturating_sub(1);
     let (mut lines, mut ids) = (Vec::new(), Vec::new());
-    let folds = llm::figures::shown(executions.len(), BACKGROUND_SHOWN) < executions.len();
-    let shown = if all || !folds {
-        executions.len()
-    } else {
-        BACKGROUND_SHOWN
-    };
-    for execution in executions.iter().take(shown) {
+    for execution in executions {
         let shine =
             matches!(hovered, Some(CommandRow::BackgroundCommand { id, .. }) if id == execution.id);
         let row_kind = CommandRow::BackgroundCommand {
@@ -380,15 +368,6 @@ pub(super) fn background_lines(
             vec![row]
         };
         lines.extend(rows);
-    }
-    if folds {
-        let fold = match all {
-            true => "click for less".to_string(),
-            false => format!("{} more", executions.len() - BACKGROUND_SHOWN),
-        };
-        let shine = hovered == Some(CommandRow::Fold);
-        lines.push(Line::from(paint.action_hint(shine, fold)));
-        ids.push(CommandRow::Fold);
     }
     (lines, ids)
 }
