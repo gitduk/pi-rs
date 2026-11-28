@@ -319,7 +319,13 @@ fn a_large_reply_stores_only_final_messages() {
         .iter()
         .map(|record| record["type"].as_str().unwrap_or("missing"))
         .collect();
-    assert_eq!(types, ["session", "input", "assistant"], "{text}");
+    let turn = ["session", "input", "assistant"];
+    assert_eq!(types.get(..3), Some(&turn[..]), "{text}\n{}", said(&out));
+    // A title a model writes lands as a fact of its own, whenever it comes back.
+    assert!(
+        types[3..].iter().all(|kind| *kind == "meta"),
+        "{types:?}\n{text}"
+    );
     assert_eq!(text.matches("greeting-input-marker").count(), 1);
     assert_eq!(text.matches("greeting-reply-marker").count(), 1);
     assert_eq!(records[2]["status"], "done");
